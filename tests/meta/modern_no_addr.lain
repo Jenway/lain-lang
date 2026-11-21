@@ -1,0 +1,72 @@
+// Zero-addr regression test for modern Stage-2 Lain idioms
+struct Item {
+  id: u64,
+  val: i64,
+}
+
+func Table(Elem: Type) -> Type {
+  let b = record_begin();
+  record_add(b, "data", MutSlice(Elem));
+  record_add(b, "len", u64);
+  return record_end(b);
+}
+
+let ItemTable = Table(Item);
+
+struct State {
+  buf: Mut(u8),
+  cur: Mut(Item),
+  items: Mut(ItemTable),
+}
+
+// Generic allocator returning Mut(T) inferred solely from target `let p: Mut(T) = ...`
+func cast_mut(raw: Mut(u8)) ?{ T: Type } -> Mut(T) {
+  return ptr_cast(Mut(T), raw);
+}
+
+func push_item(tbl: Mut(ItemTable), it: Item) -> u64 {
+  let idx: u64 = tbl.len;
+  tbl.data[idx] = it;
+  tbl.len = idx + 1;
+  return idx;
+}
+
+func read_item_val(it: Ref(Item)) -> i64 {
+  return it.val;
+}
+
+func main() -> i64 {
+  let raw_arr: Array(u64, 4) = [0, 0, 0, 0];
+  let byte_p: Mut(u8) = ptr_cast(Mut(u8), mut_of(raw_arr));
+
+  // 1. Return-type generic unification + auto-deref writes
+  let item_ptr: Mut(Item) = cast_mut(byte_p);
+  item_ptr.id = 10;
+  item_ptr.val = 32;
+
+  // 2. null_ref & is_null check
+  let nil_item: Mut(Item) = null_ref(Mut(Item));
+  let nil_flag: i64 = if is_null(nil_item) { 100 } else { 0 };
+  let nonnil_flag: i64 = if is_null(item_ptr) { 0 } else { 1 };
+
+  // 3. make_slice(MutSlice(Item), ptr, cap) + slice .ptr typed check
+  let item_backing: Array(u64, 4) = [0, 0, 0, 0];
+  let first_mut: Mut(Item) = ptr_cast(Mut(Item), mut_of(item_backing));
+  let ms: MutSlice(Item) = make_slice(MutSlice(Item), first_mut, 2);
+  let ptr_round: Mut(Item) = ms.ptr;
+  ptr_round.id = 7;
+
+  // 4. Table(Item) + Mut(State) nested 2-level auto-deref
+  let tbl_val: ItemTable = ItemTable { data: ms, len: 0 };
+  let st_val: State = State {
+    buf: byte_p,
+    cur: item_ptr,
+    items: mut_of(tbl_val),
+  };
+  let st: Mut(State) = mut_of(st_val);
+  let i0: u64 = push_item(st.items, Item { id: 1, val: 50 });
+  let i1: u64 = push_item(st.items, Item { id: 2, val: 60 });
+
+  // 32 + 50 + 60 + 10 + 100 + 1 + 1 + 1 = 255
+  return read_item_val(st.cur) + st.items.data[0].val + st.items.data[1].val + (item_ptr.id as i64) + nil_flag + nonnil_flag + (i1 as i64) + (ptr_round.id as i64);
+}

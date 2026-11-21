@@ -1,0 +1,323 @@
+// decl.lain —— 过程与顶层 let 的编译：签名解析、栈槽铺底、过程体交给 core。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let codes = import("ir_codes");
+let s = import("sym");
+let ax = import("ast");
+let cx = import("ctx");
+let co = import("core");
+let sm = import("stmt");
+let me = import("member");
+let agg = import("agg");
+let modules = import("modules");
+let an = import("anon");
+let ct = import("ctypes");
+let ireg = import("tyreg");
+let tb = import("tbuild");
+let ctf = import("ctfor");
+let gn = import("generics");
+
+extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
+
+// --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
+func new_ty(k: addr) -> addr { return ax.new_ty(k); }
+func new_val(k: addr) -> addr { return ax.new_val(k); }
+func box(k: addr) -> addr { return ax.box(k); }
+func box_get(p: addr) -> u64 { return ax.box_get(p); }
+func n_count(g: u64) -> u64 { return ax.n_count(g); }
+func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
+func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
+func no_slot() -> u64 { return ax.no_slot(); }
+func skip_semi(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); }
+func e_type() -> u64 { return ax.e_type(); }
+func e_ast() -> u64 { return ax.e_ast(); }
+func tnone(k: addr) -> addr { return cx.tnone(k); }
+func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
+func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 { return cx.parse_type(k, g, i, out); }
+func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); }
+func count_tree(h: u64, acc: u64) -> u64 { return cx.count_tree(h, acc); }
+func emit_slots(k: addr, j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); }
+func slot_put(k: addr, j: u64, v: addr, tp: addr) -> u64 { return cx.slot_put(k, j, v, tp); }
+func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
+func push_val(k: addr, v: addr) -> u64 { return cx.push_val(k, v); }
+func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 { return sm.block_mode(k, g, i, term, slot, tp); }
+func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 { return co.expr(k, g, i, minp, want, out); }
+
+// --- 过程 ---------------------------------------------------------------
+func emit_ret_guard(k: addr, rt: addr, term: addr) -> u64 {
+  if box_get(term) == 1 { return 0; }
+  if ty.ty_known(rt) == 0 {
+    ir.args_reset(k);
+    return ir.emit_jump(k, codes.INST_RETURN(), 0);
+  }
+  ir.args_reset(k);
+  return ir.emit_jump(k, codes.INST_UNREACHABLE(), 0);
+}
+
+// 过程与顶层值都按「模块前缀 + 名字」定名，跨源同名不撞。
+func proc_name(k: addr, g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  if i >= 2 and ax.is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() {
+    return name;
+  }
+  return modules.qual(k, st.st_src(k), name);
+}
+
+func begin_proc(k: addr, q: u64, rt: addr) -> u64 {
+  st.st_set_slotj(k, 0);
+  st.st_set_loopdepth(k, 0);
+  env.env_release(k, 0);
+  st.st_set_retk(k, ty.tk(rt));
+  st.st_set_retw(k, ty.tw(rt));
+  st.st_set_retsg(k, ty.tsg(rt));
+  st.st_set_retsh(k, ty.tsh(rt));
+  return ir.proc_begin(k, q);
+}
+
+// 值聚合返回的隐藏首参：%_ret: #addr。后面 return 的整块拷贝就写它。
+func sret_param(k: addr) -> u64 {
+  let vn: u64 = ir.fresh_t(k);
+  let ap: addr = ir.taddr(k);
+  ir.proc_param(k, vn, ap);
+  return st.st_set_retptr(k, vn);
+}
+
+func bind_gen_vals(k: addr, nms: addr, vals: addr, i: u64, n: u64) -> u64 {
+  if i >= n { return 1; }
+  let nm: u64 = load(nms + i * 8);
+  let v: addr = vals + i * 24;
+  let vk: u64 = load(v); let va: u64 = load(v + 8); let vb: u64 = load(v + 16);
+  ctf.bind(k, nm, vk, va, vb);
+  return bind_gen_vals(k, nms, vals, i + 1, n);
+}
+
+func flush_gen(k: addr) -> u64 {
+  let ge: addr = gn.genq_pending(k);
+  if ge as u64 == 0 { return 0; }
+  let q: u64 = load(ge);
+  let tpl_u: u64 = load(ge + 8);
+  let tpl_e: addr = tpl_u as addr;
+  let nct: u64 = load(ge + 16);
+  let nms_u: u64 = load(ge + 24);
+  let vals_u: u64 = load(ge + 32);
+  let dp: u64 = load(ge + 40);
+  let hdr: addr = modules.sym_sig(tpl_e);
+  let src: u64 = load(hdr + 8);
+  let root: u64 = lain2_source_root(src);
+  let pg_i: u64 = load(hdr + 16);
+  let pg: u64 = ax.n_at(root, pg_i);
+  let ret_i: u64 = load(hdr + 32);
+  let body_i: u64 = load(hdr + 40);
+  let bodyg: u64 = ax.n_at(root, body_i);
+  let saved_src: u64 = st.st_src(k);
+  let saved_dp: u64 = gn.gen_depth(k);
+  let cm: u64 = ctf.mark(k);
+  st.st_set_src(k, src);
+  gn.set_gen_depth(k, dp);
+  bind_gen_vals(k, nms_u as addr, vals_u as addr, 0, nct);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  if ret_i != 0 { parse_type(k, root, ret_i, rt); }
+  compile_body_with(k, pg, rt, bodyg, q);
+  ctf.release(k, cm);
+  gn.set_gen_depth(k, saved_dp);
+  st.st_set_src(k, saved_src);
+  return flush_gen(k);
+}
+
+// 匿名过程与泛型单态化队列按批排空。
+func flush_queue(k: addr) -> u64 {
+  let e: addr = an.pending(k);
+  if e as u64 == 0 { return flush_gen(k); }
+  let q: u64 = an.entry_name(e);
+  let src: u64 = an.entry_src(e);
+  let g: u64 = an.entry_group(e);
+  let node: u64 = an.entry_node(e);
+  let saved_src: u64 = st.st_src(k);
+  st.st_set_src(k, src);
+  let b: u64 = compile_body(k, g, node, q);
+  if st.st_ok(k) != 0 {
+    // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
+    let m: addr = "anonymous func cannot capture";
+    let d: u64 = ir.diag(k, 0, 2, m, 29);
+  }
+  st.st_set_src(k, saved_src);
+  return flush_queue(k);
+}
+
+func compile_body_with(k: addr, pg: u64, rt: addr, bodyg: u64, q: u64) -> u64 {
+  let paramp: addr = st.st_alloc(k, 512);
+  let syms: addr = st.st_alloc(k, 128);
+  let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
+  let sr: u64 = agg.sret_ty(rt);
+  let bp: u64 = begin_proc(k, q, rt);
+  let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
+  let pnames: addr = st.st_alloc(k, 128);
+  let dummy: u64 = loop w(idx: u64 = 0) while idx < np {
+    let vn: u64 = ir.fresh_t(k);
+    store(pnames + idx * 8, vn);
+    ir.proc_param(k, vn, paramp + idx * 32);
+    idx = idx + 1;
+  };
+  if sr == 0 {
+    if ty.ty_known(rt) == 1 { ir.proc_result(k, rt); }
+  }
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + count_tree(bodyg, 0);
+  let sd: u64 = emit_slots(k, 0, nslots);
+  let bnd: u64 = loop w(idx: u64 = 0) while idx < np {
+    let sl: u64 = st.st_next_slot(k);
+    let vt: addr = new_ty(k);
+    ty.ty_at(vt, paramp + idx * 32);
+    let pn: u64 = load(pnames + idx * 8);
+    let ps: u64 = load(syms + idx * 8);
+    let pv: addr = new_val(k);
+    ty.val_ref(pv, pn, vt);
+    slot_put(k, sl, pv, vt);
+    env.env_push(k, ps, sl, vt);
+    idx = idx + 1;
+  };
+  let term: addr = box(k);
+  let after: u64 = block_mode(k, bodyg, 0, term, no_slot(), rt);
+  let guard: u64 = emit_ret_guard(k, rt, term);
+  ir.region_end(k);
+  ir.proc_end(k);
+  return flush_queue(k);
+}
+
+// 过程体：i 指向形参组，返回体之后的位置。
+func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let pg: u64 = n_at(g, i);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  let a0: u64 = i + 1;
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let bodyg: u64 = n_at(g, a);
+  compile_body_with(k, pg, rt, bodyg, q);
+  return a + 1;
+}
+
+// 跳到过程的体之后（花括号组结束），用于只由编译期求值器解释的过程。
+func skip_body(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if ax.is_group(g, i) == 1 {
+    if ax.delim_of(g, i) == ax.dl_brace() { return i + 1; }
+  }
+  return skip_body(g, i + 1);
+}
+
+func compile_func(k: addr, g: u64, i: u64) -> u64 {
+  let q: u64 = proc_name(k, g, i);
+  let se: addr = modules.find_here(k, n_sym(g, i + 1));
+  let flag: u64 = if se as u64 == 0 { 0 } else { modules.sym_set_flag(se, 1) };
+  if se as u64 != 0 {
+    if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 2); }
+  }
+  return compile_body(k, g, i + 2, q);
+}
+
+// let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
+func compile_func_expr(k: addr, g: u64, i: u64, name: u64) -> u64 {
+  let q: u64 = modules.qual(k, st.st_src(k), name);
+  let se: addr = modules.find_here(k, name);
+  if se as u64 != 0 {
+    if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 1); }
+  }
+  let b: u64 = compile_body(k, g, i + 1, q);
+  return skip_semi(g, b);
+}
+
+// 顶层的普通值：零参过程，把值算出来直接返回。
+func compile_top_let(k: addr, g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  let j0: u64 = i + 2;
+  let t: addr = tnone(k);
+  let j: u64 = if j0 < n_count(g) and n_sym(g, j0) == s.p_colon() { parse_type(k, g, j0 + 1, t) } else { j0 };
+  let e: u64 = expect_sym(k, g, j, s.p_eq());
+  let q: u64 = proc_name(k, g, i);
+  st.st_set_slotj(k, 0);
+  st.st_set_loopdepth(k, 0);
+  env.env_release(k, 0);
+  st.st_set_retk(k, 9);
+  st.st_set_retsh(k, 0);
+  ir.proc_begin(k, q);
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + count_tree(g, 0);
+  let sd: u64 = emit_slots(k, 0, nslots);
+  let v: addr = new_val(k);
+  let nj: u64 = expr(k, g, e, 0, t, v);
+  if st.st_ok(k) != 0 { return nj; }
+  let vt: addr = new_ty(k);
+  if ty.ty_known(t) == 1 {
+    ty.ty_at(vt, t);
+  } else {
+    let vs: u64 = ty.tsh(ty.vty(v));
+    if vs != 0 {
+      if agg.shp_kind(vs) == agg.kind_string() {
+        let id: u64 = ireg.ty_add(k, ireg.lk_bits(), 8, 0, 0);
+        let sid: u64 = ct.slice_t(k, id, 0);
+        let projected: u64 = ireg.project(k, sid, vt);
+      } else {
+        ty.ty_at(vt, ty.vty(v));
+      }
+    } else {
+      ty.ty_at(vt, ty.vty(v));
+    }
+  }
+  if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return nj; }
+  if ty.tk(vt) == 3 and ty.tsh(vt) == 0 and ty.tsh(ty.vty(v)) != 0 {
+    let sh: u64 = ty.tsh(ty.vty(v));
+    let sv: u64 = ty.ty_set_sh(vt, sh);
+  }
+  ir.proc_result(k, vt);
+  let sl: u64 = st.st_next_slot(k);
+  slot_put(k, sl, v, ty.vty(v));
+  env.env_push(k, name, sl, vt);
+  let lv: addr = new_val(k);
+  slot_get(k, sl, vt, lv);
+  ir.args_reset(k);
+  push_val(k, lv);
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  ir.proc_end(k);
+  let fl: u64 = flush_queue(k);
+  return skip_semi(g, nj);
+}
+
+// 静态数据的读数过程：表与字符串直接返回数据符号的地址。
+func compile_data_ref(k: addr, g: u64, i: u64, nj: u64, dname: u64, t: addr) -> u64 {
+  let q: u64 = proc_name(k, g, i);
+  let bp: u64 = begin_proc(k, q, t);
+  ir.proc_result(k, t);
+  ir.region_begin(k);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, dname);
+  let ins: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  ir.proc_end(k);
+  return skip_semi(g, nj);
+}
+
+// 顶层聚合构造：数据块先登记成零字节，再由这个过程把字段写进去。
+func compile_data_agg(k: addr, g: u64, i: u64, nj: u64, dname: u64, sh: u64, fg: u64) -> u64 {
+  let q: u64 = proc_name(k, g, i);
+  let t: addr = new_ty(k);
+  let a1: u64 = ty.ty_addr(t);
+  let a2: u64 = ty.ty_set_sh(t, sh);
+  let bp: u64 = begin_proc(k, q, t);
+  ir.proc_result(k, t);
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + count_tree(fg, 0);
+  let sd: u64 = emit_slots(k, 0, nslots);
+  let wr: u64 = me.agg_fields(k, sh, fg, 0, dname);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, dname);
+  let ins: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  ir.proc_end(k);
+  return skip_semi(g, nj);
+}

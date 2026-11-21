@@ -1299,11 +1299,21 @@ static void emit_data(C99Ctx *ctx) {
     fputs("\n};\n", out);
   }
   if (ctx->module->data_count > 0) fputc('\n', out);
+  fputs("const void *lain_c99_data_anchor(void) {\n", out);
+  if (ctx->module->data_count > 0) {
+    fputs("  return (const void *)", out);
+    emit_data_c_name(out, &ctx->module->data[0]);
+    fputs(";\n", out);
+  } else {
+    fputs("  return NULL;\n", out);
+  }
+  fputs("}\n\n", out);
 }
 
 static void emit_sub_signature(FILE *out, const L1Subroutine *sub,
                                bool is_extern_decl) {
-  if (!is_extern_decl && !(sub->flags & SUBROUTINE_EXTERN)) {
+  if (!is_extern_decl && !(sub->flags & SUBROUTINE_EXTERN) &&
+      strcmp(sub->name, "lain_meta_v2_entry") != 0) {
     fputs("static ", out);
   }
   emit_sub_ret_type(out, sub);

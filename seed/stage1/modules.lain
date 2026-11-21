@@ -1,0 +1,228 @@
+// 模块：模块表（别名 → 源号）、模块符号表（每份源导出的顶层名字）、限定名拼装。
+// 每个模块的过程与数据统一带前缀 "s<源号>__"，跨源同名不会撞。
+let st = import("state");
+let ty = import("types");
+let ir = import("ir");
+
+extern lain2_sym_addr(h: u64) -> addr = lain2_sym_addr;
+extern lain2_sym_len(h: u64) -> u64 = lain2_sym_len;
+extern lain2_sym_find(p: addr, n: u64) -> u64 = lain2_sym_find;
+extern lain2_sym_same(a: u64, b: u64) -> u64 = lain2_sym_same;
+extern lain2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
+
+// --- 符号字节 -----------------------------------------------------------
+func sym_addr(h: u64) -> addr {
+  if h == 0 { return 0 as addr; }
+  return lain2_sym_addr(h);
+}
+
+func sym_len(h: u64) -> u64 {
+  if h == 0 { return 0; }
+  return lain2_sym_len(h);
+}
+
+// 把十进制写进 p，返回字节数。
+func digits_at(p: addr, v: u64) -> u64 {
+  let n: u64 = loop c(x: u64 = v, n: u64 = 1) while x >= 10 {
+    x = x / 10;
+    n = n + 1;
+  };
+  let w: u64 = loop w(y: u64 = v, i: u64 = n) while i > 0 {
+    let d: u64 = y - y / 10 * 10;
+    let d8: u8 = d as u8;
+    let base: u8 = 48;
+    let b: u8 = base + d8;
+    let at: u64 = i - 1;
+    store(p + at, b);
+    y = y / 10;
+    i = i - 1;
+  };
+  return n;
+}
+
+func copy_sym(dst: addr, h: u64) -> u64 {
+  let len: u64 = sym_len(h);
+  let src: addr = sym_addr(h);
+  let i: u64 = loop c(i: u64 = 0) while i < len {
+    let b: u8 = load(src + i);
+    store(dst + i, b);
+    i = i + 1;
+  };
+  return len;
+}
+
+// s<源号>__<名字><尾巴>。尾巴为 0 表示没有。
+func qual_full(s: addr, src: u64, name: u64, tail: u64) -> u64 {
+  let p: addr = st.st_scratch(s);
+  let one: u8 = 115;
+  let us: u8 = 95;
+  store(p, one);
+  let n: u64 = digits_at(p + 1, src);
+  store(p + 1 + n, us);
+  store(p + 2 + n, us);
+  let nl: u64 = copy_sym(p + 3 + n, name);
+  let off: u64 = 3 + n + nl;
+  let tl: u64 = copy_sym(p + off, tail);
+  return lain2_sym_intern(p, off + tl);
+}
+
+func qual(s: addr, src: u64, name: u64) -> u64 {
+  return qual_full(s, src, name, 0);
+}
+
+// s<源号>__<前缀><十进制>
+func qual_num(s: addr, src: u64, prefix: u64, v: u64) -> u64 {
+  let p: addr = st.st_scratch(s);
+  let one: u8 = 115;
+  let us: u8 = 95;
+  store(p, one);
+  let n: u64 = digits_at(p + 1, src);
+  store(p + 1 + n, us);
+  store(p + 2 + n, us);
+  let pl: u64 = copy_sym(p + 3 + n, prefix);
+  let off: u64 = 3 + n + pl;
+  let dl: u64 = digits_at(p + off, v);
+  return lain2_sym_intern(p, off + dl);
+}
+
+// 当前的源号就是当前的模块号。
+func cur(s: addr) -> u64 { return st.st_src(s); }
+
+func in_cur(s: addr, name: u64) -> u64 { return qual(s, cur(s), name); }
+
+// --- 模块表 -------------------------------------------------------------
+// 条目 32 字节：[别名符号, 源号, 种类, 导入方源号]。
+// 别名是文件局部的：两份源各自 import 同一个别名指不同目标时不能互相串。
+func mod_add(s: addr, alias: u64, src: u64, kind: u64) -> u64 {
+  let p: addr = st.st_mod_new(s, 32);
+  store(p, alias);
+  store(p + 8, src);
+  store(p + 16, kind);
+  store(p + 24, st.st_src(s));
+  return 1;
+}
+
+func mod_at(s: addr, i: u64) -> addr { return st.st_modbase(s) + i * 32; }
+
+func mod_count(s: addr) -> u64 { return st.st_modused(s) / 32; }
+
+func mod_scan(s: addr, alias: u64, owner: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let p: addr = mod_at(s, i);
+  let got: u64 = load(p);
+  let own: u64 = load(p + 24);
+  if got == alias and own == owner { return load(p + 8) + 1; }
+  return mod_scan(s, alias, owner, i + 1, n);
+}
+
+// (导入方, 别名) → 源号 + 1；未命中回 0。
+func mod_lookup(s: addr, alias: u64) -> u64 {
+  return mod_scan(s, alias, st.st_src(s), 0, mod_count(s));
+}
+
+func mod_name_scan(s: addr, src: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let p: addr = mod_at(s, i);
+  let got: u64 = load(p + 8);
+  if got == src { return load(p); }
+  return mod_name_scan(s, src, i + 1, n);
+}
+
+// 源号 → 该源的模块别名符号（导入时登记，供源号反查）；未登记回 0。
+func mod_name_of(s: addr, src: u64) -> u64 {
+  return mod_name_scan(s, src, 0, mod_count(s));
+}
+
+// --- 模块符号表 ---------------------------------------------------------
+// 条目 88 字节：[种类, 裸名, 模块号, 限定名, 签名, 形状号, 标记, 声明下标, 源号, 只读, Fn TypeId]。
+// 「声明下标 + 源号」留给延迟解析的签名：签名里的类型可能来自本文件后面的 inject，
+// 第一次解析它时那个类型还不存在。
+func sym_kind_struct() -> u64 { return 1; }
+func sym_kind_enum() -> u64 { return 2; }
+func sym_kind_func() -> u64 { return 3; }
+func sym_kind_extern() -> u64 { return 4; }
+func sym_kind_data() -> u64 { return 5; }
+func sym_kind_value() -> u64 { return 6; }
+func sym_kind_generic() -> u64 { return 7; }
+
+// 名字键：AST 给出的符号句柄按出现位置分配，同一文本在不同位置句柄不同，
+// 所以查表前统一把原文重新 intern 一次，得到按内容稳定的键。
+func name_key(s: addr, h: u64) -> u64 {
+  let n: u64 = sym_len(h);
+  if n == 0 { return 0; }
+  // 符号池已经映射进 guest 空间，可以直接按内容查表，不必复制文本。
+  let f: u64 = lain2_sym_find(sym_addr(h), n);
+  if f != 0 { return f; }
+  return h;
+}
+
+func sym_add(s: addr, kind: u64, mod: u64, name: u64, q: u64, sig: addr, sh: u64) -> addr {
+  let p: addr = st.st_sym_new(s, 88);
+  store(p, kind);
+  store(p + 8, name);
+  store(p + 16, mod);
+  store(p + 24, q);
+  store(p + 32, sig as u64);
+  store(p + 40, sh);
+  store(p + 48, 0);
+  store(p + 72, 0);
+  store(p + 80, 0);
+  return p;
+}
+
+func sym_count(s: addr) -> u64 { return st.st_symused(s) / 88; }
+
+func sym_at(s: addr, i: u64) -> addr { return st.st_symbase(s) + i * 88; }
+
+func sym_kind(p: addr) -> u64 { return load(p); }
+func sym_name(p: addr) -> u64 { return load(p + 8); }
+func sym_mod(p: addr) -> u64 { return load(p + 16); }
+func sym_qual(p: addr) -> u64 { return load(p + 24); }
+func sym_sig(p: addr) -> addr { return load(p + 32) as addr; }
+func sym_shape(p: addr) -> u64 { return load(p + 40); }
+// 标记：生成器函数是否已经编译过体（0 未编译，1 已编译）。
+func sym_flag(p: addr) -> u64 { return load(p + 48); }
+func sym_set_flag(p: addr, v: u64) -> u64 { store(p + 48, v); return v; }
+
+// 声明所在的源号与源里的节点下标：inject 要在沙箱里跑生成器，生成器的体
+// 可能还没编过，需要凭这两个值回到它的声明位置补编。
+func sym_decl(p: addr) -> u64 { return load(p + 56); }
+func sym_set_decl(p: addr, v: u64) -> u64 { store(p + 56, v); return v; }
+func sym_src(p: addr) -> u64 { return load(p + 64); }
+func sym_set_src(p: addr, v: u64) -> u64 { store(p + 64, v); return v; }
+
+// 静态数据是否只读：ro 表与字符串不允许被赋值。
+func sym_ro(p: addr) -> u64 { return load(p + 72); }
+func sym_set_ro(p: addr, v: u64) -> u64 { store(p + 72, v); return v; }
+func sym_fnid(p: addr) -> u64 { return load(p + 80); }
+func sym_set_fnid(p: addr, v: u64) -> u64 { store(p + 80, v); return v; }
+
+// AST 的符号句柄按出现位置分配，同名不同位置句柄不同，比名一律走这条。
+func sym_same(a: u64, b: u64) -> u64 { return lain2_sym_same(a, b); }
+
+func sym_scan(s: addr, mod: u64, name: u64, i: u64, n: u64) -> addr {
+  if i >= n { return 0 as addr; }
+  let p: addr = sym_at(s, i);
+  let got_mod: u64 = load(p + 16);
+  let got_name: u64 = load(p + 8);
+  if got_mod == mod and lain2_sym_same(got_name, name) == 1 { return p; }
+  return sym_scan(s, mod, name, i + 1, n);
+}
+
+// 名字是不是一个已知的结构类型（聚合构造只在结构名后跟花括号时成立）。
+func is_struct_name(s: addr, sym: u64) -> u64 {
+  let e: addr = find_here(s, sym);
+  if e as u64 == 0 { return 0; }
+  if sym_kind(e) == sym_kind_struct() { return 1; }
+  return 0;
+}
+
+// (模块号, 裸名) → 条目地址；未命中回 0。
+func sym_find(s: addr, mod: u64, name: u64) -> addr {
+  return sym_scan(s, mod, name, 0, sym_count(s));
+}
+
+// 当前源里查一个裸名。
+func find_here(s: addr, name: u64) -> addr {
+  return sym_find(s, cur(s), name);
+}

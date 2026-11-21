@@ -214,7 +214,8 @@ func p1_generic(k: addr, g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64
 func p1_func(k: addr, g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   let name: u64 = n_sym(g, i + 1);
-  let q: u64 = modules.qual(k, st.st_src(k), name);
+  let is_root: u64 = if i >= 2 and is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
+  let q: u64 = if is_root == 1 { name } else { modules.qual(k, st.st_src(k), name) };
   let a0: u64 = i + 3;
   if a0 + 1 < n and is_group(g, a0) == 0 and n_sym(g, a0) == s.p_qmark() and is_group(g, a0 + 1) == 1 {
     if delim_of(g, a0 + 1) == dl_brace() { return p1_generic(k, g, i, i + 2, a0, name, q); }
@@ -487,21 +488,25 @@ func compile_as(k: addr, src: u64, root: u64) -> u64 {
   // 编到一半的临时量也在同一块 arena 上，所以这里保存水位、编完再放回去。
   let am: u64 = st.st_arenaused(k);
   let sp: u64 = st.st_sp(k);
+  let saved_src: u64 = st.st_src(k);
+  let saved_root: u64 = st.st_root(k);
+  let saved_ct: u64 = st.st_ctused(k);
   st.st_set_src(k, src);
   st.st_set_root(k, root);
-  let rs: u64 = st.st_reset_arena(k);
   let mk: u64 = env.env_release(k, 0);
-  let cr: u64 = ctf.reset(k);
   let n: u64 = n_count(root);
   let a: u64 = phase1(k, root, 0, n);
-  if st.st_ok(k) != 0 { return restore_arena(k, am, sp); }
+  if st.st_ok(k) != 0 { return restore_arena(k, am, sp, saved_ct, saved_src, saved_root); }
   let b: u64 = phase2(k, root, 0, n);
-  return restore_arena(k, am, sp);
+  return restore_arena(k, am, sp, saved_ct, saved_src, saved_root);
 }
 
-func restore_arena(k: addr, am: u64, sp: u64) -> u64 {
+func restore_arena(k: addr, am: u64, sp: u64, saved_ct: u64, saved_src: u64, saved_root: u64) -> u64 {
   let ra: u64 = st.st_set_arenaused(k, am);
   let rs: u64 = st.st_set_sp(k, sp);
+  let rc: u64 = st.st_set_ctused(k, saved_ct);
+  let rsrc: u64 = st.st_set_src(k, saved_src);
+  let rroot: u64 = st.st_set_root(k, saved_root);
   return st.st_ok(k);
 }
 

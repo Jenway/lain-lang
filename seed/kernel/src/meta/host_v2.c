@@ -22,7 +22,7 @@
 
 /* 段号：源码字节与 AstIn 节点分居两段，二者都按源码序号编址。 */
 #define V2_SEG_TEXT_BASE 16u
-#define V2_SEG_AST_BASE 64u
+#define V2_SEG_AST_BASE 256u
 
 #define V2_CLASS_SHIFT 28u
 #define V2_INDEX_MASK 0x0FFFFFFFu
@@ -35,9 +35,9 @@
 #define V2_REGION_MAX 65536u
 #define V2_INST_MAX 4096u
 #define V2_PROC_PARAM_MAX 16u
-#define V2_PROC_MAX 2048u
-#define V2_DATA_MAX 512u
-#define V2_FRAME_MAX 16u
+#define V2_PROC_MAX 4096u
+#define V2_DATA_MAX 1024u
+#define V2_FRAME_MAX 64u
 #define V2_CASE_MAX 64u
 #define V2_NAME_MAX 512u
 #define V2_PATH_MAX 1024u
@@ -644,6 +644,44 @@ static uint32_t v2_source_import(void *ctx, const uint64_t *args, uint32_t argc,
     }
   }
   text = v2_read_file(canonical, &size);
+  if (!text && h->sources[(uint32_t)args[0]].path) {
+    const char *base_path = h->sources[(uint32_t)args[0]].path;
+    const char *slash = strrchr(base_path, '/');
+    const char *bslash = strrchr(base_path, '\\');
+    const char *sep = (!slash || (bslash && bslash > slash)) ? bslash : slash;
+    char dir[V2_PATH_MAX];
+    char mod_rel[V2_PATH_MAX];
+    size_t dlen = sep ? (size_t)(sep - base_path + 1) : 0;
+    size_t k = 0;
+    if (dlen < sizeof(dir)) {
+      if (dlen > 0) memcpy(dir, base_path, dlen);
+      dir[dlen] = '\0';
+      for (size_t ri = 0; rel[ri] && k + 2 < sizeof(mod_rel); ++ri) {
+        if (rel[ri] == ':' && rel[ri + 1] == ':') {
+          mod_rel[k++] = '/';
+          ri++;
+        } else {
+          mod_rel[k++] = rel[ri];
+        }
+      }
+      mod_rel[k] = '\0';
+      const char *suffix = (k >= 5 && strcmp(mod_rel + k - 5, ".lain") == 0)
+                               ? ""
+                               : ".lain";
+      if (snprintf(joined, sizeof(joined), "%s%s%s", dir, mod_rel, suffix) <
+              (int)sizeof(joined) &&
+          v2_normalize(joined, canonical, sizeof(canonical))) {
+        for (i = 0; i < h->source_count; i++) {
+          if (h->sources[i].path &&
+              strcmp(h->sources[i].path, canonical) == 0) {
+            *res = i;
+            return 0;
+          }
+        }
+        text = v2_read_file(canonical, &size);
+      }
+    }
+  }
   if (!text) return LAINMETA_V2_ERR_SOURCE;
   if (!v2_add_source(h, canonical, text, text, size, &index, NULL)) {
     free(text);
@@ -1180,6 +1218,17 @@ static uint32_t v2_ir_proc_end(void *ctx, const uint64_t *args, uint32_t argc,
   if (!m) return LAINMETA_V2_ERR_HANDLE;
   if (m->proc.is_extern && m->proc.open) {
     if (m->proc.depth) return LAINMETA_V2_ERR_STATE;
+    for (uint32_t i = 0; i < m->sub_count; ++i) {
+      const L1Subroutine *prev = m->subs[i];
+      if ((prev->flags & SUBROUTINE_EXTERN) && prev->name && m->proc.name &&
+          strcmp(prev->name, m->proc.name) == 0 && prev->link_name &&
+          m->proc.link_name &&
+          strcmp(prev->link_name, m->proc.link_name) == 0) {
+        m->proc.open = false;
+        *res = m->sub_count;
+        return 0;
+      }
+    }
     sub = lainir_subroutine_extern(m->builder, m->proc.name, m->proc.link_name,
                                    m->proc.params, m->proc.param_count,
                                    m->proc.results, m->proc.result_count);

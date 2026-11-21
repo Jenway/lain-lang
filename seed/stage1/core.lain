@@ -1,0 +1,664 @@
+// core.lain —— 互递归核：Pratt 表达式、if、loop 与语句。
+// expr 调 if/loop（expr_prefix 分派），if/loop/语句又调 expr 求条件与初值；
+// lain0 的 import 是单向的，互递归的函数必须住在同一个文件里，这一层因此不可再拆。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let codes = import("ir_codes");
+let s = import("sym");
+let ax = import("ast");
+let cx = import("ctx");
+let agg = import("agg");
+let modules = import("modules");
+let bi = import("builtins");
+let cpt = import("comptime");
+let rf = import("reflect");
+let ireg = import("tyreg");
+let ct = import("ctypes");
+let lv = import("lval");
+let an = import("anon");
+let cl = import("calls");
+let flow = import("flow");
+let sm = import("stmt");
+let me = import("member");
+let rv = import("refval");
+let ctf = import("ctfor");
+let ctfn = import("ctfn");
+let gv = import("given");
+let gn = import("generics");
+
+
+// --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
+func new_ty(k: addr) -> addr { return ax.new_ty(k); }
+func new_val(k: addr) -> addr { return ax.new_val(k); }
+func box(k: addr) -> addr { return ax.box(k); }
+func box_put(p: addr, v: u64) -> u64 { return ax.box_put(p, v); }
+func box_get(p: addr) -> u64 { return ax.box_get(p); }
+func n_count(g: u64) -> u64 { return ax.n_count(g); }
+func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
+func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
+func node_count(h: u64) -> u64 { return ax.node_count(h); }
+func node_kind(h: u64) -> u64 { return ax.node_kind(h); }
+func is_group_node(h: u64) -> u64 { return ax.is_group_node(h); }
+func node_sym(h: u64) -> u64 { return ax.node_sym(h); }
+func is_group(g: u64, i: u64) -> u64 { return ax.is_group(g, i); }
+func delim_of(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); }
+func dl_paren() -> u64 { return ax.dl_paren(); }
+func dl_brace() -> u64 { return ax.dl_brace(); }
+func is_comma(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); }
+func is_name(g: u64, i: u64) -> u64 { return ax.is_name(g, i); }
+func is_digit_token(g: u64, i: u64) -> u64 { return ax.is_digit_token(g, i); }
+func is_semi(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); }
+func skip_semi(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); }
+func num_value(p: addr, n: u64) -> u64 { return ax.num_value(p, n); }
+func no_slot() -> u64 { return ax.no_slot(); }
+func e_ast() -> u64 { return ax.e_ast(); }
+func e_unbound() -> u64 { return ax.e_unbound(); }
+func e_type() -> u64 { return ax.e_type(); }
+func e_op() -> u64 { return ax.e_op(); }
+func e_unsup() -> u64 { return ax.e_unsup(); }
+func e_frame() -> u64 { return ax.e_frame(); }
+func t64(k: addr) -> addr { return cx.t64(k); }
+func tbool(k: addr) -> addr { return cx.tbool(k); }
+func tnone(k: addr) -> addr { return cx.tnone(k); }
+func push_val(k: addr, v: addr) -> u64 { return cx.push_val(k, v); }
+func val_force(k: addr, v: addr, tp: addr) -> u64 { return cx.val_force(k, v, tp); }
+func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 { return cx.coerce(k, v, from, to, out); }
+func slot_put(k: addr, j: u64, v: addr, tp: addr) -> u64 { return cx.slot_put(k, j, v, tp); }
+func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
+func slot_copy(k: addr, dst: u64, src: u64) -> u64 { return cx.slot_copy(k, dst, src); }
+func emit_slots(k: addr, j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); }
+func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
+func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 { return cx.parse_type(k, g, i, out); }
+func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); }
+func sig_lookup(k: addr, name: u64, retp: addr, paramp: addr, meta: addr) -> u64 { return cx.sig_lookup(k, name, retp, paramp, meta); }
+func alloc_res_slot(k: addr) -> u64 { return cx.alloc_res_slot(k); }
+func loop_head(k: addr, g: u64, j: u64, ob: addr) -> u64 { return cx.loop_head(k, g, j, ob); }
+func find_loop(k: addr, label: u64, has_label: u64) -> u64 { return cx.find_loop(k, label, has_label); }
+func ti32(k: addr) -> addr { return cx.ti32(k); }
+func dl_bracket() -> u64 { return ax.dl_bracket(); }
+func tok_first(g: u64, i: u64) -> u64 { return ax.tok_first(g, i); }
+func lit_addr(h: u64) -> addr { return ax.lit_addr(h); }
+func lit_len(h: u64) -> u64 { return ax.lit_len(h); }
+
+// --- 表达式 -------------------------------------------------------------
+func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if st.st_ok(k) != 0 { return i; }
+  // as 转换
+  if is_group(g, i) == 0 {
+    if n_sym(g, i) == s.k_as() {
+      let t: addr = new_ty(k);
+      let j: u64 = parse_type(k, g, i + 1, t);
+      let c: addr = new_val(k);
+      coerce(k, out, ty.vty(out), t, c);
+      ty.val_at(out, c);
+      return expr_tail(k, g, j, minp, want, out);
+    }
+  }
+  // 后缀：下标 table[i]、成员 x.y、Fn 值的直接调用 f(a)
+  if is_group(g, i) == 1 {
+    if delim_of(g, i) == dl_bracket() { return sub_expr(k, g, i, minp, want, out); }
+    if delim_of(g, i) == dl_paren() {
+      if rv.fn_val_p(k, out) == 1 { return rv.postfix_call(k, g, i, minp, want, out); }
+    }
+  }
+  if is_group(g, i) == 0 {
+    if n_sym(g, i) == s.p_dot() {
+      if i + 1 < n {
+        let plain: u64 = is_name(g, i + 1);
+        let interp: u64 = ctf.interp_at(g, i + 1);
+        if plain == 1 or interp == 1 {
+          return rv.member_on_val(k, g, i, minp, want, out);
+        }
+      }
+    }
+  }
+  let op: u64 = if is_group(g, i) == 0 { n_sym(g, i) } else { 0 };
+  let p: u64 = ty.prec(op);
+  if p == 0 { return i; }
+  if p < minp { return i; }
+  // 二元：右操作数以左操作数的类型为提示
+  let rv: addr = new_val(k);
+  // 左操作数是地址时，右操作数的提示类型必须是整数（否则 a + 512 里的字面量会变成地址）。
+  // 逻辑与/或的右操作数是独立布尔条件，不能把 lhs 的 bool(#bits<1>) 当成 rhs 子表达式的提示。
+  let is_logic: u64 = if op == s.k_and() or op == s.k_or() { 1 } else { 0 };
+  let hint: addr = if is_logic == 1 { tnone(k) } else {
+    if ty.tk(ty.vty(out)) == 3 { t64(k) } else { ty.vty(out) }
+  };
+  let rj: u64 = expr(k, g, i + 1, p + 1, hint, rv);
+  if st.st_ok(k) != 0 { return rj; }
+  let lt: addr = ty.vty(out);
+  let rt: addr = ty.vty(rv);
+  let opt: addr = new_ty(k);
+  if ty.ty_known(lt) == 1 {
+    ty.ty_at(opt, lt);
+  } else {
+    if ty.ty_known(rt) == 1 { ty.ty_at(opt, rt); } else {
+      if ty.ty_known(want) == 1 { ty.ty_at(opt, want); } else { ty.ty_i32(opt); }
+    }
+  }
+  // 指针加整数：一律发 #lea（verify 要求 base 是 #addr）
+  if ty.tk(opt) == 3 {
+    if op == s.o_plus() {
+      if ty.tk(lt) == 3 and ty.tk(rt) != 3 {
+        let res: u64 = lea_emit(k, out, rv, ty.vty(out));
+        let at: addr = new_ty(k);
+        ty.ty_at(at, ty.vty(out));
+        ty.val_ref(out, res, at);
+        return expr_tail(k, g, rj, minp, want, out);
+      }
+      if ty.tk(rt) == 3 and ty.tk(lt) != 3 {
+        let res2: u64 = lea_emit(k, rv, out, ty.vty(rv));
+        let at2: addr = new_ty(k);
+        ty.ty_at(at2, ty.vty(rv));
+        ty.val_ref(out, res2, at2);
+        return expr_tail(k, g, rj, minp, want, out);
+      }
+    }
+    let dzs: u64 = ir.diag(k, st.st_src(k), 34, "binsrc", 6);
+    let dzo: u64 = ir.diag(k, op, 32, modules.sym_addr(op), modules.sym_len(op));
+    st.st_fail(k, e_op());
+    return rj;
+  }
+  let lv: addr = new_val(k);
+  let rvv: addr = new_val(k);
+  coerce(k, out, lt, opt, lv);
+  coerce(k, rv, rt, opt, rvv);
+  let kind: u64 = ty.bin_inst(op, ty.tsg(opt));
+  if kind == 999 { let dz9: u64 = ir.diag(k, op, 33, modules.sym_addr(op), modules.sym_len(op)); st.st_fail(k, e_op()); return rj; }
+  let rest: addr = new_ty(k);
+  ty.result_ty(op, opt, rest);
+  ir.args_reset(k);
+  push_val(k, lv);
+  push_val(k, rvv);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, kind, res, opt);
+  ty.val_ref(out, res, rest);
+  return expr_tail(k, g, rj, minp, want, out);
+}
+
+func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  let j: u64 = expr_prefix(k, g, i, want, out);
+  if st.st_ok(k) != 0 { return j; }
+  return expr_tail(k, g, j, minp, want, out);
+}
+
+@root
+func lainc_core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  return expr(k, g, i, minp, want, out);
+}
+
+@root
+func lainc_core_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  return expr_tail(k, g, i, minp, want, out);
+}
+
+func prefix_neg(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let j: u64 = i + 1;
+  if j >= n_count(g) { st.st_fail(k, e_ast()); return j; }
+  if is_digit_token(g, j) == 0 { st.st_fail(k, e_unsup()); return j; }
+  let h: u64 = n_at(g, j);
+  let pa: addr = ax.lit_addr(h);
+  let pl: u64 = ax.lit_len(h);
+  let v: u64 = num_value(pa, pl);
+  let t: addr = new_ty(k);
+  if ty.ty_known(want) == 1 and ty.tw(want) > 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
+  ir.args_reset(k);
+  ir.arg_int(k, 0);
+  ir.arg_int(k, v);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, codes.INST_SUB(), res, t);
+  ty.val_ref(out, res, t);
+  return j + 1;
+}
+
+// 反射分派：认 meta_* 查询与类型名。实参必须在这里用 expr 递归求值，
+// 所以钩子只能留在本文件；表结构与发射逻辑都在 reflect.lain。
+func reflect_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  if is_name(g, i) == 0 { return 0; }
+  let m: u64 = rf.mode_of(n_sym(g, i));
+  if m == 0 {
+    let tv: u64 = rf.type_value(k, g, i, out);
+    if tv == 1 { return i + 1; }
+    return 0;
+  }
+  if i + 1 >= n_count(g) { return 0; }
+  if is_group(g, i + 1) != 1 { return 0; }
+  let pr: u64 = rf.prepare(k);
+  if st.st_ok(k) != 0 { return i + 2; }
+  let pg: u64 = n_at(g, i + 1);
+  let v1: addr = new_val(k);
+  let v2: addr = new_val(k);
+  let pair: u64 = if m >= 6 and m <= 9 { 1 } else { 0 };
+  let j1: u64 = if m == 10 { 0 } else { expr(k, pg, 0, 0, t64(k), v1) };
+  if st.st_ok(k) != 0 { return i + 2; }
+  let bad: u64 = rf.bad_id(k, m, v1);
+  if bad == 1 { return i + 2; }
+  let j2: u64 = if pair == 1 { expr(k, pg, 2, 0, t64(k), v2) } else { 0 };
+  if st.st_ok(k) != 0 { return i + 2; }
+  let ok: u64 = rf.query(k, m, v1, v2, want, out);
+  if ok == 0 { st.st_fail(k, e_unsup()); }
+  return i + 2;
+}
+
+func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { st.st_fail(k, e_ast()); return i; }
+  let h: u64 = n_at(g, i);
+  if is_group_node(h) == 1 {
+    let dl: u64 = ax.delim(h);
+    if dl == dl_paren() {
+      let j: u64 = expr(k, h, 0, 0, want, out);
+      return i + 1;
+    }
+    if dl == dl_bracket() { return arr_lit(k, g, i, want, out); }
+    st.st_fail(k, e_ast());
+    return i + 1;
+  }
+  if is_digit_token(g, i) == 1 {
+    let t: addr = new_ty(k);
+    if ty.ty_known(want) == 1 and ty.tw(want) > 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
+    let pa: addr = ax.lit_addr(h);
+    let pl: u64 = ax.lit_len(h);
+    let v: u64 = num_value(pa, pl);
+    ty.val_lit(out, v, t);
+    return i + 1;
+  }
+  if tok_first(g, i) == 34 { return str_lit(k, g, i, out); }
+  let sym: u64 = node_sym(h);
+  if sym == s.k_true() or sym == s.k_false() {
+    let t: addr = tbool(k);
+    let b: u64 = if sym == s.k_true() { 1 } else { 0 };
+    ty.val_lit(out, b, t);
+    return i + 1;
+  }
+  // func (形参) [-> 返回] { 体 }：产物是一个 Fn(...) 值。
+  if sym == s.k_func() {
+    if i + 1 < n and is_group(g, i + 1) == 1 {
+      return an.func_expr(k, g, i, want, out);
+    }
+  }
+  if sym == s.k_eval() {
+    if i + 1 < n and is_group(g, i + 1) == 1 {
+      if delim_of(g, i + 1) == dl_paren() { return eval_call(k, g, i, want, out); }
+    }
+  }
+  if sym == s.t_type() {
+    let m: addr = "type is compile-time only";
+    let d: u64 = ir.diag(k, 0, 1, m, 25);
+    st.st_fail(k, e_unsup());
+    return i + 1;
+  }
+  if sym == s.k_if() {
+    let t: addr = box(k);
+    return flow.if_compile(k, g, i, want, out, t);
+  }
+  if sym == s.k_loop() or sym == s.k_while() {
+    let t: addr = box(k);
+    return flow.loop_compile(k, g, i, want, out, t);
+  }
+  if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
+  // 名字 . 名字：编译期 Witness 成员/调用、FieldInfo 投影、变体/导入/变量字段
+  if i + 2 < n and is_group(g, i + 1) == 0 and is_name(g, i) == 1 {
+    if n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
+      if env.env_find(k, sym) == 0 {
+        let wf: addr = gv.witness_field_at(k, g, i);
+        if st.st_ok(k) != 0 { return i + 3; }
+        if wf as u64 != 0 {
+          let fk: u64 = load(wf + 8);
+          let fa: u64 = load(wf + 16);
+          if fk == 8 and i + 3 < n and is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_paren() {
+            let se: addr = fa as addr;
+            cl.call_sig(k, modules.sym_qual(se), modules.sym_sig(se), n_at(g, i + 3), want, out);
+            return i + 4;
+          }
+          if fk == 0 { ty.val_lit(out, fa, t64(k)); return i + 3; }
+        }
+        let pv: addr = ctf.proj_at(k, g, i);
+        if (pv as u64) != 0 {
+          if ctf.v_kind(pv) == 0 {
+            ty.val_lit(out, ctf.v_a(pv), t64(k));
+            return i + 3;
+          }
+          let m: addr = "type is compile-time only";
+          let d: u64 = ir.diag(k, 0, 1, m, 25);
+          st.st_fail(k, e_unsup());
+          return i + 3;
+        }
+      }
+      return me.dotted(k, g, i, want, out);
+    }
+  }
+  // Name(args...) { 字段... }：类型工厂构造结果直接初始化结构体。
+  if i + 2 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
+    if delim_of(g, i + 1) == dl_paren() and delim_of(g, i + 2) == dl_brace() {
+      let tv: addr = st.st_alloc(k, 24);
+      let fj: u64 = ctfn.eval_factory_call(k, g, i, tv);
+      if fj != 0 {
+        if st.st_ok(k) != 0 { return i + 3; }
+        let sh: u64 = ireg.ty_shape(k, ctf.v_a(tv));
+        if sh == 0 { st.st_fail(k, e_type()); return i + 3; }
+        me.agg_construct_sh(k, sh, n_at(g, i + 2), out);
+        return i + 3;
+      }
+    }
+  }
+  // 名字 { 字段... }：聚合构造。只有结构名后跟花括号才算构造，
+  // 否则 if 语句里的条件变量会被误当成构造名。
+  if i + 1 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
+    if delim_of(g, i + 1) == dl_brace() and modules.is_struct_name(k, sym) == 1 {
+      return me.agg_construct(k, g, i, out);
+    }
+  }
+  // 编译期反射与类型句柄：类型名在表达式位置折成 TypeId 字面量，
+  // meta_* 查询就地展开成 #lea / #load。两者都不生成辅助过程。
+  let rq: u64 = reflect_prefix(k, g, i, want, out);
+  if rq != 0 { return rq; }
+  // 间接调用：icall[(形参) -> 返回](目标, 实参...)。
+  if sym == s.b_icall() and i + 2 < n {
+    if is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
+      return cl.icall_call(k, g, i, want, out);
+    }
+  }
+  if i + 1 < n and is_group(g, i + 1) == 1 {
+    if delim_of(g, i + 1) == dl_paren() {
+      if bi.is_builtin(sym) == 1 { return me.builtin_call(k, g, i, want, out); }
+      // size_of / align_of / field_count：编译期折成 u64 常量。
+      let qc: addr = st.st_alloc(k, 24);
+      let qh: u64 = ctf.query_fold(k, qc, g, i);
+      if st.st_ok(k) != 0 { return i + 2; }
+      if qh == 1 {
+        ty.val_lit(out, ctf.v_a(qc), t64(k));
+        return i + 2;
+      }
+      // 局部 Fn(...) 值：按签名发间接调用。
+      let fo: u64 = env.env_find(k, sym);
+      if fo != 0 {
+        let ft: addr = new_ty(k);
+        env.env_ty(k, fo, ft);
+        let fsh: u64 = ty.tsh(ft);
+        if fsh != 0 {
+          if agg.shp_kind(fsh) == agg.kind_fn() {
+            let fv: addr = new_val(k);
+            let fj: u64 = cl.var_ref(k, g, i, tnone(k), fv);
+            let pf: u64 = rv.postfix_call(k, g, i + 1, 0, want, fv);
+            let ig: u64 = fj;
+            ty.val_at(out, fv);
+            return pf;
+          }
+        }
+      }
+      // ?{} 泛型函数调用：单态化调度
+      let ge: addr = modules.find_here(k, sym);
+      if ge as u64 != 0 {
+        if modules.sym_kind(ge) == modules.sym_kind_generic() {
+          let nb: addr = box(k);
+          gn.call_generic(k, ge, g, i, want, out, nb);
+          return box_get(nb);
+        }
+      }
+      return cl.call_expr(k, g, i, want, out);
+    }
+    if delim_of(g, i + 1) == dl_bracket() and sym == s.b_icall() {
+      return cl.icall_call(k, g, i, want, out);
+    }
+  }
+  // 编译期常量（comptime for 的循环变量）：折成字面量参与运行期表达式（局部运行期绑定优先）。
+  if env.env_find(k, sym) == 0 {
+    let cv: addr = ctf.lookup(k, sym);
+    if cv as u64 != 0 {
+      if ctf.v_kind(cv) == 0 {
+        ty.val_lit(out, ctf.v_a(cv), t64(k));
+        return i + 1;
+      }
+      let m: addr = "type is compile-time only";
+      let d: u64 = ir.diag(k, 0, 1, m, 25);
+      st.st_fail(k, e_unsup());
+      return i + 1;
+    }
+  }
+  return cl.var_ref(k, g, i, want, out);
+}
+
+// --- eval ---------------------------------------------------------------
+// eval(算得出来的东西)：把内层表达式编进独立的临时模块，交给 Lain VM 跑出标量，
+// 再当作字面量交回外层。运行期局部量在求值时不可见，引用它们会报未绑定。
+func eval_fail(k: addr, tmp: u64, saved_mod: u64, saved_sp: u64, code: u64, out: addr, back: u64) -> u64 {
+  cpt.release(tmp);
+  st.st_set_mod(k, saved_mod);
+  st.st_set_sp(k, saved_sp);
+  ty.val_none(out);
+  st.st_fail(k, code);
+  return back;
+}
+
+func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let pg: u64 = n_at(g, i + 1);
+  let saved_mod: u64 = st.st_mod(k);
+  let saved_sp: u64 = st.st_sp(k);
+  env.env_release(k, 0);
+  let tmp: u64 = cpt.clone(k);
+  st.st_set_mod(k, tmp);
+  // 临时模块拿到的是克隆那一刻的主模块，可能还没有反射表：先把表铺进去，
+  // 内层表达式里的 meta_* 查询才能落到真实数据段上。
+  let pr: u64 = rf.prepare(k);
+  if st.st_ok(k) != 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
+  }
+  let ename: u64 = cpt.entry_name();
+  ir.proc_begin(k, ename);
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + cx.count_tree(pg, 0);
+  emit_slots(k, 0, nslots);
+  let tv: addr = new_val(k);
+  expr(k, pg, 0, 0, tnone(k), tv);
+  if st.st_ok(k) != 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
+  }
+  if ty.ty_known(tv) == 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_type(), out, i + 2);
+  }
+  let vt: addr = new_ty(k);
+  ty.ty_at(vt, ty.vty(tv));
+  if ty.tk(vt) == 3 or ty.ty_byte_ok(vt) == 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_type(), out, i + 2);
+  }
+  ir.proc_result(k, vt);
+  ir.args_reset(k);
+  push_val(k, tv);
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  let vrc: u64 = cpt.verify(tmp);
+  if vrc != 0 {
+    let vm: addr = "eval-verify";
+    let vd: u64 = ir.diag(k, vrc, 1, vm, 11);
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
+  }
+  let ob: addr = cpt.out_buf();
+  ir.args_reset(k);
+  let arc: u64 = cpt.apply_scalar(tmp, ename, ob);
+  let rc: u64 = if arc != 0 { arc } else { load(ob) };
+  if rc != 0 {
+    let am: addr = "eval-apply";
+    let ad: u64 = ir.diag(k, rc, 1, am, 10);
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
+  }
+  let bits: u64 = load(ob + 8);
+  cpt.release(tmp);
+  st.st_set_mod(k, saved_mod);
+  st.st_set_sp(k, saved_sp);
+  ty.val_lit(out, bits, vt);
+  coerce(k, out, vt, want, out);
+  return i + 2;
+}
+
+
+// --- 表达式处理器的具体实现（挂在核心分派后面，避免膨胀上半部） --------------
+
+// #lea 的独立发射点：base 是地址值，idx 是整数或字面量。
+func lea_emit(k: addr, base: addr, idx: addr, t: addr) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.op_val(k, base);
+  let b: u64 = ir.op_val(k, idx);
+  let c: u64 = ir.arg_int(k, 1);
+  let d: u64 = ir.arg_int(k, 0);
+  let ins: u64 = ir.emit(k, codes.INST_LEA(), res, t);
+  return res;
+}
+
+// 下标：base[i] → #lea(元素基址, i, 元素字节宽, 0)。
+// 切片的元素基址是 16 字节头里的 ptr；数组/表直接用自身地址。
+func elem_of_arr(k: addr, sh: u64, et: addr) -> u64 {
+  let elem: u64 = agg.mem_index(sh, 0);
+  let r: u64 = agg.mem_ty(k, elem, et);
+  return agg.type_size(agg.mem_k(elem), agg.mem_w(elem), agg.mem_sh(elem));
+}
+
+func elem_of_slice(k: addr, sh: u64, et: addr) -> u64 {
+  let r: u64 = ct.elem_ty(k, sh, et);
+  return ct.elem_size(k, sh);
+}
+
+func sub_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  let bg: u64 = n_at(g, i);
+  let uw: u64 = rv.unwrap_ref(k, out);
+  let ignored_uw: u64 = uw;
+  let bt: addr = ty.vty(out);
+  let sh: u64 = ty.tsh(bt);
+  if sh == 0 { st.st_fail(k, e_type()); return i + 1; }
+  let kd: u64 = agg.shp_kind(sh);
+  let sliced: u64 = if kd == agg.kind_slice() or kd == agg.kind_mutslice() { 1 } else { 0 };
+  let base: addr = new_val(k);
+  if sliced == 1 {
+    let lv: addr = new_val(k);
+    let l: u64 = agg.load_at(k, ty.vn(out), 0, ir.taddr(k), lv);
+    ty.val_at(base, lv);
+  } else {
+    ty.val_at(base, out);
+  }
+  let nt: addr = new_ty(k);
+  let u: u64 = ty.ty_u64(nt);
+  let iv: addr = new_val(k);
+  let j: u64 = expr(k, bg, 0, 0, nt, iv);
+  let et: addr = new_ty(k);
+  let ew: u64 = if sliced == 1 { elem_of_slice(k, sh, et) } else { elem_of_arr(k, sh, et) };
+  let at: addr = new_ty(k);
+  let a1: u64 = ty.ty_addr(at);
+  let a2: u64 = ty.ty_set_sh(at, ty.tsh(et));
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.op_val(k, base);
+  let b: u64 = ir.op_val(k, iv);
+  let c: u64 = ir.arg_int(k, ew);
+  let d: u64 = ir.arg_int(k, 0);
+  let ins: u64 = ir.emit(k, codes.INST_LEA(), res, ir.taddr(k));
+  let ignored: u64 = j;
+  if sliced == 1 {
+    // 切片的 s[i] 是元素值本身：标量按真实位宽读，聚合给那块视图。
+    let ev: addr = new_val(k);
+    if rv.deref_loads(ty.tsh(et)) == 1 {
+      let el: u64 = agg.load_at(k, res, 0, et, ev);
+    } else {
+      let ev2: u64 = ty.val_ref(ev, res, et);
+    }
+    ty.val_at(out, ev);
+  } else {
+    let static_table: u64 = agg.shp_static(sh);
+    if static_table == 1 {
+      ty.val_ref(out, res, at);
+    } else {
+      let ev: addr = new_val(k);
+      if rv.deref_loads(ty.tsh(et)) == 1 {
+        let el: u64 = agg.load_at(k, res, 0, et, ev);
+      } else {
+        let ev2: u64 = ty.val_ref(ev, res, et);
+      }
+      ty.val_at(out, ev);
+    }
+  }
+  return expr_tail(k, g, i + 1, minp, want, out);
+}
+
+// 局部数组字面量：按期望的 Array(T, N) 开栈块，逐个元素强制后写入。
+func arr_fill(k: addr, g: u64, i: u64, idx: u64, base: u64, esz: u64, et: addr,
+              cnt: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if idx >= cnt { return i; }
+  if is_comma(g, i) == 1 { return arr_fill(k, g, i + 1, idx, base, esz, et, cnt); }
+  let v: addr = new_val(k);
+  let j: u64 = expr(k, g, i, 0, et, v);
+  let c: addr = new_val(k);
+  coerce(k, v, ty.vty(v), et, c);
+  let s: u64 = agg.store_at(k, base, idx * esz, c, et);
+  return arr_fill(k, g, j, idx + 1, base, esz, et, cnt);
+}
+
+func arr_lit(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let grp: u64 = n_at(g, i);
+  let cnt: u64 = bi.table_cnt(grp, 0, n_count(grp), 0);
+  let wsh: u64 = ty.tsh(want);
+  let ok: u64 = if wsh == 0 { 0 } else {
+    if agg.shp_kind(wsh) == agg.kind_array() {
+      if agg.shp_len(wsh) == cnt { 1 } else { 0 }
+    } else { 0 }
+  };
+  if ok == 0 {
+    let m: addr = "array-literal";
+    let d: u64 = ir.diag(k, cnt, 1, m, 13);
+    st.st_fail(k, e_type());
+    ty.val_none(out);
+    return i + 1;
+  }
+  let elem: u64 = agg.mem_index(wsh, 0);
+  let et: addr = new_ty(k);
+  let e1: u64 = agg.mem_ty(k, elem, et);
+  let esz: u64 = agg.type_size(agg.mem_k(elem), agg.mem_w(elem), agg.mem_sh(elem));
+  let objv: addr = new_val(k);
+  let base: u64 = agg.new_bytes(k, agg.shp_size(wsh), agg.shp_align(wsh), objv);
+  let filled: u64 = arr_fill(k, grp, 0, 0, base, esz, et, cnt);
+  ty.val_at(out, objv);
+  return i + 1;
+}
+
+// 字符串字面量：登记一块 ro 数据，值是它的地址，类型带长度形状。
+func str_lit(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let h: u64 = n_at(g, i);
+  let text: addr = lit_addr(h) + 1;
+  let len: u64 = lit_len(h) - 2;
+  let src: u64 = st.st_src(k);
+  let seq: u64 = st.st_next_str(k);
+  let pre: u64 = strlit_prefix(k);
+  let dname: u64 = modules.qual_num(k, src, pre, seq);
+  let sh: u64 = bi.string_data(k, dname, text, len);
+  let t: addr = new_ty(k);
+  let a: u64 = ty.ty_addr(t);
+  let s2: u64 = ty.ty_set_sh(t, sh);
+  ty.val_ref(out, dname, t);
+  return i + 1;
+}
+
+func strlit_prefix(k: addr) -> u64 {
+  let p: addr = st.st_scratch(k) + 64;
+  let c0: u8 = 115;
+  let c1: u8 = 116;
+  let c2: u8 = 114;
+  let c3: u8 = 108;
+  let c4: u8 = 105;
+  let c5: u8 = 116;
+  let c6: u8 = 95;
+  store(p, c0);
+  store(p + 1, c1);
+  store(p + 2, c2);
+  store(p + 3, c3);
+  store(p + 4, c4);
+  store(p + 5, c5);
+  store(p + 6, c6);
+  return ir.sym_lit(p, 7);
+}
+
+

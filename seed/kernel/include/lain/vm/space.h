@@ -41,7 +41,7 @@
 
 /* 定长：内核结构不做动态分配。2 个模块段 + 各 TCB 的栈 + 宿主注入，
  * 64 足够；满了就是拒绝，不是扩容。 */
-#define LAINVM_SPACE_MAX_REGIONS 64
+#define LAINVM_SPACE_MAX_REGIONS 512
 
 /* 槽号的"没有"哨兵。用 #define 而不是 enum：0xFFFFFFFF 超出 int 的范围。 */
 #define LAINVM_SPACE_NO_SLOT 0xFFFFFFFFu

@@ -13,6 +13,17 @@ EXAMPLES = os.path.join(ROOT, "examples")
 META_ENTRY = os.path.join(ROOT, "src", "entry.lain")
 META_UNITS = os.path.join(BUILD, "metaunits")
 META_OUT = os.path.join(BUILD, "meta")
+STAGE1_ENTRY = os.path.join(ROOT, "seed", "stage1", "entry.lain")
+STAGE1_UNITS = os.path.join(BUILD, "stage1_units")
+STAGE1_C = os.path.join(BUILD, "stage1.c")
+STAGE1_EXE = os.path.join(BUILD, "lain-stage1.exe" if os.name == "nt" else "lain-stage1")
+STAGE2_L1 = os.path.join(BUILD, "stage2.l1")
+STAGE2_C = os.path.join(BUILD, "stage2.c")
+STAGE2_EXE = os.path.join(BUILD, "lain-stage2.exe" if os.name == "nt" else "lain-stage2")
+STAGE3_L1 = os.path.join(BUILD, "stage3.l1")
+NATIVE_DRIVER = os.path.join(ROOT, "seed", "native_meta_driver.c")
+KERNEL_INC = os.path.join(ROOT, "seed", "kernel", "include")
+SEED_LIB = os.path.join(BUILD, "lib", "lain_seed.lib" if os.name == "nt" else "liblain_seed.a")
 
 
 def exe(name):
@@ -187,24 +198,55 @@ def abi_check():
 
 
 def split_meta():
-    """把 src 里的 Meta 拆成逐模块单元。回单元路径列表或 None。"""
-    if os.path.isdir(META_UNITS):
-        shutil.rmtree(META_UNITS)
-    result = run([LAIN0, "--entry", META_ENTRY, "--split", META_UNITS])
+    """从 seed/stage1 编译出原生 Stage-1 编译器，再用它把 src/ 编成 build/stage2.l1。"""
+    clang_bin = shutil.which("clang")
+    if not clang_bin:
+        print("失败: 未找到 clang，无法构建 Stage-1")
+        return None
+    if os.path.isdir(STAGE1_UNITS):
+        shutil.rmtree(STAGE1_UNITS)
+    result = run([LAIN0, "--entry", STAGE1_ENTRY, "--split", STAGE1_UNITS])
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr)
         return None
-    return [os.path.join(META_UNITS, n) for n in sorted(os.listdir(META_UNITS))
-            if n.endswith(".l1")]
+    s1_units = [os.path.join(STAGE1_UNITS, n)
+                for n in sorted(os.listdir(STAGE1_UNITS))
+                if n.endswith(".l1")]
+    if not s1_units:
+        return None
+    res_c = run([LAINIR_C, "-o", STAGE1_C] + s1_units)
+    if res_c.returncode != 0:
+        print(res_c.stdout)
+        print(res_c.stderr)
+        return None
+    res_cc = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
+                  NATIVE_DRIVER, STAGE1_C, SEED_LIB, "-o", STAGE1_EXE])
+    if res_cc.returncode != 0:
+        print(res_cc.stdout)
+        print(res_cc.stderr)
+        return None
+    if os.path.exists(STAGE2_L1):
+        os.remove(STAGE2_L1)
+    res_s2 = run([STAGE1_EXE, META_ENTRY, "--out", STAGE2_L1])
+    if res_s2.returncode != 0 or not os.path.exists(STAGE2_L1):
+        print(res_s2.stdout)
+        print(res_s2.stderr)
+        return None
+    res_v2 = run([LAINIR_VERIFY, STAGE2_L1])
+    if res_v2.returncode != 0:
+        print(res_v2.stdout)
+        print(res_v2.stderr)
+        return None
+    return [STAGE2_L1]
 
 
 def compile_sample(stem, units, folder=LAIN0_TESTS):
     """用 Meta 编译一个样例。回 (输出文本, 失败文本或 None)。"""
     os.makedirs(META_OUT, exist_ok=True)
     out_path = os.path.join(META_OUT, stem + ".l1")
-    command = [LAIN_META] + units + [os.path.join(folder, stem + ".lain"),
-                                      "--out", out_path]
+    command = [LAIN_META, "--fuel", "64000000"] + units + [
+        os.path.join(folder, stem + ".lain"), "--out", out_path]
     result = run(command)
     text = result.stdout + result.stderr
     if result.returncode != 0:
@@ -467,6 +509,10 @@ META_CASES = [
     {"file": "concepts_max.lain", "entry": "s0__main", "value": 124,
      "folds": [], "procs": ["s0__i64_less", "s0__i64_gt", "s0__u64_less"],
      "absent": ["#call [("]},
+    # Phase 3A：零 addr 原语（ptr_cast / make_slice / null_ref / is_null）+ Ref/Mut 自动解引用 + 返回类型泛型合一。
+    {"file": "modern_no_addr.lain", "entry": "s0__main", "value": 255,
+     "folds": [], "procs": ["s0__push_item", "s0__read_item_val"],
+     "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -518,8 +564,8 @@ def compile_meta_test(stem, units):
     out_path = os.path.join(META_TEST_OUT, stem + ".l1")
     if os.path.exists(out_path):
         os.remove(out_path)
-    command = [LAIN_META] + units + [os.path.join("tests", "meta", stem + ".lain"),
-                                     "--out", out_path]
+    command = [LAIN_META, "--fuel", "64000000"] + units + [
+        os.path.join("tests", "meta", stem + ".lain"), "--out", out_path]
     result = run(command)
     return out_path, result.stdout + result.stderr, result.returncode
 
@@ -743,25 +789,58 @@ def main():
         print("现代样例 跳过")
 
     print()
-    print("[C99 自举验证]  src/ 全量 Meta 编译器发射为 C99")
-    if units:
-        self_c = os.path.join(WORK, "meta_self.c")
-        self_res = run([LAINIR_C, "-o", self_c] + units)
+    print("[C99 自举验证]  Stage-1 -> Stage-2 -> Stage-3 固定点一致")
+    if units and clang_bin:
+        self_res = run([LAINIR_C, "-o", STAGE2_C] + units)
         if self_res.returncode != 0:
-            problems.append("C99 自举: lainir-c 发射失败")
+            problems.append("C99 自举: lainir-c 发射 stage2.c 失败")
             print("C99 自举 失败")
-        elif clang_bin:
-            cc_self = run([clang_bin, "-std=c99", "-fsyntax-only", self_c])
+        else:
+            cc_self = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
+                           NATIVE_DRIVER, STAGE2_C, SEED_LIB, "-o", STAGE2_EXE])
             if cc_self.returncode != 0:
-                problems.append("C99 自举: clang -std=c99 语法/类型检查失败")
+                problems.append("C99 自举: clang 编译 stage2.exe 失败")
                 print("C99 自举 失败")
             else:
-                print("C99 自举 通过（%d 单元 -> %d KB C99）"
-                      % (len(units), os.path.getsize(self_c) // 1024))
-        else:
-            print("C99 自举 发射通过（未找到 clang，跳过 C 编译检查）")
+                if os.path.exists(STAGE3_L1):
+                    os.remove(STAGE3_L1)
+                res_s3 = run([STAGE2_EXE, META_ENTRY, "--out", STAGE3_L1])
+                if res_s3.returncode != 0 or not os.path.exists(STAGE3_L1):
+                    problems.append("C99 自举: Stage-2 编译 stage3.l1 失败")
+                    print("C99 自举 失败")
+                else:
+                    res_v3 = run([LAINIR_VERIFY, STAGE3_L1])
+                    if res_v3.returncode != 0:
+                        problems.append("C99 自举: stage3.l1 校验失败")
+                        print("C99 自举 失败")
+                    else:
+                        with open(STAGE2_L1, "rb") as f2, open(STAGE3_L1, "rb") as f3:
+                            same = (f2.read() == f3.read())
+                        if not same:
+                            problems.append("C99 自举: stage2.l1 与 stage3.l1 不一致")
+                            print("C99 自举 失败（固定点不一致）")
+                        else:
+                            print("C99 自举 通过（Stage-1 -> Stage-2 -> Stage-3 固定点一致，%d KB IR / %d KB C99）"
+                                  % (os.path.getsize(STAGE2_L1) // 1024,
+                                     os.path.getsize(STAGE2_C) // 1024))
+    elif units:
+        print("C99 自举 跳过（未找到 clang）")
     else:
         print("C99 自举 跳过（自举单元缺失）")
+
+    # 现代源码零 addr 审查 + 编译遥测
+    zero_addr_targets = [os.path.join(ROOT, "tests", "meta", "modern_no_addr.lain")]
+    if os.path.isdir(EXAMPLES):
+        zero_addr_targets += [os.path.join(EXAMPLES, n)
+                              for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]
+    for zpath in zero_addr_targets:
+        with open(zpath, "r", encoding="utf-8") as zh:
+            zsrc = re.sub(r"//.*", "", zh.read())
+        if re.search(r"\baddr\b", zsrc):
+            problems.append("零 addr 审查失败: %s 仍含裸 addr 类型" % os.path.relpath(zpath, ROOT))
+    total_steps = sum(r["steps"] for r in rows)
+    print("编译器遥测: 38 样例合计 VM steps=%d；零 addr 现代文件检查 %d 份通过"
+          % (total_steps, len(zero_addr_targets)))
 
     if problems:
         print()

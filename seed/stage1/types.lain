@@ -1,0 +1,239 @@
+// 类型与值：全部是 caller 分配的 24 / 56 字节块，只有标量与 addr 参与签名。
+// 之所以不返回 struct：lain0 把聚合返回值降级成被调者栈帧里的 #alloca 地址，
+// 跨调用读字段会读到下一个调用的帧。
+let codes = import("ir_codes");
+let s = import("sym");
+
+// --- 类型块：k @0，w @8，sg @16，sh @24。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
+// sh 是形状号：非 0 表示这个 addr 指向 struct/enum/数组/字符串，布局在 agg.lain。
+func ty_save(p: addr, k: u64, w: u64, sg: u64) -> u64 {
+  store(p, k);
+  store(p + 8, w);
+  store(p + 16, sg);
+  store(p + 24, 0);
+  return k;
+}
+
+func tk(p: addr) -> u64 { return load(p); }
+func tw(p: addr) -> u64 { return load(p + 8); }
+func tsg(p: addr) -> u64 { return load(p + 16); }
+func tsh(p: addr) -> u64 { return load(p + 24); }
+func ty_set_sh(p: addr, v: u64) -> u64 { store(p + 24, v); return v; }
+
+func ty_at(dst: addr, src: addr) -> u64 {
+  let a: u64 = load(src);
+  let b: u64 = load(src + 8);
+  let c: u64 = load(src + 16);
+  let d: u64 = load(src + 24);
+  ty_save(dst, a, b, c);
+  return ty_set_sh(dst, d);
+}
+
+func ty_known(p: addr) -> u64 {
+  if load(p) == 9 { return 0; }
+  return 1;
+}
+
+func ty_same(a: addr, b: addr) -> u64 {
+  let a0: u64 = load(a);
+  let b0: u64 = load(b);
+  if a0 != b0 { return 0; }
+  let a1: u64 = load(a + 8);
+  let b1: u64 = load(b + 8);
+  if a1 != b1 { return 0; }
+  let a2: u64 = load(a + 16);
+  let b2: u64 = load(b + 16);
+  if a2 != b2 { return 0; }
+  let a3: u64 = load(a + 24);
+  let b3: u64 = load(b + 24);
+  if a3 != b3 { return 0; }
+  return 1;
+}
+
+// bool 只有 1 位，不能进 #load/#store。
+func ty_byte_ok(p: addr) -> u64 {
+  let w: u64 = load(p + 8);
+  if w == 0 { return 0; }
+  let r: u64 = w - w / 8 * 8;
+  if r != 0 { return 0; }
+  return 1;
+}
+
+func ty_none(p: addr) -> u64 { return ty_save(p, 9, 0, 0); }
+
+func ty_bits(p: addr, w: u64, sg: u64) -> u64 {
+  return ty_save(p, codes.TY_BITS(), w, sg);
+}
+
+func ty_addr(p: addr) -> u64 { return ty_save(p, codes.TY_ADDR(), 0, 0); }
+
+// 带形状的地址：聚合与数组值在 IR 里一律是 #addr。
+func ty_agg(p: addr, sh: u64) -> u64 {
+  ty_addr(p);
+  return ty_set_sh(p, sh);
+}
+func ty_bool(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 1, 0); }
+func ty_i32(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 32, 1); }
+func ty_u64(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 64, 0); }
+func ty_u8(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 8, 0); }
+
+// 类型名 → 类型。认不出来返回 0，调用方负责报错。
+func ty_of_sym(h: u64, out: addr) -> u64 {
+  if h == s.t_i8() { ty_bits(out, 8, 1); return 1; }
+  if h == s.t_i16() { ty_bits(out, 16, 1); return 1; }
+  if h == s.t_i32() { ty_bits(out, 32, 1); return 1; }
+  if h == s.t_i64() { ty_bits(out, 64, 1); return 1; }
+  if h == s.t_u8() { ty_bits(out, 8, 0); return 1; }
+  if h == s.t_u16() { ty_bits(out, 16, 0); return 1; }
+  if h == s.t_u32() { ty_bits(out, 32, 0); return 1; }
+  if h == s.t_u64() { ty_bits(out, 64, 0); return 1; }
+  if h == s.t_usize() { ty_bits(out, 64, 0); return 1; }
+  if h == s.t_bool() { ty_bool(out); return 1; }
+  if h == s.t_addr() { ty_addr(out); return 1; }
+  if h == s.t_void() { ty_none(out); return 1; }
+  return 0;
+}
+
+// --- 值块：n @0，lit @8，bits @16，类型 @24。
+func val_save(p: addr, n: u64, lit: u64, bits: u64, t: addr) -> u64 {
+  store(p, n);
+  store(p + 8, lit);
+  store(p + 16, bits);
+  ty_at(p + 24, t);
+  return n;
+}
+
+func val_at(dst: addr, src: addr) -> u64 {
+  let a: u64 = load(src);
+  let b: u64 = load(src + 8);
+  let c: u64 = load(src + 16);
+  store(dst, a);
+  store(dst + 8, b);
+  store(dst + 16, c);
+  return ty_at(dst + 24, src + 24);
+}
+
+func vn(p: addr) -> u64 { return load(p); }
+func vlit(p: addr) -> u64 { return load(p + 8); }
+func vbits(p: addr) -> u64 { return load(p + 16); }
+func vty(p: addr) -> addr { return p + 24; }
+
+func val_none(p: addr) -> u64 {
+  store(p, 0);
+  store(p + 8, 0);
+  store(p + 16, 0);
+  ty_none(p + 24);
+  return 0;
+}
+
+func val_lit(p: addr, bits: u64, t: addr) -> u64 {
+  return val_save(p, 0, 1, bits, t);
+}
+
+func val_ref(p: addr, n: u64, t: addr) -> u64 {
+  return val_save(p, n, 0, 0, t);
+}
+
+func val_known(p: addr) -> u64 {
+  if load(p + 8) == 1 { return 1; }
+  if load(p) != 0 { return 1; }
+  return 0;
+}
+
+// --- 算子表 ------------------------------------------------------------
+// 优先级与 seed/lain0/src/Lexer.cpp:306 binaryPrecedence 一致。
+func prec(h: u64) -> u64 {
+  if h == s.k_or() { return 1; }
+  if h == s.k_and() { return 2; }
+  if h == s.o_pipe() { return 3; }
+  if h == s.o_caret() { return 4; }
+  if h == s.o_amp() { return 5; }
+  if h == s.o_eq() { return 6; }
+  if h == s.o_ne() { return 6; }
+  if h == s.o_lt() { return 7; }
+  if h == s.o_le() { return 7; }
+  if h == s.o_gt() { return 7; }
+  if h == s.o_ge() { return 7; }
+  if h == s.o_shl() { return 8; }
+  if h == s.o_shr() { return 8; }
+  if h == s.o_plus() { return 9; }
+  if h == s.o_minus() { return 9; }
+  if h == s.o_star() { return 10; }
+  if h == s.o_slash() { return 10; }
+  if h == s.o_percent() { return 10; }
+  return 0;
+}
+
+func is_cmp(h: u64) -> u64 {
+  if h == s.o_eq() { return 1; }
+  if h == s.o_ne() { return 1; }
+  if h == s.o_lt() { return 1; }
+  if h == s.o_le() { return 1; }
+  if h == s.o_gt() { return 1; }
+  if h == s.o_ge() { return 1; }
+  return 0;
+}
+
+// 与 seed/lain0/src/Sema.cpp:495 selectBinary 逐条对齐。
+func bin_inst(h: u64, sg: u64) -> u64 {
+  if h == s.o_plus() { return codes.INST_ADD(); }
+  if h == s.o_minus() { return codes.INST_SUB(); }
+  if h == s.o_star() { return codes.INST_MUL(); }
+  if h == s.o_slash() {
+    if sg == 1 { return codes.INST_SDIV(); }
+    return codes.INST_UDIV();
+  }
+  if h == s.o_percent() {
+    if sg == 1 { return codes.INST_SREM(); }
+    return codes.INST_UREM();
+  }
+  if h == s.o_amp() { return codes.INST_AND(); }
+  if h == s.o_pipe() { return codes.INST_OR(); }
+  if h == s.o_caret() { return codes.INST_XOR(); }
+  if h == s.o_shl() { return codes.INST_SHL(); }
+  if h == s.o_shr() {
+    if sg == 1 { return codes.INST_ASHR(); }
+    return codes.INST_LSHR();
+  }
+  if h == s.k_and() { return codes.INST_AND(); }
+  if h == s.k_or() { return codes.INST_OR(); }
+  if h == s.o_eq() { return codes.INST_EQ(); }
+  if h == s.o_ne() { return codes.INST_NE(); }
+  if h == s.o_lt() {
+    if sg == 1 { return codes.INST_SLT(); }
+    return codes.INST_ULT();
+  }
+  if h == s.o_le() {
+    if sg == 1 { return codes.INST_SLE(); }
+    return codes.INST_ULE();
+  }
+  if h == s.o_gt() {
+    if sg == 1 { return codes.INST_SGT(); }
+    return codes.INST_UGT();
+  }
+  if h == s.o_ge() {
+    if sg == 1 { return codes.INST_SGE(); }
+    return codes.INST_UGE();
+  }
+  return 999;
+}
+
+// 转换指令：0 表示等宽、不需要指令（调用方发 #add(x, 0)）。
+func cast_inst(fk: u64, fw: u64, fsg: u64, tk: u64, tw: u64) -> u64 {
+  if fk == codes.TY_ADDR() { return codes.INST_BITCAST(); }
+  if tk == codes.TY_ADDR() { return codes.INST_BITCAST(); }
+  if fw == tw { return 0; }
+  if fw == 0 { return 0; }
+  if tw == 0 { return 0; }
+  if tw > fw {
+    if fsg == 1 { return codes.INST_SEXT(); }
+    return codes.INST_ZEXT();
+  }
+  return codes.INST_TRUNC();
+}
+
+// 比较的结果是 bool，其它算子的结果是操作数类型。
+func result_ty(h: u64, t: addr, out: addr) -> u64 {
+  if is_cmp(h) == 1 { return ty_bool(out); }
+  return ty_at(out, t);
+}

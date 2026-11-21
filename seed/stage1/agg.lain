@@ -1,0 +1,519 @@
+// 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
+// 形状记录 112 字节头，成员记录在独立数组里（每项 64 字节）：
+//   头  = [种类@0, 名字@8, 模块@16, 已用字节@24, 对齐@32, 成员数@40, 静态@56,
+//          TypeId@64, 元素 TypeId@72, 返回 TypeId@80, 形参表@88,
+//          成员区指针@96, 成员区容量@104]
+//   成员 = [名字@0, 偏移@8, 标签号@16, 有载荷@24, k@32, w@40, sg@48, 形状@56]
+// 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、11 Fn、12 Type。
+// 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
+// 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
+let st = import("state");
+let ty = import("types");
+let ir = import("ir");
+let codes = import("ir_codes");
+
+func kind_struct() -> u64 { return 1; }
+func kind_enum() -> u64 { return 2; }
+func kind_array() -> u64 { return 3; }
+func kind_string() -> u64 { return 4; }
+func kind_ref() -> u64 { return 6; }
+func kind_mut() -> u64 { return 7; }
+func kind_slice() -> u64 { return 8; }
+func kind_mutslice() -> u64 { return 9; }
+func kind_fn() -> u64 { return 11; }
+func kind_type() -> u64 { return 12; }
+
+// 一条形状记录的字节数（成员不内联，这 112 字节只是头部）。
+func shp_rec() -> u64 { return 112; }
+
+// 形状表下标换算：地址算术只接受字面量倍数，所以这里写死 112。
+func shape_at(k: addr, i: u64) -> u64 {
+  let b: addr = st.st_shpbase(k);
+  return (b + i * 112) as u64;
+}
+
+// 成员区初始槽数。
+func mem_init() -> u64 { return 8; }
+
+func align_up(v: u64, a: u64) -> u64 {
+  if a == 0 { return v; }
+  return (v + a - 1) / a * a;
+}
+
+func shp_new(s: addr, kind: u64, name: u64, m: u64) -> u64 {
+  let p: addr = st.st_shp_new(s, shp_rec());
+  store(p, kind);
+  store(p + 8, name);
+  store(p + 16, m);
+  store(p + 24, 0);
+  store(p + 32, 1);
+  store(p + 40, 0);
+  store(p + 48, 0);
+  store(p + 56, 0);
+  store(p + 64, 0);
+  store(p + 72, 0);
+  store(p + 80, 0);
+  store(p + 88, 0);
+  let ms: addr = st.st_ralloc(s, mem_init() * 64);
+  store(p + 96, ms as u64);
+  store(p + 104, mem_init());
+  return p as u64;
+}
+
+func shp_mem(sh: u64) -> addr {
+  let p: addr = sh as addr;
+  return load(p + 96) as addr;
+}
+
+func shp_memcap(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 104);
+}
+
+func shp_kind(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p);
+}
+
+func shp_name(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 8);
+}
+
+func shp_mod(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 16);
+}
+
+func shp_set_name(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 8, v);
+  return v;
+}
+
+func shp_set_mod(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 16, v);
+  return v;
+}
+
+func shp_size(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 24);
+}
+
+func shp_align(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 32);
+}
+
+func shp_count(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 40);
+}
+
+// 数组/字符串的元素个数（与成员数不同：成员恒为 1 条元素类型描述）。
+func shp_len(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 48);
+}
+
+func shp_static(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 56);
+}
+
+func shp_set_static(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 56, v);
+  return v;
+}
+
+func shp_tid(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 64);
+}
+
+func shp_set_tid(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 64, v);
+  return v;
+}
+
+func shp_elem(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 72);
+}
+
+func shp_set_elem(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 72, v);
+  return v;
+}
+
+func shp_ret(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 80);
+}
+
+func shp_set_ret(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 80, v);
+  return v;
+}
+
+func shp_sig(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 88);
+}
+
+func shp_set_sig(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 88, v);
+  return v;
+}
+
+// 成员区在独立的持久块里，按需扩容。
+func mem_at(sh: u64, i: u64) -> addr {
+  let base: addr = shp_mem(sh);
+  return base + i * 64;
+}
+
+func mem_copy(dst: addr, src: addr, n: u64, i: u64) -> u64 {
+  if i >= n { return 1; }
+  let d: addr = dst + i * 64;
+  let p: addr = src + i * 64;
+  let v0: u64 = load(p);
+  let v1: u64 = load(p + 8);
+  let v2: u64 = load(p + 16);
+  let v3: u64 = load(p + 24);
+  let v4: u64 = load(p + 32);
+  let v5: u64 = load(p + 40);
+  let v6: u64 = load(p + 48);
+  let v7: u64 = load(p + 56);
+  store(d, v0);
+  store(d + 8, v1);
+  store(d + 16, v2);
+  store(d + 24, v3);
+  store(d + 32, v4);
+  store(d + 40, v5);
+  store(d + 48, v6);
+  store(d + 56, v7);
+  return mem_copy(dst, src, n, i + 1);
+}
+
+// 成员区满时翻倍：旧块随编译结束一起作废。
+func mem_reserve(s: addr, sh: u64, need: u64) -> u64 {
+  let cap: u64 = shp_memcap(sh);
+  if need <= cap { return 1; }
+  let ncap: u64 = cap * 2;
+  let nb: addr = st.st_ralloc(s, ncap * 64);
+  if st.st_ok(s) != 0 { return 0; }
+  let old: addr = shp_mem(sh);
+  let used: u64 = shp_count(sh);
+  let cp: u64 = mem_copy(nb, old, used, 0);
+  let p: addr = sh as addr;
+  store(p + 96, nb as u64);
+  store(p + 104, ncap);
+  return 1;
+}
+
+func mem_name(m: addr) -> u64 { return load(m); }
+func mem_off(m: addr) -> u64 { return load(m + 8); }
+func mem_tag(m: addr) -> u64 { return load(m + 16); }
+func mem_has(m: addr) -> u64 { return load(m + 24); }
+func mem_k(m: addr) -> u64 { return load(m + 32); }
+func mem_w(m: addr) -> u64 { return load(m + 40); }
+func mem_sg(m: addr) -> u64 { return load(m + 48); }
+func mem_sh(m: addr) -> u64 { return load(m + 56); }
+
+// 成员的类型描述。
+func mem_ty(k: addr, m: addr, out: addr) -> u64 {
+  let save: u64 = ty.ty_save(out, mem_k(m), mem_w(m), mem_sg(m));
+  return ty.ty_set_sh(out, mem_sh(m));
+}
+
+// 某个类型描述占多少字节、要对齐到几。
+func type_size(k: u64, w: u64, sub: u64) -> u64 {
+  if sub != 0 { return shp_size(sub); }
+  if k == 3 { return 8; }
+  let n: u64 = w / 8;
+  if n == 0 { return 1; }
+  return n;
+}
+
+func type_align(k: u64, w: u64, sub: u64) -> u64 {
+  if sub != 0 { return shp_align(sub); }
+  if k == 3 { return 8; }
+  let n: u64 = w / 8;
+  if n == 0 { return 1; }
+  return n;
+}
+
+func add_member(s: addr, sh: u64, name: u64, off: u64, tag: u64, has: u64,
+                k: u64, w: u64, sg: u64, sub: u64) -> addr {
+  let p: addr = sh as addr;
+  let i: u64 = load(p + 40);
+  let rs: u64 = mem_reserve(s, sh, i + 1);
+  if st.st_ok(s) != 0 { return 0 as addr; }
+  let m: addr = mem_at(sh, i);
+  store(m, name);
+  store(m + 8, off);
+  store(m + 16, tag);
+  store(m + 24, has);
+  store(m + 32, k);
+  store(m + 40, w);
+  store(m + 48, sg);
+  store(m + 56, sub);
+  store(p + 40, i + 1);
+  return m;
+}
+
+// struct 字段：偏移按字段对齐向上取整，头里的「已用字节」推进到字段末尾，
+// 「对齐」取最大值。
+func field_add(s: addr, sh: u64, name: u64, k: u64, w: u64, sg: u64, sub: u64) -> addr {
+  let p: addr = sh as addr;
+  let a: u64 = type_align(k, w, sub);
+  let cur: u64 = load(p + 32);
+  if a > cur { store(p + 32, a); }
+  let used: u64 = load(p + 24);
+  let off: u64 = align_up(used, a);
+  let sz: u64 = type_size(k, w, sub);
+  store(p + 24, off + sz);
+  return add_member(s, sh, name, off, 0, 1, k, w, sg, sub);
+}
+
+// enum 变体：标签号就是加入顺序，载荷起点一律对齐到 1 之后的位置。
+func variant_add(s: addr, sh: u64, name: u64, has: u64, k: u64, w: u64, sg: u64,
+                 sub: u64) -> addr {
+  let p: addr = sh as addr;
+  let tag: u64 = load(p + 40);
+  let a: u64 = type_align(k, w, sub);
+  let cur: u64 = load(p + 32);
+  if a > cur { store(p + 32, a); }
+  let off: u64 = align_up(1, a);
+  let sz: u64 = type_size(k, w, sub);
+  let end: u64 = if has == 1 { off + sz } else { 1 };
+  let cur2: u64 = load(p + 24);
+  if end > cur2 { store(p + 24, end); }
+  return add_member(s, sh, name, off, tag, has, k, w, sg, sub);
+}
+
+// 数组与字符串：一个成员，描述元素类型。
+func array_new(s: addr, kind: u64, n: u64, k: u64, w: u64, sg: u64, sub: u64) -> u64 {
+  let sh: u64 = shp_new(s, kind, 0, st.st_src(s));
+  let esz: u64 = type_size(k, w, sub);
+  let ea: u64 = type_align(k, w, sub);
+  let p: addr = sh as addr;
+  store(p + 24, esz * n);
+  store(p + 32, ea);
+  store(p + 48, n);
+  let m: addr = add_member(s, sh, 0, 0, 0, 1, k, w, sg, sub);
+  return sh;
+}
+
+// 声明结束后把总大小补齐到对齐边界。
+func finish(s: addr, sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  let a0: u64 = load(p + 32);
+  let a: u64 = if a0 == 0 { 1 } else { a0 };
+  store(p + 32, a);
+  let u2: u64 = load(p + 24);
+  store(p + 24, align_up(u2, a));
+  return 0;
+}
+
+// (名字) → 成员记录；未命中回 0。
+func mem_scan(sh: u64, name: u64, i: u64, n: u64) -> addr {
+  if i >= n { return 0 as addr; }
+  let m: addr = mem_at(sh, i);
+  let got: u64 = load(m);
+  if got == name { return m; }
+  return mem_scan(sh, name, i + 1, n);
+}
+
+func mem_find(sh: u64, name: u64) -> addr {
+  let n: u64 = shp_count(sh);
+  return mem_scan(sh, name, 0, n);
+}
+
+func mem_index(sh: u64, i: u64) -> addr { return mem_at(sh, i); }
+
+// --- 发射 ---------------------------------------------------------------
+// 按形状开一块新存储，返回 #alloca 的结果名；out 收下一个「聚合地址值」。
+func new_obj(k: addr, sh: u64, out: addr) -> u64 {
+  let size: u64 = shp_size(sh);
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, size);
+  let tv: addr = ir.tbits(k, 8);
+  let ins: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), res, tv, 0);
+  let at: addr = st.st_alloc(k, 32);
+  let ta: u64 = ty.ty_addr(at);
+  let sh_set: u64 = ty.ty_set_sh(at, sh);
+  let v: u64 = ty.val_ref(out, res, at);
+  return res;
+}
+
+// 同理，开一块 n 字节的裸存储（切片头、临时聚合都用它）。
+func new_bytes(k: addr, n: u64, al: u64, out: addr) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, n);
+  let tv: addr = ir.tbits(k, 8);
+  let ins: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), res, tv, 0);
+  let at: addr = st.st_alloc(k, 32);
+  let ta: u64 = ty.ty_addr(at);
+  let v: u64 = ty.val_ref(out, res, at);
+  return res;
+}
+
+// obj + off 的地址名。
+func off_of(k: addr, obj: u64, off: u64) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let ins: u64 = ir.emit_lea(k, res, obj, 0, 1, off);
+  return res;
+}
+
+// 把 val（已按 tp 解释）写到 obj + off。
+func store_at(k: addr, obj: u64, off: u64, val: addr, tp: addr) -> u64 {
+  let p: u64 = off_of(k, obj, off);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.op_val(k, val);
+  let b: u64 = ir.arg_ref(k, p);
+  return ir.emit_mem(k, codes.INST_STORE(), 0, tp, 0);
+}
+
+// 从 obj + off 读一个 tp，结果放进 out。
+func load_at(k: addr, obj: u64, off: u64, tp: addr, out: addr) -> u64 {
+  let p: u64 = off_of(k, obj, off);
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, p);
+  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, tp, 0);
+  return ty.val_ref(out, res, tp);
+}
+
+// 读枚举标签（一个字节）。
+func tag_read(k: addr, obj: u64) -> u64 {
+  let t8: addr = ir.tbits(k, 8);
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, obj);
+  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t8, 0);
+  return res;
+}
+
+// 写枚举标签。
+func tag_write(k: addr, obj: u64, tag: u64) -> u64 {
+  let t8: addr = ir.tbits(k, 8);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, tag);
+  let b: u64 = ir.arg_ref(k, obj);
+  return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+}
+
+// 枚举投影：标签命中就读载荷，否则给 0。out 收一个 res_ty 值。
+func variant_proj(k: addr, sh: u64, obj: u64, name: u64, res_ty: addr, out: addr) -> u64 {
+  let m: addr = mem_find(sh, name);
+  if m as u64 == 0 {
+    let rc: u64 = st.st_fail(k, 2);
+    let v: u64 = ty.val_none(out);
+    return 0;
+  }
+  let tag: u64 = mem_tag(m);
+  let mt: addr = st.st_alloc(k, 32);
+  let mtb: u64 = mem_ty(k, m, mt);
+  let t8: addr = ir.tbits(k, 8);
+  let tg: u64 = tag_read(k, obj);
+  let ceq: u64 = ir.fresh_t(k);
+  let rc0: u64 = ir.args_reset(k);
+  let a0: u64 = ir.arg_ref(k, tg);
+  let a1: u64 = ir.arg_int(k, tag);
+  let eqi: u64 = ir.emit(k, codes.INST_EQ(), ceq, t8);
+  let h1: u64 = proj_then(k, m, obj, res_ty, mt);
+  let h2: u64 = proj_zero(k, res_ty);
+  let res: u64 = ir.fresh_t(k);
+  let ifi: u64 = ir.emit_if(k, res, ceq, h1, h2);
+  return ty.val_ref(out, res, res_ty);
+}
+
+func proj_then(k: addr, m: addr, obj: u64, res_ty: addr, mt: addr) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  let rr: u64 = ir.region_result(k, res_ty);
+  let has: u64 = mem_has(m);
+  if has == 1 {
+    let p: u64 = off_of(k, obj, mem_off(m));
+    let lv: u64 = ir.fresh_t(k);
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.arg_ref(k, p);
+    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), lv, mt, 0);
+    let rc2: u64 = ir.args_reset(k);
+    let b: u64 = ir.arg_ref(k, lv);
+    let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  } else {
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.arg_int(k, 0);
+    let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  }
+  return ir.region_end(k);
+}
+
+func proj_zero(k: addr, res_ty: addr) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  let rr: u64 = ir.region_result(k, res_ty);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, 0);
+  let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  return ir.region_end(k);
+}
+
+// --- 值聚合与 sret -------------------------------------------------------
+// struct / enum / Array / Slice / MutSlice 在 LAINIR 里是多字节块，按值返回必须
+// 由调用方给出目标块（sret）。Ref / Mut / Fn 物理上只是一个 #addr，绝不走 sret。
+func sret_kind(kd: u64) -> u64 {
+  if kd == kind_struct() { return 1; }
+  if kd == kind_enum() { return 1; }
+  if kd == kind_array() { return 1; }
+  if kd == kind_slice() { return 1; }
+  if kd == kind_mutslice() { return 1; }
+  return 0;
+}
+
+func sret_shape(sh: u64) -> u64 {
+  if sh == 0 { return 0; }
+  return sret_kind(shp_kind(sh));
+}
+
+func sret_ty(t: addr) -> u64 { return sret_shape(ty.tsh(t)); }
+
+// 整块拷贝：先按 8 字节段搬，剩下的尾字节逐字节搬。
+func copy_words(k: addr, dst: u64, src: u64, n: u64) -> u64 {
+  let t8: addr = ir.tbits(k, 64);
+  let i: u64 = loop w(j: u64 = 0) while j < n {
+    let v: addr = st.st_alloc(k, 56);
+    let l: u64 = load_at(k, src, j * 8, t8, v);
+    let s: u64 = store_at(k, dst, j * 8, v, t8);
+    j = j + 1;
+  };
+  return n;
+}
+
+func copy_tail(k: addr, dst: u64, src: u64, at: u64, n: u64) -> u64 {
+  let t8: addr = ir.tbits(k, 8);
+  let i: u64 = loop b(j: u64 = 0) while j < n {
+    let v: addr = st.st_alloc(k, 56);
+    let l: u64 = load_at(k, src, at + j, t8, v);
+    let s: u64 = store_at(k, dst, at + j, v, t8);
+    j = j + 1;
+  };
+  return n;
+}
+
+func copy_block(k: addr, dst: u64, src: u64, size: u64) -> u64 {
+  let words: u64 = size / 8;
+  let h: u64 = copy_words(k, dst, src, words);
+  let rest: u64 = size - words * 8;
+  if rest == 0 { return size; }
+  return copy_tail(k, dst, src, words * 8, rest);
+}

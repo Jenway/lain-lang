@@ -12,7 +12,7 @@ let cx = import("ctx");
 let agg = import("agg");
 let modules = import("modules");
 let bi = import("builtins");
-let comptime = import("comptime");
+let cpt = import("comptime");
 let rf = import("reflect");
 let ireg = import("tyreg");
 let ct = import("ctypes");
@@ -27,7 +27,6 @@ let ctf = import("ctfor");
 let ctfn = import("ctfn");
 let gv = import("given");
 let gn = import("generics");
-let ireg = import("tyreg");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -124,7 +123,11 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
   // 二元：右操作数以左操作数的类型为提示
   let rv: addr = new_val(k);
   // 左操作数是地址时，右操作数的提示类型必须是整数（否则 a + 512 里的字面量会变成地址）。
-  let hint: addr = if ty.tk(ty.vty(out)) == 3 { t64(k) } else { ty.vty(out) };
+  // 逻辑与/或的右操作数是独立布尔条件，不能把 lhs 的 bool(#bits<1>) 当成 rhs 子表达式的提示。
+  let is_logic: u64 = if op == s.k_and() or op == s.k_or() { 1 } else { 0 };
+  let hint: addr = if is_logic == 1 { tnone(k) } else {
+    if ty.tk(ty.vty(out)) == 3 { t64(k) } else { ty.vty(out) }
+  };
   let rj: u64 = expr(k, g, i + 1, p + 1, hint, rv);
   if st.st_ok(k) != 0 { return rj; }
   let lt: addr = ty.vty(out);
@@ -156,7 +159,7 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
       }
     }
     let dzs: u64 = ir.diag(k, st.st_src(k), 34, "binsrc", 6);
-    let dzo: u64 = ir.diag(k, op, 32, lain2_sym_addr(op) as addr, lain2_sym_len(op));
+    let dzo: u64 = ir.diag(k, op, 32, modules.sym_addr(op), modules.sym_len(op));
     st.st_fail(k, e_op());
     return rj;
   }
@@ -165,7 +168,7 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
   coerce(k, out, lt, opt, lv);
   coerce(k, rv, rt, opt, rvv);
   let kind: u64 = ty.bin_inst(op, ty.tsg(opt));
-  if kind == 999 { let dz9: u64 = ir.diag(k, op, 33, lain2_sym_addr(op) as addr, lain2_sym_len(op)); st.st_fail(k, e_op()); return rj; }
+  if kind == 999 { let dz9: u64 = ir.diag(k, op, 33, modules.sym_addr(op), modules.sym_len(op)); st.st_fail(k, e_op()); return rj; }
   let rest: addr = new_ty(k);
   ty.result_ty(op, opt, rest);
   ir.args_reset(k);
@@ -183,6 +186,16 @@ func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
   return expr_tail(k, g, j, minp, want, out);
 }
 
+@root
+func lainc_core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  return expr(k, g, i, minp, want, out);
+}
+
+@root
+func lainc_core_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  return expr_tail(k, g, i, minp, want, out);
+}
+
 func prefix_neg(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   let j: u64 = i + 1;
   if j >= n_count(g) { st.st_fail(k, e_ast()); return j; }
@@ -192,7 +205,7 @@ func prefix_neg(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   let pl: u64 = ax.lit_len(h);
   let v: u64 = num_value(pa, pl);
   let t: addr = new_ty(k);
-  if ty.ty_known(want) == 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
+  if ty.ty_known(want) == 1 and ty.tw(want) > 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
   ir.args_reset(k);
   ir.arg_int(k, 0);
   ir.arg_int(k, v);
@@ -247,7 +260,7 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   }
   if is_digit_token(g, i) == 1 {
     let t: addr = new_ty(k);
-    if ty.ty_known(want) == 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
+    if ty.ty_known(want) == 1 and ty.tw(want) > 1 { ty.ty_at(t, want); } else { ty.ty_i32(t); }
     let pa: addr = ax.lit_addr(h);
     let pl: u64 = ax.lit_len(h);
     let v: u64 = num_value(pa, pl);
@@ -414,7 +427,7 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
 // eval(算得出来的东西)：把内层表达式编进独立的临时模块，交给 Lain VM 跑出标量，
 // 再当作字面量交回外层。运行期局部量在求值时不可见，引用它们会报未绑定。
 func eval_fail(k: addr, tmp: u64, saved_mod: u64, saved_sp: u64, code: u64, out: addr, back: u64) -> u64 {
-  comptime.release(tmp);
+  cpt.release(tmp);
   st.st_set_mod(k, saved_mod);
   st.st_set_sp(k, saved_sp);
   ty.val_none(out);
@@ -427,7 +440,7 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   let saved_mod: u64 = st.st_mod(k);
   let saved_sp: u64 = st.st_sp(k);
   env.env_release(k, 0);
-  let tmp: u64 = comptime.clone(k);
+  let tmp: u64 = cpt.clone(k);
   st.st_set_mod(k, tmp);
   // 临时模块拿到的是克隆那一刻的主模块，可能还没有反射表：先把表铺进去，
   // 内层表达式里的 meta_* 查询才能落到真实数据段上。
@@ -435,7 +448,7 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   if st.st_ok(k) != 0 {
     return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
   }
-  let ename: u64 = comptime.entry_name();
+  let ename: u64 = cpt.entry_name();
   ir.proc_begin(k, ename);
   ir.region_begin(k);
   let nslots: u64 = 16 + 32 + cx.count_tree(pg, 0);
@@ -458,15 +471,15 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   push_val(k, tv);
   ir.emit_jump(k, codes.INST_RETURN(), 0);
   ir.region_end(k);
-  let vrc: u64 = comptime.verify(tmp);
+  let vrc: u64 = cpt.verify(tmp);
   if vrc != 0 {
     let vm: addr = "eval-verify";
     let vd: u64 = ir.diag(k, vrc, 1, vm, 11);
     return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
   }
-  let ob: addr = comptime.out_buf();
+  let ob: addr = cpt.out_buf();
   ir.args_reset(k);
-  let arc: u64 = comptime.apply_scalar(tmp, ename, ob);
+  let arc: u64 = cpt.apply_scalar(tmp, ename, ob);
   let rc: u64 = if arc != 0 { arc } else { load(ob) };
   if rc != 0 {
     let am: addr = "eval-apply";
@@ -474,7 +487,7 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
   }
   let bits: u64 = load(ob + 8);
-  comptime.release(tmp);
+  cpt.release(tmp);
   st.st_set_mod(k, saved_mod);
   st.st_set_sp(k, saved_sp);
   ty.val_lit(out, bits, vt);
@@ -512,6 +525,8 @@ func elem_of_slice(k: addr, sh: u64, et: addr) -> u64 {
 
 func sub_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
   let bg: u64 = n_at(g, i);
+  let uw: u64 = rv.unwrap_ref(k, out);
+  let ignored_uw: u64 = uw;
   let bt: addr = ty.vty(out);
   let sh: u64 = ty.tsh(bt);
   if sh == 0 { st.st_fail(k, e_type()); return i + 1; }

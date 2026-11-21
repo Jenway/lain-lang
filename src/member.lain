@@ -12,8 +12,9 @@ let modules = import("modules");
 let bi = import("builtins");
 let cl = import("calls");
 let rf = import("refval");
+let gn = import("generics");
 
-extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = lainc_core_expr;
 
 // --- ast / ctx 层转发（正文的裸调用经这里转一手） --------------------------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -87,7 +88,9 @@ func variant_new(k: addr, sh: u64, vname: u64, argp: u64, out: addr) -> u64 {
     let s1: u64 = agg.mem_ty(k, m, mt);
     let pv: addr = new_val(k);
     let j: u64 = expr(k, argp, 0, 0, mt, pv);
-    let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), pv, mt);
+    let cv: addr = new_val(k);
+    cx.coerce(k, pv, ty.vty(pv), mt, cv);
+    let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), cv, mt);
   }
   ty.val_at(out, objv);
   return 0;
@@ -142,7 +145,9 @@ func agg_fields(k: addr, sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
   let s1: u64 = agg.mem_ty(k, m, mt);
   let pv: addr = new_val(k);
   let j: u64 = expr(k, fg, a, 0, mt, pv);
-  let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), pv, mt);
+  let cv: addr = new_val(k);
+  cx.coerce(k, pv, ty.vty(pv), mt, cv);
+  let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), cv, mt);
   return agg_fields(k, sh, fg, j, obj);
 }
 
@@ -178,6 +183,28 @@ func member_ref(k: addr, g: u64, i: u64, m: u64, name: u64, want: addr, out: add
       if delim_of(g, i + 3) == dl_paren() {
         let j: u64 = cl.call_sig(k, q, modules.sym_sig(e), n_at(g, i + 3), want, out);
         return i + 4;
+      }
+    }
+    st.st_fail(k, e_ast());
+    return i + 3;
+  }
+  if kd == modules.sym_kind_struct() {
+    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
+      if delim_of(g, i + 3) == dl_brace() {
+        let made: u64 = agg_construct_sh(k, modules.sym_shape(e), n_at(g, i + 3), out);
+        let gone: u64 = made;
+        return i + 4;
+      }
+    }
+    st.st_fail(k, e_ast());
+    return i + 3;
+  }
+  if kd == modules.sym_kind_generic() {
+    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
+      if delim_of(g, i + 3) == dl_paren() {
+        let nb: addr = ax.box(k);
+        gn.call_generic(k, e, g, i + 2, want, out, nb);
+        return ax.box_get(nb);
       }
     }
     st.st_fail(k, e_ast());

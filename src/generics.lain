@@ -1,7 +1,7 @@
 // generics.lain —— Phase 2B ?{} 泛型模板登记、4 步单态化调度与待编队列。
 // 单向依赖 state/types/ast/sym/agg/ir/modules/tyreg/tbuild/ctfor/ctfn/ctx/calls/given/genunify。
 extern lain2_source_root(idx: u64) -> u64 = lain2_source_root;
-extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = lainc_core_expr;
 let st = import("state");
 let ty = import("types");
 let ax = import("ast");
@@ -220,6 +220,12 @@ func alloc_mangled(k: addr, e: addr, src: u64, nct: u64, ctp_tbl: addr, vals: ad
   return qn;
 }
 
+func ret_end(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  if ctf.has_delim(g, i, ax.dl_brace()) == 1 { return i; }
+  return ret_end(g, i + 1);
+}
+
 // --- 对外调用入口 ---------------------------------------------------------
 func call_generic(k: addr, e: addr, g: u64, i: u64, want: addr, out: addr, next_box: addr) -> u64 {
   let hdr: addr = modules.sym_sig(e);
@@ -246,6 +252,13 @@ func call_generic(k: addr, e: addr, g: u64, i: u64, want: addr, out: addr, next_
   let ab: addr = st.st_alloc(k, absz);
   let np: u64 = eval_rt_args(k, pg, 0, ax.n_at(g, i + 1), 0, 0, ab, ctp_tbl, nct, vals, bound);
   if st.st_ok(k) != 0 { return 0; }
+  if ret_i != 0 and ty.ty_known(want) == 1 {
+    let re: u64 = ret_end(root, ret_i);
+    if gu.ast_has_unbound(root, ret_i, re, ctp_tbl, nct, bound) == 1 {
+      gu.unify_type(k, root, ret_i, re, ireg.tid_of(k, want), ctp_tbl, nct, vals, bound);
+      if st.st_ok(k) != 0 { return 0; }
+    }
+  }
   if resolve_givens(k, qg, ctp_tbl, nct, vals, bound, 0) == 0 { return 0; }
   let hit: addr = gu.cache_find(k, e as u64, nct, vals);
   let cm: u64 = ctf.mark(k);

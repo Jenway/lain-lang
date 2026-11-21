@@ -1,0 +1,244 @@
+// IR：宿主 lain2_ir_* 原语的薄封装，加上临时名/标签名/槽名的生成。
+// 这里只管「把一条指令塞进当前区域」，终结状态与作用域由 eval.lain 负责。
+let st = import("state");
+let ty = import("types");
+let codes = import("ir_codes");
+
+extern lain2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
+extern lain2_ir_mod_new(name: u64) -> u64 = lain2_ir_mod_new;
+extern lain2_ir_proc_begin(mod: u64, name: u64) -> u64 = lain2_ir_proc_begin;
+extern lain2_ir_proc_param(mod: u64, name: u64, k: u64, w: u64) -> u64 = lain2_ir_proc_param;
+extern lain2_ir_proc_result(mod: u64, k: u64, w: u64) -> u64 = lain2_ir_proc_result;
+extern lain2_ir_proc_extern(mod: u64, name: u64, link: u64) -> u64 = lain2_ir_proc_extern;
+extern lain2_ir_proc_end(mod: u64) -> u64 = lain2_ir_proc_end;
+extern lain2_ir_data_add(mod: u64, name: u64, bytes: addr, size: u64, is_ro: u64) -> u64 = lain2_ir_data_add;
+extern lain2_ir_data_find(mod: u64, name: u64) -> u64 = lain2_ir_data_find;
+extern lain2_ir_inst_symbol(mod: u64, kind: u64, res: u64, symbol: u64) -> u64 = lain2_ir_inst_symbol;
+extern lain2_ir_region_begin(mod: u64) -> u64 = lain2_ir_region_begin;
+extern lain2_ir_region_param(mod: u64, name: u64, k: u64, w: u64, ik: u64, ib: u64) -> u64 = lain2_ir_region_param;
+extern lain2_ir_region_result(mod: u64, k: u64, w: u64) -> u64 = lain2_ir_region_result;
+extern lain2_ir_region_end(mod: u64) -> u64 = lain2_ir_region_end;
+extern lain2_ir_args_reset(mod: u64) -> u64 = lain2_ir_args_reset;
+extern lain2_ir_arg_ref(mod: u64, name: u64) -> u64 = lain2_ir_arg_ref;
+extern lain2_ir_arg_int(mod: u64, bits: u64) -> u64 = lain2_ir_arg_int;
+extern lain2_ir_inst(mod: u64, kind: u64, res: u64, k: u64, w: u64) -> u64 = lain2_ir_inst;
+extern lain2_ir_inst_if(mod: u64, res: u64, cond: u64, then_r: u64, else_r: u64) -> u64 = lain2_ir_inst_if;
+extern lain2_ir_inst_loop(mod: u64, res: u64, label: u64, body: u64) -> u64 = lain2_ir_inst_loop;
+extern lain2_ir_inst_jump(mod: u64, kind: u64, label: u64) -> u64 = lain2_ir_inst_jump;
+extern lain2_ir_inst_call(mod: u64, res: u64, callee: u64, tail: u64) -> u64 = lain2_ir_inst_call;
+extern lain2_ir_inst_call_indirect(mod: u64, res: u64, code: u64, width: u64, plo: u64, phi: u64) -> u64 = lain2_ir_inst_call_indirect;
+extern lain2_ir_inst_mem(mod: u64, kind: u64, res: u64, k: u64, w: u64, order: u64, vol: u64, align: u64) -> u64 = lain2_ir_inst_mem;
+extern lain2_ir_mod_verify(mod: u64) -> u64 = lain2_ir_mod_verify;
+extern lain2_ir_mod_emit_output(mod: u64) -> u64 = lain2_ir_mod_emit_output;
+extern lain2_diag_emit(span: u64, level: u64, p: addr, n: u64) -> u64 = lain2_diag_emit;
+
+// --- 名字 ---------------------------------------------------------------
+// 临时量叫 `_t<n>`、标签叫 `_l<n>`、局部槽叫 `_v<n>`：下划线开头，不与源码
+// 标识符的习惯写法撞车。
+func digits(v: u64) -> u64 {
+  let c: u64 = loop c(n: u64 = v, i: u64 = 1) while n >= 10 {
+    n = n / 10;
+    i = i + 1;
+    if n < 10 { break c(i); }
+  };
+  return c;
+}
+
+func name_with(s: addr, a: u8, b: u8, v: u64) -> u64 {
+  let p: addr = st.st_scratch(s);
+  store(p, a);
+  store(p + 1, b);
+  let n: u64 = digits(v);
+  let end: u64 = 2 + n;
+  let w: u64 = loop w(i: u64 = 0, num: u64 = v, pos: u64 = end) while i < n {
+    let d: u64 = num % 10;
+    num = num / 10;
+    i = i + 1;
+    pos = pos - 1;
+    store(p + pos, (d + 48) as u8);
+  };
+  return lain2_sym_intern(p, end);
+}
+
+func fresh_t(s: addr) -> u64 {
+  let n: u64 = st.st_next_tmp(s);
+  return name_with(s, 95, 116, n);
+}
+
+func fresh_l(s: addr) -> u64 {
+  let n: u64 = st.st_next_label(s);
+  return name_with(s, 95, 108, n);
+}
+
+// 局部变量槽的名字由序号决定，不再分配：过程入口按序号发 #alloca。
+func slot_name(s: addr, j: u64) -> u64 {
+  return name_with(s, 95, 118, j);
+}
+
+// --- 模块与过程 -----------------------------------------------------------
+func mod_new(s: addr, name: u64) -> u64 {
+  let m: u64 = lain2_ir_mod_new(name);
+  st.st_set_mod(s, m);
+  return m;
+}
+
+// 类型块用 L1TypeKind 编号，9 表示「没有类型」。宿主那边 0 表示无类型、1..4 是
+// L1TypeKind + 1，转换只在这一处发生。
+func kcode(tp: addr) -> u64 {
+  let k: u64 = ty.tk(tp);
+  if k == 9 { return 0; }
+  return k + 1;
+}
+
+func proc_begin(s: addr, name: u64) -> u64 {
+  return lain2_ir_proc_begin(st.st_mod(s), name);
+}
+
+func proc_param(s: addr, name: u64, tp: addr) -> u64 {
+  return lain2_ir_proc_param(st.st_mod(s), name, kcode(tp), ty.tw(tp));
+}
+
+func proc_result(s: addr, tp: addr) -> u64 {
+  return lain2_ir_proc_result(st.st_mod(s), kcode(tp), ty.tw(tp));
+}
+
+func proc_extern(s: addr, name: u64, link: u64) -> u64 {
+  return lain2_ir_proc_extern(st.st_mod(s), name, link);
+}
+
+// 静态数据可以在任何时刻登记；is_writable 为假即落在只读段。
+func data_add(s: addr, name: u64, bytes: addr, size: u64, is_writable: u64) -> u64 {
+  return lain2_ir_data_add(st.st_mod(s), name, bytes, size, is_writable);
+}
+
+// 数据是否已在本模块里（1 起的序号，0 表示没有）。克隆出来的模块带着主模块的
+// 数据段，全局数据靠它判重。
+func data_find(s: addr, name: u64) -> u64 {
+  return lain2_ir_data_find(st.st_mod(s), name);
+}
+
+func emit_symbol(s: addr, kind: u64, res: u64, symbol: u64) -> u64 {
+  return lain2_ir_inst_symbol(st.st_mod(s), kind, res, symbol);
+}
+
+func proc_end(s: addr) -> u64 {
+  return lain2_ir_proc_end(st.st_mod(s));
+}
+
+// 任意字节的符号（名字来自 guest 内存）。
+func sym_lit(p: addr, n: u64) -> u64 {
+  return lain2_sym_intern(p, n);
+}
+
+// 把一个值变成操作数：字面量走立即数，其余按名字引用。
+// 名字为空说明上游少填了一个值：就地报错，绝不把 0 当句柄发给宿主。
+func op_val(s: addr, v: addr) -> u64 {
+  if ty.vlit(v) == 1 { return arg_int(s, ty.vbits(v)); }
+  let nm: u64 = ty.vn(v);
+  if nm == 0 {
+    let m: addr = "empty-operand";
+    let d: u64 = diag(s, v as u64, 1, m, 13);
+    let d2: u64 = diag(s, ty.vbits(v), 2, m, 13);
+    return st.st_fail(s, 3);
+  }
+  return arg_ref(s, nm);
+}
+
+// 类型块的临时载体：LEA 与字节读写都要一个 addr / bits 类型实参。
+// 每个都从 arena 现取 32 字节，随源结束一起作废。
+func taddr(s: addr) -> addr {
+  let t: addr = st.st_alloc(s, 32);
+  let rc: u64 = ty.ty_addr(t);
+  return t;
+}
+
+func tbits(s: addr, w: u64) -> addr {
+  let t: addr = st.st_alloc(s, 32);
+  let rc: u64 = ty.ty_bits(t, w, 0);
+  return t;
+}
+
+// --- 区域 ---------------------------------------------------------------
+func region_begin(s: addr) -> u64 {
+  return lain2_ir_region_begin(st.st_mod(s));
+}
+
+// ik 0 = 立即数，2 = 按名字引用已有值。
+func region_param(s: addr, name: u64, tp: addr, ik: u64, ib: u64) -> u64 {
+  return lain2_ir_region_param(st.st_mod(s), name, kcode(tp), ty.tw(tp), ik, ib);
+}
+
+func region_result(s: addr, tp: addr) -> u64 {
+  return lain2_ir_region_result(st.st_mod(s), kcode(tp), ty.tw(tp));
+}
+
+func region_end(s: addr) -> u64 {
+  return lain2_ir_region_end(st.st_mod(s));
+}
+
+// --- 指令 ---------------------------------------------------------------
+func args_reset(s: addr) -> u64 {
+  return lain2_ir_args_reset(st.st_mod(s));
+}
+
+func arg_ref(s: addr, name: u64) -> u64 {
+  return lain2_ir_arg_ref(st.st_mod(s), name);
+}
+
+func arg_int(s: addr, bits: u64) -> u64 {
+  return lain2_ir_arg_int(st.st_mod(s), bits);
+}
+
+func emit(s: addr, kind: u64, res: u64, tp: addr) -> u64 {
+  return lain2_ir_inst(st.st_mod(s), kind, res, kcode(tp), ty.tw(tp));
+}
+
+func emit_if(s: addr, res: u64, cond: u64, then_r: u64, else_r: u64) -> u64 {
+  return lain2_ir_inst_if(st.st_mod(s), res, cond, then_r, else_r);
+}
+
+func emit_loop(s: addr, res: u64, label: u64, body: u64) -> u64 {
+  return lain2_ir_inst_loop(st.st_mod(s), res, label, body);
+}
+
+func emit_jump(s: addr, kind: u64, label: u64) -> u64 {
+  return lain2_ir_inst_jump(st.st_mod(s), kind, label);
+}
+
+func emit_call(s: addr, res: u64, callee: u64, tail: u64) -> u64 {
+  return lain2_ir_inst_call(st.st_mod(s), res, callee, tail);
+}
+
+// 间接调用：被调值由调用方先压进操作数列表，形参类型按两个打包字传入。
+func emit_call_indirect(s: addr, res: u64, ret: addr, plo: u64, phi: u64) -> u64 {
+  return lain2_ir_inst_call_indirect(st.st_mod(s), res, kcode(ret), ty.tw(ret), plo,
+                                     phi);
+}
+
+// kind 只允许 LOAD / STORE / ALLOCA。order 固定 ORDER_RELAXED，对齐按参数。
+func emit_mem(s: addr, kind: u64, res: u64, tp: addr, align: u64) -> u64 {
+  return lain2_ir_inst_mem(st.st_mod(s), kind, res, kcode(tp), ty.tw(tp), 0, 0, align);
+}
+
+// 指针算术一律走 #lea[#addr](base, idx, scale, offset)。
+func emit_lea(s: addr, res: u64, base: u64, idx: u64, scale: u64, off: u64) -> u64 {
+  let rc: u64 = args_reset(s);
+  let a: u64 = arg_ref(s, base);
+  let b: u64 = arg_int(s, idx);
+  let c: u64 = arg_int(s, scale);
+  let d: u64 = arg_int(s, off);
+  return emit(s, codes.INST_LEA(), res, taddr(s));
+}
+
+// --- 收尾 ---------------------------------------------------------------
+func verify(s: addr) -> u64 {
+  return lain2_ir_mod_verify(st.st_mod(s));
+}
+
+func emit_output(s: addr) -> u64 {
+  return lain2_ir_mod_emit_output(st.st_mod(s));
+}
+
+func diag(s: addr, span: u64, level: u64, p: addr, n: u64) -> u64 {
+  return lain2_diag_emit(span, level, p, n);
+}

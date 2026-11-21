@@ -62,10 +62,13 @@ func ct_call(k: addr, name: u64, ag: u64, out: addr) -> u64 {
     if collect(k, ag, 0, 0, nargs, ab) == 0 { return 2; }
     return ctp.apply_prim(k, name, ag, ab, nargs, out);
   }
-  let qr: u64 = ctf.prim(k, name, ag, out);
-  if qr != 0 { return qr; }
   let e: addr = modules.find_here(k, name);
-  if e as u64 == 0 { ctf.fail_msg(k, "unknown comptime fn", 19, ax.e_unbound()); return 2; }
+  if e as u64 == 0 {
+    let qr: u64 = ctf.prim(k, name, ag, out);
+    if qr != 0 { return qr; }
+    ctf.fail_msg(k, "unknown comptime fn", 19, ax.e_unbound());
+    return 2;
+  }
   if modules.sym_kind(e) != modules.sym_kind_func() { ctf.fail_msg(k, "not callable", 12, ax.e_type()); return 2; }
   call_user(k, e, ag, out);
   return 1;
@@ -101,6 +104,23 @@ func ct_prefix(k: addr, g: u64, i: u64, out: addr) -> u64 {
     return i + 1;
   }
   if name == 0 { ctf.fail_msg(k, "bad comptime expr", 17, ax.e_op()); return i + 1; }
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
+    let m: u64 = modules.mod_lookup(k, name);
+    if m != 0 {
+      let mem: addr = modules.sym_find(k, m - 1, ax.n_sym(g, i + 2));
+      if mem as u64 != 0 {
+        let mk: u64 = modules.sym_kind(mem);
+        if mk == modules.sym_kind_func() and ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
+          call_user(k, mem, ax.n_at(g, i + 3), out);
+          return i + 4;
+        }
+        if mk == modules.sym_kind_struct() or mk == modules.sym_kind_enum() {
+          ctf.v_set(out, 1, ctf.tid_of_shape(k, modules.sym_shape(mem)), 0);
+          return i + 3;
+        }
+      }
+    }
+  }
   if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
     ct_call(k, name, ax.n_at(g, i + 1), out);
     return i + 2;
@@ -204,11 +224,14 @@ func call_user(k: addr, e: addr, ag: u64, out: addr) -> u64 {
     return 1;
   }
   let prev: u64 = st.st_ctdone(k);
+  let prev_src: u64 = st.st_src(k);
   let mark: u64 = ctf.mark(k);
   st.st_set_ctdone(k, 0);
+  st.st_set_src(k, modules.sym_src(e));
   bind_arr(k, nms, ab, 0, nargs);
   if st.st_ok(k) == 0 { run(k, ax.n_at(root, body)); }
   ctf.release(k, mark);
+  st.st_set_src(k, prev_src);
   st.st_set_ctdone(k, prev);
   if st.st_ok(k) != 0 { return 0; }
   let ret: addr = st.st_ctret(k);
@@ -294,13 +317,28 @@ func run_at(k: addr, g: u64, i: u64) -> u64 {
 
 // --- 对外入口：顶层 let 绑定与类型位置调用 -------------------------------
 func eval_factory_call(k: addr, g: u64, i: u64, out: addr) -> u64 {
-  if ax.is_name(g, i) == 0 or ctf.has_delim(g, i + 1, ax.dl_paren()) == 0 { return 0; }
-  let fn: addr = modules.find_here(k, ax.n_sym(g, i));
-  if fn as u64 == 0 { return 0; }
-  if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
-  if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
-  call_user(k, fn, ax.n_at(g, i + 1), out);
-  return i + 2;
+  if ax.is_name(g, i) == 0 { return 0; }
+  if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    let fn: addr = modules.find_here(k, ax.n_sym(g, i));
+    if fn as u64 == 0 { return 0; }
+    if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
+    if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
+    call_user(k, fn, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 3 < ax.n_count(g) and ax.is_name(g, i + 2) == 1 {
+    if ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
+      let m: u64 = modules.mod_lookup(k, ax.n_sym(g, i));
+      if m == 0 { return 0; }
+      let fn2: addr = modules.sym_find(k, m - 1, ax.n_sym(g, i + 2));
+      if fn2 as u64 == 0 { return 0; }
+      if modules.sym_kind(fn2) != modules.sym_kind_func() { return 0; }
+      if tb.sig_types(modules.sym_sig(fn2)) == 0 { return 0; }
+      call_user(k, fn2, ax.n_at(g, i + 3), out);
+      return i + 4;
+    }
+  }
+  return 0;
 }
 
 func type_binding(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {

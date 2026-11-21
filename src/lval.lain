@@ -13,7 +13,7 @@ let modules = import("modules");
 let ct = import("ctypes");
 let ireg = import("tyreg");
 let ctf = import("ctfor");
-extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = lainc_core_expr;
 
 // 记录 128 字节：[存储名字@0, 类型@56, 只读标记@88]。
 // 名字是 IR 里的值名（局部槽、数据符号或 #lea 的结果），不是宿主地址。
@@ -184,9 +184,29 @@ func parse_base(k: addr, g: u64, i: u64, r: addr) -> u64 {
   return i + 1;
 }
 
+func auto_deref(k: addr, r: addr) -> u64 {
+  let t: addr = rec_ty(r);
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd != agg.kind_ref() and kd != agg.kind_mut() { return 0; }
+  let w: addr = st.st_alloc(k, 56);
+  let l: u64 = agg.load_at(k, rec_cell(r), 0, ir.taddr(k), w);
+  let sc: u64 = set_cell(r, ty.vn(w));
+  if kd == agg.kind_ref() { rec_set_lock(r, 1); }
+  let eid: u64 = ct.elem_tid(k, sh);
+  let pr: u64 = ireg.project(k, eid, t);
+  let ig0: u64 = l;
+  let ig1: u64 = sc;
+  let ig2: u64 = pr;
+  return auto_deref(k, r) + 1;
+}
+
 func parse_walk(k: addr, g: u64, i: u64, eqj: u64, r: addr) -> u64 {
   let m: addr = "bad-lvalue";
   if i >= eqj { return i; }
+  let ad: u64 = auto_deref(k, r);
+  let ig_ad: u64 = ad;
   if ax.is_group(g, i) == 1 {
     if ax.delim_of(g, i) != ax.dl_bracket() { return lval_bad(k, m, 10, i); }
     let sh: u64 = ty.tsh(rec_ty(r));

@@ -1,0 +1,349 @@
+// ctfor.lain —— 编译期反射直接查询、comptime for 循环展开与 [:expr] 成员插值。
+// 值单元 24 字节：[种类@0, 值一@8, 值二@16]：
+//   0 整数/SymId、1 Type(TypeId)、2 FieldInfo(类型, 下标)、3 字节切片、4 字段列表(struct TypeId)。
+// 绑定栈住在 st_ctbase 里，每条 32 字节：[名字符号@0, 种类@8, 值一@16, 值二@24]。
+// 本模块只依赖 state/types/ast/sym/agg/ir/modules/tyreg，单向无环。
+let st = import("state");
+let ty = import("types");
+let ax = import("ast");
+let s = import("sym");
+let agg = import("agg");
+let ir = import("ir");
+let modules = import("modules");
+let ireg = import("tyreg");
+
+// --- 值单元、报错与安全 AST 探测 --------------------------------------------
+func fail_msg(k: addr, m: addr, n: u64, code: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, n);
+  return st.st_fail(k, code);
+}
+func v_set(v: addr, kind: u64, a: u64, b: u64) -> addr {
+  store(v, kind); store(v + 8, a); store(v + 16, b);
+  return v;
+}
+func v_new(k: addr, kind: u64, a: u64, b: u64) -> addr { return v_set(st.st_alloc(k, 24), kind, a, b); }
+func v_kind(v: addr) -> u64 { return load(v); }
+func v_a(v: addr) -> u64 { return load(v + 8); }
+func v_b(v: addr) -> u64 { return load(v + 16); }
+func has_delim(g: u64, i: u64, dl: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_group(g, i) == 0 { return 0; }
+  return if ax.delim_of(g, i) == dl { 1 } else { 0 };
+}
+func has_tok(g: u64, i: u64, sym: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_group(g, i) == 1 { return 0; }
+  return if ax.n_sym(g, i) == sym { 1 } else { 0 };
+}
+
+// --- 编译期绑定栈 -----------------------------------------------------------
+func mark(k: addr) -> u64 { return st.st_ctused(k); }
+func release(k: addr, m: u64) -> u64 { return st.st_set_ctused(k, m); }
+func reset(k: addr) -> u64 { return st.st_set_ctused(k, 0); }
+func look_scan(k: addr, name: u64, used: u64) -> addr {
+  if used == 0 { return 0 as addr; }
+  let back: u64 = used - 32;
+  let b: addr = st.st_ctbase(k) + back;
+  let got: u64 = load(b);
+  if got == name {
+    let k0: u64 = load(b + 8); let a0: u64 = load(b + 16); let b0: u64 = load(b + 24);
+    return v_new(k, k0, a0, b0);
+  }
+  return look_scan(k, name, back);
+}
+
+func lookup(k: addr, name: u64) -> addr { return look_scan(k, name, st.st_ctused(k)); }
+
+func bind(k: addr, name: u64, kind: u64, a: u64, b: u64) -> u64 {
+  let used: u64 = st.st_ctused(k);
+  if used + 32 > st.st_ctcap(k) { return st.st_fail(k, 3); }
+  let p: addr = st.st_ctbase(k) + used;
+  store(p, name); store(p + 8, kind); store(p + 16, a); store(p + 24, b);
+  return st.st_set_ctused(k, used + 32);
+}
+
+func set_scan(k: addr, name: u64, kind: u64, a: u64, b: u64, used: u64) -> u64 {
+  if used == 0 { return st.st_fail(k, 2); }
+  let back: u64 = used - 32;
+  let p: addr = st.st_ctbase(k) + back;
+  if load(p) == name { store(p + 8, kind); store(p + 16, a); store(p + 24, b); return 1; }
+  return set_scan(k, name, kind, a, b, back);
+}
+func set_binding(k: addr, name: u64, v: addr) -> u64 {
+  return set_scan(k, name, v_kind(v), v_a(v), v_b(v), st.st_ctused(k));
+}
+
+// --- 直接读 agg / tyreg 的形状查询（不依赖冻结反射快照，无 8 字段上限） --------
+func tid_of_shape(k: addr, sh: u64) -> u64 {
+  let got: u64 = agg.shp_tid(sh);
+  if got != 0 { return got; }
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(agg.shp_kind(sh)), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return id;
+}
+
+func tid_of_name(k: addr, name: u64) -> u64 {
+  let t: addr = st.st_alloc(k, 32);
+  if ty.ty_of_sym(name, t) == 1 { return ireg.tid_of(k, t); }
+  let e: addr = modules.find_here(k, name);
+  if e as u64 == 0 { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
+    return tid_of_shape(k, modules.sym_shape(e));
+  }
+  return 0;
+}
+
+func f_count(k: addr, tid: u64) -> u64 {
+  let sh: u64 = ireg.ty_shape(k, tid);
+  return if sh == 0 { 0 } else { agg.shp_count(sh) };
+}
+
+func f_name(k: addr, tid: u64, i: u64) -> u64 { return agg.mem_name(agg.mem_at(ireg.ty_shape(k, tid), i)); }
+func f_off(k: addr, tid: u64, i: u64) -> u64 { return agg.mem_off(agg.mem_at(ireg.ty_shape(k, tid), i)); }
+
+func f_tid(k: addr, tid: u64, i: u64) -> u64 {
+  let t: addr = st.st_alloc(k, 32);
+  agg.mem_ty(k, agg.mem_at(ireg.ty_shape(k, tid), i), t);
+  return ireg.tid_of(k, t);
+}
+
+func as_tid(k: addr, v: addr) -> u64 {
+  let kd: u64 = v_kind(v);
+  if kd == 1 { return v_a(v); }
+  if kd == 0 {
+    let id: u64 = v_a(v);
+    if id >= 1 and id <= ireg.reg_count(k) { return id; }
+    fail_msg(k, "invalid type id", 15, ax.e_type());
+    return 0;
+  }
+  fail_msg(k, "not a type or type id", 21, ax.e_type());
+  return 0;
+}
+
+// --- 编译期查询与 FieldInfo 投影 -------------------------------------------
+func eval_single(k: addr, ag: u64, out: addr) -> u64 {
+  let n: u64 = ax.n_count(ag);
+  if n == 0 { fail_msg(k, "missing query arg", 17, ax.e_ast()); return 0; }
+  let j: u64 = eval_expr(k, ag, 0, 0, out);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != n { fail_msg(k, "extra query args", 16, ax.e_ast()); return 0; }
+  return 1;
+}
+
+func prim(k: addr, name: u64, ag: u64, out: addr) -> u64 {
+  let is_sz: u64 = if name == s.intern("size_of", 7) { 1 } else { 0 };
+  let is_al: u64 = if name == s.intern("align_of", 8) { 1 } else { 0 };
+  let is_fc: u64 = if name == s.intern("field_count", 11) { 1 } else { 0 };
+  let is_fs: u64 = if name == s.intern("fields_of", 9) { 1 } else { 0 };
+  if is_sz == 0 and is_al == 0 and is_fc == 0 and is_fs == 0 { return 0; }
+  let arg: addr = st.st_alloc(k, 24);
+  if eval_single(k, ag, arg) == 0 { return 2; }
+  let tid: u64 = as_tid(k, arg);
+  if st.st_ok(k) != 0 { return 2; }
+  if is_sz == 1 { v_set(out, 0, ireg.size_of(k, tid), 0); return 1; }
+  if is_al == 1 { v_set(out, 0, ireg.align_of(k, tid), 0); return 1; }
+  if is_fc == 1 { v_set(out, 0, f_count(k, tid), 0); return 1; }
+  let sh: u64 = ireg.ty_shape(k, tid);
+  if sh == 0 { fail_msg(k, "fields_of needs struct", 22, ax.e_type()); return 2; }
+  if agg.shp_kind(sh) != agg.kind_struct() { fail_msg(k, "fields_of needs struct", 22, ax.e_type()); return 2; }
+  v_set(out, 4, tid, 0);
+  return 1;
+}
+
+func query_fold(k: addr, out: addr, g: u64, i: u64) -> u64 {
+  let nm: u64 = ax.node_sym(ax.n_at(g, i));
+  let ok: u64 = if nm == s.intern("size_of", 7) or nm == s.intern("align_of", 8) or nm == s.intern("field_count", 11) { 1 } else { 0 };
+  if ok == 0 { return 0; }
+  if modules.find_here(k, nm) as u64 != 0 { return 0; }
+  let rc: u64 = prim(k, nm, ax.n_at(g, i + 1), out);
+  if rc != 1 and st.st_ok(k) == 0 { fail_msg(k, "bad compile-time query", 22, ax.e_type()); }
+  return 1;
+}
+
+func proj(k: addr, v: addr, mn: u64) -> addr {
+  if v_kind(v) != 2 { return 0 as addr; }
+  let tid: u64 = v_a(v);
+  let idx: u64 = v_b(v);
+  if mn == s.t_name() { return v_new(k, 0, f_name(k, tid, idx), 0); }
+  if mn == s.t_fty() or mn == s.t_fld_ty() { return v_new(k, 1, f_tid(k, tid, idx), 0); }
+  if mn == s.t_off() { return v_new(k, 0, f_off(k, tid, idx), 0); }
+  return 0 as addr;
+}
+
+func proj_at(k: addr, g: u64, i: u64) -> addr {
+  let bv: addr = lookup(k, ax.node_sym(ax.n_at(g, i)));
+  if bv as u64 == 0 { return 0 as addr; }
+  if v_kind(bv) != 2 { return 0 as addr; }
+  return proj(k, bv, ax.node_sym(ax.n_at(g, i + 2)));
+}
+
+// --- 轻量编译期常量表达式求值 -----------------------------------------------
+func op_prio(g: u64, i: u64) -> u64 {
+  if ax.is_group(g, i) == 1 { return 0; }
+  let op: u64 = ax.n_sym(g, i);
+  if op == s.o_plus() or op == s.o_minus() { return 1; }
+  if op == s.o_star() or op == s.o_slash() or op == s.o_percent() { return 2; }
+  return 0;
+}
+
+func bin_int(k: addr, op: u64, a: u64, b: u64) -> u64 {
+  if op == s.o_plus() { return a + b; }
+  if op == s.o_minus() { return a - b; }
+  if op == s.o_star() { return a * b; }
+  if b == 0 { fail_msg(k, "divide by zero", 14, ax.e_op()); return 0; }
+  return if op == s.o_slash() { a / b } else { a % b };
+}
+
+func ev_prefix(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { fail_msg(k, "empty comptime expr", 19, ax.e_ast()); return i; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if ax.delim(h) == ax.dl_paren() {
+      let j: u64 = eval_expr(k, h, 0, 0, out);
+      if st.st_ok(k) == 0 and j != ax.n_count(h) { fail_msg(k, "bad comptime expr", 17, ax.e_ast()); }
+      return i + 1;
+    }
+    fail_msg(k, "bad comptime expr", 17, ax.e_ast());
+    return i + 1;
+  }
+  if ax.is_digit_token(g, i) == 1 {
+    v_set(out, 0, ax.num_value(ax.lit_addr(h), ax.lit_len(h)), 0);
+    return i + 1;
+  }
+  if ax.tok_first(g, i) == 34 {
+    let pa: addr = ax.lit_addr(h);
+    v_set(out, 3, (pa as u64) + 1, ax.lit_len(h) - 2);
+    return i + 1;
+  }
+  let name: u64 = ax.node_sym(h);
+  if name == 0 { fail_msg(k, "not a comptime constant", 23, ax.e_op()); return i + 1; }
+  if has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    let pr: u64 = prim(k, name, ax.n_at(g, i + 1), out);
+    if pr != 0 { return i + 2; }
+    fail_msg(k, "not a comptime query", 20, ax.e_op());
+    return i + 2;
+  }
+  let bv: addr = lookup(k, name);
+  if bv as u64 != 0 {
+    if has_tok(g, i + 1, s.p_dot()) == 1 {
+      if i + 2 < n {
+        if ax.is_name(g, i + 2) == 1 {
+          let pv: addr = proj(k, bv, ax.n_sym(g, i + 2));
+          if pv as u64 != 0 { v_set(out, v_kind(pv), v_a(pv), v_b(pv)); return i + 3; }
+          fail_msg(k, "bad FieldInfo member", 20, ax.e_op());
+          return i + 3;
+        }
+      }
+    }
+    v_set(out, v_kind(bv), v_a(bv), v_b(bv));
+    return i + 1;
+  }
+  let tid: u64 = tid_of_name(k, name);
+  if tid != 0 { v_set(out, 1, tid, 0); return i + 1; }
+  fail_msg(k, "not a comptime constant", 23, ax.e_op());
+  return i + 1;
+}
+
+func ev_tail(k: addr, g: u64, i: u64, minp: u64, out: addr) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  let p: u64 = op_prio(g, i);
+  if p == 0 or p < minp { return i; }
+  if v_kind(out) != 0 { fail_msg(k, "comptime op needs int", 21, ax.e_type()); return i; }
+  let op: u64 = ax.n_sym(g, i);
+  let rhs: addr = st.st_alloc(k, 24);
+  let j: u64 = ev_prefix(k, g, i + 1, rhs);
+  if st.st_ok(k) != 0 { return j; }
+  let j2: u64 = ev_tail(k, g, j, p + 1, rhs);
+  if st.st_ok(k) != 0 { return j2; }
+  if v_kind(rhs) != 0 { fail_msg(k, "comptime op needs int", 21, ax.e_type()); return j2; }
+  v_set(out, 0, bin_int(k, op, v_a(out), v_a(rhs)), 0);
+  return ev_tail(k, g, j2, minp, out);
+}
+
+func eval_expr(k: addr, g: u64, i: u64, minp: u64, out: addr) -> u64 {
+  let j: u64 = ev_prefix(k, g, i, out);
+  if st.st_ok(k) != 0 { return j; }
+  return ev_tail(k, g, j, minp, out);
+}
+
+// --- comptime for 序列与迭代 -----------------------------------------------
+// 描述符 48 字节：[种类@0, 类型@8, 上限@16, 当前位置@24, 体下标@32, 变量名@40]。
+func seq_make(k: addr, kd: u64, tid: u64, hi: u64, cur: u64, nb: addr, next_i: u64) -> addr {
+  let d: addr = st.st_alloc(k, 48);
+  store(d, kd); store(d + 8, tid); store(d + 16, hi); store(d + 24, cur);
+  ax.box_put(nb, next_i);
+  return d;
+}
+
+func seq_open(k: addr, g: u64, start: u64, nb: addr) -> addr {
+  if start >= ax.n_count(g) { fail_msg(k, "bad comptime for seq", 20, ax.e_ast()); return 0 as addr; }
+  let v: addr = st.st_alloc(k, 24);
+  let j: u64 = eval_expr(k, g, start, 0, v);
+  if st.st_ok(k) != 0 { return 0 as addr; }
+  if v_kind(v) == 4 { return seq_make(k, 4, v_a(v), f_count(k, v_a(v)), 0, nb, j); }
+  if v_kind(v) == 0 {
+    if has_tok(g, j, s.p_dotdot()) == 1 {
+      let w: addr = st.st_alloc(k, 24);
+      let j2: u64 = eval_expr(k, g, j + 1, 0, w);
+      if st.st_ok(k) != 0 { return 0 as addr; }
+      if v_kind(w) != 0 { fail_msg(k, "range bound needs int", 21, ax.e_type()); return 0 as addr; }
+      return seq_make(k, 5, 0, v_a(w), v_a(v), nb, j2);
+    }
+  }
+  fail_msg(k, "bad comptime for seq", 20, ax.e_ast());
+  return 0 as addr;
+}
+
+func for_open(k: addr, g: u64, i: u64) -> addr {
+  if i + 4 >= ax.n_count(g) { fail_msg(k, "bad comptime for", 16, ax.e_ast()); return 0 as addr; }
+  if ax.is_name(g, i + 2) == 0 { fail_msg(k, "expected loop var", 17, ax.e_ast()); return 0 as addr; }
+  if has_tok(g, i + 3, s.k_in()) == 0 { fail_msg(k, "expected in", 11, ax.e_ast()); return 0 as addr; }
+  let nb: addr = ax.box(k);
+  let d: addr = seq_open(k, g, i + 4, nb);
+  if st.st_ok(k) != 0 { return 0 as addr; }
+  let bi: u64 = ax.box_get(nb);
+  if has_delim(g, bi, ax.dl_brace()) == 0 { fail_msg(k, "expected loop body", 18, ax.e_ast()); return 0 as addr; }
+  store(d + 32, bi);
+  store(d + 40, ax.n_sym(g, i + 2));
+  return d;
+}
+
+func for_step(k: addr, d: addr) -> u64 {
+  let cur: u64 = load(d + 24);
+  let hi: u64 = load(d + 16);
+  if cur >= hi { return 0; }
+  let nm: u64 = load(d + 40);
+  let kd: u64 = load(d);
+  if kd == 4 {
+    let tid: u64 = load(d + 8);
+    bind(k, nm, 2, tid, cur);
+  } else {
+    bind(k, nm, 0, cur, 0);
+  }
+  if st.st_ok(k) != 0 { return 0; }
+  store(d + 24, cur + 1);
+  return 1;
+}
+
+func for_body(d: addr) -> u64 { return load(d + 32); }
+
+// --- [:expr] 成员名插值 -----------------------------------------------------
+func interp_at(g: u64, i: u64) -> u64 {
+  if has_delim(g, i, ax.dl_bracket()) == 0 { return 0; }
+  return has_tok(ax.n_at(g, i), 0, s.p_colon());
+}
+
+func interp_name(k: addr, grp: u64) -> u64 {
+  let n: u64 = ax.n_count(grp);
+  if n < 2 { fail_msg(k, "empty member splice", 19, ax.e_ast()); return 0; }
+  let v: addr = st.st_alloc(k, 24);
+  let j: u64 = eval_expr(k, grp, 1, 0, v);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != n { fail_msg(k, "bad member splice", 17, ax.e_ast()); return 0; }
+  if v_kind(v) == 0 { return v_a(v); }
+  if v_kind(v) == 3 { return s.intern(v_a(v) as addr, v_b(v)); }
+  fail_msg(k, "bad field name", 14, ax.e_type());
+  return 0;
+}

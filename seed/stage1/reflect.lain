@@ -1,0 +1,219 @@
+// reflect.lain —— 编译期反射查询的 IR 内联发射。
+// 查询不生成辅助过程：钩子在编译期当下把 #lea / #load 发进当前模块，
+// 因此元函数体里的 meta_field_count(tid) 和普通表达式一样参与求值与折叠。
+// 类型注册表与反射表的打包在 tyreg.lain，查询只读那张表。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let tr = import("tyreg");
+let modules = import("modules");
+let ir = import("ir");
+let codes = import("ir_codes");
+let s = import("sym");
+let cx = import("ctx");
+
+// 表相关的东西由 tyreg.lain 定义，这里只做转发，让调用方只认一个模块。
+func stride() -> u64 { return tr.stride(); }
+func reg_count(k: addr) -> u64 { return tr.reg_count(k); }
+func prepare(k: addr) -> u64 { return tr.prepare(k); }
+func buffer_name() -> u64 { return tr.buffer_name(); }
+func buffer_bytes() -> u64 { return tr.buffer_bytes(); }
+func reflect_name() -> u64 { return tr.reflect_name(); }
+
+func mode_of(nm: u64) -> u64 {
+  if nm == s.intern("meta_type_size", 14) { return 1; }
+  if nm == s.intern("meta_type_align", 15) { return 2; }
+  if nm == s.intern("meta_field_count", 16) { return 3; }
+  if nm == s.intern("meta_type_name_len", 18) { return 4; }
+  if nm == s.intern("meta_type_name", 14) { return 5; }
+  if nm == s.intern("meta_field_name_len", 19) { return 6; }
+  if nm == s.intern("meta_field_type", 15) { return 7; }
+  if nm == s.intern("meta_field_offset", 17) { return 8; }
+  if nm == s.intern("meta_field_name", 15) { return 9; }
+  if nm == s.intern("meta_out", 8) { return 10; }
+  return 0;
+}
+
+// --- 查询原语的 IR 内联发射 -------------------------------------------------
+// 反射表的行地址。tid 是字面量时把行偏移折进立即数，省掉一次乘法。
+func lea_base(k: addr, tv: addr, off: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, reflect_name());
+  if ty.vlit(tv) == 1 {
+    let i0: u64 = ir.arg_int(k, 0);
+    let s0: u64 = ir.arg_int(k, 1);
+    let o0: u64 = ir.arg_int(k, ty.vbits(tv) * stride() + off);
+    return ir.emit(k, codes.INST_LEA(), out, ir.taddr(k));
+  }
+  let i1: u64 = ir.arg_ref(k, ty.vn(tv));
+  let s1: u64 = ir.arg_int(k, stride());
+  let o1: u64 = ir.arg_int(k, off);
+  return ir.emit(k, codes.INST_LEA(), out, ir.taddr(k));
+}
+
+// 带值索引的 LEA：下标本身可以是一个表达式的结果。
+func lea_idx_val(k: addr, base: u64, fv: addr, scale: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, base);
+  if ty.vlit(fv) == 1 {
+    let i0: u64 = ir.arg_int(k, 0);
+    let s0: u64 = ir.arg_int(k, 1);
+    let o0: u64 = ir.arg_int(k, ty.vbits(fv) * scale);
+    return ir.emit(k, codes.INST_LEA(), out, ir.taddr(k));
+  }
+  let i1: u64 = ir.arg_ref(k, ty.vn(fv));
+  let s1: u64 = ir.arg_int(k, scale);
+  let o1: u64 = ir.arg_int(k, 0);
+  return ir.emit(k, codes.INST_LEA(), out, ir.taddr(k));
+}
+
+func load_u64(k: addr, p: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, p);
+  return ir.emit(k, codes.INST_LOAD(), out, ir.tbits(k, 64));
+}
+
+func lea_idx(k: addr, base: u64, idx: u64, scale: u64, off: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, base);
+  let b: u64 = ir.arg_ref(k, idx);
+  let c: u64 = ir.arg_int(k, scale);
+  let d: u64 = ir.arg_int(k, off);
+  return ir.emit(k, codes.INST_LEA(), out, ir.taddr(k));
+}
+
+// 比较/逻辑类辅助返回结果名字本身：调用方要把它当 cond 交给 emit_if。
+func lt_val(k: addr, v: addr, c: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.op_val(k, v);
+  let b: u64 = ir.arg_int(k, c);
+  let e: u64 = ir.emit(k, codes.INST_ULT(), out, ir.tbits(k, 64));
+  return out;
+}
+
+func and_bool(k: addr, x: u64, y: u64, out: u64) -> u64 {
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, x);
+  let b: u64 = ir.arg_ref(k, y);
+  let e: u64 = ir.emit(k, codes.INST_AND(), out, ir.tbits(k, 1));
+  return out;
+}
+
+// 表尾名字区里第 noff 字节的地址。查询在编译期就把这个地址算成定值。
+func name_ptr(k: addr, noff: u64, out: u64) -> u64 {
+  return lea_idx(k, reflect_name(), noff, 1, 0, out);
+}
+
+func field_rec(k: addr, tv: addr, fv: addr, out: u64) -> u64 {
+  let p: u64 = ir.fresh_t(k);
+  let a: u64 = lea_base(k, tv, 64, p);
+  return lea_idx_val(k, p, fv, 32, out);
+}
+
+// 在区域里算出一格的值；v 是结果寄存器。
+func body(k: addr, mode: u64, tv: addr, fv: addr, v: u64) -> u64 {
+  if mode == 5 {
+    let p: u64 = ir.fresh_t(k);
+    let a: u64 = lea_base(k, tv, 48, p);
+    let n: u64 = ir.fresh_t(k);
+    let b: u64 = load_u64(k, p, n);
+    return name_ptr(k, n, v);
+  }
+  if mode == 9 {
+    let f: u64 = ir.fresh_t(k);
+    let a: u64 = field_rec(k, tv, fv, f);
+    let n: u64 = ir.fresh_t(k);
+    let b: u64 = load_u64(k, f, n);
+    return name_ptr(k, n, v);
+  }
+  if mode >= 6 {
+    let off: u64 = if mode == 6 { 8 } else { if mode == 7 { 16 } else { 24 } };
+    let f: u64 = ir.fresh_t(k);
+    let a: u64 = field_rec(k, tv, fv, f);
+    let s2: u64 = ir.fresh_t(k);
+    let b: u64 = ir.emit_lea(k, s2, f, 0, 1, off);
+    return load_u64(k, s2, v);
+  }
+  let hoff: u64 = if mode == 1 { 24 } else { if mode == 2 { 32 } else { if mode == 3 { 40 } else { 56 } } };
+  let p: u64 = ir.fresh_t(k);
+  let a: u64 = lea_base(k, tv, hoff, p);
+  return load_u64(k, p, v);
+}
+
+func zero_reg(k: addr, tp: addr) -> u64 {
+  ir.region_begin(k);
+  let r: u64 = ir.region_result(k, tp);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, 0);
+  let b: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  return ir.region_end(k);
+}
+
+// 字面量 TypeId 越界是编译错误：0 是保留编号，真实类型占 1..cnt。
+// 运行期算出来的编号只能在查询里做边界判断，那时表外一格也不会被读到。
+func bad_id(k: addr, mode: u64, tv: addr) -> u64 {
+  if mode == 10 { return 0; }
+  if ty.vlit(tv) != 1 { return 0; }
+  let id: u64 = ty.vbits(tv);
+  let cnt: u64 = reg_count(k);
+  let bad: u64 = if id == 0 { 1 } else { if id > cnt { 1 } else { 0 } };
+  if bad == 0 { return 0; }
+  let msg: addr = "invalid type id";
+  let d: u64 = ir.diag(k, cx.e_type(), 1, msg, 15);
+  st.st_fail(k, cx.e_type());
+  return 1;
+}
+
+// 模式：1 尺寸 2 对齐 3 字段数 4 类型名长度 5 类型名地址
+//       6 字段名长度 7 字段类型 8 字段偏移 9 字段名地址 10 输出缓冲地址
+func query(k: addr, mode: u64, p1: addr, p2: addr, want: addr, out: addr) -> u64 {
+  if mode == 10 {
+    ty.val_ref(out, buffer_name(), ir.taddr(k));
+    return 1;
+  }
+  if st.st_rftab(k) != st.st_mod(k) + 1 { return 0; }
+  let rt: addr = if mode == 5 or mode == 9 { ir.taddr(k) } else { cx.t64(k) };
+  let cnt: u64 = reg_count(k);
+  let c1: u64 = lt_val(k, p1, cnt + 1, ir.fresh_t(k));
+  let cond: u64 = if mode >= 6 {
+    let c2: u64 = lt_val(k, p2, tr.field_cap(), ir.fresh_t(k));
+    and_bool(k, c1, c2, ir.fresh_t(k))
+  } else {
+    c1
+  };
+  let v: u64 = ir.fresh_t(k);
+  ir.region_begin(k);
+  let rr: u64 = ir.region_result(k, rt);
+  let bv: u64 = body(k, mode, p1, p2, v);
+  ir.args_reset(k);
+  let ya: u64 = ir.arg_ref(k, v);
+  let yj: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  let r1: u64 = ir.region_end(k);
+  let r2: u64 = zero_reg(k, rt);
+  let res: u64 = ir.fresh_t(k);
+  let fi: u64 = ir.emit_if(k, res, cond, r1, r2);
+  ty.val_ref(out, res, rt);
+  return 1;
+}
+
+// 类型名在表达式位置折成一个 u64 的 TypeId 字面量。
+// 局部的同名绑定优先：`let i8: u64 = ...` 之后 i8 是变量，不是类型名。
+func type_value(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let nm: u64 = cx.n_sym(g, i);
+  if env.env_find(k, nm) != 0 { return 0; }
+  let t: addr = cx.new_ty(k);
+  if ty.ty_of_sym(nm, t) == 1 {
+    let id: u64 = tr.ty_add(k, ty.tk(t), ty.tw(t), ty.tsg(t), 0);
+    ty.val_lit(out, id, cx.t64(k));
+    return 1;
+  }
+  let e: addr = modules.find_here(k, nm);
+  if e as u64 == 0 { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
+    let id: u64 = tr.ty_add(k, 3, 0, 0, modules.sym_shape(e));
+    ty.val_lit(out, id, cx.t64(k));
+    return 1;
+  }
+  return 0;
+}

@@ -18,7 +18,7 @@ let ctf = import("ctfor");
 let tb = import("tbuild");
 let gv = import("given");
 
-extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = lainc_core_expr;
 
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
 func new_val(k: addr) -> addr { return ax.new_val(k); }
@@ -278,15 +278,25 @@ func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 
   if sym == s.k_let() { return stmt_let(k, g, i); }
   if sym == s.k_given() { return gv.reg_given(k, g, i, 1); }
   if sym == s.k_if() {
-    let dummy: addr = new_val(k);
+    let v: addr = new_val(k);
     let nt: addr = tnone(k);
-    let j: u64 = flow.if_compile(k, g, i, nt, dummy, term);
+    let hint: addr = if slot == no_slot() { nt } else { tp };
+    let j: u64 = flow.if_compile(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
     return skip_semi(g, j);
   }
   if sym == s.k_loop() or sym == s.k_while() {
-    let dummy: addr = new_val(k);
+    let v: addr = new_val(k);
     let nt: addr = tnone(k);
-    let j: u64 = flow.loop_compile(k, g, i, nt, dummy, term);
+    let hint: addr = if slot == no_slot() { nt } else { tp };
+    let j: u64 = flow.loop_compile(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
     return skip_semi(g, j);
   }
   if sym == s.k_return() { return stmt_return(k, g, i, term); }
@@ -303,12 +313,12 @@ func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 
     return i + 1;
   }
   if sym == s.k_comptime() {
-    if i + 1 < n {
-      if n_sym(g, i + 1) == s.k_for() { return stmt_ctfor(k, g, i, term); }
+    if i + 1 < n and n_sym(g, i + 1) == s.k_for() { return stmt_ctfor(k, g, i, term); }
+    if i + 1 >= n or n_sym(g, i + 1) != s.p_dot() {
+      st.st_fail(k, e_unsup());
+      box_put(term, 1);
+      return i + 1;
     }
-    st.st_fail(k, e_unsup());
-    box_put(term, 1);
-    return i + 1;
   }
   let eqj: u64 = lv.find_eq(g, i, n);
   if eqj != 0 { return stmt_assign(k, g, i, eqj); }
@@ -338,5 +348,10 @@ func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64
   let r: u64 = block_walk(k, g, i, term, slot, tp);
   gv.release(k, gm);
   return r;
+}
+
+@root
+func lainc_stmt_block(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
+  return block_mode(k, g, i, term, slot, tp);
 }
 
