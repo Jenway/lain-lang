@@ -25,7 +25,8 @@ let GenHdr = struct {
   pg_i: u64,
   qg_i: u64,
   ret_i: u64,
-  body_i: u64
+  body_i: u64,
+  modv: u64
 };
 
 let GenQRec = struct {
@@ -66,15 +67,18 @@ let paramty_at = func(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), ps) + i * 32);
 };
 
-// --- 模板头（48B）：[decl_i@0, src@8, pg_i@16, qg_i@24, ret_i@32, body_i@40] ---
+// --- 模板头（56B）：[decl_i@0, src@8, pg_i@16, qg_i@24, ret_i@32, body_i@40, modv@48] ---
+let gen_hdr_modv = func(hdr: Mut(GenHdr)) -> u64 { return hdr.modv; };
+
 let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_i: u64, qg_i: u64, ret_i: u64, body_i: u64) -> Mut(modules.SymEntry) {
-  let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), st.st_ralloc(k, 48));
+  let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), st.st_ralloc(k, 56));
   hdr.decl_i = decl_i;
   hdr.src = st.st_src(k);
   hdr.pg_i = pg_i;
   hdr.qg_i = qg_i;
   hdr.ret_i = ret_i;
   hdr.body_i = body_i;
+  hdr.modv = st.st_scope(k);
   let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_generic(), st.st_src(k), name, q, ptr_cast(Mut(u8), hdr), 0);
   modules.sym_set_decl(se, decl_i);
   modules.sym_set_src(se, st.st_src(k));
@@ -159,6 +163,18 @@ let parse_explicit_q = func(k: Mut(st.State), qag: u64, i: u64, ctp_tbl: Mut(gu.
   }
   let idx: u64 = gu.ct_find(ctp_tbl, nct, ax.n_sym(qag, i), 0);
   if idx == 999 { ctf.fail_msg(k, "unknown comptime arg", 20, ax.e_type()); return 0; }
+  // 实参是模块（名字、点号路径或函子调用）时记模块见证值。
+  let mv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let mj: u64 = gv.eval_mod_arg(k, qag, i + 2, mv);
+  if st.st_ok(k) != 0 { return 0; }
+  if mj != 0 {
+    let mdst: Mut(ctf.CtVal) = gu.val_at(vals, idx);
+    mdst.kind = 9;
+    mdst.a = ctf.v_a(mv);
+    mdst.b = ctf.v_b(mv);
+    deref(gu.word_at(bound, idx)) = 1;
+    return parse_explicit_q(k, qag, mj, ctp_tbl, nct, vals, bound);
+  }
   let ev: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
   let nj: u64 = gv.eval_witness(k, qag, i + 2, ev);
   if st.st_ok(k) != 0 { return 0; }
@@ -210,8 +226,100 @@ let eval_rt_args = func(k: Mut(st.State), pg: u64, pi: u64, argsg: u64, ai: u64,
   return eval_rt_args(k, pg, te, argsg, nj2, idx + 1, ab, ctp_tbl, nct, vals, bound);
 };
 
-// 用已解出的编译期参数，解析出隐式 given 实例。
-let resolve_givens = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
+// 编译期参数里第一个 T: Type 的下标；没有则 999。
+let type_param_at = func(qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, i: u64) -> u64 {
+  if i >= nct { return 999; }
+  let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
+  if p.ty_end == p.ty_start + 1 {
+    if ax.is_name(qg, p.ty_start) == 1 {
+      if ax.n_sym(qg, p.ty_start) == s.t_type() { return i; }
+    }
+  }
+  return type_param_at(qg, ctp_tbl, nct, i + 1);
+};
+
+// 把 T 绑定成模块的 Self 类型；T 已绑定时比对一致性。
+let bind_self_param = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), t_idx: u64, i: u64, st_tid: u64) -> u64 {
+  if t_idx == 999 or t_idx == i { return 1; }
+  if st_tid == 0 { ctf.fail_msg(k, "module has no Self type", 23, ax.e_type()); return 0; }
+  let tslot: Mut(ctf.CtVal) = gu.val_at(vals, t_idx);
+  if deref(gu.word_at(bound, t_idx)) == 1 {
+    if tslot.a != st_tid {
+      ctf.fail_msg(k, "module Self type conflict", 25, ax.e_type());
+      return 0;
+    }
+    return 1;
+  }
+  tslot.kind = 1;
+  tslot.a = st_tid;
+  tslot.b = 0;
+  deref(gu.word_at(bound, t_idx)) = 1;
+  return 1;
+};
+
+// 约束是签名时的编译期参数求解：显式模块直接校验，隐式模块从 given 记录区里搜。
+let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64, sig_e: Mut(modules.SymEntry)) -> u64 {
+  let has_self: u64 = gv.sig_has_self(sig_e);
+  let t_idx: u64 = type_param_at(qg, ctp_tbl, nct, 0);
+  let seal_value: u64 = modules.sym_qual(sig_e);
+  let tv: Mut(ctf.CtVal) = gu.val_at(vals, i);
+  if deref(gu.word_at(bound, i)) == 1 {
+    if tv.kind != 9 {
+      ctf.fail_msg(k, "explicit ?{} arg needs a module", 31, ax.e_type());
+      return 0;
+    }
+    if gv.check_mod_matches_sig(k, tv.a, sig_e, 1) == 0 { return 0; }
+    tv.b = seal_value;
+    if has_self != 0 {
+      let st_tid: u64 = gv.mod_self_tid(k, tv.a);
+      if bind_self_param(k, ctp_tbl, nct, vals, bound, t_idx, i, st_tid) == 0 { return 0; }
+    }
+    return 1;
+  }
+  let tbound: u64 = 0;
+  if t_idx != 999 and t_idx != i { tbound = deref(gu.word_at(bound, t_idx)); }
+  let self_tid: u64 = 0;
+  let want_self: u64 = 0;
+  if tbound == 1 {
+    let tslot: Mut(ctf.CtVal) = gu.val_at(vals, t_idx);
+    self_tid = tslot.a;
+    want_self = has_self;
+  }
+  let seal_box: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
+  deref(seal_box) = 0;
+  let modv: u64 = gv.find_sig_implicit(k, sig_e, self_tid, want_self, seal_box);
+  if modv == 0 { return 0; }
+  tv.kind = 9;
+  tv.a = modv;
+  tv.b = deref(seal_box);
+  deref(gu.word_at(bound, i)) = 1;
+  if has_self != 0 {
+    let st_tid2: u64 = gv.mod_self_tid(k, modv);
+    if bind_self_param(k, ctp_tbl, nct, vals, bound, t_idx, i, st_tid2) == 0 { return 0; }
+  }
+  return 1;
+};
+
+// 用已解出的编译期参数，解析出隐式 given 实例；约束是签名时找模块见证。
+// 签名约束先解：T 未绑时可从胜出的模块取 Self，其余约束再解。
+let resolve_sig_pass = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
+  if i >= nct { return 1; }
+  let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
+  let cm: u64 = ctf.mark(k);
+  push_bound(k, ctp_tbl, nct, vals, bound, 0);
+  let sig_e: Mut(modules.SymEntry) = gv.sig_at(k, qg, p.ty_start, p.ty_end);
+  if is_null(sig_e) {
+    ctf.release(k, cm);
+    return resolve_sig_pass(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+  }
+  let ok: u64 = resolve_sig_param(k, qg, ctp_tbl, nct, vals, bound, i, sig_e);
+  ctf.release(k, cm);
+  if ok == 0 { return 0; }
+  if st.st_ok(k) != 0 { return 0; }
+  return resolve_sig_pass(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+};
+
+let resolve_givens_rest = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
   if i >= nct { return 1; }
   if deref(gu.word_at(bound, i)) == 0 {
     let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
@@ -235,7 +343,12 @@ let resolve_givens = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec)
     dst.b = ge.wrec;
     deref(gu.word_at(bound, i)) = 1;
   }
-  return resolve_givens(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+  return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+};
+
+let resolve_givens = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
+  if resolve_sig_pass(k, qg, ctp_tbl, nct, vals, bound, i) == 0 { return 0; }
+  return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i);
 };
 
 let coerce_args = func(k: Mut(st.State), ab: Mut(ty.Val), ps: Mut(ty.Ty), i: u64, np: u64) -> u64 {

@@ -1,5 +1,5 @@
-// given.lain —— Witness 实例求值、given 作用域栈与歧义校验、Witness 成员解析。
-// 单向依赖 state/types/ast/sym/agg/ir/modules/tyreg/ctfor/ctprim/ctfn。
+// given.lain —— Witness 实例求值、given 作用域栈与歧义校验、Witness 成员解析、模块 Witness 校验。
+// 单向依赖 state/types/ast/sym/agg/ir/modules/tyreg/ctypes/ctfor/ctprim/ctfn/ctx。
 let st = import("state");
 let ty = import("types");
 let ax = import("ast");
@@ -7,9 +7,11 @@ let s = import("sym");
 let agg = import("agg");
 let modules = import("modules");
 let ireg = import("tyreg");
+let ct = import("ctypes");
 let ctf = import("ctfor");
 let ctp = import("ctprim");
 let ctfn = import("ctfn");
+let cx = import("ctx");
 
 let GivenEntry = struct {
   name: u64,
@@ -304,4 +306,339 @@ let reg_given = func(k: Mut(st.State), g: u64, decl_i: u64, implicit: u64) -> u6
   }
   ctf.fail_msg(k, "expected given name", 19, ax.e_ast());
   return decl_i + 1;
+};
+
+// --- Phase 4：模块 Witness ------------------------------------------------
+// implicit = 2 的条目记模块见证：[name@0 = 0, tid@8 = 模块号, wrec@16 = 封签视图,
+// depth@24, implicit@32 = 2]。模块见证与 Step A 的结构见证永不混淆：
+// find_implicit 只认 implicit == 1，模板搜索只认 implicit == 2。
+
+let push_mod_implicit = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
+  return push_given(k, 0, modv, seal, 2);
+};
+
+let u64_at = func(arr: Mut(u64), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), arr) + i * 8);
+};
+
+// 模块成员的类型编号：类型别名取限定名，结构/枚举取形状上的类型。
+let type_tid_of = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
+  let kd: u64 = modules.sym_kind(m);
+  if kd == modules.sym_kind_type_alias() { return modules.sym_qual(m); }
+  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
+    let sh: u64 = modules.sym_shape(m);
+    if sh == 0 { return 0; }
+    return ctf.tid_of_shape(k, sh);
+  }
+  return 0;
+};
+
+// 模块导出的 pub let Self = T 的类型编号；没有则回 0。
+let mod_self_tid = func(k: Mut(st.State), modv: u64) -> u64 {
+  let e: Mut(modules.SymEntry) = modules.sym_find(k, modv, s.b_self_type());
+  if is_null(e) { return 0; }
+  if modules.sym_pub(e) == 0 { return 0; }
+  return type_tid_of(k, e);
+};
+
+// --- 签名体里的条目名称解析 ------------------------------------------------
+// 严格的名字点号链：Name ('.' Name)*
+let sig_path_ok = func(g: u64, i: u64, te: u64) -> u64 {
+  if i >= te { return 1; }
+  if ax.is_name(g, i) == 0 { return 0; }
+  if i + 1 == te { return 1; }
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return 0; }
+  return sig_path_ok(g, i + 2, te);
+};
+
+let sig_path_names = func(g: u64, i: u64, te: u64, out: Mut(u64), idx: u64) -> u64 {
+  if i >= te { return idx; }
+  if ax.is_name(g, i) == 1 {
+    deref(u64_at(out, idx)) = ax.n_sym(g, i);
+    return sig_path_names(g, i + 1, te, out, idx + 1);
+  }
+  return sig_path_names(g, i + 1, te, out, idx);
+};
+
+// 点号链的终止位置（不包含）：从 i 起连续吃 Name ('.' Name)*。
+let path_end_at = func(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  if ax.is_name(g, i) == 0 { return i; }
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return i + 1; }
+  return path_end_at(g, i + 2);
+};
+
+let sig_only = func(e: Mut(modules.SymEntry)) -> Mut(modules.SymEntry) {
+  if is_null(e) { return null_ref(Mut(modules.SymEntry)); }
+  if modules.sym_kind(e) != modules.sym_kind_sig() { return null_ref(Mut(modules.SymEntry)); }
+  return e;
+};
+
+// 在 base_mod 里按裸名查签名符号。
+let sig_local = func(k: Mut(st.State), base_mod: u64, name: u64) -> Mut(modules.SymEntry) {
+  let e: Mut(modules.SymEntry) = modules.sym_find(k, base_mod, name);
+  if is_null(e) == 0 { return e; }
+  if base_mod == modules.cur(k) { return modules.find_here(k, name); }
+  return null_ref(Mut(modules.SymEntry));
+};
+
+// 名字或点号路径在 base_mod 里解析成 sig 符号；不是 sig 回空引用。
+let sig_ref_mod = func(k: Mut(st.State), base_mod: u64, g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
+  if sig_path_ok(g, ts, te) == 0 { return null_ref(Mut(modules.SymEntry)); }
+  let names: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8 * 17));
+  let cnt: u64 = sig_path_names(g, ts, te, names, 0);
+  if cnt == 0 { return null_ref(Mut(modules.SymEntry)); }
+  if cnt == 1 { return sig_only(sig_local(k, base_mod, deref(u64_at(names, 0)))); }
+  let seal: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
+  deref(seal) = 0;
+  let segs: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), names) + 8);
+  let mv: u64 = modules.mod_resolve_path(k, base_mod, deref(u64_at(names, 0)), segs, cnt - 2, seal);
+  if mv == 0 { return null_ref(Mut(modules.SymEntry)); }
+  return sig_only(modules.sym_find(k, mv, deref(u64_at(names, cnt - 1))));
+};
+
+// 按当前词法作用域解析名称或点号路径对应的 sig。
+let sig_at = func(k: Mut(st.State), g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
+  return sig_ref_mod(k, modules.cur(k), g, ts, te);
+};
+
+// 签名体里是否声明了 Self：只认 ``[pub] let Self : ...`` 这种形状。
+let sig_has_self_scan = func(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_name(g, i) == 1 {
+    if ax.n_sym(g, i) == s.b_self_type() {
+      if ctf.has_tok(g, i + 1, s.p_colon()) == 1 { return 1; }
+    }
+  }
+  return sig_has_self_scan(g, i + 1);
+};
+
+let sig_has_self = func(sig_e: Mut(modules.SymEntry)) -> u64 {
+  return sig_has_self_scan(modules.sym_decl(sig_e), 0);
+};
+
+// --- 签名成员核验 ---------------------------------------------------------
+let sig_item_end = func(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  if ax.is_semi(g, i) == 1 { return i; }
+  return sig_item_end(g, i + 1);
+};
+
+let sig_deny = func(k: Mut(st.State), emit: u64, m: Ref(u8), n: u64) -> u64 {
+  if emit != 0 { ctf.fail_msg(k, m, n, ax.e_type()); }
+  return 0;
+};
+
+let fn_tids_at = func(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, np: u64, sig: Mut(u64)) -> u64 {
+  if i >= np { return 1; }
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  let c: u64 = ty.ty_at(t, cx.ty_idx(ps, i));
+  deref(u64_at(sig, i)) = ireg.tid_of(k, t);
+  return fn_tids_at(k, ps, i + 1, np, sig);
+};
+
+// 模块成员是过程时的 Fn 类型编号：优先用登记好的 Fn TypeId，没有则现场拼。
+let fn_tid_of_sym = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
+  let fid: u64 = modules.sym_fnid(m);
+  if fid != 0 { return fid; }
+  let sg: Mut(u8) = modules.sym_sig(m);
+  let np: u64 = cx.sig_np(sg);
+  let tids: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
+  let tn: u64 = fn_tids_at(k, cx.sig_params(sg), 0, np, tids);
+  return ct.fn_t(k, ireg.tid_of(k, cx.sig_ret(sg)), np, tids as u64);
+};
+
+// 一条签名要求的右侧：抽象类型、子签名或一般类型表达式。
+let sig_check_typed = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), g: u64, mname: u64, m: Mut(modules.SymEntry), ts: u64, te: u64, emit: u64) -> u64 {
+  // let Name : Type;  —— 抽象类型，后续条目里的 Self / Name 由此绑定解出。
+  if te == ts + 1 and ax.is_name(g, ts) == 1 {
+    if ax.n_sym(g, ts) == s.t_type() {
+      let tid: u64 = type_tid_of(k, m);
+      if tid == 0 { return sig_deny(k, emit, "sig mismatch: missing or private member", 39); }
+      ctf.bind(k, mname, 1, tid, 0);
+      return 1;
+    }
+  }
+  // let Name : SubSig;  —— 子模块契约。
+  let sub: Mut(modules.SymEntry) = sig_ref_mod(k, modules.sym_mod(sig_e), g, ts, te);
+  if is_null(sub) == 0 {
+    if modules.sym_kind(m) != modules.sym_kind_mod() {
+      return sig_deny(k, emit, "sig mismatch: member type differs", 33);
+    }
+    return check_mod_matches_sig(k, modules.sym_qual(m), sub, emit);
+  }
+  // 一般类型表达式：Fn(...) -> ...、Self、i64 等。
+  let want_t: Mut(ty.Ty) = ax.new_ty(k);
+  let saved_err: u64 = st.st_ok(k);
+  cx.parse_type(k, g, ts, want_t);
+  if st.st_ok(k) != 0 {
+    st.st_set_err(k, saved_err);
+    return sig_deny(k, emit, "sig mismatch: member type differs", 33);
+  }
+  let kd: u64 = modules.sym_kind(m);
+  let want_id: u64 = ireg.tid_of(k, want_t);
+  if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() {
+    let wsh: u64 = ireg.ty_shape(k, want_id);
+    if wsh == 0 { return sig_deny(k, emit, "sig mismatch: member type differs", 33); }
+    if agg.shp_kind(wsh) != agg.kind_fn() { return sig_deny(k, emit, "sig mismatch: member type differs", 33); }
+    if want_id != fn_tid_of_sym(k, m) { return sig_deny(k, emit, "sig mismatch: member type differs", 33); }
+    return 1;
+  }
+  if kd == modules.sym_kind_value() or kd == modules.sym_kind_data() {
+    let got: u64 = ireg.tid_of(k, ptr_cast(Mut(ty.Ty), modules.sym_sig(m)));
+    if want_id != got { return sig_deny(k, emit, "sig mismatch: member type differs", 33); }
+    return 1;
+  }
+  return sig_deny(k, emit, "sig mismatch: member type differs", 33);
+};
+
+// i 指向 let 之后的名字。
+let sig_check_one = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), g: u64, i: u64, emit: u64) -> u64 {
+  if i >= ax.n_count(g) { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
+  if ax.is_name(g, i) == 0 { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
+  let mname: u64 = ax.n_sym(g, i);
+  if ctf.has_tok(g, i + 1, s.p_colon()) == 0 { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
+  let ts: u64 = i + 2;
+  if ts >= ax.n_count(g) { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
+  let te: u64 = sig_item_end(g, ts);
+  let m: Mut(modules.SymEntry) = modules.sym_find(k, impl_modv, mname);
+  if is_null(m) { return sig_deny(k, emit, "sig mismatch: missing or private member", 39); }
+  if modules.sym_pub(m) == 0 { return sig_deny(k, emit, "sig mismatch: missing or private member", 39); }
+  if sig_check_typed(k, sig_e, g, mname, m, ts, te, emit) == 0 { return 0; }
+  if te >= ax.n_count(g) { return 1; }
+  return sig_check_items(k, impl_modv, sig_e, g, te + 1, emit);
+};
+
+let sig_check_items = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), g: u64, i: u64, emit: u64) -> u64 {
+  if i >= ax.n_count(g) { return 1; }
+  if ax.is_semi(g, i) == 1 { return sig_check_items(k, impl_modv, sig_e, g, i + 1, emit); }
+  if ax.is_name(g, i) == 1 {
+    let w: u64 = ax.n_sym(g, i);
+    if w == s.k_pub() { return sig_check_items(k, impl_modv, sig_e, g, i + 1, emit); }
+    if w == s.k_let() { return sig_check_one(k, impl_modv, sig_e, g, i + 1, emit); }
+  }
+  return sig_deny(k, emit, "sig mismatch: bad declaration", 29);
+};
+
+// 模块实现是否满足签名：逐条核对公开成员与类型。emit_diag = 0 时只判定、不报错。
+let check_mod_matches_sig = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), emit_diag: u64) -> u64 {
+  let saved_src: u64 = st.st_src(k);
+  let saved_vmod: u64 = st.st_vmod(k);
+  st.st_set_src(k, modules.sym_src(sig_e));
+  st.st_set_vmod(k, 0);
+  let cm: u64 = ctf.mark(k);
+  let r: u64 = sig_check_items(k, impl_modv, sig_e, modules.sym_decl(sig_e), 0, emit_diag);
+  ctf.release(k, cm);
+  st.st_set_src(k, saved_src);
+  st.st_set_vmod(k, saved_vmod);
+  return r;
+};
+
+// 模块候选是否命中：先比对 Self 类型，再逐条核验签名成员。
+let mod_matches_sig = func(k: Mut(st.State), modv: u64, sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64) -> u64 {
+  if has_self != 0 {
+    if mod_self_tid(k, modv) != self_tid { return 0; }
+  }
+  return check_mod_matches_sig(k, modv, sig_e, 0);
+};
+
+let SigPick = struct {
+  has: u64,
+  best: u64,
+  depth: u64,
+  count: u64
+};
+
+// 从记录区尾部向前扫描模块见证，取最内层深度里唯一命中的模块。
+let sig_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, pick: Mut(SigPick)) -> u64 {
+  if off == 0 { return 1; }
+  let back: u64 = off - 40;
+  let p: Mut(GivenEntry) = given_at(base, back);
+  let imp: u64 = p.implicit;
+  let dp: u64 = p.depth;
+  let mv: u64 = p.tid;
+  if imp == 2 {
+    if pick.has == 1 and dp < pick.depth { return 1; }
+    if pick.has == 0 { pick.depth = dp; }
+    if dp == pick.depth {
+      if pick.has == 0 or mv != pick.best {
+        if mod_matches_sig(k, mv, sig_e, self_tid, has_self) == 1 {
+          if pick.has == 0 {
+            pick.has = 1;
+            pick.best = mv;
+            pick.count = 1;
+          } else {
+            pick.count = pick.count + 1;
+          }
+        }
+      }
+    }
+  }
+  return sig_scan(k, base, back, sig_e, self_tid, has_self, pick);
+};
+
+// 在当前 given 记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
+let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
+  let pick: Mut(SigPick) = ptr_cast(Mut(SigPick), st.st_alloc(k, 32));
+  pick.has = 0;
+  pick.best = 0;
+  pick.depth = 0;
+  pick.count = 0;
+  sig_scan(k, g_base(k), g_used(k), sig_e, self_tid, has_self, pick);
+  if st.st_ok(k) != 0 { return 0; }
+  if pick.has == 0 {
+    ctf.fail_msg(k, "missing module witness", 22, ax.e_type());
+    return 0;
+  }
+  if pick.count > 1 {
+    ctf.fail_msg(k, "ambiguous module witness", 24, ax.e_type());
+    return 0;
+  }
+  deref(out_seal) = modules.sym_qual(sig_e);
+  return pick.best;
+};
+
+// --- ?{ m: Mod } 实参是模块时求出模块见证值 ---------------------------------
+// 名字、点号路径、函子调用三种形状；不是模块就回 0，交给常规 Witness 求值。
+let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_name(g, i) == 0 { return 0; }
+  if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let j: u64 = ctfn.eval_factory_call(k, g, i, tv);
+    if j == 0 { return 0; }
+    if st.st_ok(k) != 0 { return j; }
+    if ctf.v_kind(tv) != 9 { return 0; }
+    ctf.v_set(out, 9, ctf.v_a(tv), ctf.v_b(tv));
+    return j;
+  }
+  let nm: u64 = ax.n_sym(g, i);
+  let pe: u64 = path_end_at(g, i);
+  let cnt: u64 = (pe - i + 1) / 2;
+  if cnt > 1 {
+    let names: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8 * 17));
+    let ncnt: u64 = sig_path_names(g, i, pe, names, 0);
+    let seal: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
+    deref(seal) = 0;
+    let segs: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), names) + 8);
+    let mv: u64 = modules.mod_resolve_path(k, modules.cur(k), deref(u64_at(names, 0)), segs, ncnt - 1, seal);
+    if mv == 0 { return 0; }
+    ctf.v_set(out, 9, mv, deref(seal));
+    return pe;
+  }
+  let sb: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
+  deref(sb) = 0;
+  let um: u64 = ctf.find_used_mod(k, nm, sb);
+  if um != 0 {
+    ctf.v_set(out, 9, um, deref(sb));
+    return i + 1;
+  }
+  let e: Mut(modules.SymEntry) = modules.find_here(k, nm);
+  if is_null(e) == 0 {
+    if modules.sym_kind(e) == modules.sym_kind_mod() {
+      ctf.v_set(out, 9, modules.sym_qual(e), modules.sym_decl(e));
+      return i + 1;
+    }
+  }
+  return 0;
 };

@@ -13,6 +13,8 @@ let tb = import("tbuild");
 let ctf = import("ctfor");
 let ctp = import("ctprim");
 
+extern ctfn_compile_vmod(k: Mut(st.State), src: u64, bodyg: u64, parent_modv: u64, vmod: u64) -> u64 = lainc_compile_functor_mod;
+
 let ct_val_at = func(ab: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
   return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), ab) + idx * 24);
 };
@@ -71,7 +73,7 @@ let ct_call = func(k: Mut(st.State), name: u64, ag: u64, out: Mut(ctf.CtVal)) ->
     if collect(k, ag, 0, 0, nargs, ab) == 0 { return 2; }
     return ctp.apply_prim(k, name, ag, ab, nargs, out);
   }
-  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
   if is_null(e) {
     let qr: u64 = ctf.prim(k, name, ag, out);
     if qr != 0 { return qr; }
@@ -115,6 +117,10 @@ let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
   if name == 0 { ctf.fail_msg(k, "bad comptime expr", 17, ax.e_op()); return i + 1; }
   if name == s.k_struct() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
     eval_struct_expr(k, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
+  if name == s.k_module() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    eval_mod_expr(k, ax.n_at(g, i + 1), out);
     return i + 2;
   }
   if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
@@ -237,12 +243,15 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, out: M
   }
   let prev: u64 = st.st_ctdone(k);
   let prev_src: u64 = st.st_src(k);
+  let prev_vmod: u64 = st.st_vmod(k);
   let mark: u64 = ctf.mark(k);
   st.st_set_ctdone(k, 0);
   st.st_set_src(k, modules.sym_src(e));
+  st.st_set_vmod(k, modules.sym_mod(e));
   bind_arr(k, nms, ab, 0, nargs);
   if st.st_ok(k) == 0 { run(k, ax.n_at(root, body)); }
   ctf.release(k, mark);
+  st.st_set_vmod(k, prev_vmod);
   st.st_set_src(k, prev_src);
   st.st_set_ctdone(k, prev);
   if st.st_ok(k) != 0 { return 0; }
@@ -250,6 +259,17 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, out: M
   let rk: u64 = ctf.v_kind(ret); let ra: u64 = ctf.v_a(ret); let rb: u64 = ctf.v_b(ret);
   tb.cache_put(k, ptr_cast(Mut(u8), e), nargs, ptr_cast(Mut(u8), ab), rk, ra, rb);
   ctf.v_set(out, rk, ra, rb);
+  return 1;
+};
+
+// module { ... } 作为编译期表达式：分配一个新的虚拟模块号，把体交给求值侧编译
+// （@root lainc_compile_functor_mod），返回 Module 值。
+let eval_mod_expr = func(k: Mut(st.State), bodyg: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let vmod: u64 = st.st_next_vmod(k);
+  let parent: u64 = modules.cur(k);
+  let src: u64 = st.st_src(k);
+  ctfn_compile_vmod(k, src, bodyg, parent, vmod);
+  if st.st_ok(k) == 0 { ctf.v_set(out, 9, vmod, 0); }
   return 1;
 };
 
@@ -355,29 +375,48 @@ let run_at = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 };
 
 // --- 对外入口：顶层 let 绑定与类型位置调用 -------------------------------
+let factory_call_user = func(k: Mut(st.State), fn: Mut(modules.SymEntry), ag: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if is_null(fn) == 1 { return 0; }
+  if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
+  if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
+  call_user(k, fn, ag, out);
+  return 1;
+};
+
+let path_call_at = func(k: Mut(st.State), g: u64, i: u64, owner: u64, seal: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return 0; }
+  if i + 2 >= n { return 0; }
+  if ax.is_name(g, i + 2) == 0 { return 0; }
+  let nm: u64 = ax.n_sym(g, i + 2);
+  if ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
+    let fn: Mut(modules.SymEntry) = modules.sym_lookup_in(k, owner, seal, nm, modules.cur(k));
+    if factory_call_user(k, fn, ax.n_at(g, i + 3), out) == 1 { return i + 4; }
+    return 0;
+  }
+  if ctf.has_tok(g, i + 3, s.p_dot()) == 0 { return 0; }
+  let seal2: Mut(u64) = ax.box(k);
+  let m: u64 = modules.resolve_child_mod(k, owner, seal, nm, modules.cur(k), seal2);
+  if m == 0 { return 0; }
+  return path_call_at(k, g, i + 2, m, deref(seal2), out);
+};
+
+// A.B.C.MakeRing(args)：首段落到模块号，中间各段逐段下钻，最后一段当函子名查。
+let eval_path_call = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let seal: Mut(u64) = ax.box(k);
+  let m: u64 = ctf.find_used_mod(k, ax.n_sym(g, i), seal);
+  if m == 0 { return 0; }
+  return path_call_at(k, g, i, m, deref(seal), out);
+};
+
 let eval_factory_call = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
   if ax.is_name(g, i) == 0 { return 0; }
   if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
-    let fn: Mut(modules.SymEntry) = modules.find_here(k, ax.n_sym(g, i));
-    if is_null(fn) { return 0; }
-    if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
-    if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
-    call_user(k, fn, ax.n_at(g, i + 1), out);
-    return i + 2;
+    let fn: Mut(modules.SymEntry) = ctf.find_sym(k, ax.n_sym(g, i));
+    if factory_call_user(k, fn, ax.n_at(g, i + 1), out) == 1 { return i + 2; }
+    return 0;
   }
-  if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 3 < ax.n_count(g) and ax.is_name(g, i + 2) == 1 {
-    if ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
-      let m: u64 = modules.mod_lookup(k, ax.n_sym(g, i));
-      if m == 0 { return 0; }
-      let fn2: Mut(modules.SymEntry) = modules.sym_find(k, m - 1, ax.n_sym(g, i + 2));
-      if is_null(fn2) { return 0; }
-      if modules.sym_kind(fn2) != modules.sym_kind_func() { return 0; }
-      if tb.sig_types(modules.sym_sig(fn2)) == 0 { return 0; }
-      call_user(k, fn2, ax.n_at(g, i + 3), out);
-      return i + 4;
-    }
-  }
-  return 0;
+  return eval_path_call(k, g, i, out);
 };
 
 let type_binding = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64) -> u64 {

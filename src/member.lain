@@ -13,6 +13,8 @@ let bi = import("builtins");
 let cl = import("calls");
 let rf = import("refval");
 let gn = import("generics");
+let ireg = import("tyreg");
+let ctf = import("ctfor");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
@@ -43,14 +45,87 @@ let expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), o
 let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.typed_builtin(k, g, i, want, out); };
 let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.member_on_val(k, g, i, minp, want, out); };
 
-// 名字 . 名字：先认本源的枚举变体，再看导入模块成员，最后当变量字段。
+// 路径上的每一段：后面还有 .名字 时先试子模块，否则按成员落定。
+// 成员之后剩下的 .字段 与 [下标] 后缀由 core 的后缀流程接着处理。
+let member_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(g);
+  let name: u64 = n_sym(g, pos);
+  let more: u64 = if pos + 2 < n and is_name(g, pos + 2) == 1 and n_sym(g, pos + 1) == s.p_dot() { 1 } else { 0 };
+  if more == 1 {
+    let nb: Mut(u64) = ax.box(k);
+    let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), name, modules.cur(k), nb);
+    if nx != 0 {
+      deref(sn) = ax.box_get(nb);
+      return member_step(k, g, pos + 2, nx, sn, want, out);
+    }
+  }
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), name, modules.cur(k));
+  if is_null(e) {
+    let pv: Mut(modules.SymEntry) = modules.sym_find(k, m, name);
+    if (pv as u64) != 0 {
+      let pm: Ref(u8) = "private symbol";
+      let pd: u64 = ir.diag(k, 0, 1, pm, 14);
+    }
+    let um: Ref(u8) = "unbound module member";
+    let ud: u64 = ir.diag(k, 0, 1, um, 21);
+    st.st_fail(k, e_unbound());
+    return pos + 1;
+  }
+  return path_member(k, g, pos, e, want, out);
+};
+
+// 模块成员路径 M.x / A.B.x / A.B.fn(...) / A.B.Struct { ... } / A.B.Enum.Variant。
+let module_member = func(k: Mut(st.State), g: u64, i: u64, m0: u64, s0: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let sn: Mut(u64) = ax.box(k);
+  deref(sn) = s0;
+  return member_step(k, g, i + 2, m0, sn, want, out);
+};
+
+// 路径末段的成员：枚举变体先分流，其余交给成员分派。
+let path_member = func(k: Mut(st.State), g: u64, last: u64, e: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let nx: u64 = last + 1;
+  let n: u64 = n_count(g);
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_enum() and nx + 1 < n and is_group(g, nx) == 0 {
+    if n_sym(g, nx) == s.p_dot() and is_name(g, nx + 1) == 1 {
+      let sh: u64 = modules.sym_shape(e);
+      let vpos: u64 = nx + 1;
+      if vpos + 1 < n and is_group(g, vpos + 1) == 1 {
+        if delim_of(g, vpos + 1) == dl_brace() {
+          let made: u64 = variant_new(k, sh, n_sym(g, vpos), n_at(g, vpos + 1), out);
+          let gone: u64 = made;
+          return vpos + 2;
+        }
+        if delim_of(g, vpos + 1) == dl_paren() {
+          let got: u64 = variant_proj_call(k, sh, n_sym(g, vpos), n_at(g, vpos + 1), want, out);
+          let gone: u64 = got;
+          return vpos + 2;
+        }
+      }
+      st.st_fail(k, e_unsup());
+      return vpos + 1;
+    }
+  }
+  return member_entry(k, g, last, e, want, out);
+};
+
+// 名字 . 名字：本地变量、枚举变体与静态数据走运行期路径，其余按模块成员路径解析。
 let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let a: u64 = n_sym(g, i);
   let b: u64 = n_sym(g, i + 2);
-  let e: Mut(modules.SymEntry) = modules.find_here(k, a);
-  if (e as u64) != 0 {
-    if modules.sym_kind(e) == modules.sym_kind_enum() {
-      let sh: u64 = modules.sym_shape(e);
+  // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
+  if env.env_find(k, a) != 0 {
+    let bv: Mut(ty.Val) = new_val(k);
+    let bj: u64 = cl.var_ref(k, g, i, tnone(k), bv);
+    if st.st_ok(k) != 0 { return i + 3; }
+    ty.val_at(out, bv);
+    return member_on_val(k, g, i + 1, 0, want, out);
+  }
+  let le: Mut(modules.SymEntry) = ctf.find_sym(k, a);
+  if (le as u64) != 0 {
+    let lk: u64 = modules.sym_kind(le);
+    if lk == modules.sym_kind_enum() {
+      let sh: u64 = modules.sym_shape(le);
       if i + 3 < n_count(g) {
         if is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_brace() {
           let made: u64 = variant_new(k, sh, b, n_at(g, i + 3), out);
@@ -66,17 +141,13 @@ let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(t
       st.st_fail(k, e_unsup());
       return i + 3;
     }
+    if lk == modules.sym_kind_data() or lk == modules.sym_kind_value() {
+      return field_ref(k, g, i, a, b, out);
+    }
   }
-  let m: u64 = modules.mod_lookup(k, a);
-  if m != 0 { return member_ref(k, g, i, m - 1, b, want, out); }
-  // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
-  if env.env_find(k, a) != 0 {
-    let bv: Mut(ty.Val) = new_val(k);
-    let bj: u64 = cl.var_ref(k, g, i, tnone(k), bv);
-    if st.st_ok(k) != 0 { return i + 3; }
-    ty.val_at(out, bv);
-    return member_on_val(k, g, i + 1, 0, want, out);
-  }
+  let sn: Mut(u64) = ax.box(k);
+  let m0: u64 = ctf.find_used_mod(k, a, sn);
+  if m0 != 0 { return module_member(k, g, i, m0, ax.box_get(sn), want, out); }
   return field_ref(k, g, i, a, b, out);
 };
 
@@ -127,8 +198,13 @@ let agg_construct_sh = func(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.Val)
 // Name { 字段: 表达式 ... }
 let agg_construct = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
   let nm: u64 = n_sym(g, i);
-  let e: Mut(modules.SymEntry) = modules.find_here(k, nm);
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, nm);
   if is_null(e) { cl.fail_name(k, nm, e_unbound()); return i + 2; }
+  if modules.sym_kind(e) == modules.sym_kind_type_alias() {
+    let ash: u64 = ireg.ty_shape(k, modules.sym_qual(e));
+    agg_construct_sh(k, ash, n_at(g, i + 1), out);
+    return i + 2;
+  }
   let sh: u64 = modules.sym_shape(e);
   if sh == 0 { st.st_fail(k, e_type()); return i + 2; }
   agg_construct_sh(k, sh, n_at(g, i + 1), out);
@@ -176,43 +252,52 @@ let field_ref = func(k: Mut(st.State), g: u64, i: u64, var_sym: u64, fname: u64,
   return i + 3;
 };
 
-// 导入模块成员：M.bump(...)、M.answer、M.table
-let member_ref = func(k: Mut(st.State), g: u64, i: u64, m: u64, name: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
-  let e: Mut(modules.SymEntry) = modules.sym_find(k, m, name);
-  if is_null(e) { return cl.fail_name(k, name, e_unbound()); }
+// 已知符号的成员引用：M.bump(...)、M.answer、M.table、M.Struct { ... }、M.gen(...)。
+let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let kd: u64 = modules.sym_kind(e);
   let q: u64 = modules.sym_qual(e);
-  if kd == modules.sym_kind_func() {
-    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
-      if delim_of(g, i + 3) == dl_paren() {
-        let j: u64 = cl.call_sig(k, q, modules.sym_sig(e), n_at(g, i + 3), want, out);
-        return i + 4;
-      }
+  let has_call: u64 = if i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_paren() { 1 } else { 0 };
+  if kd == modules.sym_kind_mod() or kd == modules.sym_kind_sig() {
+    let mm: Ref(u8) = "module is compile-time only";
+    let md: u64 = ir.diag(k, 0, 1, mm, 27);
+    st.st_fail(k, e_unsup());
+    return i + 1;
+  }
+  if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() {
+    if has_call == 1 {
+      let j: u64 = cl.call_sig(k, q, modules.sym_sig(e), n_at(g, i + 1), want, out);
+      return i + 2;
     }
     st.st_fail(k, e_ast());
-    return i + 3;
+    return i + 1;
   }
   if kd == modules.sym_kind_struct() {
-    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
-      if delim_of(g, i + 3) == dl_brace() {
-        let made: u64 = agg_construct_sh(k, modules.sym_shape(e), n_at(g, i + 3), out);
-        let gone: u64 = made;
-        return i + 4;
-      }
+    if i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
+      let made: u64 = agg_construct_sh(k, modules.sym_shape(e), n_at(g, i + 1), out);
+      let gone: u64 = made;
+      return i + 2;
     }
     st.st_fail(k, e_ast());
-    return i + 3;
+    return i + 1;
+  }
+  if kd == modules.sym_kind_type_alias() {
+    if i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
+      let sh: u64 = ireg.ty_shape(k, modules.sym_qual(e));
+      let made2: u64 = agg_construct_sh(k, sh, n_at(g, i + 1), out);
+      let gone2: u64 = made2;
+      return i + 2;
+    }
+    st.st_fail(k, e_ast());
+    return i + 1;
   }
   if kd == modules.sym_kind_generic() {
-    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
-      if delim_of(g, i + 3) == dl_paren() {
-        let nb: Mut(u64) = ax.box(k);
-        gn.call_generic(k, e, g, i + 2, want, out, nb);
-        return ax.box_get(nb);
-      }
+    if has_call == 1 {
+      let nb: Mut(u64) = ax.box(k);
+      gn.call_generic(k, e, g, i, want, out, nb);
+      return ax.box_get(nb);
     }
     st.st_fail(k, e_ast());
-    return i + 3;
+    return i + 1;
   }
   let vt: Mut(u8) = modules.sym_sig(e);
   let res: u64 = ir.fresh_t(k);
@@ -221,7 +306,7 @@ let member_ref = func(k: Mut(st.State), g: u64, i: u64, m: u64, name: u64, want:
   let t2: Mut(ty.Ty) = new_ty(k);
   if (vt as u64) != 0 { let cp: u64 = ty.ty_at(t2, ptr_cast(Mut(ty.Ty), vt)); } else { let nn: u64 = ty.ty_none(t2); }
   ty.val_ref(out, res, t2);
-  return i + 3;
+  return i + 1;
 };
 
 // 内建调用：实参先各自求值，再由 builtins 按名字分派。

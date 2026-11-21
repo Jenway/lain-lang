@@ -203,11 +203,16 @@ let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 {
   return i + 1;
 };
 
-// 名字型类型：标量走 ty_of_sym，struct / enum 名走模块符号表并带上形状号。
+// 名字型类型：标量走 ty_of_sym，struct / enum 名走模块符号表并带上形状号，
+// 类型别名（let Self = T;）直接投影符号上记的类型号。
 let named_type = func(k: Mut(st.State), name: u64, out: Mut(ty.Ty)) -> u64 {
-  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
   if is_null(e) { st.st_fail(k, 21); return 0; }
   let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_type_alias() {
+    let pr: u64 = ireg.project(k, modules.sym_qual(e), out);
+    return 1;
+  }
   if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() { st.st_fail(k, 22); return 0; }
   let sh: u64 = modules.sym_shape(e);
   let a: u64 = ty.ty_addr(out);
@@ -215,23 +220,65 @@ let named_type = func(k: Mut(st.State), name: u64, out: Mut(ty.Ty)) -> u64 {
   return sh;
 };
 
-// 限定类型名 M.Name。
-let qual_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  let alias: u64 = n_sym(g, i);
-  let name: u64 = n_sym(g, i + 2);
-  let m: u64 = modules.mod_lookup(k, alias);
-  if m == 0 { st.st_fail(k, e_type()); return i + 3; }
-  let e: Mut(modules.SymEntry) = modules.sym_find(k, m - 1, name);
-  if is_null(e) { st.st_fail(k, e_type()); return i + 3; }
-  let kd: u64 = modules.sym_kind(e);
-  if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() {
-    st.st_fail(k, e_type());
-    return i + 3;
+// 从 pos 起的点号链里最后一个名字的下标（pos 本身是名字）。
+let seg_last = func(g: u64, pos: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if pos + 2 < n and is_name(g, pos + 2) == 1 and n_sym(g, pos + 1) == s.p_dot() {
+    return seg_last(g, pos + 2);
   }
-  let sh: u64 = modules.sym_shape(e);
-  let a: u64 = ty.ty_addr(out);
-  let b: u64 = ty.ty_set_sh(out, sh);
-  return i + 3;
+  return pos;
+};
+
+// 沿 A.B.C 的前缀逐跳落到模块号，seal 一路经 sn 传下去；断链回 0。
+let path_walk = func(k: Mut(st.State), g: u64, pos: u64, last: u64, m: u64, sn: Mut(u64)) -> u64 {
+  if pos >= last { return m; }
+  let nb: Mut(u64) = ax.box(k);
+  let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), n_sym(g, pos), modules.cur(k), nb);
+  if nx == 0 { return 0; }
+  deref(sn) = ax.box_get(nb);
+  return path_walk(k, g, pos + 2, last, nx, sn);
+};
+
+// 限定类型名 M.Name / A.B.C.Name，以及编译期工厂调用 A.B.Factory(实参)。
+let qual_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
+  let last: u64 = seg_last(g, i);
+  let after: u64 = last + 1;
+  if after < n_count(g) and is_group(g, after) == 1 and delim_of(g, after) == dl_paren() {
+    let cf: u64 = ctfn.type_from_call(k, g, i, out);
+    if cf != 0 { return cf; }
+    if st.st_ok(k) != 0 { return after + 1; }
+    st.st_fail(k, e_type());
+    return after + 1;
+  }
+  let sn: Mut(u64) = ax.box(k);
+  let m0: u64 = ctf.find_used_mod(k, n_sym(g, i), sn);
+  if m0 == 0 { st.st_fail(k, e_type()); return after; }
+  let m: u64 = path_walk(k, g, i + 2, last, m0, sn);
+  if m == 0 { st.st_fail(k, e_type()); return after; }
+  let target: u64 = n_sym(g, last);
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), target, modules.cur(k));
+  if is_null(e) {
+    let pv: Mut(modules.SymEntry) = modules.sym_find(k, m, target);
+    if (pv as u64) != 0 {
+      let pm: Ref(u8) = "private symbol";
+      let pd: u64 = ir.diag(k, 0, 1, pm, 14);
+    }
+    st.st_fail(k, e_type());
+    return after;
+  }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
+    let sh: u64 = modules.sym_shape(e);
+    let a: u64 = ty.ty_addr(out);
+    let b: u64 = ty.ty_set_sh(out, sh);
+    return after;
+  }
+  if kd == modules.sym_kind_type_alias() {
+    let pr: u64 = ireg.project(k, modules.sym_qual(e), out);
+    return after;
+  }
+  st.st_fail(k, e_type());
+  return after;
 };
 
 // --- 复合类型工厂 -------------------------------------------------------
@@ -257,20 +304,18 @@ let factory_slice = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty), mutv
   return i + 2;
 };
 
+// 数组长度：字面量、编译期常量名，或任意编译期常量表达式。
 let count_at = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   if i >= n_count(g) { st.st_fail(k, e_type()); return 0; }
   if ax.is_digit_token(g, i) == 1 {
     let h: u64 = n_at(g, i);
     return ax.num_value(ax.lit_addr(h), ax.lit_len(h));
   }
-  if is_name(g, i) == 1 {
-    let bv: Mut(ctf.CtVal) = ctf.lookup(k, n_sym(g, i));
-    if (bv as u64) != 0 {
-      if ctf.v_kind(bv) == 0 { return ctf.v_a(bv); }
-    }
-  }
-  st.st_fail(k, e_type());
-  return 0;
+  let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = ctf.eval_expr(k, g, i, 0, v);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != n_count(g) or ctf.v_kind(v) != 0 { st.st_fail(k, e_type()); return 0; }
+  return ctf.v_a(v);
 };
 
 let factory_array = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
@@ -346,6 +391,12 @@ let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 
     ty.ty_set_sh(out, tb.type_shape(k));
     return i + 1;
   }
+  // Module 是编译期的一等模块类型：物理上同样不可物化，只携带逻辑形状。
+  if sym == s.t_module() {
+    let tid: u64 = tb.module_tid(k);
+    let a: u64 = ireg.project(k, tid, out);
+    return i + 1;
+  }
   if sym == s.k_ro() { return parse_type(k, g, i + 1, out); }
   if is_name(g, i) == 1 and i + 1 < n_count(g) and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() {
@@ -381,10 +432,6 @@ let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 
     return i + 1;
   }
   if is_name(g, i) == 1 and i + 2 < n_count(g) and n_sym(g, i + 1) == s.p_dot() {
-    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 and ax.delim_of(g, i + 3) == dl_paren() {
-      let cf2: u64 = ctfn.type_from_call(k, g, i, out);
-      if cf2 != 0 { return cf2; }
-    }
     return qual_type(k, g, i, out);
   }
   if ty.ty_of_sym(sym, out) == 1 { return i + 1; }

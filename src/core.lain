@@ -331,6 +331,34 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       return me.dotted(k, g, i, want, out);
     }
   }
+  // Factory(实参).成员：函子调用返回 Module 时直接取它的成员。
+  if i + 3 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
+    if delim_of(g, i + 1) == dl_paren() and is_group(g, i + 2) == 0 and n_sym(g, i + 2) == s.p_dot() and is_name(g, i + 3) == 1 {
+      let mv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+      let mj: u64 = ctfn.eval_factory_call(k, g, i, mv);
+      if mj != 0 {
+        if st.st_ok(k) != 0 { return mj; }
+        if ctf.v_kind(mv) == 9 {
+          let modv: u64 = ctf.v_a(mv);
+          let seal: u64 = ctf.v_b(mv);
+          let me_e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, modv, seal, n_sym(g, i + 3), modules.cur(k));
+          if is_null(me_e) {
+            let um: Ref(u8) = "unbound module member";
+            let ud: u64 = ir.diag(k, 0, 1, um, 21);
+            st.st_fail(k, e_unbound());
+            return i + 4;
+          }
+          return me.member_entry(k, g, i + 3, me_e, want, out);
+        }
+        if ctf.v_kind(mv) == 1 {
+          let tm: Ref(u8) = "type is compile-time only";
+          let td: u64 = ir.diag(k, 0, 1, tm, 25);
+          st.st_fail(k, e_unsup());
+          return i + 4;
+        }
+      }
+    }
+  }
   // Name(args...) { 字段... }：类型工厂构造结果直接初始化结构体。
   if i + 2 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
     if delim_of(g, i + 1) == dl_paren() and delim_of(g, i + 2) == dl_brace() {
@@ -338,6 +366,12 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       let fj: u64 = ctfn.eval_factory_call(k, g, i, tv);
       if fj != 0 {
         if st.st_ok(k) != 0 { return i + 3; }
+        if ctf.v_kind(tv) != 1 {
+          let nm0: Ref(u8) = "type factory expected";
+          let nd0: u64 = ir.diag(k, 0, 1, nm0, 21);
+          st.st_fail(k, e_type());
+          return i + 3;
+        }
         let sh: u64 = ireg.ty_shape(k, ctf.v_a(tv));
         if sh == 0 { st.st_fail(k, e_type()); return i + 3; }
         me.agg_construct_sh(k, sh, n_at(g, i + 2), out);
@@ -391,7 +425,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
         }
       }
       // ?{} 泛型函数调用：单态化调度
-      let ge: Mut(modules.SymEntry) = modules.find_here(k, sym);
+      let ge: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
       if (ge as u64) != 0 {
         if modules.sym_kind(ge) == modules.sym_kind_generic() {
           let nb: Mut(u64) = box(k);

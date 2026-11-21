@@ -2,6 +2,7 @@
 // 值单元 24 字节：[种类@0, 值一@8, 值二@16]：
 //   0 整数/SymId、1 Type(TypeId)、2 FieldInfo(类型, 下标)、3 字节切片、4 字段列表(struct TypeId)。
 // 绑定栈住在 st_ctbase 里，每条 32 字节：[名字符号@0, 种类@8, 值一@16, 值二@24]。
+// 种类 10 是块级 use 激活的模块，这类条目名字固定为 0。
 // 本模块只依赖 state/types/ast/sym/agg/ir/modules/tyreg，单向无环。
 let st = import("state");
 let ty = import("types");
@@ -98,6 +99,88 @@ let set_scan = func(k: Mut(st.State), name: u64, kind: u64, a: u64, b: u64, used
 };
 let set_binding = func(k: Mut(st.State), name: u64, v: Mut(CtVal)) -> u64 {
   return set_scan(k, name, v_kind(v), v_a(v), v_b(v), st.st_ctused(k));
+};
+
+// --- 块级 use M;：激活模块而不引入短名 --------------------------------------
+// 条目沿用绑定栈，名字固定为 0；lookup 按名字比较，永远不会把它当成具名变量。
+// 种类 10 表示「本块激活的模块」，值一是模块号，值二是封签模块号。
+let push_use = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
+  return bind(k, 0, 10, modv, seal);
+};
+
+let scan_use_sym = func(k: Mut(st.State), name: u64, used: u64) -> Mut(modules.SymEntry) {
+  if used == 0 { return null_ref(Mut(modules.SymEntry)); }
+  let back: u64 = used - 32;
+  let b: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if b.kind == 10 {
+    let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, b.a, b.b, name, modules.cur(k));
+    if is_null(e) == 0 { return e; }
+  }
+  return scan_use_sym(k, name, back);
+};
+
+// 名字解析：本模块优先，其次是块内 use 激活的模块，由近及远。
+let find_sym = func(k: Mut(st.State), name: u64) -> Mut(modules.SymEntry) {
+  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  if is_null(e) == 0 { return e; }
+  return scan_use_sym(k, name, st.st_ctused(k));
+};
+
+let scan_use_mod = func(k: Mut(st.State), name: u64, used: u64, out_seal: Mut(u64)) -> u64 {
+  if used == 0 { return 0; }
+  let back: u64 = used - 32;
+  let b: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if b.kind == 10 {
+    let m: u64 = modules.resolve_child_mod(k, b.a, b.b, name, modules.cur(k), out_seal);
+    if m != 0 { return m; }
+  }
+  return scan_use_mod(k, name, back, out_seal);
+};
+
+// 名字当作模块解析：先看编译期绑定里的 Module 值，再看本模块的子模块，
+// 最后逐条走块内 use 激活的模块。
+let find_used_mod = func(k: Mut(st.State), name: u64, out_seal: Mut(u64)) -> u64 {
+  let cv: Mut(CtVal) = lookup(k, name);
+  if is_null(cv) == 0 {
+    if v_kind(cv) == 9 {
+      deref(out_seal) = v_b(cv);
+      return v_a(cv);
+    }
+  }
+  let m: u64 = modules.resolve_child_mod(k, modules.cur(k), 0, name, modules.cur(k), out_seal);
+  if m != 0 { return m; }
+  return scan_use_mod(k, name, st.st_ctused(k), out_seal);
+};
+
+// --- 绑定栈快照 -------------------------------------------------------------
+// 函子体在过程里实例化时，它的 phase2 会排到 #proc 结束之后才编；那时块级
+// use 的绑定栈已经出栈。先用快照把活跃条目挪到持久区，编完再照原样压回去。
+let snap_save = func(k: Mut(st.State), out_cnt: Mut(u64)) -> Mut(u8) {
+  let cnt: u64 = st.st_ctused(k) / 32;
+  deref(out_cnt) = cnt;
+  if cnt == 0 { return null_ref(Mut(u8)); }
+  let buf: Mut(u8) = st.st_ralloc(k, cnt * 32);
+  let base: Mut(u8) = st.st_ctbase(k);
+  let i: u64 = loop cp(i: u64 = 0) while i < cnt {
+    let src: Mut(CtBind) = ptr_cast(Mut(CtBind), base + i * 32);
+    let dst: Mut(CtBind) = ptr_cast(Mut(CtBind), buf + i * 32);
+    dst.name = src.name;
+    dst.kind = src.kind;
+    dst.a = src.a;
+    dst.b = src.b;
+    i = i + 1;
+  };
+  return buf;
+};
+
+let snap_restore = func(k: Mut(st.State), buf: Mut(u8), cnt: u64) -> u64 {
+  if is_null(buf) == 1 { return 0; }
+  let i: u64 = loop rs(i: u64 = 0) while i < cnt {
+    let src: Mut(CtBind) = ptr_cast(Mut(CtBind), buf + i * 32);
+    let b: u64 = bind(k, src.name, src.kind, src.a, src.b);
+    i = i + 1;
+  };
+  return cnt;
 };
 
 // --- 直接读 agg / tyreg 的形状查询（不依赖冻结反射快照，无 8 字段上限） --------

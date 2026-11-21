@@ -11,6 +11,7 @@ let bi = import("builtins");
 let env = import("env");
 let ireg = import("tyreg");
 let tb = import("tbuild");
+let ctf = import("ctfor");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
@@ -22,7 +23,7 @@ let val_idx = func(ab: Mut(ty.Val), idx: u64) -> Mut(ty.Val) {
 let call_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let callee: u64 = ax.n_sym(g, i);
   let argsg: u64 = ax.n_at(g, i + 1);
-  let e: Mut(modules.SymEntry) = modules.find_here(k, callee);
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, callee);
   if is_null(e) { ty.val_none(out); fail_name(k, callee, ax.e_unbound()); return i + 2; }
   let kd: u64 = modules.sym_kind(e);
   if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() {
@@ -145,7 +146,8 @@ let call_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64, ab:
   return j;
 };
 
-// 名字取值：局部槽 → 顶层过程引用（保留完整 Fn 类型）→ 顶层 let（零参过程）。
+// 名字取值：局部槽 → 顶层过程引用（保留完整 Fn 类型）→ 顶层 let（零参过程）→
+// 编译期常量（只有整数可以在这里折成字面量）。
 let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let sym: u64 = ax.n_sym(g, i);
   let off: u64 = env.env_find(k, sym);
@@ -155,9 +157,15 @@ let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(
     cx.slot_get(k, env.env_slot(k, off), t, out);
     return i + 1;
   }
-  let se: Mut(modules.SymEntry) = modules.find_here(k, sym);
+  let se: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
   if (se as u64) != 0 {
     let sk: u64 = modules.sym_kind(se);
+    if sk == modules.sym_kind_type_alias() {
+      let m: Ref(u8) = "type is compile-time only";
+      let d: u64 = ir.diag(k, 0, 1, m, 25);
+      st.st_fail(k, ax.e_unsup());
+      return i + 1;
+    }
     if sk == modules.sym_kind_func() or sk == modules.sym_kind_extern() {
       let fid: u64 = modules.sym_fnid(se);
       if fid != 0 {
@@ -171,20 +179,29 @@ let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(
         return i + 1;
       }
     }
-  }
-  let e: Mut(modules.SymEntry) = modules.find_here(k, sym);
-  if (e as u64) != 0 {
-    let kd: u64 = modules.sym_kind(e);
-    if kd == modules.sym_kind_data() or kd == modules.sym_kind_value() {
-      let vt: Mut(u8) = modules.sym_sig(e);
+    if sk == modules.sym_kind_data() or sk == modules.sym_kind_value() {
+      let vt: Mut(u8) = modules.sym_sig(se);
       let res: u64 = ir.fresh_t(k);
       let rc: u64 = ir.args_reset(k);
-      let ins: u64 = ir.emit_call(k, res, modules.sym_qual(e), 0);
+      let ins: u64 = ir.emit_call(k, res, modules.sym_qual(se), 0);
       let t2: Mut(ty.Ty) = ax.new_ty(k);
       if (vt as u64) != 0 { let cp: u64 = ty.ty_at(t2, ptr_cast(Mut(ty.Ty), vt)); } else { let nn: u64 = ty.ty_none(t2); }
       ty.val_ref(out, res, t2);
       return i + 1;
     }
+  }
+  let cv: Mut(ctf.CtVal) = ctf.lookup(k, sym);
+  if (cv as u64) != 0 {
+    if ctf.v_kind(cv) == 0 {
+      let t: Mut(ty.Ty) = cx.t64(k);
+      ty.val_lit(out, ctf.v_a(cv), t);
+      return i + 1;
+    }
+    let m: Ref(u8) = "compile-time value used at runtime";
+    let d: u64 = ir.diag(k, 0, 1, m, 34);
+    ty.val_none(out);
+    st.st_fail(k, ax.e_type());
+    return i + 1;
   }
   fail_name(k, sym, ax.e_unbound());
   return i + 1;

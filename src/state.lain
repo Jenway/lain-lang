@@ -23,7 +23,7 @@ let State = struct {
   err: u64,
   base: Mut(u8),
   src: u64,
-  pad56: u64,
+  vmod_seq: u64,
   term: u64,
   cap: u64,
   scratch: Mut(u8),
@@ -79,13 +79,18 @@ let State = struct {
   typesh: u64,
   ctcache: Mut(u8),
   ctcache_n: u64,
-  genblk: Mut(u8)
+  genblk: Mut(u8),
+  in_proc: u64,
+  fq_base: Mut(u8),
+  fq_used: u64,
+  fq_cap: u64,
+  vmod: u64
 };
 
 // cap：绑定栈字节数。arena 与持久分配都跨源存活：一次编译
 // 里所有源的形状、类型、符号必须同时有效。
 let st_new = func(cap: u64) -> Mut(State) {
-  let raw: Mut(u8) = lain2_mem_alloc(512, 8);
+  let raw: Mut(u8) = lain2_mem_alloc(552, 8);
   let b: Mut(u8) = lain2_mem_alloc(cap, 8);
   let s: Mut(u8) = lain2_mem_alloc(256, 8);
   let f: Mut(u8) = lain2_mem_alloc(1024, 8);
@@ -95,20 +100,26 @@ let st_new = func(cap: u64) -> Mut(State) {
   let d: Mut(u8) = lain2_mem_alloc(65536, 8);
   let g: Mut(u8) = lain2_mem_alloc(64, 8);
   let h: Mut(u8) = lain2_mem_alloc(16777216, 8);
-  let m: Mut(u8) = lain2_mem_alloc(16384, 8);
+  let m: Mut(u8) = lain2_mem_alloc(65536, 8);
   let t: Mut(u8) = lain2_mem_alloc(4194304, 8);
-  let u: Mut(u8) = lain2_mem_alloc(4096, 8);
+  let u: Mut(u8) = lain2_mem_alloc(8192, 8);
   let v: Mut(u8) = lain2_mem_alloc(65536, 8);
   let x: Mut(u8) = lain2_mem_alloc(32, 8);
   let gb: Mut(u8) = lain2_mem_alloc(128, 8);
-  let words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), 64);
-  let w: u64 = loop w(j: u64 = 0) while j < 64 {
+  let fq: Mut(u8) = lain2_mem_alloc(32768, 8);
+  let words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), 69);
+  let w: u64 = loop w(j: u64 = 0) while j < 69 {
     words[j] = 0;
     j = j + 1;
   };
   let gb_words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), gb), 16);
   let gz: u64 = loop gzw(j: u64 = 0) while j < 16 {
     gb_words[j] = 0;
+    j = j + 1;
+  };
+  let fq_words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), fq), 4096);
+  let fz: u64 = loop fqz(j: u64 = 0) while j < 4096 {
+    fq_words[j] = 0;
     j = j + 1;
   };
   let p: Mut(State) = ptr_cast(Mut(State), raw);
@@ -130,17 +141,23 @@ let st_new = func(cap: u64) -> Mut(State) {
   p.shpcap = 16777216;
   p.modbase = m;
   p.modused = 0;
-  p.modcap = 16384;
+  p.modcap = 65536;
   p.symbase = t;
   p.symused = 0;
   p.symcap = 4194304;
   p.pndbase = u;
   p.pndused = 0;
-  p.pndcap = 4096;
+  p.pndcap = 8192;
   p.ctbase = v;
   p.ctcap = 65536;
   p.ctret = x;
   p.genblk = gb;
+  p.vmod_seq = 1000;
+  p.in_proc = 0;
+  p.fq_base = fq;
+  p.fq_used = 0;
+  p.fq_cap = 32768;
+  p.vmod = 0;
   return p;
 };
 
@@ -260,16 +277,16 @@ let st_symused = func(p: Mut(State)) -> u64 { return p.symused; };
 let st_set_symused = func(p: Mut(State), v: u64) -> u64 { p.symused = v; return v; };
 let st_symcap = func(p: Mut(State)) -> u64 { return p.symcap; };
 
-// 匿名过程队列：条目 40 字节 [限定名, 源号, 根节点, 形参组, 签名]。
+// 匿名过程队列：条目 48 字节 [限定名, 源号, 根节点, 形参组, 签名, 预留模块号]。
 let st_pndbase = func(p: Mut(State)) -> Mut(u8) { return p.pndbase; };
 let st_pndused = func(p: Mut(State)) -> u64 { return p.pndused; };
 let st_set_pndused = func(p: Mut(State), v: u64) -> u64 { p.pndused = v; return v; };
 let st_pndcap = func(p: Mut(State)) -> u64 { return p.pndcap; };
 
 // 匿名过程队列的写入与读出。
-let st_q_add = func(p: Mut(State)) -> Mut(u8) { return st_pnd_new(p, 40); };
-let st_q_count = func(p: Mut(State)) -> u64 { return st_pndused(p) / 40; };
-let st_q_at = func(p: Mut(State), i: u64) -> Mut(u8) { return st_pndbase(p) + i * 40; };
+let st_q_add = func(p: Mut(State)) -> Mut(u8) { return st_pnd_new(p, 48); };
+let st_q_count = func(p: Mut(State)) -> u64 { return st_pndused(p) / 48; };
+let st_q_at = func(p: Mut(State), i: u64) -> Mut(u8) { return st_pndbase(p) + i * 48; };
 let st_qhead = func(p: Mut(State)) -> u64 { return p.qhead; };
 let st_set_qhead = func(p: Mut(State), v: u64) -> u64 { p.qhead = v; return v; };
 
@@ -425,6 +442,31 @@ let st_set_ctcache_n = func(p: Mut(State), v: u64) -> u64 { p.ctcache_n = v; ret
 
 // Phase 2B 拓展块（128 字节）：given 栈 / 单态化缓存 / 泛型待编队列。
 let st_genblk = func(p: Mut(State)) -> Mut(u8) { return p.genblk; };
+
+// 虚拟模块序号：内联 module 与函子实例化共用一条单调递增的编号流。
+let st_vmod_seq = func(p: Mut(State)) -> u64 { return p.vmod_seq; };
+
+let st_next_vmod = func(p: Mut(State)) -> u64 {
+  let n: u64 = p.vmod_seq;
+  if n < 1000 { n = 1000; }
+  p.vmod_seq = n + 1;
+  return n;
+};
+
+// 当前正在求值的过程编号（0 表示不在过程体内）。
+let st_in_proc = func(p: Mut(State)) -> u64 { return p.in_proc; };
+let st_set_in_proc = func(p: Mut(State), v: u64) -> u64 { p.in_proc = v; return v; };
+
+// 限定名拼装区：跨模块路径（A$B$name）在此拼接，32768 字节。
+let st_fqbase = func(p: Mut(State)) -> Mut(u8) { return p.fq_base; };
+let st_fqused = func(p: Mut(State)) -> u64 { return p.fq_used; };
+let st_set_fqused = func(p: Mut(State), v: u64) -> u64 { p.fq_used = v; return v; };
+let st_fqcap = func(p: Mut(State)) -> u64 { return p.fq_cap; };
+
+// 词法作用域编号覆盖：0 表示沿用源编号 p.src。
+let st_vmod = func(p: Mut(State)) -> u64 { return p.vmod; };
+let st_set_vmod = func(p: Mut(State), v: u64) -> u64 { p.vmod = v; return v; };
+let st_scope = func(p: Mut(State)) -> u64 { if p.vmod != 0 { return p.vmod; } return p.src; };
 
 let st_fail = func(p: Mut(State), code: u64) -> u64 {
   p.err = code;

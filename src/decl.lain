@@ -20,6 +20,7 @@ let ctf = import("ctfor");
 let gn = import("generics");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
+extern decl_compile_vmod_p2(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 = lainc_compile_functor_mod_p2;
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
@@ -62,7 +63,7 @@ let proc_name = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   if i >= 2 and ax.is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() {
     return name;
   }
-  return modules.qual(k, st.st_src(k), name);
+  return modules.qual(k, st.st_scope(k), name);
 };
 
 let begin_proc = func(k: Mut(st.State), q: u64, rt: Mut(ty.Ty)) -> u64 {
@@ -73,6 +74,8 @@ let begin_proc = func(k: Mut(st.State), q: u64, rt: Mut(ty.Ty)) -> u64 {
   st.st_set_retw(k, ty.tw(rt));
   st.st_set_retsg(k, ty.tsg(rt));
   st.st_set_retsh(k, ty.tsh(rt));
+  let ip: u64 = st.st_in_proc(k);
+  let nip: u64 = st.st_set_in_proc(k, ip + 1);
   return ir.proc_begin(k, q);
 };
 
@@ -92,9 +95,8 @@ let bind_gen_vals = func(k: Mut(st.State), nms: Mut(u64), vals: Mut(ctf.CtVal), 
   return bind_gen_vals(k, nms, vals, i + 1, n);
 };
 
-let flush_gen = func(k: Mut(st.State)) -> u64 {
-  let ge: Mut(gn.GenQRec) = gn.genq_pending(k);
-  if is_null(ge) { return 0; }
+// 处理已经弹出的泛型队列条目；调用方负责弹出，避免重复弹出丢条目。
+let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   let q: u64 = ge.mangled_q;
   let tpl_e: Mut(modules.SymEntry) = ge.tpl_e;
   let nct: u64 = ge.nct;
@@ -103,14 +105,18 @@ let flush_gen = func(k: Mut(st.State)) -> u64 {
   let dp: u64 = ge.depth;
   let hdr: Mut(gn.GenHdr) = ptr_cast(Mut(gn.GenHdr), modules.sym_sig(tpl_e));
   let src: u64 = hdr.src;
+  let gm: u64 = hdr.modv;
   let root: u64 = lain2_source_root(src);
   let pg: u64 = ax.n_at(root, hdr.pg_i);
   let ret_i: u64 = hdr.ret_i;
   let bodyg: u64 = ax.n_at(root, hdr.body_i);
   let saved_src: u64 = st.st_src(k);
+  let saved_vmod: u64 = st.st_vmod(k);
   let saved_dp: u64 = gn.gen_depth(k);
   let cm: u64 = ctf.mark(k);
+  let gvm: u64 = if gm >= 1000 { gm } else { 0 };
   st.st_set_src(k, src);
+  st.st_set_vmod(k, gvm);
   gn.set_gen_depth(k, dp);
   bind_gen_vals(k, nms, vals, 0, nct);
   let rt: Mut(ty.Ty) = new_ty(k);
@@ -119,28 +125,82 @@ let flush_gen = func(k: Mut(st.State)) -> u64 {
   compile_body_with(k, pg, rt, bodyg, q);
   ctf.release(k, cm);
   gn.set_gen_depth(k, saved_dp);
-  st.st_set_src(k, saved_src);
-  return flush_gen(k);
-};
-
-// 匿名过程与泛型单态化队列按批排空。
-let flush_queue = func(k: Mut(st.State)) -> u64 {
-  let e: Mut(an.AnonEntry) = an.pending(k);
-  if is_null(e) { return flush_gen(k); }
-  let q: u64 = an.entry_name(e);
-  let src: u64 = an.entry_src(e);
-  let g: u64 = an.entry_group(e);
-  let node: u64 = an.entry_node(e);
-  let saved_src: u64 = st.st_src(k);
-  st.st_set_src(k, src);
-  let b: u64 = compile_body(k, g, node, q);
-  if st.st_ok(k) != 0 {
-    // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
-    let m: Ref(u8) = "anonymous func cannot capture";
-    let d: u64 = ir.diag(k, 0, 2, m, 29);
-  }
+  st.st_set_vmod(k, saved_vmod);
   st.st_set_src(k, saved_src);
   return flush_queue(k);
+};
+
+// 函子 phase2 队列，条目 40 字节：[虚拟模块号, 源号, 体组, 绑定快照, 快照条数]。
+let FqRec = struct {
+  vmod: u64,
+  src: u64,
+  bodyg: u64,
+  snap: Mut(u8),
+  cnt: u64
+};
+
+let fq_at = func(k: Mut(st.State), i: u64) -> Mut(FqRec) {
+  return ptr_cast(Mut(FqRec), st.st_fqbase(k) + i * 40);
+};
+
+// 队列里还有待编条目（只看不弹；弹出会丢掉条目）。
+let queue_pending = func(k: Mut(st.State)) -> u64 {
+  if st.st_qhead(k) < st.st_q_count(k) { return 1; }
+  let gb: Mut(gn.GenQBlk) = gn.qblk(k);
+  if is_null(gb.qbase) == 0 and gb.qhead < gb.qn { return 1; }
+  return 0;
+};
+
+// 过程体内实例化的函子等到所有过程收尾后补编 phase2；内层重入时已处理的条目
+// 用 vmod = 0 标记，不会被重编。
+let flush_fq = func(k: Mut(st.State)) -> u64 {
+  let total: u64 = st.st_fqused(k) / 40;
+  let done: u64 = loop w(i: u64 = 0) while i < st.st_fqused(k) / 40 {
+    let r: Mut(FqRec) = fq_at(k, i);
+    let vmod: u64 = r.vmod;
+    if vmod != 0 {
+      r.vmod = 0;
+      if st.st_ok(k) == 0 {
+        let a: u64 = decl_compile_vmod_p2(k, vmod, r.src, r.bodyg, r.snap, r.cnt);
+      }
+      // phase2 可能再排进匿名过程、泛型单态或新的函子实例，先把它们排空。
+      let more: u64 = if queue_pending(k) == 1 or st.st_fqused(k) / 40 > total { 1 } else { 0 };
+      if more == 1 { return flush_queue(k); }
+    }
+    i = i + 1;
+  };
+  st.st_set_fqused(k, 0);
+  return done;
+};
+
+// 匿名过程、泛型单态化与函子 phase2 按批排空：每轮处理一条，再回到队头。
+let flush_queue = func(k: Mut(st.State)) -> u64 {
+  let e: Mut(an.AnonEntry) = an.pending(k);
+  if is_null(e) == 0 {
+    let q: u64 = an.entry_name(e);
+    let src: u64 = an.entry_src(e);
+    let g: u64 = an.entry_group(e);
+    let node: u64 = an.entry_node(e);
+    let am: u64 = an.entry_modv(e);
+    let saved_src: u64 = st.st_src(k);
+    let saved_vmod: u64 = st.st_vmod(k);
+    let avm: u64 = if am >= 1000 { am } else { 0 };
+    st.st_set_src(k, src);
+    st.st_set_vmod(k, avm);
+    let b: u64 = compile_body(k, g, node, q);
+    if st.st_ok(k) != 0 {
+      // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
+      let m: Ref(u8) = "anonymous func cannot capture";
+      let d: u64 = ir.diag(k, 0, 2, m, 29);
+    }
+    st.st_set_vmod(k, saved_vmod);
+    st.st_set_src(k, saved_src);
+    return flush_queue(k);
+  }
+  let ge: Mut(gn.GenQRec) = gn.genq_pending(k);
+  if is_null(ge) == 0 { return flush_gen_rec(k, ge); }
+  if st.st_in_proc(k) != 0 { return 0; }
+  return flush_fq(k);
 };
 
 let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u64, q: u64) -> u64 {
@@ -148,6 +208,7 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
   let sr: u64 = agg.sret_ty(rt);
+  let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, rt);
   let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
   let pnames: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
@@ -181,6 +242,7 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   let guard: u64 = emit_ret_guard(k, rt, term);
   ir.region_end(k);
   ir.proc_end(k);
+  let ipr: u64 = st.st_set_in_proc(k, ip0);
   return flush_queue(k);
 };
 
@@ -220,7 +282,7 @@ let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 // let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
 let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) -> u64 {
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
-  let q: u64 = if is_null(se) { modules.qual(k, st.st_src(k), name) } else { modules.sym_qual(se) };
+  let q: u64 = if is_null(se) { modules.qual(k, st.st_scope(k), name) } else { modules.sym_qual(se) };
   if (se as u64) != 0 {
     if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 1); }
   }
@@ -241,6 +303,8 @@ let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   env.env_release(k, 0);
   st.st_set_retk(k, 9);
   st.st_set_retsh(k, 0);
+  let ip0: u64 = st.st_in_proc(k);
+  let nip: u64 = st.st_set_in_proc(k, ip0 + 1);
   ir.proc_begin(k, q);
   ir.region_begin(k);
   let nslots: u64 = 16 + 32 + count_tree(g, 0);
@@ -281,6 +345,7 @@ let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   ir.emit_jump(k, codes.INST_RETURN(), 0);
   ir.region_end(k);
   ir.proc_end(k);
+  let ipr: u64 = st.st_set_in_proc(k, ip0);
   let fl: u64 = flush_queue(k);
   return skip_semi(g, nj);
 };
@@ -288,6 +353,7 @@ let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 // 静态数据的读数过程：表与字符串直接返回数据符号的地址。
 let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, t: Mut(ty.Ty)) -> u64 {
   let q: u64 = proc_name(k, g, i);
+  let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, t);
   ir.proc_result(k, t);
   ir.region_begin(k);
@@ -296,6 +362,7 @@ let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u6
   let ins: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
   ir.region_end(k);
   ir.proc_end(k);
+  let ipr: u64 = st.st_set_in_proc(k, ip0);
   return skip_semi(g, nj);
 };
 
@@ -305,6 +372,7 @@ let compile_data_agg = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u6
   let t: Mut(ty.Ty) = new_ty(k);
   let a1: u64 = ty.ty_addr(t);
   let a2: u64 = ty.ty_set_sh(t, sh);
+  let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, t);
   ir.proc_result(k, t);
   ir.region_begin(k);
@@ -316,5 +384,6 @@ let compile_data_agg = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u6
   let ins: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
   ir.region_end(k);
   ir.proc_end(k);
+  let ipr: u64 = st.st_set_in_proc(k, ip0);
   return skip_semi(g, nj);
 };

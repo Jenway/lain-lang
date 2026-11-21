@@ -161,6 +161,40 @@ let lval_bad = func(k: Mut(st.State), m: Ref(u8), n: u64, back: u64) -> u64 {
   return back;
 };
 
+// 从 pos 起的模块链：还有下一段时先试子模块，末段必须是静态数据。
+// 落定在数据符号上就返回它的下一个位置，后面的 .字段 与 [下标] 留给 parse_walk。
+let module_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64), r: Mut(LvalRec)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  let name: u64 = ax.n_sym(g, pos);
+  let more: u64 = if pos + 2 < n and ax.is_name(g, pos + 2) == 1 and ax.n_sym(g, pos + 1) == s.p_dot() { 1 } else { 0 };
+  if more == 1 {
+    let nb: Mut(u64) = ax.box(k);
+    let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), name, modules.cur(k), nb);
+    if nx != 0 {
+      deref(sn) = ax.box_get(nb);
+      return module_step(k, g, pos + 2, nx, sn, r);
+    }
+  }
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), name, modules.cur(k));
+  if is_null(e) { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd != modules.sym_kind_data() and kd != modules.sym_kind_value() { return 0; }
+  let f: u64 = from_data(k, e, r);
+  return pos + 1;
+};
+
+// 模块成员数据 M.var / A.B.var：从首名落定到模块后再逐段走；未命中回 0。
+let module_data_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i + 2 >= n { return 0; }
+  if ax.n_sym(g, i + 1) != s.p_dot() { return 0; }
+  if ax.is_name(g, i + 2) == 0 { return 0; }
+  let sn: Mut(u64) = ax.box(k);
+  let m0: u64 = ctf.find_used_mod(k, ax.n_sym(g, i), sn);
+  if m0 == 0 { return 0; }
+  return module_step(k, g, i + 2, m0, sn, r);
+};
+
 let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
   let m: Ref(u8) = "bad-lvalue";
   if ax.is_name(g, i) == 0 { return lval_bad(k, m, 10, i + 1); }
@@ -182,10 +216,12 @@ let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 
   }
   let off: u64 = env.env_find(k, sym);
   if off != 0 { let f: u64 = from_local(k, off, r); return i + 1; }
-  let e: Mut(modules.SymEntry) = modules.find_here(k, sym);
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
   if (e as u64) != 0 {
     if modules.sym_kind(e) == modules.sym_kind_data() { let f2: u64 = from_data(k, e, r); return i + 1; }
   }
+  let mj: u64 = module_data_base(k, g, i, r);
+  if mj != 0 { return mj; }
   let p: Ref(u8) = modules.sym_addr(sym);
   let n: u64 = modules.sym_len(sym);
   let d: u64 = ir.diag(k, ax.e_unbound(), 1, p, n);
