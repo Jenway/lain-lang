@@ -141,9 +141,7 @@ func fn_type_id(k: Mut(st.State), sg: Mut(u8)) -> u64 {
 }
 
 // --- phase1：声明 --------------------------------------------------------
-func p1_struct(k: Mut(st.State), g: u64, i: u64) -> u64 {
-  let name: u64 = n_sym(g, i + 1);
-  let fg: u64 = n_at(g, i + 2);
+func parse_struct_shape(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut(modules.SymEntry) {
   let sh: u64 = agg.shp_new(k, agg.kind_struct(), name, st.st_src(k));
   let n: u64 = n_count(fg);
   let j: u64 = loop c(j: u64 = 0) while j < n {
@@ -159,14 +157,18 @@ func p1_struct(k: Mut(st.State), g: u64, i: u64) -> u64 {
     }
   };
   let fin: u64 = agg.finish(k, sh);
+  return modules.sym_add(k, modules.sym_kind_struct(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
+}
+
+func p1_struct(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  let fg: u64 = n_at(g, i + 2);
   let q: u64 = modules.qual(k, st.st_src(k), name);
-  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_struct(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
+  let e: Mut(modules.SymEntry) = parse_struct_shape(k, name, q, fg);
   return i + 3;
 }
 
-func p1_enum(k: Mut(st.State), g: u64, i: u64) -> u64 {
-  let name: u64 = n_sym(g, i + 1);
-  let fg: u64 = n_at(g, i + 2);
+func parse_enum_shape(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut(modules.SymEntry) {
   let sh: u64 = agg.shp_new(k, agg.kind_enum(), name, st.st_src(k));
   let n: u64 = n_count(fg);
   let j: u64 = loop c(j: u64 = 0) while j < n {
@@ -186,8 +188,14 @@ func p1_enum(k: Mut(st.State), g: u64, i: u64) -> u64 {
     }
   };
   let fin: u64 = agg.finish(k, sh);
+  return modules.sym_add(k, modules.sym_kind_enum(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
+}
+
+func p1_enum(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  let fg: u64 = n_at(g, i + 2);
   let q: u64 = modules.qual(k, st.st_src(k), name);
-  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_enum(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
+  let e: Mut(modules.SymEntry) = parse_enum_shape(k, name, q, fg);
   return i + 3;
 }
 
@@ -307,9 +315,22 @@ func p1_let(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let e: u64 = expect_sym(k, g, j, s.p_eq());
   if e >= n { st.st_fail(k, e_ast()); return e; }
   if n_sym(g, e) == s.k_import() { return p1_import(k, g, e, name); }
-  let q: u64 = modules.qual(k, st.st_src(k), name);
+  let is_root: u64 = if i >= 2 and is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
+  let q: u64 = if is_root == 1 { name } else { modules.qual(k, st.st_src(k), name) };
   // let 名 = func (形参) [-> 返回] { 体 }：签名先登记，体留给 phase2。
   if n_sym(g, e) == s.k_func() { return p1_flet(k, g, e, name, q); }
+  // let 名 = struct { 字段 }：形状在这里登记，体留给 phase2 跳过。
+  if n_sym(g, e) == s.k_struct() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
+    let se: Mut(modules.SymEntry) = parse_struct_shape(k, name, q, n_at(g, e + 1));
+    modules.sym_set_flag(se, 1);
+    return skip_semi(g, e + 2);
+  }
+  // let 名 = enum { 变体 }：形状在这里登记，体留给 phase2 跳过。
+  if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
+    let se: Mut(modules.SymEntry) = parse_enum_shape(k, name, q, n_at(g, e + 1));
+    modules.sym_set_flag(se, 1);
+    return skip_semi(g, e + 2);
+  }
   // let 名 = 编译期类型工厂(...)：求值并登记为具名结构体，不生成运行期过程。
   let tbind: u64 = ctfn.type_binding(k, g, e, name, q);
   if tbind != 0 {
@@ -415,6 +436,10 @@ func p2_let(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let e: u64 = find_eq(g, i + 2, n) + 1;
   if e >= n { st.st_fail(k, e_ast()); return e; }
   if n_sym(g, e) == s.k_import() { return skip_semi(g, e); }
+  // let 名 = struct/enum { ... }：形状在 phase1 已登记，这里只跳过花括号组。
+  if n_sym(g, e) == s.k_struct() or n_sym(g, e) == s.k_enum() {
+    return skip_semi(g, e + 2);
+  }
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
   if is_null(se) { st.st_fail(k, e_ast()); return e; }
   let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
@@ -444,6 +469,13 @@ func p2_let(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   return dl.compile_data_ref(k, g, i, after, dname, tv);
 }
 
+// 向后扫描整条语句，遇到分号就越过它。
+func skip_stmt(g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  if is_semi(g, i) == 1 { return i + 1; }
+  return skip_stmt(g, i + 1, n);
+}
+
 func phase2(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
@@ -459,11 +491,11 @@ func phase2(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     let a: u64 = compile_func(k, g, i);
     return phase2(k, g, a, n);
   }
-  if sym == s.k_given() { let a: u64 = skip_semi(g, i + 1); return phase2(k, g, a, n); }
+  if sym == s.k_given() { let a: u64 = skip_stmt(g, i + 1, n); return phase2(k, g, a, n); }
   if sym == s.k_let() { let a: u64 = p2_let(k, g, i, n); return phase2(k, g, a, n); }
   if sym == s.k_extern() {
     // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
-    let a: u64 = skip_semi(g, i + 1);
+    let a: u64 = skip_stmt(g, i + 1, n);
     return phase2(k, g, a, n);
   }
   if sym == s.k_struct() or sym == s.k_enum() {
@@ -572,7 +604,7 @@ func inject_decl(k: Mut(st.State), g: u64, i: u64) -> u64 {
     st.st_set_src(k, dsrc);
     let droot: u64 = lain2_source_root(dsrc);
     st.st_set_root(k, droot);
-    let cf: u64 = dl.compile_func(k, droot, dnode);
+    let cf: u64 = if is_group(droot, dnode + 1) == 1 { dl.compile_func_expr(k, droot, dnode, fname) } else { dl.compile_func(k, droot, dnode) };
     let fs: u64 = modules.sym_set_flag(fn, 1);
     st.st_set_src(k, saved_src);
     st.st_set_root(k, saved_root);

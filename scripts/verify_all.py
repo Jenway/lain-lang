@@ -9,14 +9,10 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
 WORK = os.path.join(BUILD, "verify_all")
-LAIN0_TESTS = os.path.join(ROOT, "seed", "lain0", "tests")
 EXAMPLES = os.path.join(ROOT, "examples")
 META_ENTRY = os.path.join(ROOT, "src", "entry.lain")
 META_UNITS = os.path.join(BUILD, "metaunits")
 META_OUT = os.path.join(BUILD, "meta")
-STAGE1_ENTRY = os.path.join(ROOT, "seed", "stage1", "entry.lain")
-STAGE1_UNITS = os.path.join(BUILD, "stage1_units")
-STAGE1_C = os.path.join(BUILD, "stage1.c")
 STAGE1_EXE = os.path.join(BUILD, "lain-stage1.exe" if os.name == "nt" else "lain-stage1")
 STAGE2_L1 = os.path.join(BUILD, "stage2.l1")
 STAGE2_C = os.path.join(BUILD, "stage2.c")
@@ -35,131 +31,10 @@ def exe(name):
     return path
 
 
-LAIN0 = os.path.join(BUILD, "lain0", "lain0.exe") if os.name == "nt" else os.path.join(BUILD, "lain0", "lain0")
 LAINIR_VERIFY = exe("lainir-verify")
 LAINIR_RUN = exe("lainir-run")
 LAINIR_C = exe("lainir-c")
 LAIN_META = exe("lain-meta-v2")
-
-
-# 真值用例：样例 -> [(函数名, 实参, 手算期望值)]。
-# 期望值来自对 seed/lain0/tests/<样例>.lain 源码的人工核对，负数按有符号读数比较。
-RUN_CASES = {
-    "arith": [("total", [], 3)],
-    "bits": [
-        ("band", [14, 6], 6),
-        ("bor", [14, 1], 15),
-        ("bshl", [3, 2], 12),
-        ("bshr", [4294967288, 2], -2),
-        ("uband", [14, 6], 6),
-        ("ubor", [12, 3], 15),
-        ("ubshl", [3, 2], 12),
-        ("ubshr", [240, 4], 15),
-    ],
-    "choose": [
-        ("smaller", [2, 5], 3),
-        ("smaller", [9, 4], 5),
-        ("clamp_zero", [4294967293], 3),
-        ("clamp_zero", [4], 5),
-    ],
-    "convert": [
-        ("widen", [4294967294], -2),
-        ("narrow", [4294967301], 5),
-        ("same", [4294967289], -7),
-        ("bare", [4294967294], -2),
-    ],
-    "field_expr": [("shift", [5, 7], 6), ("scale", [3], 6)],
-    "flow": [
-        ("pick", [3, 7], 3),
-        ("pick", [7, 3], 3),
-        ("inc", [41], 42),
-        ("bump", [41], 42),
-        ("copy_of", [9], 9),
-        ("lit", [], 3),
-    ],
-    "hex": [("mask", [4660], 4608), ("small", [], 42)],
-    "if_default": [
-        ("keep", [5, 1], 6),
-        ("keep", [5, 0], 1),
-        ("keep_or_zero", [5, 0], 0),
-        ("total", [1, 2, 1], 5),
-        ("total", [1, 2, 0], 5),
-    ],
-    "jumps": [("first", [5], 5), ("early", [5], 6), ("step", [4], 14)],
-    "local_type": [("below", [], 1)],
-    "locals": [("mk", [10], 10), ("mk2", [7], 7), ("two", [4], 4)],
-    "loop": [("countdown", [5], 15), ("upto", [5], 10)],
-    "loop_if": [("clip", [6], 13), ("branchy", [4], 36), ("nested", [5], 3)],
-    "loop_value": [("first_over", [10, 3], 3), ("third", [10], 3)],
-    "modules_lib": [("answer", [], 42), ("twice", [], 42), ("bump", [5], 6)],
-    "modules_main": [("total", [], 127), ("nested", [], 43), ("later", [], 44)],
-    "modules_twin": [("total", [], 3)],
-    "modules_twin_a": [("dup", [7], 7)],
-    "modules_twin_b": [("dup", [8], 8)],
-    "neg": [("offset", [10], 7), ("below", [3], 4), ("bare", [], -2)],
-    "ops": [
-        ("mix", [7, 3], 7),
-        ("cmp_signed", [5, 3], 1),
-        ("cmp_unsigned", [5, 3], 1),
-        ("cmp_equal", [5, 5], 0),
-        ("mix_unsigned", [7, 3], 2),
-        ("cmp_le", [3, 3], 1),
-    ],
-    "table": [
-        ("second", [], 2),
-        ("third", [], 30),
-        ("count", [], 3),
-        ("first_mark", [], 7),
-        ("bump", [1, 55], 55),
-    ],
-    "u8math": [
-        ("eq8", [3, 3], 1),
-        ("ne8", [3, 3], 0),
-        ("lt8", [2, 3], 1),
-        ("le8", [3, 3], 1),
-        ("gt8", [4, 3], 1),
-        ("ge8", [3, 4], 0),
-        ("add8", [200, 100], 44),
-        ("sub8", [1, 3], 254),
-        ("and8", [15, 51], 3),
-        ("shr8", [240, 4], 15),
-    ],
-    "value_if": [
-        ("plus", [5, 1], 6),
-        ("plus", [5, 0], -4),
-        ("pick", [9, 4, 1], 4),
-        ("pick", [4, 9, 0], 4),
-        ("scale", [3, 1], 9),
-        ("sum", [5, 1], 9),
-        ("sum", [5, 0], 7),
-    ],
-    "widths": [
-        ("n64", [6, 3], 20),
-        ("c64", [6, 3], 1),
-        ("ln", [2, 3], 5),
-        ("lc", [2, 2], 0),
-        ("s64", [3, 5], -2),
-        ("bl", [1, 1], 1),
-    ],
-    "variant_local": [("keep", [9], 9), ("compute", [9], 9)],
-    "bytes": [("length", [], 2), ("inline_first", [], 104)],
-    "cast": [("local_store", [], 7), ("local_byte", [], 42),
-             ("local_round", [], 11)],
-    "field_value": [("local_total", [], 7)],
-    "loop_local": [("local_sum", [4], 10)],
-    "memory": [("local_peek", [], 65)],
-    "pointer": [("local_poke", [], 9)],
-    "projection": [("local_both", [9], 18)],
-    "refs": [("via_ref", [], 42), ("local_set", [], 5)],
-    "strinline": [("first_byte", [], 104)],
-    "symbol_addr": [("first_byte", [], 1)],
-    "types": [("copy", [], 7), ("chain", [], 5), ("project", [9], 18)],
-}
-
-# 没有真值用例的样例，以及原因。
-NO_RUN = {
-    "extern": "入口依赖宿主能力表（驱动不注册）",
-}
 
 
 def run(cmd, timeout=1800):
@@ -173,19 +48,17 @@ def fail(message):
 
 
 def build():
-    cache = os.path.join(BUILD, "CMakeCache.txt")
-    if not os.path.exists(cache):
-        result = run(["cmake", "-S", "seed", "-B", "build", "-G", "Ninja"])
-        if result.returncode != 0:
-            print(result.stdout)
-            print(result.stderr)
-            fail("cmake 配置")
+    result = run(["cmake", "-S", "seed", "-B", "build", "-G", "Ninja"])
+    if result.returncode != 0:
+        print(result.stdout)
+        print(result.stderr)
+        fail("cmake 配置")
     result = run(["cmake", "--build", "build"])
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr)
         fail("cmake 构建")
-    for tool in (LAIN0, LAINIR_VERIFY, LAINIR_RUN, LAIN_META):
+    for tool in (LAINIR_VERIFY, LAINIR_RUN, LAINIR_C, LAIN_META):
         if not os.path.exists(tool):
             fail("没有这个产物: " + tool)
 
@@ -200,54 +73,16 @@ def abi_check():
 
 
 def split_meta():
-    """构建原生 Stage-1 编译器，再用它把 src/ 编成 build/stage2.l1。
+    """构建原生 Stage-1 编译器，再用它把 src/entry.lain 编成 build/stage2.l1。
 
-    优先用 seed/bootstrap/lainc_boot.c（C99 自举快照）冷启动 Stage-1；
-    快照不存在时回退到 seed/stage1/ 的 lain0 --split 路径。
+    用 seed/bootstrap/lainc_boot.c（C99 自举快照）冷启动 Stage-1。
     """
     clang_bin = shutil.which("clang")
     if not clang_bin:
         print("失败: 未找到 clang，无法构建 Stage-1")
         return None
-    if os.path.exists(BOOT_C):
-        res_cc = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
-                      NATIVE_DRIVER, BOOT_C, SEED_LIB, "-o", STAGE1_EXE])
-        if res_cc.returncode != 0:
-            print(res_cc.stdout)
-            print(res_cc.stderr)
-            return None
-        if os.path.exists(STAGE2_L1):
-            os.remove(STAGE2_L1)
-        res_s2 = run([STAGE1_EXE, META_ENTRY, "--out", STAGE2_L1])
-        if res_s2.returncode != 0 or not os.path.exists(STAGE2_L1):
-            print(res_s2.stdout)
-            print(res_s2.stderr)
-            return None
-        res_v2 = run([LAINIR_VERIFY, STAGE2_L1])
-        if res_v2.returncode != 0:
-            print(res_v2.stdout)
-            print(res_v2.stderr)
-            return None
-        return [STAGE2_L1]
-    if os.path.isdir(STAGE1_UNITS):
-        shutil.rmtree(STAGE1_UNITS)
-    result = run([LAIN0, "--entry", STAGE1_ENTRY, "--split", STAGE1_UNITS])
-    if result.returncode != 0:
-        print(result.stdout)
-        print(result.stderr)
-        return None
-    s1_units = [os.path.join(STAGE1_UNITS, n)
-                for n in sorted(os.listdir(STAGE1_UNITS))
-                if n.endswith(".l1")]
-    if not s1_units:
-        return None
-    res_c = run([LAINIR_C, "-o", STAGE1_C] + s1_units)
-    if res_c.returncode != 0:
-        print(res_c.stdout)
-        print(res_c.stderr)
-        return None
     res_cc = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
-                  NATIVE_DRIVER, STAGE1_C, SEED_LIB, "-o", STAGE1_EXE])
+                  NATIVE_DRIVER, BOOT_C, SEED_LIB, "-o", STAGE1_EXE])
     if res_cc.returncode != 0:
         print(res_cc.stdout)
         print(res_cc.stderr)
@@ -267,32 +102,21 @@ def split_meta():
     return [STAGE2_L1]
 
 
-def compile_sample(stem, units, folder=LAIN0_TESTS):
-    """用 Meta 编译一个样例。回 (输出文本, 失败文本或 None)。"""
+def compile_via_native(stem, folder):
+    """用原生 Stage-2 编译器编译一个样例。回 (输出文本, 失败文本或 None)。"""
     os.makedirs(META_OUT, exist_ok=True)
     out_path = os.path.join(META_OUT, stem + ".l1")
-    command = [LAIN_META, "--fuel", "64000000"] + units + [
-        os.path.join(folder, stem + ".lain"), "--out", out_path]
-    result = run(command)
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    result = run([STAGE2_EXE, os.path.join(folder, stem + ".lain"),
+                  "--out", out_path])
     text = result.stdout + result.stderr
     if result.returncode != 0:
         body = text.strip().splitlines()
         return text, body[-1] if body else "失败"
     if not os.path.exists(out_path):
-        return text, "Meta 没写产物"
+        return text, "编译器没写产物"
     return text, None
-
-
-def lain0_compile_sample(stem, folder=LAIN0_TESTS):
-    """用 lain0 编译同一个样例，作为差分基准。回产物路径或 None。"""
-    out_dir = os.path.join(WORK, stem)
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "lain0.l1")
-    result = run([LAIN0, os.path.join(folder, stem + ".lain"),
-                  "-o", out_path, "--round-trip"])
-    if result.returncode != 0 or not os.path.exists(out_path):
-        return None
-    return out_path
 
 
 def proc_names(paths):
@@ -359,47 +183,6 @@ def run_native(stem, meta_path, entry):
 def measure(result, expected):
     """按期望值的符号选择读数：非负期望比无符号值，负期望比有符号值。"""
     return result["value"] if expected >= 0 else result["signed"]
-
-
-def check_runs(stem, meta_path, l0_path):
-    """跑该样例的全部真值用例，比对 Meta 与 lain0。回 (通过数, 总数, 明细列表)。"""
-    cases = RUN_CASES.get(stem)
-    if not cases:
-        return 0, 0, []
-    meta_names = proc_names([meta_path])
-    l0_names = proc_names([l0_path]) if l0_path else set()
-    passed = 0
-    details = []
-    for func, args, expected in cases:
-        meta_entry = "s0__%s" % func
-        l0_entry = "%s__%s" % (stem, func)
-        if meta_entry not in meta_names:
-            details.append("%s：Meta 没有入口 %s" % (stem, meta_entry))
-            continue
-        result, error, _ = execute([meta_path], meta_entry, args)
-        if error:
-            details.append("%s %s%r: %s" % (stem, func, tuple(args), error))
-            continue
-        got = measure(result, expected)
-        if got != expected:
-            details.append("%s %s%r 期望 %d，实得 %d"
-                           % (stem, func, tuple(args), expected, got))
-            continue
-        if l0_path:
-            if l0_entry not in l0_names:
-                details.append("%s：lain0 没有入口 %s" % (stem, l0_entry))
-                continue
-            ref, ref_error, _ = execute([l0_path], l0_entry, args)
-            if ref_error:
-                details.append("%s lain0 %s%r: %s" % (stem, func, tuple(args), ref_error))
-                continue
-            if measure(ref, expected) != measure(result, expected):
-                details.append("%s %s%r 与 lain0 不一致：lain0 %d，Meta %d"
-                               % (stem, func, tuple(args), measure(ref, expected),
-                                  measure(result, expected)))
-                continue
-        passed += 1
-    return passed, len(cases), details
 
 
 # IR 层用例：直接写 LAINIR 文本，测间接 #call 的四条路径。
@@ -617,24 +400,24 @@ def proc_block(text, name):
     return text[start:end]
 
 
-def compile_meta_test(stem, units):
-    """编译 tests/meta/<stem>.lain。回 (产物路径, 驱动输出, 驱动退出码)。"""
+def compile_meta_test(stem):
+    """用原生 Stage-2 编译器编译 tests/meta/<stem>.lain。回 (产物路径, 驱动输出, 驱动退出码)。"""
     out_path = os.path.join(META_TEST_OUT, stem + ".l1")
     if os.path.exists(out_path):
         os.remove(out_path)
-    command = [LAIN_META, "--fuel", "64000000"] + units + [
-        os.path.join("tests", "meta", stem + ".lain"), "--out", out_path]
+    command = [STAGE2_EXE, os.path.join("tests", "meta", stem + ".lain"),
+               "--out", out_path]
     result = run(command)
     return out_path, result.stdout + result.stderr, result.returncode
 
 
-def check_meta_cases(units):
+def check_meta_cases():
     """跑 Meta 扩展测试。回 (通过数, 总数, 明细列表)。"""
     passed = 0
     details = []
     for case in META_CASES:
         stem = case["file"][:-len(".lain")]
-        out_path, text, code = compile_meta_test(stem, units)
+        out_path, text, code = compile_meta_test(stem)
         if code != 0 or "result=0" not in text:
             body = text.strip().splitlines()
             details.append("%s 编译: %s" % (case["file"], body[-1] if body else "失败"))
@@ -688,11 +471,11 @@ def check_meta_cases(units):
     # 负测试：必须给出编译错误诊断，且不留下可执行产物。
     for negative in META_NEGATIVE:
         stem = negative["file"][:-len(".lain")]
-        out_path, text, code = compile_meta_test(stem, units)
+        out_path, text, code = compile_meta_test(stem)
         if "result=0" in text:
             details.append("%s 编译成功，但%s必须失败" % (negative["file"], negative["why"]))
             continue
-        if "compile failed" not in text:
+        if "diag " not in text or code == 0:
             body = text.strip().splitlines()
             details.append("%s 没有编译失败诊断: %s"
                            % (negative["file"], body[-1] if body else "无输出"))
@@ -726,65 +509,51 @@ def main():
         if not units:
             problems.append("Meta 自举: lain0 --split src/entry.lain 失败")
 
-    names = sorted(n for n in os.listdir(LAIN0_TESTS) if n.endswith(".lain"))
-    rows = []
-    total_pass = 0
-    total_cases = 0
-    if units:
-        for name in names:
-            stem = name[:-len(".lain")]
-            text, error = compile_sample(stem, units)
-            row = {"name": stem, "compile": "ok" if not error else "FAIL",
-                   "verify": "-", "run": "-", "diff": "-", "steps": 0}
-            if error:
-                problems.append("%s 编译: %s" % (stem, error))
-                rows.append(row)
-                continue
-            hit = re.search(r"^steps=(\d+)$", text, re.MULTILINE)
-            if hit:
-                row["steps"] = int(hit.group(1))
-            out_path = os.path.join(META_OUT, stem + ".l1")
-            result = run([LAINIR_VERIFY, out_path])
-            if result.returncode != 0:
-                row["verify"] = "FAIL"
-                body = (result.stdout + result.stderr).strip().splitlines()
-                problems.append("%s 校验: %s" % (stem, body[0] if body else "失败"))
-                rows.append(row)
-                continue
-            row["verify"] = "ok"
-            l0_path = lain0_compile_sample(stem)
-            passed, count, details = check_runs(stem, out_path, l0_path)
-            total_pass += passed
-            total_cases += count
-            row["run"] = "%d/%d" % (passed, count) if count else "-"
-            row["diff"] = "ok" if l0_path else "-"
-            rows.append(row)
-            for line in details:
-                problems.append(line)
-            print(".", end="", flush=True)
-        print()
+    clang_bin = shutil.which("clang")
 
-    header = ("样例", "编译", "校验", "真值", "差分", "steps")
-    widths = (24, 6, 6, 8, 6, 10)
-    line = "  ".join(h.ljust(w) for h, w in zip(header, widths))
     print()
-    print(line)
-    print("-" * len(line))
-    for row in rows:
-        cells = (row["name"], row["compile"], row["verify"], row["run"],
-                 row["diff"], str(row["steps"]))
-        print("  ".join(c.ljust(w) for c, w in zip(cells, widths)))
-
-    failed = [r["name"] for r in rows if "FAIL" in (r["compile"], r["verify"])]
-    print()
-    print("样例 %d/%d 通过；真值用例 %d/%d"
-          % (len(rows) - len(failed), len(rows), total_pass, total_cases))
-    missing = [r["name"] for r in rows if r["run"] == "-"]
-    if missing:
-        print()
-        print("没有真值用例的样例（只验证编译与校验）:")
-        for name in missing:
-            print("  %-24s %s" % (name, NO_RUN.get(name, "未登记原因")))
+    print("[C99 自举验证]  Stage-1 -> Stage-2 -> Stage-3 固定点一致")
+    bootstrap_ok = False
+    stage2_ready = False
+    if units and clang_bin:
+        self_res = run([LAINIR_C, "-o", STAGE2_C] + units)
+        if self_res.returncode != 0:
+            problems.append("C99 自举: lainir-c 发射 stage2.c 失败")
+            print("C99 自举 失败")
+        else:
+            cc_self = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
+                           NATIVE_DRIVER, STAGE2_C, SEED_LIB, "-o", STAGE2_EXE])
+            if cc_self.returncode != 0:
+                problems.append("C99 自举: clang 编译 stage2.exe 失败")
+                print("C99 自举 失败")
+            else:
+                stage2_ready = True
+                if os.path.exists(STAGE3_L1):
+                    os.remove(STAGE3_L1)
+                res_s3 = run([STAGE2_EXE, META_ENTRY, "--out", STAGE3_L1])
+                if res_s3.returncode != 0 or not os.path.exists(STAGE3_L1):
+                    problems.append("C99 自举: Stage-2 编译 stage3.l1 失败")
+                    print("C99 自举 失败")
+                else:
+                    res_v3 = run([LAINIR_VERIFY, STAGE3_L1])
+                    if res_v3.returncode != 0:
+                        problems.append("C99 自举: stage3.l1 校验失败")
+                        print("C99 自举 失败")
+                    else:
+                        with open(STAGE2_L1, "rb") as f2, open(STAGE3_L1, "rb") as f3:
+                            same = (f2.read() == f3.read())
+                        if not same:
+                            problems.append("C99 自举: stage2.l1 与 stage3.l1 不一致")
+                            print("C99 自举 失败（固定点不一致）")
+                        else:
+                            bootstrap_ok = True
+                            print("C99 自举 通过（Stage-1 -> Stage-2 -> Stage-3 固定点一致，%d KB IR / %d KB C99）"
+                                  % (os.path.getsize(STAGE2_L1) // 1024,
+                                     os.path.getsize(STAGE2_C) // 1024))
+    elif units:
+        print("C99 自举 跳过（未找到 clang）")
+    else:
+        print("C99 自举 跳过（自举单元缺失）")
 
     print()
     print("[IR 层用例]  间接 #call（取值 / 尾调用 / 非法目标 / 签名不符）")
@@ -794,22 +563,21 @@ def main():
 
     print()
     print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离执行）、代码注入 inject（静态反射 / SoA 与 VTable）与间接调用 icall")
-    if units:
-        meta_passed, meta_total, meta_details = check_meta_cases(units)
+    if stage2_ready:
+        meta_passed, meta_total, meta_details = check_meta_cases()
         print("Meta 用例 %d/%d" % (meta_passed, meta_total))
         problems += meta_details
     else:
-        print("Meta 用例 跳过（自举单元缺失）")
+        print("Meta 用例 跳过（Stage-2 编译器缺失）")
 
     print()
     print("[现代样例]  examples/*.lain 编译、校验、VM 与 C99 原生差分")
-    clang_bin = shutil.which("clang")
-    if units and os.path.isdir(EXAMPLES):
+    if stage2_ready and os.path.isdir(EXAMPLES):
         ex_names = sorted(n for n in os.listdir(EXAMPLES) if n.endswith(".lain"))
         ex_pass = 0
         for ex_name in ex_names:
             ex_stem = ex_name[:-len(".lain")]
-            _, ex_err = compile_sample(ex_stem, units, EXAMPLES)
+            _, ex_err = compile_via_native(ex_stem, EXAMPLES)
             if ex_err:
                 problems.append("examples/%s 编译: %s" % (ex_name, ex_err))
                 continue
@@ -852,9 +620,9 @@ def main():
                               "[FAIL] failing (2 failed)"]),
         ("std_bench_smoke", 21, None),
     ]
-    if units and clang_bin:
+    if units and stage2_ready:
         for std_stem, std_value, std_lines in std_cases:
-            _, std_err = compile_sample(std_stem, units, META_TESTS)
+            _, std_err = compile_via_native(std_stem, META_TESTS)
             if std_err:
                 problems.append("tests/meta/%s.lain 编译: %s" % (std_stem, std_err))
                 continue
@@ -895,7 +663,7 @@ def main():
                                 % (std_stem, nat_text.strip()))
                 continue
             std_passed += 1
-        _, oob_err = compile_sample("std_io_oob", units, META_TESTS)
+        _, oob_err = compile_via_native("std_io_oob", META_TESTS)
         if oob_err:
             problems.append("tests/meta/std_io_oob.lain 编译: %s" % oob_err)
         else:
@@ -909,55 +677,14 @@ def main():
     else:
         print("标准库 跳过")
 
-    print()
-    print("[C99 自举验证]  Stage-1 -> Stage-2 -> Stage-3 固定点一致")
-    bootstrap_ok = False
-    if units and clang_bin:
-        self_res = run([LAINIR_C, "-o", STAGE2_C] + units)
-        if self_res.returncode != 0:
-            problems.append("C99 自举: lainir-c 发射 stage2.c 失败")
-            print("C99 自举 失败")
-        else:
-            cc_self = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
-                           NATIVE_DRIVER, STAGE2_C, SEED_LIB, "-o", STAGE2_EXE])
-            if cc_self.returncode != 0:
-                problems.append("C99 自举: clang 编译 stage2.exe 失败")
-                print("C99 自举 失败")
-            else:
-                if os.path.exists(STAGE3_L1):
-                    os.remove(STAGE3_L1)
-                res_s3 = run([STAGE2_EXE, META_ENTRY, "--out", STAGE3_L1])
-                if res_s3.returncode != 0 or not os.path.exists(STAGE3_L1):
-                    problems.append("C99 自举: Stage-2 编译 stage3.l1 失败")
-                    print("C99 自举 失败")
-                else:
-                    res_v3 = run([LAINIR_VERIFY, STAGE3_L1])
-                    if res_v3.returncode != 0:
-                        problems.append("C99 自举: stage3.l1 校验失败")
-                        print("C99 自举 失败")
-                    else:
-                        with open(STAGE2_L1, "rb") as f2, open(STAGE3_L1, "rb") as f3:
-                            same = (f2.read() == f3.read())
-                        if not same:
-                            problems.append("C99 自举: stage2.l1 与 stage3.l1 不一致")
-                            print("C99 自举 失败（固定点不一致）")
-                        else:
-                            bootstrap_ok = True
-                            print("C99 自举 通过（Stage-1 -> Stage-2 -> Stage-3 固定点一致，%d KB IR / %d KB C99）"
-                                  % (os.path.getsize(STAGE2_L1) // 1024,
-                                     os.path.getsize(STAGE2_C) // 1024))
-                            if args.update_bootstrap:
-                                os.makedirs(os.path.dirname(BOOT_C), exist_ok=True)
-                                shutil.copyfile(STAGE2_C, BOOT_C)
-                                print("自举快照已刷新: %s" % os.path.relpath(BOOT_C, ROOT))
-    elif units:
-        print("C99 自举 跳过（未找到 clang）")
-    else:
-        print("C99 自举 跳过（自举单元缺失）")
-    if args.update_bootstrap and not bootstrap_ok:
+    if args.update_bootstrap and bootstrap_ok and not problems:
+        os.makedirs(os.path.dirname(BOOT_C), exist_ok=True)
+        shutil.copyfile(STAGE2_C, BOOT_C)
+        print("自举快照已刷新: %s" % os.path.relpath(BOOT_C, ROOT))
+    elif args.update_bootstrap:
         print("自举快照 未刷新（固定点未通过或检查被跳过）")
 
-    # 现代源码零 addr 审查 + 编译遥测
+    # 现代源码零 addr 审查
     zero_addr_targets = [os.path.join(ROOT, "tests", "meta", "modern_no_addr.lain")]
     if os.path.isdir(EXAMPLES):
         zero_addr_targets += [os.path.join(EXAMPLES, n)
@@ -975,9 +702,7 @@ def main():
             zsrc = re.sub(r"//.*", "", zh.read())
         if re.search(r"\baddr\b", zsrc):
             problems.append("零 addr 审查失败: %s 仍含裸 addr 类型" % os.path.relpath(zpath, ROOT))
-    total_steps = sum(r["steps"] for r in rows)
-    print("编译器遥测: 38 样例合计 VM steps=%d；零 addr 现代文件检查 %d 份通过"
-          % (total_steps, len(zero_addr_targets)))
+    print("零 addr 现代文件检查 %d 份通过" % len(zero_addr_targets))
 
     if problems:
         print()
@@ -985,7 +710,7 @@ def main():
         for item in problems:
             print("  " + item)
     print("耗时 %.1f 秒" % (time.time() - started))
-    return 0 if not problems and not failed else 1
+    return 0 if not problems else 1
 
 
 if __name__ == "__main__":

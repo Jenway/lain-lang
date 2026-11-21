@@ -113,6 +113,10 @@ func ct_prefix(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
     return i + 1;
   }
   if name == 0 { ctf.fail_msg(k, "bad comptime expr", 17, ax.e_op()); return i + 1; }
+  if name == s.k_struct() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    eval_struct_expr(k, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
   if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
     let m: u64 = modules.mod_lookup(k, name);
     if m != 0 {
@@ -219,7 +223,7 @@ func find_body(g: u64, i: u64) -> u64 {
 func call_user(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, out: Mut(ctf.CtVal)) -> u64 {
   let d: u64 = modules.sym_decl(e);
   let root: u64 = lain2_source_root(modules.sym_src(e));
-  let pi: u64 = if ax.n_sym(root, d) == s.k_func() { d + 2 } else { d + 1 };
+  let pi: u64 = if ax.is_group(root, d + 1) == 1 { d + 1 } else { d + 2 };
   let body: u64 = find_body(root, pi + 1);
   if body == 0 { ctf.fail_msg(k, "no body", 7, ax.e_ast()); return 0; }
   let ab: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 192));
@@ -246,6 +250,32 @@ func call_user(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, out: Mut(ctf
   let rk: u64 = ctf.v_kind(ret); let ra: u64 = ctf.v_a(ret); let rb: u64 = ctf.v_b(ret);
   tb.cache_put(k, ptr_cast(Mut(u8), e), nargs, ptr_cast(Mut(u8), ab), rk, ra, rb);
   ctf.v_set(out, rk, ra, rb);
+  return 1;
+}
+
+func eval_struct_expr(k: Mut(st.State), fg: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let b: Mut(tb.TypeBuilder) = tb.record_begin(k);
+  let n: u64 = ax.n_count(fg);
+  let j: u64 = loop fe(j: u64 = 0) while j < n {
+    if ax.is_comma(fg, j) == 1 or ax.is_semi(fg, j) == 1 {
+      j = j + 1;
+    } else {
+      let fname: u64 = ax.n_sym(fg, j);
+      if ctf.has_tok(fg, j + 1, s.p_colon()) == 0 { ctf.fail_msg(k, "expected colon", 14, ax.e_ast()); return 0; }
+      let ftv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+      let nj: u64 = ct_eval(k, fg, j + 2, 0, ftv);
+      if st.st_ok(k) != 0 { return nj; }
+      let ftid: u64 = ctp.as_type(k, ftv);
+      if st.st_ok(k) != 0 { return nj; }
+      tb.record_add(k, b, fname, ftid);
+      if st.st_ok(k) != 0 { return nj; }
+      j = nj;
+    }
+  };
+  if st.st_ok(k) != 0 { return j; }
+  let id: u64 = tb.record_end(k, b);
+  if st.st_ok(k) != 0 { return 0; }
+  ctf.v_set(out, 1, id, 0);
   return 1;
 }
 
