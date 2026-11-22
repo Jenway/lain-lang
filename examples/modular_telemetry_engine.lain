@@ -1,0 +1,399 @@
+// Phase 4 展示：嵌套模块 + 签名封装 + 编译期函子 + SoA 摄取 + 策略 Witness + eval 阈值。
+let io = import("std::io");
+let bench = import("std::bench");
+
+// ---------------------------------------------------------------------------
+// 数据契约
+// ---------------------------------------------------------------------------
+
+let Packet = struct {
+  src: i64,
+  weight: i64,
+  payload: i64,
+};
+
+let Aggregator = sig {
+  pub let Self: Type;
+  pub let zero: Fn(() -> Self);
+  pub let combine: Fn((Self, Self) -> Self);
+};
+
+let CodecSig = sig {
+  pub let Self: Type;
+  pub let encode: Fn((Packet) -> i64);
+  pub let decode: Fn((i64) -> Packet);
+};
+
+// ---------------------------------------------------------------------------
+// 策略 Witness：i64 的加法与峰值，Packet 的加权累计
+// ---------------------------------------------------------------------------
+
+let SumAgg: Aggregator = module {
+  pub let Self = i64;
+  pub let zero = func() -> i64 { return 0; };
+  pub let combine = func(a: i64, b: i64) -> i64 { return a + b; };
+};
+
+let PeakAgg: Aggregator = module {
+  pub let Self = i64;
+  pub let zero = func() -> i64 { return 0; };
+  pub let combine = func(a: i64, b: i64) -> i64 {
+    return if a > b { a } else { b };
+  };
+};
+
+let WeightedAgg: Aggregator = module {
+  pub let Self = Packet;
+  pub let zero = func() -> Packet {
+    return Packet { src: 0, weight: 0, payload: 0 };
+  };
+  pub let combine = func(a: Packet, b: Packet) -> Packet {
+    return Packet {
+      src: a.src + b.src,
+      weight: a.weight + b.weight,
+      payload: a.payload + (b.payload * b.weight),
+    };
+  };
+};
+
+use SumAgg;
+
+// ---------------------------------------------------------------------------
+// 编译期函子：固定容量环形缓冲
+// ---------------------------------------------------------------------------
+
+let RingBuf = func(T: Type, Cap: u64) -> Module {
+  return module {
+    let Buf = struct {
+      data: Array(T, Cap),
+      head: u64,
+      len: u64,
+    };
+
+    pub let Self = Buf;
+
+    pub let make = func(values: Array(T, Cap), used: u64) -> Buf {
+      return Buf { data: values, head: 0, len: used };
+    };
+
+    pub let push = func(self: Mut(Buf), v: T) -> u64 {
+      let idx: u64 = (deref(self).head + deref(self).len) % Cap;
+      deref(self).data[idx] = v;
+      if deref(self).len < Cap {
+        deref(self).len = deref(self).len + 1;
+      } else {
+        deref(self).head = (deref(self).head + 1) % Cap;
+      }
+      return deref(self).len;
+    };
+
+    pub let push_all = func(self: Mut(Buf), values: Slice(T)) -> u64 {
+      let n: u64 = values.len;
+      let last: u64 = loop fill(i: u64 = 0, len: u64 = 0) while i < n {
+        len = push(self, values[i]);
+        i = i + 1;
+      };
+      return last;
+    };
+
+    pub let get = func(self: Ref(Buf), i: u64) -> T {
+      let idx: u64 = (deref(self).head + i) % Cap;
+      return deref(self).data[idx];
+    };
+  };
+};
+
+// 同一份函子按不同 T / Cap 实例化，产出彼此独立的类型与命名空间
+let I64Ring = RingBuf(i64, 4);
+let PktRing = RingBuf(Packet, 4);
+
+// ---------------------------------------------------------------------------
+// 编译期类型工厂：AoS -> SoA 布局
+// ---------------------------------------------------------------------------
+
+let make_soa = func(T: Type, N: u64) -> Type {
+  let b = record_begin();
+  comptime for f in fields_of(T) {
+    record_add(b, f.name, Array(f.type, N));
+  }
+  return record_end(b);
+};
+
+let PacketSoA = make_soa(Packet, 4);
+
+// ---------------------------------------------------------------------------
+// 编译期阈值与惩罚权重：三项都在 eval 沙箱内折叠为立即数
+// ---------------------------------------------------------------------------
+
+let policy_spread = func(n: i64) -> i64 {
+  let s: i64 = loop acc(i: i64 = 1, acc: i64 = 0) while i <= n {
+    acc = acc + (i * i);
+    i = i + 1;
+  };
+  return s;
+};
+
+let policy_seed = func(k: i64) -> i64 {
+  return ((k * 31) + 7) % 23;
+};
+
+let policy_penalty = func(base: i64, k: i64) -> i64 {
+  let step: i64 = loop grow(i: i64 = 0, acc: i64 = 1) while i < k {
+    acc = acc * 3;
+    i = i + 1;
+  };
+  return base + step;
+};
+
+// 一次 eval 把阈值、严重度种子、惩罚权重打包进单个字，运行时按位取出。
+
+let policy_word = func(n: i64) -> i64 {
+  let thr: i64 = policy_spread(n);
+  let seed: i64 = policy_seed(4);
+  let pen: i64 = policy_penalty(5, 3);
+  return (thr << 32) | (seed << 16) | pen;
+};
+
+let PolicyWord: i64 = eval(policy_word(6));
+
+// ---------------------------------------------------------------------------
+// 多跳嵌套模块：Telemetry.Codec / Policy / Engine
+// ---------------------------------------------------------------------------
+
+let Telemetry = module {
+  pub let Codec = module {
+    let MAGIC: u64 = 0x5A as u64;
+    let MASK16: u64 = 0xFFFF as u64;
+
+    let scramble = func(v: u64) -> u64 {
+      return (v ^ MAGIC) & MASK16;
+    };
+
+    pub let Self = Packet;
+
+    pub let encode = func(p: Packet) -> i64 {
+      let s: u64 = scramble((p.src as u64) & MASK16);
+      let w: u64 = scramble((p.weight as u64) & MASK16);
+      let q: u64 = (p.payload as u64) & MASK16;
+      return ((s << 32) | (w << 16) | q) as i64;
+    };
+
+    pub let decode = func(wire: i64) -> Packet {
+      let raw: u64 = wire as u64;
+      let s: u64 = scramble((raw >> 32) & MASK16);
+      let w: u64 = scramble((raw >> 16) & MASK16);
+      let q: u64 = raw & MASK16;
+      return Packet { src: s as i64, weight: w as i64, payload: q as i64 };
+    };
+  };
+
+  // 签名视图：MAGIC / MASK16 / scramble 被封装在 Codec 内部
+  pub let CodecSealed: CodecSig = Codec;
+
+  pub let Policy = module {
+    // 从编译期折叠出的策略字里取出三个字段
+    pub let Threshold: i64 = PolicyWord >> 32;
+    pub let SeveritySeed: i64 = (PolicyWord >> 16) & 0xFFFF;
+    pub let Penalty: i64 = PolicyWord & 0xFFFF;
+
+    pub let classify = func(wire: i64) -> i64 {
+      let mag: i64 = if wire < 0 { 0 - wire } else { wire };
+      let raw: i64 = (mag % 17) + SeveritySeed;
+      if raw >= Threshold { return 3; }
+      if raw >= (Threshold / 2) { return 2; }
+      if raw >= (Threshold / 4) { return 1; }
+      return 0;
+    };
+  };
+
+  pub let Engine = module {
+    pub let State = struct {
+      ring: PktRing.Self,
+      soa: PacketSoA,
+      frames: u64,
+      wire_sum: i64,
+      checksum: i64,
+    };
+
+    pub let ingest = func(st: Mut(State), p: Packet, wire: i64) -> i64 {
+      let decoded: Packet = CodecSealed.decode(wire);
+      let slot: u64 = deref(st).frames % 4;
+
+      PktRing.push(mut_of(deref(st).ring), decoded);
+
+      let cols: Mut(PacketSoA) = mut_of(deref(st).soa);
+      comptime for f in fields_of(Packet) {
+        deref(cols).[:f.name][slot] = decoded.[:f.name];
+      }
+
+      let severity: i64 = Policy.classify(wire);
+      deref(st).frames = deref(st).frames + 1;
+      deref(st).wire_sum = deref(st).wire_sum + wire;
+      deref(st).checksum = deref(st).checksum + (severity * Policy.Penalty) + decoded.payload;
+      return severity;
+    };
+
+    pub let ingest_all = func(st: Mut(State), frames: Slice(Packet)) -> i64 {
+      let total: i64 = loop feed(i: u64 = 0, acc: i64 = 0) while i < frames.len {
+        let wire: i64 = CodecSealed.encode(frames[i]);
+        acc = acc + ingest(st, frames[i], wire);
+        i = i + 1;
+      };
+      return total;
+    };
+
+    // 从 SoA 列重建一行 AoS，保持零裸 addr
+    pub let row = func(st: Ref(State), idx: u64) -> Packet {
+      let cols: PacketSoA = deref(st).soa;
+      return Packet {
+        src: cols.src[idx],
+        weight: cols.weight[idx],
+        payload: cols.payload[idx],
+      };
+    };
+
+    pub let snapshot = func(st: Ref(State)) -> i64 {
+      let frames: i64 = deref(st).frames as i64;
+      return (deref(st).checksum * 3) + (deref(st).wire_sum & 7) + frames;
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// 泛型聚合：Witness 由 use 或 ?{ m: ... } 提供
+// ---------------------------------------------------------------------------
+
+let fold_all = func(items: Slice(T)) ?{ T: Type, m: Aggregator } -> T {
+  let total: T = loop walk(i: u64 = 0, acc: T = m.zero()) while i < items.len {
+    acc = m.combine(acc, items[i]);
+    i = i + 1;
+  };
+  return total;
+};
+
+// ---------------------------------------------------------------------------
+// 演示入口
+// ---------------------------------------------------------------------------
+
+let main = func() -> i64 {
+  let started: u64 = bench.nanos();
+
+  // 1. i64 环形窗口：写入 6 个样本，容量 4 只保留最近 4 个
+  let seeds: Array(i64, 4) = [0, 0, 0, 0];
+  let signal: I64Ring.Self = I64Ring.make(seeds, 0);
+  let samples: Array(i64, 6) = [12, 7, 30, 5, 18, 9];
+  I64Ring.push_all(mut_of(signal), slice_of(samples));
+
+  let window: Array(i64, 4) = [0, 0, 0, 0];
+  window[0] = I64Ring.get(ref_of(signal), 0);
+  window[1] = I64Ring.get(ref_of(signal), 1);
+  window[2] = I64Ring.get(ref_of(signal), 2);
+  window[3] = I64Ring.get(ref_of(signal), 3);
+
+  let sum_window: i64 = fold_all(slice_of(window));
+  let peak_window: i64 = 0;
+  {
+    use PeakAgg;
+    peak_window = fold_all(slice_of(window));
+  }
+  let peak_override: i64 = fold_all(slice_of(window)) ?{ m: PeakAgg };
+
+  // 2. Packet 流水线：编码、环形缓存、SoA 摄取
+  // 结构体数组逐槽写入，避免依赖聚合字面量的隐式拷贝
+  let zero: Packet = Packet { src: 0, weight: 0, payload: 0 };
+  let ring_seed: Array(Packet, 4) = [zero, zero, zero, zero];
+  ring_seed[0] = zero;
+  ring_seed[1] = zero;
+  ring_seed[2] = zero;
+  ring_seed[3] = zero;
+  let packet_ring: PktRing.Self = PktRing.make(ring_seed, 0);
+  let packet_soa: PacketSoA = PacketSoA {
+    src: [0, 0, 0, 0],
+    weight: [0, 0, 0, 0],
+    payload: [0, 0, 0, 0],
+  };
+  let engine: Telemetry.Engine.State = Telemetry.Engine.State {
+    ring: packet_ring,
+    soa: packet_soa,
+    frames: 0,
+    wire_sum: 0,
+    checksum: 0,
+  };
+  let f0: Packet = Packet { src: 3, weight: 2, payload: 40 };
+  let f1: Packet = Packet { src: 9, weight: 1, payload: 17 };
+  let f2: Packet = Packet { src: 4, weight: 5, payload: 23 };
+  let f3: Packet = Packet { src: 12, weight: 3, payload: 31 };
+  let f4: Packet = Packet { src: 6, weight: 4, payload: 11 };
+  let frames: Array(Packet, 5) = [zero, zero, zero, zero, zero];
+  frames[0] = f0;
+  frames[1] = f1;
+  frames[2] = f2;
+  frames[3] = f3;
+  frames[4] = f4;
+  let severity_total: i64 = Telemetry.Engine.ingest_all(mut_of(engine), slice_of(frames));
+
+  let blank: Packet = Packet { src: 0, weight: 0, payload: 0 };
+  let rows: Array(Packet, 4) = [blank, blank, blank, blank];
+  rows[0] = Telemetry.Engine.row(ref_of(engine), 0);
+  rows[1] = Telemetry.Engine.row(ref_of(engine), 1);
+  rows[2] = Telemetry.Engine.row(ref_of(engine), 2);
+  rows[3] = Telemetry.Engine.row(ref_of(engine), 3);
+  let traffic: Packet = fold_all(slice_of(rows)) ?{ m: WeightedAgg };
+
+  let wire_probe: i64 = Telemetry.CodecSealed.encode(frames[2]);
+  let echo: Packet = Telemetry.CodecSealed.decode(wire_probe);
+  let roundtrip: i64 = if (echo.src == frames[2].src) and (echo.payload == frames[2].payload) { 1 } else { 0 };
+
+  // 计时结果只用于确认单调时钟未回退，输出保持确定性
+  let elapsed: u64 = bench.nanos() - started;
+  let bench_ok: i64 = if elapsed >= 0 { 1 } else { 0 };
+  let snapshot: i64 = Telemetry.Engine.snapshot(ref_of(engine));
+
+  let checksum: i64 = snapshot
+    + (sum_window * 3)
+    + (peak_window * 5)
+    + (peak_override * 7)
+    + ((traffic.src + traffic.weight + traffic.payload) * 11)
+    + (severity_total * 13)
+    + (roundtrip * 17)
+    + Telemetry.Policy.Threshold
+    + Telemetry.Policy.SeveritySeed
+    + Telemetry.Policy.Penalty;
+
+  // 3. 终端仪表盘
+  io.println("== lain telemetry engine ==");
+  io.print("window sum  : ");
+  io.println_i64(sum_window);
+  io.print("window peak : ");
+  io.println_i64(peak_window);
+  io.print("peak forced : ");
+  io.println_i64(peak_override);
+  io.print("policy thr  : ");
+  io.println_i64(Telemetry.Policy.Threshold);
+  io.print("policy seed : ");
+  io.println_i64(Telemetry.Policy.SeveritySeed);
+  io.print("policy fine : ");
+  io.println_i64(Telemetry.Policy.Penalty);
+  io.print("frames      : ");
+  io.println_i64(engine.frames as i64);
+  io.print("severity    : ");
+  io.println_i64(severity_total);
+  io.print("wire probe  : ");
+  io.println_i64(wire_probe);
+  io.print("roundtrip   : ");
+  io.println_i64(roundtrip);
+  io.print("soa traffic : ");
+  io.println_i64(traffic.src + traffic.weight + traffic.payload);
+  io.print("snapshot    : ");
+  io.println_i64(snapshot);
+  io.print("bench_ok    : ");
+  io.println_i64(bench_ok);
+  io.print("checksum    : ");
+  io.println_i64(checksum);
+
+  let exit_code: i64 = ((checksum % 251) + 251) % 251;
+  if exit_code == 0 { exit_code = 1; }
+  io.print("exit code   : ");
+  io.println_i64(exit_code);
+  return exit_code;
+};
