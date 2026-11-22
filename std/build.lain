@@ -1,0 +1,224 @@
+// std::build —— 声明式构建图与双哈希增量缓存。
+//
+// 只依赖语言核心（enum / struct / Slice / Array / loop / 引用族），不触碰 std::os，
+// 因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
+//
+// 增量规则见 docs/04-compilation-and-build.md：
+// 源码哈希只决定本单元是否需要重编，接口哈希只决定下游依赖是否需要重编。
+
+pub let Os = enum { Windows, Linux, MacOS };
+
+pub let Arch = enum { X86_64, AArch64 };
+
+pub let OptMode = enum { Debug, ReleaseSafe, ReleaseFast };
+
+// 目标环境。三个枚举以只读引用存放：LAINIR 把聚合字段按指针存放，
+// 而空载荷 enum 的形状只有 1 字节，按值内联的 enum 字段会互相覆盖；
+// 引用槽固定 8 字节，偏移与宽度因而一致。构造时用 ref_of 指向调用方的
+// 枚举左值，这些枚举块的生命期需覆盖构建图的使用期。
+pub let TargetEnv = struct {
+  os: Ref(Os),
+  arch: Ref(Arch),
+  opt: Ref(OptMode),
+};
+
+pub let ArtifactKind = enum { Executable, StaticLib, Test };
+
+// 一个编译单元在构建图里的登记项。id 从 1 起编号，0 表示无效。
+// dep_mask 的第 (id - 1) 位表示「依赖该 id 的单元」。
+pub let Artifact = struct {
+  id: u64,
+  kind: ArtifactKind,
+  name: Slice(u8),
+  root: Slice(u8),
+  dep_mask: u64,
+  src_hash: u64,
+  iface_hash: u64,
+};
+
+pub let Graph = struct {
+  target: TargetEnv,
+  count: u64,
+  items: Array(Artifact, 32),
+};
+
+// 收敛为构建图的关联模块：g.add_executable(...) 之类的 UFCS 由它承接。
+pub let Self = Graph;
+
+// ---------------------------------------------------------------------------
+// 静态 arena：LAINIR 里的 Array 与 struct 都是指向块的指针，函数返回时帧里的块失效。
+// 构建图与其中的登记项统一从本模块的静态 arena 切分，生命期与进程相同。
+// ---------------------------------------------------------------------------
+let GraphArena = struct {
+  bytes: Array(u8, 16384),
+};
+
+// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
+// 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
+let arena_backing: GraphArena = GraphArena { };
+
+let ArenaHalt = struct { zero: u64 };
+
+let arena_halt_at = func(h: ArenaHalt) -> u64 {
+  return 1 / h.zero;
+};
+
+// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
+let arena_halt = func(cause: u64) -> u64 {
+  let h: ArenaHalt = ArenaHalt { zero: cause - cause };
+  return arena_halt_at(h);
+};
+
+// 从静态 arena 切出 bytes 字节，回块起点的原始地址。
+let arena_take = func(bytes: u64) -> u64 {
+  let base: u64 = ptr_of(arena_backing);
+  let head: Mut(u64) = ptr_cast(Mut(u64), base);
+  let used: u64 = deref(head);
+  let start: u64 = ((used + 7) / 8) * 8;
+  let end: u64 = start + ((bytes + 7) / 8) * 8;
+  if end + 8 > 16384 {
+    let dead: u64 = arena_halt(end);
+    return dead;
+  }
+  deref(head) = end;
+  return base + 8 + start;
+};
+
+// ---------------------------------------------------------------------------
+// 双哈希：FNV-1a 与缓存键合成。
+// ---------------------------------------------------------------------------
+pub let fnv1a_bytes = func(data: Slice(u8)) -> u64 {
+  let h: u64 = loop c(i: u64 = 0, h: u64 = 0xcbf29ce484222325) while i < data.len {
+    h = (h ^ (data[i] as u64)) * 0x100000001b3;
+    i = i + 1;
+  };
+  return h;
+};
+
+// .l1b 缓存键：源码哈希与接口哈希各自的 FNV-1a 值按奇偶两路混合。
+// 两路都参与，因此源码或接口任一变化都会换键。
+pub let hash_pair = func(src_bytes: Slice(u8), iface_bytes: Slice(u8)) -> u64 {
+  let s: u64 = fnv1a_bytes(src_bytes);
+  let f: u64 = fnv1a_bytes(iface_bytes);
+  return s ^ (f * 0x9e3779b97f4a7c15);
+};
+
+// 接口哈希是否未变：为 1 表示下游依赖可以全部跳过重编。
+pub let interface_unchanged = func(prev_iface: u64, next_iface: u64) -> u64 {
+  if prev_iface == next_iface { return 1; }
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
+// 构建图：内存中的声明式登记面。
+// ---------------------------------------------------------------------------
+// 空图：每个聚合字段从 arena 切一块，随后把目标环境与计数写回去。
+pub let new_graph = func(target: TargetEnv) -> Graph {
+  let g: Graph = Graph { };
+  comptime for f in fields_of(Graph) {
+    let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(g) + (f.offset as u64));
+    deref(dst) = arena_take(size_of(f.type) as u64);
+  }
+  g.target = target;
+  g.count = 0;
+  return g;
+};
+
+// 读取面统一按只读引用接收：调用方直接用 UFCS（g.has(...)）或补 ref_of。
+pub let has = func(g: Ref(Graph), id: u64) -> u64 {
+  if id == 0 { return 0; }
+  if id > deref(g).count { return 0; }
+  return 1;
+};
+
+// 取登记项；id 越界时回零值登记项（id == 0），调用方用 has 先判存在。
+pub let get = func(g: Ref(Graph), id: u64) -> Artifact {
+  if has(g, id) == 0 {
+    return Artifact { };
+  }
+  return deref(g).items[id - 1];
+};
+
+// 登记一个新编译单元，回其 id；图满（32 项）回 0。
+pub let add_artifact = func(g: Mut(Graph), kind: ArtifactKind, name: Slice(u8), root: Slice(u8),
+                            src_bytes: Slice(u8), iface_bytes: Slice(u8)) -> u64 {
+  if deref(g).count >= 32 {
+    return 0;
+  }
+  let id: u64 = deref(g).count + 1;
+  let a: Artifact = Artifact {
+    id: id,
+    kind: kind,
+    name: name,
+    root: root,
+    dep_mask: 0,
+    src_hash: fnv1a_bytes(src_bytes),
+    iface_hash: fnv1a_bytes(iface_bytes),
+  };
+  deref(g).items[deref(g).count] = a;
+  deref(g).count = id;
+  return id;
+};
+
+pub let add_executable = func(g: Mut(Graph), name: Slice(u8), root: Slice(u8),
+                              src_bytes: Slice(u8), iface_bytes: Slice(u8)) -> u64 {
+  let kind: ArtifactKind = ArtifactKind.Executable { };
+  return add_artifact(g, kind, name, root, src_bytes, iface_bytes);
+};
+
+pub let add_static_lib = func(g: Mut(Graph), name: Slice(u8), root: Slice(u8),
+                              src_bytes: Slice(u8), iface_bytes: Slice(u8)) -> u64 {
+  let kind: ArtifactKind = ArtifactKind.StaticLib { };
+  return add_artifact(g, kind, name, root, src_bytes, iface_bytes);
+};
+
+pub let add_test = func(g: Mut(Graph), name: Slice(u8), root: Slice(u8),
+                        src_bytes: Slice(u8), iface_bytes: Slice(u8)) -> u64 {
+  let kind: ArtifactKind = ArtifactKind.Test { };
+  return add_artifact(g, kind, name, root, src_bytes, iface_bytes);
+};
+
+// 记一条依赖边：from_id 依赖 to_id。重复登记与非法 id 都回 0。
+pub let link = func(g: Mut(Graph), from_id: u64, to_id: u64) -> u64 {
+  if has(g, from_id) == 0 { return 0; }
+  if has(g, to_id) == 0 { return 0; }
+  if from_id == to_id { return 0; }
+  let bit: u64 = 1 << (to_id - 1);
+  let a: Artifact = deref(g).items[from_id - 1];
+  if (a.dep_mask & bit) != 0 { return 0; }
+  a.dep_mask = a.dep_mask | bit;
+  deref(g).items[from_id - 1] = a;
+  return 1;
+};
+
+let popcount64 = func(bits: u64) -> u64 {
+  let n: u64 = loop c(rest: u64 = bits, n: u64 = 0) while rest != 0 {
+    n = n + (rest & 1);
+    rest = rest >> 1;
+  };
+  return n;
+};
+
+// 依赖边总数。
+pub let edge_count = func(g: Ref(Graph)) -> u64 {
+  let total: u64 = loop c(i: u64 = 0, total: u64 = 0) while i < deref(g).count {
+    let a: Artifact = deref(g).items[i];
+    total = total + popcount64(a.dep_mask);
+    i = i + 1;
+  };
+  return total;
+};
+
+// 拓扑执行步数：每个单元自身一步，每条依赖边一次链接一步。
+pub let step_count = func(g: Ref(Graph)) -> u64 {
+  return deref(g).count + edge_count(g);
+};
+
+// 本单元是否需要重编：源码哈希或接口哈希任一变化即重编；id 非法按必重编处理。
+pub let needs_rebuild = func(g: Ref(Graph), id: u64, next_src: u64, next_iface: u64) -> u64 {
+  if has(g, id) == 0 { return 1; }
+  let a: Artifact = deref(g).items[id - 1];
+  if a.src_hash != next_src { return 1; }
+  if a.iface_hash != next_iface { return 1; }
+  return 0;
+};

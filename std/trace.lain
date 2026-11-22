@@ -3,6 +3,9 @@
 // 丢弃计数，导出时只写出真正记录下来的事件。时间戳统一用微秒，自第一次取时刻
 // 起算相对时间，因此导出的 JSON 不必关心宿主时钟的起点。
 //
+// 每个事件带一个线程号 tid，导出的 JSON 里按事件各自的 tid 写出，因此同一次追踪
+// 里编译器（tid 1）与虚拟机（tid 2）的区间可以落在 Perfetto 的两条泳道上；
+// dump_json 在存在事件时补两条 thread_name 元数据事件，给两条泳道起名字。
 // 导出的缓冲由调用方提供：dump_json 往 MutSlice(u8) 里写，返回写入的字节数。
 // 缓冲不足以容纳整份 JSON 时以除零陷阱终止程序，绝不写出被截断的 JSON。
 extern trace_clock_ns() -> u64 = lain_perf_nanos;
@@ -16,6 +19,7 @@ pub let TraceEvent = struct {
   ts_us: u64,
   dur_us: u64,
   arg_val: u64,
+  tid: u64,
 };
 
 // 常量写成过程：顶层值符号在结构体字段与实参位置上会有物理类型偏差。
@@ -37,6 +41,7 @@ let blank = func() -> TraceEvent {
     ts_us: 0,
     dur_us: 0,
     arg_val: 0,
+    tid: 1,
   };
 };
 
@@ -140,11 +145,19 @@ pub let trace_is_enabled = func() -> u64 {
   return w[state_enabled()];
 };
 
-pub let span_begin = func() -> u64 {
+pub let span_begin_tid = func() -> u64 {
   return relative_us();
 };
 
-let record = func(name: Slice(u8), cat: Slice(u8), ph: u64, ts: u64, dur: u64, arg: u64) -> u64 {
+pub let span_begin = func() -> u64 {
+  return span_begin_tid();
+};
+
+// 线程号：编译器的区间落在 tid 1，虚拟机的区间落在 tid 2。
+pub let tid_compiler = func() -> u64 { return 1; };
+pub let tid_vm = func() -> u64 { return 2; };
+
+let record = func(name: Slice(u8), cat: Slice(u8), ph: u64, ts: u64, dur: u64, arg: u64, tid: u64) -> u64 {
   let w: MutSlice(u64) = flags();
   if w[state_enabled()] == 0 { return 0; }
   let n: u64 = w[state_count()];
@@ -162,24 +175,33 @@ let record = func(name: Slice(u8), cat: Slice(u8), ph: u64, ts: u64, dur: u64, a
     ts_us: ts,
     dur_us: dur,
     arg_val: arg,
+    tid: tid,
   };
   w[state_count()] = n + 1;
   return n + 1;
 };
 
-pub let span_end = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val: u64) -> u64 {
+pub let span_end_tid = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val: u64, tid: u64) -> u64 {
   let w: MutSlice(u64) = flags();
   if w[state_enabled()] == 0 { return 0; }
   let now: u64 = relative_us();
   let dur: u64 = if now >= start_us { now - start_us } else { 0 };
-  return record(name, cat, 88, start_us, dur, arg_val);
+  return record(name, cat, 88, start_us, dur, arg_val, tid);
 };
 
-pub let counter = func(name: Slice(u8), val: u64) -> u64 {
+pub let span_end = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val: u64) -> u64 {
+  return span_end_tid(name, cat, start_us, arg_val, 1);
+};
+
+pub let counter_tid = func(name: Slice(u8), val: u64, tid: u64) -> u64 {
   let w: MutSlice(u64) = flags();
   if w[state_enabled()] == 0 { return 0; }
   let cat: Slice(u8) = "";
-  return record(name, cat, 67, relative_us(), 0, val);
+  return record(name, cat, 67, relative_us(), 0, val, tid);
+};
+
+pub let counter = func(name: Slice(u8), val: u64) -> u64 {
+  return counter_tid(name, val, 1);
 };
 
 pub let event_count = func() -> u64 {
@@ -279,15 +301,19 @@ let put_span = func(o: Out, e: TraceEvent) -> Out {
   let b: Out = put_u64(a, e.ts_us);
   let c: Out = put_text(b, ",\"dur\":");
   let d: Out = put_u64(c, e.dur_us);
-  let f: Out = put_text(d, ",\"pid\":1,\"tid\":1,\"args\":{\"v\":");
-  return put_text(put_u64(f, e.arg_val), "}}");
+  let f: Out = put_text(d, ",\"pid\":1,\"tid\":");
+  let g: Out = put_u64(f, e.tid);
+  let h: Out = put_text(g, ",\"args\":{\"v\":");
+  return put_text(put_u64(h, e.arg_val), "}}");
 };
 
 let put_counter = func(o: Out, e: TraceEvent) -> Out {
   let a: Out = put_text(put_head(o, e), ",\"ph\":\"C\",\"ts\":");
   let b: Out = put_u64(a, e.ts_us);
-  let c: Out = put_text(b, ",\"pid\":1,\"tid\":1,\"args\":{\"value\":");
-  return put_text(put_u64(c, e.arg_val), "}}");
+  let c: Out = put_text(b, ",\"pid\":1,\"tid\":");
+  let d: Out = put_u64(c, e.tid);
+  let f: Out = put_text(d, ",\"args\":{\"value\":");
+  return put_text(put_u64(f, e.arg_val), "}}");
 };
 
 let put_event = func(o: Out, t: MutSlice(TraceEvent), i: u64) -> Out {
@@ -302,6 +328,20 @@ let put_events = func(o: Out, t: MutSlice(TraceEvent), i: u64, n: u64) -> Out {
   return put_events(put_event(sep, t, i), t, i + 1, n);
 };
 
+// 线程名字元事件：让 Perfetto 把 tid 1 / tid 2 两条泳道标成 lainc / Lain-VM。
+let put_thread_name = func(o: Out, name: Slice(u8), tid: u64) -> Out {
+  let a: Out = put_text(o, "{\"name\":\"thread_name\",\"cat\":\"trace\",\"ph\":\"M\",\"pid\":1,\"tid\":");
+  let b: Out = put_u64(a, tid);
+  let c: Out = put_text(b, ",\"args\":{\"name\":");
+  return put_text(put_json_str(c, name), "}}");
+};
+
+let put_meta = func(o: Out, n: u64) -> Out {
+  if n == 0 { return o; }
+  let a: Out = put_thread_name(put_text(o, ","), "lainc", tid_compiler());
+  return put_thread_name(put_text(a, ","), "Lain-VM", tid_vm());
+};
+
 pub let dump_json = func(buf: MutSlice(u8)) -> u64 {
   let w: MutSlice(u64) = flags();
   let t: MutSlice(TraceEvent) = events();
@@ -309,6 +349,7 @@ pub let dump_json = func(buf: MutSlice(u8)) -> u64 {
   let head: Out = put_text(start, "{\"traceEvents\":[");
   let n: u64 = w[state_count()];
   let body: Out = put_events(head, t, 0, n);
-  let done: Out = put_text(body, "]}");
+  let meta: Out = put_meta(body, n);
+  let done: Out = put_text(meta, "]}");
   return buf.len - done.left;
 };

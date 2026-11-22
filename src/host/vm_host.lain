@@ -29,7 +29,8 @@ pub let PROC_CAP = func() -> u64 { return 3; };
 pub let WINDOW_CAP = func() -> u64 { return 6; };
 pub let MEM_CAP = func() -> u64 { return 3072; };
 pub let TCB_CAP = func() -> u64 { return 3072; };
-pub let CAP_ENTRY_CAP = func() -> u64 { return 4; };
+pub let CAP_ENTRY_CAP = func() -> u64 { return 16; };
+pub let TRACE_CAP = func() -> u64 { return 256; };
 
 // --- 容量配置 -------------------------------------------------------------
 // 小容量配置与上面的常量逐项相同，供既有宿主测试使用；编译器侧执行
@@ -49,6 +50,7 @@ pub let VmHostConfig = struct {
   quota_steps: u64,
   quota_stack: u64,
   quota_depth: u64,
+  trace_cap: u64,
 };
 
 pub let default_config = func() -> VmHostConfig {
@@ -67,6 +69,7 @@ pub let default_config = func() -> VmHostConfig {
     quota_steps: 200000,
     quota_stack: 2048,
     quota_depth: 8,
+    trace_cap: 0,
   };
 };
 
@@ -86,6 +89,7 @@ pub let default_large_config = func() -> VmHostConfig {
     quota_steps: 500000,
     quota_stack: 65536,
     quota_depth: 128,
+    trace_cap: TRACE_CAP(),
   };
 };
 
@@ -117,6 +121,7 @@ let ImageCell = struct { v: im.VmImage };
 let TcbCell = struct { v: eng.TCB };
 let CapEntryCell = struct { v: eng.VmCapEntry };
 let CapTableCell = struct { v: eng.VmCapTable };
+let TraceCell = struct { v: eng.VmTraceEvent };
 
 // --- 记录 -----------------------------------------------------------------
 // 所有表都摊平成 (指针, 长度) 标量对；嵌套的 MutSlice 字段经由调用方指针
@@ -153,6 +158,9 @@ pub let VmHost = struct {
   tcb: Mut(eng.TCB),
   caps: Mut(eng.VmCapTable),
   cap_entries: Mut(eng.VmCapEntry),
+  trace: Mut(eng.VmTraceEvent),
+  trace_len: u64,
+  trace_count: Mut(u64),
   quota_steps: u64,
   quota_stack: u64,
   quota_depth: u64,
@@ -228,6 +236,9 @@ pub let host_new_with_config = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.Host
     tcb: null_ref(Mut(eng.TCB)),
     caps: null_ref(Mut(eng.VmCapTable)),
     cap_entries: null_ref(Mut(eng.VmCapEntry)),
+    trace: null_ref(Mut(eng.VmTraceEvent)),
+    trace_len: 0,
+    trace_count: null_ref(Mut(u64)),
     quota_steps: cfg.quota_steps,
     quota_stack: cfg.quota_stack,
     quota_depth: cfg.quota_depth,
@@ -298,6 +309,18 @@ pub let host_new_with_config = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.Host
   let table: eng.VmCapTable = eng.caps_new(vp.cap_entries, cfg.cap_entry_cap);
   deref(vp.caps) = table;
   let frozen: u64 = eng.caps_freeze(vp.caps);
+  // 轨迹计数一格总是切出来：没挂轨迹时它只是一个永远为零的槽。
+  let tct: Mut(u8) = take(vp, size_of(u64), 8);
+  if is_null(tct) { return null_ref(Mut(VmHost)); }
+  vp.trace_count = ptr_cast(Mut(u64), tct);
+  deref(vp.trace_count) = 0;
+  if cfg.trace_cap > 0 {
+    let trb: Mut(u8) = take(vp, cfg.trace_cap * size_of(TraceCell), 16);
+    if is_null(trb) { return null_ref(Mut(VmHost)); }
+    let trz: u64 = zero(trb, cfg.trace_cap * size_of(TraceCell));
+    vp.trace = ptr_cast(Mut(eng.VmTraceEvent), trb);
+    vp.trace_len = cfg.trace_cap;
+  }
   vp.last_error = VMH_OK();
   return vp;
 };
@@ -329,12 +352,38 @@ pub let host_last_bytes = func(v: Mut(VmHost)) -> u64 {
   return v.last_bytes;
 };
 
+// --- 调用轨迹 -------------------------------------------------------------
+// 记录条数 / 容量 / 第 i 条事件。缓冲区由 default_large_config 切出，
+// 小配置的宿主不占这块内存，计数恒为零。
+pub let last_trace_count = func(v: Mut(VmHost)) -> u64 {
+  if is_null(v) { return 0; }
+  if is_null(v.trace_count) { return 0; }
+  return deref(v.trace_count);
+};
+
+pub let last_trace_cap = func(v: Mut(VmHost)) -> u64 {
+  if is_null(v) { return 0; }
+  return v.trace_len;
+};
+
+pub let last_trace_at = func(v: Mut(VmHost), i: u64) -> eng.VmTraceEvent {
+  if is_null(v) {
+    return eng.VmTraceEvent { sub_sym: 0, depth: 0, steps: 0, kind: 0 };
+  }
+  if i >= v.trace_len {
+    return eng.VmTraceEvent { sub_sym: 0, depth: 0, steps: 0, kind: 0 };
+  }
+  let p: Mut(eng.VmTraceEvent) = v.trace + i * size_of(TraceCell);
+  return deref(p);
+};
+
 let clear_mark = func(v: Mut(VmHost)) -> u64 {
   v.last_error = VMH_OK();
   v.last_trap = eng.TRAP_NONE();
   v.last_status = eng.SLICE_DONE();
   v.last_steps = 0;
   v.last_bytes = 0;
+  deref(v.trace_count) = 0;
   return 0;
 };
 
@@ -597,9 +646,11 @@ let run_scalar = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
                       out: Mut(u8), cap: u64) -> u64 {
   let quota: eng.VmQuota = eng.quota_new(v.quota_steps, v.quota_stack, v.quota_depth);
   let arena: MutSlice(u8) = make_slice(MutSlice(u8), v.tcb_arena, v.tcb_len);
+  let trace: MutSlice(eng.VmTraceEvent) =
+      make_slice(MutSlice(eng.VmTraceEvent), v.trace, v.trace_len);
   let image: Ref(im.VmImage) = ref_of(deref(v.image));
-  let result: eng.VmResult = eng.vm_apply(image, v.space, v.caps, quota, v.owner,
-                                          entry, args, arena);
+  let result: eng.VmResult = eng.vm_apply_traced(image, v.space, v.caps, quota, v.owner,
+                                                entry, args, arena, trace, v.trace_count);
   v.last_steps = result.steps_used;
   v.last_trap = result.trap_kind;
   v.last_status = result.status;
@@ -662,6 +713,9 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
     v.last_error = VMH_ERR_CAPACITY();
     return VMH_ERR_CAPACITY();
   }
+  let trace: MutSlice(eng.VmTraceEvent) =
+      make_slice(MutSlice(eng.VmTraceEvent), v.trace, v.trace_len);
+  let traced: u64 = eng.vm_tcb_set_trace(tcb, trace, v.trace_count);
   let started: u64 = eng.vm_tcb_start(tcb, entry, args);
   let first: eng.VmResult = eng.vm_step(tcb);
   let st: u64 = loop spin(st: u64 = first.status)

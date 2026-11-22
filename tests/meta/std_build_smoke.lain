@@ -1,0 +1,117 @@
+// std::build 回归：目标环境、构建图登记、依赖链接、以及双哈希增量判定。
+// 仅改函数体时接口哈希不变 -> 下游全部跳过；签名变化 -> 接口哈希翻转，下游必须重编。
+// 全部判定成立时返回值恰为 97。
+let bld = import("std::build");
+
+use bld;
+
+let main = func() -> i64 {
+  // --- 目标环境 ---
+  let os_linux: bld.Os = bld.Os.Linux { };
+  let arch_x86: bld.Arch = bld.Arch.X86_64 { };
+  let opt_safe: bld.OptMode = bld.OptMode.ReleaseSafe { };
+  let env: bld.TargetEnv = bld.TargetEnv {
+    os: ref_of(os_linux),
+    arch: ref_of(arch_x86),
+    opt: ref_of(opt_safe),
+  };
+
+  let env_hit: i64 = match deref(env.os) {
+    Windows => 0,
+    Linux => 3,
+    MacOS => 0,
+  };
+  let opt_hit: i64 = match deref(env.opt) {
+    Debug => 0,
+    ReleaseSafe => 1,
+    ReleaseFast => 0,
+  };
+
+  // --- 构建图 ---
+  let g: bld.Graph = bld.new_graph(env);
+
+  let name_core: Slice(u8) = "core";
+  let root_core: Slice(u8) = "src/core.lain";
+  let src_core: Slice(u8) = "pub let core_sqrt = func(x: u64) -> u64 { return x; };";
+  let iface_core: Slice(u8) = "core_sqrt(u64) -> u64";
+  let core: u64 = g.add_static_lib(name_core, root_core, src_core, iface_core);
+
+  let name_app: Slice(u8) = "app";
+  let root_app: Slice(u8) = "src/main.lain";
+  let src_app: Slice(u8) = "pub let main = func() -> i64 { return core_sqrt(16); };";
+  let iface_app: Slice(u8) = "main() -> i64";
+  let app: u64 = g.add_executable(name_app, root_app, src_app, iface_app);
+
+  let name_test: Slice(u8) = "app_test";
+  let root_test: Slice(u8) = "tests/app_test.lain";
+  let src_test: Slice(u8) = "pub let check = func() -> i64 { return 4; };";
+  let iface_test: Slice(u8) = "check() -> i64";
+  let tst: u64 = g.add_test(name_test, root_test, src_test, iface_test);
+
+  let e1: u64 = g.link(app, core);
+  let e2: u64 = g.link(tst, core);
+  // 重复登记同一条依赖边必须被拒绝。
+  let dup: u64 = g.link(app, core);
+
+  let cnt: u64 = g.count;
+  let edges: u64 = g.edge_count();
+  let steps: u64 = g.step_count();
+  let ids: u64 = app + tst + core;
+  let hit: u64 = g.has(app);
+  let miss: u64 = g.has(4);
+
+  let app_art: bld.Artifact = g.get(app);
+  let core_art: bld.Artifact = g.get(core);
+
+  // --- 双哈希增量判定 ---
+  // 仅函数体改变：源码哈希变了，接口哈希不变。
+  let src_app_body: Slice(u8) = "pub let main = func() -> i64 { return core_sqrt(64); };";
+  // 签名改变：返回类型从 i64 变成 u64，接口哈希跟着变。
+  let iface_app_sig: Slice(u8) = "main() -> u64";
+
+  let h_src_old: u64 = bld.fnv1a_bytes(src_app);
+  let h_src_new: u64 = bld.fnv1a_bytes(src_app_body);
+  let h_iface_old: u64 = bld.fnv1a_bytes(iface_app);
+  let h_iface_new: u64 = bld.fnv1a_bytes(iface_app_sig);
+
+  let key_old: u64 = bld.hash_pair(src_app, iface_app);
+  let key_body: u64 = bld.hash_pair(src_app_body, iface_app);
+  let key_sig: u64 = bld.hash_pair(src_app_body, iface_app_sig);
+  let key_again: u64 = bld.hash_pair(src_app, iface_app);
+
+  let src_diff: u64 = if h_src_old != h_src_new { 1 } else { 0 };
+  let key_diff: u64 = if key_old != key_body { 1 } else { 0 };
+  let key_flip: u64 = if key_body != key_sig { 1 } else { 0 };
+  let key_stable: u64 = if key_old == key_again { 1 } else { 0 };
+
+  // 体变：本单元重编（1），下游看接口哈希不变（1）-> 下游跳过。
+  let own_rebuild: u64 = g.needs_rebuild(app, h_src_new, h_iface_old);
+  let down_skip: u64 = bld.interface_unchanged(app_art.iface_hash, h_iface_old);
+  // 签名变化：接口哈希翻转（0）-> 下游必须重编。
+  let down_flip: u64 = bld.interface_unchanged(app_art.iface_hash, h_iface_new);
+  // 依赖方自身未变：不需要重编。
+  let core_still: u64 = g.needs_rebuild(core, core_art.src_hash, core_art.iface_hash);
+  // 非法 id 一律按必重编处理。
+  let bad_rebuild: u64 = g.needs_rebuild(99, h_src_old, h_iface_old);
+
+  // 每一项偏差都必须是 0；正确时返回 97。
+  let bias: i64 = (env_hit - 3)
+    + (opt_hit - 1)
+    + ((edges as i64) - 2)
+    + ((steps as i64) - 5)
+    + ((cnt as i64) - 3)
+    + ((ids as i64) - 6)
+    + (dup as i64)
+    + (((hit + miss) as i64) - 1)
+    + ((src_diff as i64) - 1)
+    + ((key_diff as i64) - 1)
+    + ((key_flip as i64) - 1)
+    + ((key_stable as i64) - 1)
+    + ((own_rebuild as i64) - 1)
+    + ((down_skip as i64) - 1)
+    + (down_flip as i64)
+    + (core_still as i64)
+    + ((bad_rebuild as i64) - 1)
+    + (((e1 + e2) as i64) - 2);
+  return 97 + bias;
+};

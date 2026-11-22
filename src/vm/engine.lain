@@ -207,6 +207,23 @@ pub let VmCaps = sig {
 };
 
 pub let CAP_FUNCTION = func() -> u64 { return 1; };
+// Meta 原语的种类号。它们同样由宿主函数承载，区别只在登记时写进表项的
+// kind，供调用方按种类分派与审计。
+pub let CAP_AST_TX_BEGIN = func() -> u64 { return 2; };
+pub let CAP_AST_TX_COMMIT = func() -> u64 { return 3; };
+pub let CAP_AST_TX_ROLLBACK = func() -> u64 { return 4; };
+pub let CAP_AST_MK_TOKEN = func() -> u64 { return 5; };
+pub let CAP_AST_MK_GROUP = func() -> u64 { return 6; };
+pub let CAP_TYPE_REC_BEGIN = func() -> u64 { return 7; };
+pub let CAP_TYPE_REC_ADD = func() -> u64 { return 8; };
+pub let CAP_TYPE_REC_END = func() -> u64 { return 9; };
+
+// 表项能否被调用：FUNCTION 与全部 Meta 种类都是宿主函数，其余（含 0）拒绝。
+pub let cap_kind_callable = func(kind: u64) -> u64 {
+  if kind < CAP_FUNCTION() { return 0; }
+  if kind > CAP_TYPE_REC_END() { return 0; }
+  return 1;
+};
 
 // 一个能力表项。context 是注册时冻结的可信绑定，不进入参数词、不进入值槽。
 pub let VmCapEntry = struct {
@@ -266,7 +283,7 @@ pub let VmCapHost: VmCaps = module {
     let hit: u64 = caps_find(self, link_name, 0);
     if hit == 0 { return 0; }
     let e: Mut(VmCapEntry) = cap_entry_ptr(self, hit - 1);
-    if e.kind != CAP_FUNCTION() { return 0; }
+    if cap_kind_callable(e.kind) == 0 { return 0; }
     let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
     if (fn as u64) == 0 { return 0; }
     return fn(e.context, args);
@@ -371,6 +388,21 @@ pub let endpoint_cancel = func(ep: Mut(Endpoint), who: u64) -> u64 {
   return 0;
 };
 
+// --- 调用轨迹 -------------------------------------------------------------
+// 一条轨迹事件：进入/离开哪个子过程、当时的调用深度与已用步数。缓冲区、容量
+// 与计数指针都由调用方给；没挂缓冲区（trace_cap == 0）时记录一次都不发生，
+// 建 TCB 的既有调用方因此零开销。
+pub let VmTraceEvent = struct {
+  sub_sym: u64,
+  depth: u64,
+  steps: u64,
+  kind: u64,
+};
+
+pub let TRACE_ENTER = func() -> u64 { return 1; };
+pub let TRACE_EXIT = func() -> u64 { return 2; };
+pub let TRACE_TRAP = func() -> u64 { return 3; };
+
 // --- 帧与 TCB -------------------------------------------------------------
 pub let Frame = struct {
   region: u64,
@@ -418,6 +450,9 @@ pub let TCB = struct {
   result_cell: Mut(VmValue),
   cur_region: u64,
   cur_position: u64,
+  trace_buf: Mut(VmTraceEvent),
+  trace_cap: u64,
+  trace_count: Mut(u64),
 };
 
 // TCB 的 UFCS 入口：调用方 use 本模块后可以写 tcb.vm_step()、tcb.vm_tcb_steps()
@@ -578,6 +613,9 @@ pub let vm_tcb_blank = func() -> TCB {
     result_cell: null_ref(Mut(VmValue)),
     cur_region: 0,
     cur_position: 0,
+    trace_buf: null_ref(Mut(VmTraceEvent)),
+    trace_cap: 0,
+    trace_count: null_ref(Mut(u64)),
   };
 };
 
@@ -637,8 +675,52 @@ pub let vm_tcb_new = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
     result_cell: ptr_cast(Mut(VmValue), cell_at),
     cur_region: 0,
     cur_position: 0,
+    trace_buf: null_ref(Mut(VmTraceEvent)),
+    trace_cap: 0,
+    trace_count: null_ref(Mut(u64)),
   };
   return 1;
+};
+
+// 挂上一块轨迹缓冲区。计数从零开始，容量就是切片的长度；传空切片等于不挂。
+pub let vm_tcb_set_trace = func(tcb: Mut(TCB), buf: MutSlice(VmTraceEvent),
+                                count: Mut(u64)) -> u64 {
+  tcb.trace_buf = buf.ptr;
+  tcb.trace_cap = buf.len;
+  tcb.trace_count = count;
+  deref(count) = 0;
+  return buf.len;
+};
+
+pub let vm_tcb_trace_count = func(tcb: Ref(TCB)) -> u64 {
+  if is_null(tcb.trace_count) { return 0; }
+  return deref(tcb.trace_count);
+};
+
+pub let vm_tcb_trace_cap = func(tcb: Ref(TCB)) -> u64 { return tcb.trace_cap; };
+
+// 记一条轨迹事件。缓冲区满了就丢掉多余的事件，执行本身不受影响。
+let trace_record = func(tcb: Mut(TCB), sub_sym: u64, kind: u64) -> u64 {
+  if tcb.trace_cap == 0 { return 0; }
+  let count: u64 = deref(tcb.trace_count);
+  if count >= tcb.trace_cap { return 0; }
+  let p: Mut(VmTraceEvent) = tcb.trace_buf + count * size_of(VmTraceEvent);
+  p.sub_sym = sub_sym;
+  p.depth = tcb.call_depth;
+  p.steps = tcb.steps;
+  p.kind = kind;
+  deref(tcb.trace_count) = count + 1;
+  return 1;
+};
+
+// 某一帧所属子过程的符号号；区域没绑子过程时给 0。
+let frame_sub_symbol = func(tcb: Mut(TCB), index: u64) -> u64 {
+  if index >= tcb.frame_count { return 0; }
+  let f: Mut(Frame) = tcb_frame_ptr(tcb, index);
+  let rec: im.ImageRegion = im.vm_region(tcb.image, f.region);
+  if rec.sub_index == im.NO_INDEX() { return 0; }
+  let sub: im.SubInfo = im.vm_sub(tcb.image, rec.sub_index);
+  return sub.name;
 };
 
 // 销毁 TCB：窗口收回 0、结束借用。区段本身与额度归供给方。
@@ -817,6 +899,7 @@ let clear_stack_window = func(tcb: Mut(TCB)) -> u64 {
 };
 
 let trap_now = func(tcb: Mut(TCB), kind: u64, status: u64) -> u64 {
+  let traced: u64 = trace_record(tcb, frame_sub_symbol(tcb, tcb.frame_count - 1), TRACE_TRAP());
   tcb.trap_kind = kind;
   tcb.trap_status = status;
   if tcb.frame_count > 0 {
@@ -1372,6 +1455,7 @@ let enter_sub = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
   if collected != 0 { return collected; }
   let pushed: u64 = push_region(tcb, sub.body_region, parent_position, 0, 1);
   if pushed != SLICE_RUNNABLE() { return pushed; }
+  let traced: u64 = trace_record(tcb, sub.name, TRACE_ENTER());
   let callee: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
   return bind_args(tcb, callee.slot_base, arg_count, 0);
 };
@@ -1581,6 +1665,8 @@ let collect_loop_args = func(tcb: Mut(TCB), inst: vf.IrInst, rec: im.ImageRegion
 };
 
 let op_return = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let leaving: u64 = frame_sub_symbol(tcb, tcb.frame_count - 1);
+  let traced: u64 = trace_record(tcb, leaving, TRACE_EXIT());
   let value: VmValue = value_zero();
   if inst.operand_count > 0 {
     let rec: im.ImageRegion = im.vm_region(tcb.image, tcb.cur_region);
@@ -1894,6 +1980,18 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                         caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
                         entry: u64, args: Slice(u64),
                         arena: MutSlice(u8)) -> VmResult {
+  let empty: MutSlice(VmTraceEvent) =
+      make_slice(MutSlice(VmTraceEvent), null_ref(Mut(VmTraceEvent)), 0);
+  let count0: u64 = 0;
+  let count: Mut(u64) = mut_of(count0);
+  return vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, empty, count);
+};
+
+// 与 vm_apply 相同，只是多挂一块轨迹缓冲区。空切片等价于不挂。
+pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
+                               caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
+                               entry: u64, args: Slice(u64), arena: MutSlice(u8),
+                               trace: MutSlice(VmTraceEvent), count: Mut(u64)) -> VmResult {
   let need: u64 = vm_tcb_bytes(image, quota);
   if arena.len < need { return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL()); }
   let lease: vs.StackLease = vs.vm_no_lease();
@@ -1912,6 +2010,7 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
     }
     return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL());
   }
+  let traced: u64 = vm_tcb_set_trace(live, trace, count);
   let started: u64 = vm_tcb_start(live, entry, args);
   let result: VmResult = if started != SLICE_RUNNABLE() { result_of(live) } else { run_to_end(live) };
   let closed: u64 = vm_tcb_free(live);
