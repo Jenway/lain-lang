@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lain/backend/c99.h"
+#include "lain/ir/build.h"
 #include "lain/meta/host_v2.h"
+#include "lain/text/parse.h"
 #include "lain/vm/caps.h"
 #include "lain/vm/quota.h"
 #include "lain/vm/space.h"
@@ -179,6 +182,49 @@ static int ends_with(const char *s, const char *suf) {
   return sl >= fl && strcmp(s + sl - fl, suf) == 0;
 }
 
+static int write_c99_output(const char *out_path, const char *out_text,
+                            uint32_t out_len, const char *entry,
+                            int print_result) {
+  char *text = (char *)malloc((size_t)out_len + 1);
+  if (!text) return 1;
+  if (out_len > 0) memcpy(text, out_text, out_len);
+  text[out_len] = '\0';
+
+  L1Builder *builder = lainir_builder_new();
+  if (!builder) {
+    free(text);
+    return 1;
+  }
+  L1Diagnostic diag;
+  memset(&diag, 0, sizeof(diag));
+  const L1Module *module = lainir_parse(builder, text, &diag);
+  free(text);
+  if (!module) {
+    fprintf(stderr, "native-meta: C99 解析 LAINIR 失败: %s\n", diag.message);
+    lainir_builder_free(builder);
+    return 1;
+  }
+
+  FILE *f = fopen(out_path, "wb");
+  if (!f) {
+    fprintf(stderr, "cannot write %s\n", out_path);
+    lainir_builder_free(builder);
+    return 1;
+  }
+  LainC99Options opts;
+  memset(&opts, 0, sizeof(opts));
+  opts.entry = entry ? entry : "s0__main";
+  opts.print_result = print_result != 0;
+  memset(&diag, 0, sizeof(diag));
+  int rc = lainir_emit_c99(module, f, &opts, &diag);
+  fclose(f);
+  if (rc != 0) {
+    fprintf(stderr, "native-meta: C99 发射失败: %s\n", diag.message);
+  }
+  lainir_builder_free(builder);
+  return rc == 0 ? 0 : 1;
+}
+
 static char *read_text(const char *path, uint32_t *len_out) {
   FILE *f = fopen(path, "rb");
   if (!f) return NULL;
@@ -208,11 +254,20 @@ int main(int argc, char **argv) {
   char *source_texts[NATIVE_MAX_SOURCES] = {0};
   uint32_t source_count = 0;
   const char *out_path = NULL;
+  const char *entry = NULL;
   int quiet = 0;
+  int c99_mode = 0;
+  int print_result = 0;
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
       out_path = argv[++i];
+    } else if (strcmp(argv[i], "--entry") == 0 && i + 1 < argc) {
+      entry = argv[++i];
+    } else if (strcmp(argv[i], "--c99") == 0) {
+      c99_mode = 1;
+    } else if (strcmp(argv[i], "--print-result") == 0) {
+      print_result = 1;
     } else if (strcmp(argv[i], "--source") == 0 && i + 1 < argc) {
       if (source_count >= NATIVE_MAX_SOURCES) return 1;
       source_paths[source_count++] = argv[++i];
@@ -220,8 +275,7 @@ int main(int argc, char **argv) {
       quiet = 1;
     } else if (strcmp(argv[i], "-v") == 0) {
       /* accepted for CLI parity */
-    } else if ((strcmp(argv[i], "--entry") == 0 ||
-                strcmp(argv[i], "--fuel") == 0 ||
+    } else if ((strcmp(argv[i], "--fuel") == 0 ||
                 strcmp(argv[i], "--slice") == 0 ||
                 strcmp(argv[i], "--stack") == 0 ||
                 strcmp(argv[i], "--quota") == 0 ||
@@ -241,7 +295,9 @@ int main(int argc, char **argv) {
   }
 
   if (source_count == 0) {
-    fprintf(stderr, "usage: lain-stage <source.lain> [--out <out.l1>]\n");
+    fprintf(stderr,
+            "usage: lain-stage <source.lain> [--out <out.l1|out.c>] [--c99] "
+            "[--entry <name>] [--print-result]\n");
     return 1;
   }
 
@@ -325,7 +381,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (out_path && rc == 0) {
+  int emit_c99 = c99_mode || (out_path && ends_with(out_path, ".c"));
+  if (emit_c99 && out_path && rc == 0) {
+    if (write_c99_output(out_path, out_text, out_len, entry, print_result) !=
+        0) {
+      for (uint32_t i = 0; i < source_count; ++i) free(source_texts[i]);
+      lainv2_host_free(host);
+      return 1;
+    }
+  } else if (out_path && rc == 0) {
     FILE *f = fopen(out_path, "wb");
     if (!f) {
       fprintf(stderr, "cannot write %s\n", out_path);

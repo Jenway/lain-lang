@@ -775,7 +775,46 @@ let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return 1;
 };
 
+// 判断某个值是否在任何非 #alloca 指令的操作数或被调符号里出现。
+let ops_use_name = func(it: vf.IrInst, name: u64, i: u64) -> u64 {
+  if i >= it.operand_count { return 0; }
+  let op: vf.IrOperand = vf.inst_op(it, i);
+  if (op.kind == vf.OP_VALUE()) and (op.name == name) { return 1; }
+  return ops_use_name(it, name, i + 1);
+};
+
+let cases_use_name = func(m: Ref(vf.IrModule), it: vf.IrInst, name: u64, i: u64) -> u64 {
+  if i >= it.case_count { return 0; }
+  let cs: vf.IrCase = case_at(m, it.cases_at + i);
+  if region_uses_name(m, cs.body, name) == 1 { return 1; }
+  return cases_use_name(m, it, name, i + 1);
+};
+
+let region_uses_from = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, i: u64) -> u64 {
+  if i >= r.inst_count { return 0; }
+  let ii: u64 = region_inst(r, i);
+  let it: vf.IrInst = inst_at(m, ii);
+  if it.kind != codes.INST_ALLOCA() {
+    if it.symbol == name { return 1; }
+    if ops_use_name(it, name, 0) == 1 { return 1; }
+  }
+  if region_uses_name(m, it.body, name) == 1 { return 1; }
+  if region_uses_name(m, it.else_body, name) == 1 { return 1; }
+  if region_uses_name(m, it.default_body, name) == 1 { return 1; }
+  if cases_use_name(m, it, name, 0) == 1 { return 1; }
+  return region_uses_from(m, r, name, i + 1);
+};
+
+let region_uses_name = func(m: Ref(vf.IrModule), ri: u64, name: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 0; }
+  let r: vf.IrRegion = region_at(m, ri);
+  return region_uses_from(m, r, name, 0);
+};
+
 let emit_alloca = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.result_count == 0 { return 1; }
+  let p: vf.IrProc = proc_at(em.m, em.proc);
+  if region_uses_name(em.m, p.body, vf.inst_result_name(it, 0)) == 0 { return 1; }
   let bytes: u64 = type_byte_size(it_ty(it));
   let a: u64 = emit_indent(em, em.depth);
   let b: u64 = put_str(em.w, "void *");

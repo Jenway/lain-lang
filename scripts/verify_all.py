@@ -17,6 +17,7 @@ STAGE1_EXE = os.path.join(BUILD, "lain-stage1.exe" if os.name == "nt" else "lain
 STAGE2_L1 = os.path.join(BUILD, "stage2.l1")
 STAGE2_C = os.path.join(BUILD, "stage2.c")
 STAGE2_EXE = os.path.join(BUILD, "lain-stage2.exe" if os.name == "nt" else "lain-stage2")
+LAINC_EXE = os.path.join(BUILD, "lainc.exe" if os.name == "nt" else "lainc")
 STAGE3_L1 = os.path.join(BUILD, "stage3.l1")
 NATIVE_DRIVER = os.path.join(ROOT, "seed", "native_meta_driver.c")
 BOOT_C = os.path.join(ROOT, "seed", "bootstrap", "lainc_boot.c")
@@ -621,9 +622,11 @@ def main():
                             print("C99 自举 失败（固定点不一致）")
                         else:
                             bootstrap_ok = True
+                            shutil.copyfile(STAGE2_EXE, LAINC_EXE)
                             print("C99 自举 通过（Stage-1 -> Stage-2 -> Stage-3 固定点一致，%d KB IR / %d KB C99）"
                                   % (os.path.getsize(STAGE2_L1) // 1024,
                                      os.path.getsize(STAGE2_C) // 1024))
+                            print("单命令编译器已就绪: %s" % os.path.relpath(LAINC_EXE, ROOT))
     elif units:
         print("C99 自举 跳过（未找到 clang）")
     else:

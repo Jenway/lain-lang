@@ -333,12 +333,47 @@ static uint32_t type_bits_width(const L1Type *ty) {
   return ty->width;
 }
 
+/* 判断某个符号是否在区域（含嵌套区域）里被任何非 #alloca 指令引用。 */
+static bool region_uses_symbol(const L1Region *r, const char *sym) {
+  if (!r || !sym) return false;
+  for (uint32_t p = 0; p < r->param_count; ++p) {
+    const L1Operand *init = &r->params[p].init;
+    if (init->kind == OPERAND_VALUE && !init->is_global && init->name &&
+        strcmp(init->name, sym) == 0)
+      return true;
+  }
+  for (uint32_t i = 0; i < r->inst_count; ++i) {
+    const L1Inst *inst = &r->insts[i];
+    if (inst->kind != INST_ALLOCA) {
+      for (uint32_t o = 0; o < inst->operand_count; ++o) {
+        const L1Operand *op = &inst->operands[o];
+        if (op->kind == OPERAND_VALUE && !op->is_global && op->name &&
+            strcmp(op->name, sym) == 0)
+          return true;
+      }
+      if (inst->symbol && strcmp(inst->symbol, sym) == 0) return true;
+    }
+    if (inst->body && region_uses_symbol(inst->body, sym)) return true;
+    if (inst->else_body && region_uses_symbol(inst->else_body, sym)) return true;
+    for (uint32_t c = 0; c < inst->case_count; ++c) {
+      if (inst->cases[c].body && region_uses_symbol(inst->cases[c].body, sym))
+        return true;
+    }
+    if (inst->default_case && region_uses_symbol(inst->default_case, sym))
+      return true;
+  }
+  return false;
+}
+
 /* 预扫描区域内的 #alloca：循环外的全部提升到过程顶部。 */
 static bool prescan_allocas(C99Ctx *ctx, const L1Region *r, bool in_loop) {
   if (!r) return true;
   for (uint32_t i = 0; i < r->inst_count; ++i) {
     const L1Inst *inst = &r->insts[i];
     if (inst->kind == INST_ALLOCA) {
+      if (!in_loop && inst->result_count == 1 && ctx->cur_sub &&
+          !region_uses_symbol(ctx->cur_sub->body, inst->results[0]))
+        continue;
       if (ctx->alloca_len == ctx->alloca_cap) {
         uint32_t ncap = ctx->alloca_cap ? ctx->alloca_cap * 2 : 16;
         C99AllocaInfo *na = (C99AllocaInfo *)realloc(
@@ -732,8 +767,10 @@ static bool emit_inst(C99Ctx *ctx, const L1Inst *inst, int depth,
 
   case INST_ALLOCA: {
     int aid = find_alloca_id(ctx, inst);
+    /* 未被任何指令引用的循环外分配不产出任何行。 */
+    if (aid < 0) break;
     indent(out, depth);
-    if (aid >= 0 && !ctx->allocas[aid].in_loop) {
+    if (!ctx->allocas[aid].in_loop) {
       fprintf(out, "void *%s = (void *)_alloca_%d;\n", res_names[0], aid);
     } else {
       uint64_t elem_bytes = (lainir_type_width(inst->ty) + 7u) / 8u;

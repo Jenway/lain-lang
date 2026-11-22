@@ -388,8 +388,11 @@ int main(int argc, char **argv) {
   }
   const LainVmTrap *trap = lainvm_tcb_trap(tcb);
   if (trap && trap->active) {
-    printf("trap kind=%d status=%d line=%u column=%u\n", (int)trap->kind,
-           trap->status, trap->line, trap->column);
+    uint32_t si = lainvm_image_region_sub(image, trap->region);
+    const char *nm = (si == 0xFFFFFFFFu) ? "?" : lainvm_image_sub_name(image, si);
+    printf("trap kind=%d status=%d line=%u column=%u region=%u position=%u sub=%s\n",
+           (int)trap->kind, trap->status, trap->line, trap->column,
+           trap->region, trap->position, nm ? nm : "?");
     lainvm_tcb_free(tcb);
     lainvm_image_free(image);
     lainir_builder_free(builder);
