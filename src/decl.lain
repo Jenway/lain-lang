@@ -18,6 +18,7 @@ let ireg = import("tyreg");
 let tb = import("tbuild");
 let ctf = import("ctfor");
 let gn = import("generics");
+let gv = import("given");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern decl_compile_vmod_p2(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 = lainc_compile_functor_mod_p2;
@@ -92,6 +93,8 @@ let bind_gen_vals = func(k: Mut(st.State), nms: Mut(u64), vals: Mut(ctf.CtVal), 
   let nm: u64 = deref(cx.word_idx(nms, i));
   let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), vals) + i * 24);
   ctf.bind(k, nm, ctf.v_kind(v), ctf.v_a(v), ctf.v_b(v));
+  // 模块见证参数同步进记录区，嵌套泛型调用才能自动找到它。
+  if ctf.v_kind(v) == 9 { gv.push_mod_implicit(k, ctf.v_a(v), ctf.v_b(v)); }
   return bind_gen_vals(k, nms, vals, i + 1, n);
 };
 
@@ -114,6 +117,7 @@ let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   let saved_vmod: u64 = st.st_vmod(k);
   let saved_dp: u64 = gn.gen_depth(k);
   let cm: u64 = ctf.mark(k);
+  let gmark: u64 = gv.mark(k);
   let gvm: u64 = if gm >= 1000 { gm } else { 0 };
   st.st_set_src(k, src);
   st.st_set_vmod(k, gvm);
@@ -123,6 +127,7 @@ let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   ty.ty_none(rt);
   if ret_i != 0 { parse_type(k, root, ret_i, rt); }
   compile_body_with(k, pg, rt, bodyg, q);
+  gv.release(k, gmark);
   ctf.release(k, cm);
   gn.set_gen_depth(k, saved_dp);
   st.st_set_vmod(k, saved_vmod);
@@ -269,7 +274,7 @@ let skip_body = func(g: u64, i: u64) -> u64 {
   return skip_body(g, i + 1);
 };
 
-let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+pub let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let se: Mut(modules.SymEntry) = modules.find_here(k, n_sym(g, i + 1));
   let flag: u64 = if is_null(se) { 0 } else { modules.sym_set_flag(se, 1) };
@@ -280,7 +285,7 @@ let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 };
 
 // let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
-let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) -> u64 {
+pub let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) -> u64 {
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
   let q: u64 = if is_null(se) { modules.qual(k, st.st_scope(k), name) } else { modules.sym_qual(se) };
   if (se as u64) != 0 {
@@ -291,7 +296,7 @@ let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) -> u64
 };
 
 // 顶层的普通值：零参过程，把值算出来直接返回。
-let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+pub let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let j0: u64 = i + 2;
   let t: Mut(ty.Ty) = tnone(k);
@@ -351,7 +356,7 @@ let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 };
 
 // 静态数据的读数过程：表与字符串直接返回数据符号的地址。
-let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, t: Mut(ty.Ty)) -> u64 {
+pub let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, t: Mut(ty.Ty)) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, t);
@@ -367,7 +372,7 @@ let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u6
 };
 
 // 顶层聚合构造：数据块先登记成零字节，再由这个过程把字段写进去。
-let compile_data_agg = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, sh: u64, fg: u64) -> u64 {
+pub let compile_data_agg = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, sh: u64, fg: u64) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let t: Mut(ty.Ty) = new_ty(k);
   let a1: u64 = ty.ty_addr(t);

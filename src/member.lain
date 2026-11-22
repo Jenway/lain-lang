@@ -15,6 +15,8 @@ let rf = import("refval");
 let gn = import("generics");
 let ireg = import("tyreg");
 let ctf = import("ctfor");
+let tb = import("tbuild");
+let ctfn = import("ctfn");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
@@ -44,6 +46,36 @@ let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) 
 let expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return core_expr(k, g, i, minp, want, out); };
 let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.typed_builtin(k, g, i, want, out); };
 let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.member_on_val(k, g, i, minp, want, out); };
+
+// 编译期工厂返回 Module / Type 时从后续后缀继续：`.成员` 或 `{ 字段 }`。
+let factory_value = func(k: Mut(st.State), g: u64, j: u64, v: Mut(ctf.CtVal), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(g);
+  let fk: u64 = ctf.v_kind(v);
+  if fk == 9 {
+    if j + 1 < n and is_group(g, j) == 0 and n_sym(g, j) == s.p_dot() and is_name(g, j + 1) == 1 {
+      let sn: Mut(u64) = ax.box(k);
+      deref(sn) = ctf.v_b(v);
+      return member_step(k, g, j + 1, ctf.v_a(v), sn, want, out);
+    }
+    let mm: Ref(u8) = "module is compile-time only";
+    let md: u64 = ir.diag(k, 0, 1, mm, 27);
+    st.st_fail(k, e_unsup());
+    return j;
+  }
+  if fk == 1 {
+    if j < n and is_group(g, j) == 1 and delim_of(g, j) == dl_brace() {
+      let sh: u64 = ireg.ty_shape(k, ctf.v_a(v));
+      if sh == 0 { st.st_fail(k, e_type()); return j + 1; }
+      agg_construct_sh(k, sh, n_at(g, j), out);
+      return j + 1;
+    }
+    let tm: Ref(u8) = "type is compile-time only";
+    let td: u64 = ir.diag(k, 0, 1, tm, 25);
+    st.st_fail(k, e_unsup());
+    return j;
+  }
+  return 0;
+};
 
 // 路径上的每一段：后面还有 .名字 时先试子模块，否则按成员落定。
 // 成员之后剩下的 .字段 与 [下标] 后缀由 core 的后缀流程接着处理。
@@ -110,7 +142,7 @@ let path_member = func(k: Mut(st.State), g: u64, last: u64, e: Mut(modules.SymEn
 };
 
 // 名字 . 名字：本地变量、枚举变体与静态数据走运行期路径，其余按模块成员路径解析。
-let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let a: u64 = n_sym(g, i);
   let b: u64 = n_sym(g, i + 2);
   // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
@@ -120,6 +152,14 @@ let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(t
     if st.st_ok(k) != 0 { return i + 3; }
     ty.val_at(out, bv);
     return member_on_val(k, g, i + 1, 0, want, out);
+  }
+  // 模块路径上的编译期工厂调用：M.MakeStruct(T) { ... } 与 M.MakeMod(T).fn(...)。
+  let fv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let fj: u64 = ctfn.eval_factory_call(k, g, i, fv);
+  if fj != 0 {
+    if st.st_ok(k) != 0 { return fj; }
+    let used: u64 = factory_value(k, g, fj, fv, want, out);
+    if used != 0 { return used; }
   }
   let le: Mut(modules.SymEntry) = ctf.find_sym(k, a);
   if (le as u64) != 0 {
@@ -186,7 +226,7 @@ let variant_proj_call = func(k: Mut(st.State), sh: u64, vname: u64, argp: u64, w
 };
 
 // 已知形状号的聚合构造（供 Name { ... } 与 Name(...) { ... } 共用）。
-let agg_construct_sh = func(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.Val)) -> u64 {
+pub let agg_construct_sh = func(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.Val)) -> u64 {
   let objv: Mut(ty.Val) = new_val(k);
   let obj: u64 = agg.new_obj(k, sh, objv);
   let j: u64 = agg_fields(k, sh, fg, 0, obj);
@@ -196,7 +236,7 @@ let agg_construct_sh = func(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.Val)
 };
 
 // Name { 字段: 表达式 ... }
-let agg_construct = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
+pub let agg_construct = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
   let nm: u64 = n_sym(g, i);
   let e: Mut(modules.SymEntry) = ctf.find_sym(k, nm);
   if is_null(e) { cl.fail_name(k, nm, e_unbound()); return i + 2; }
@@ -212,7 +252,7 @@ let agg_construct = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> 
 };
 
 // 字段列表：名字 : 表达式，字段之间的逗号可有可无。
-let agg_fields = func(k: Mut(st.State), sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
+pub let agg_fields = func(k: Mut(st.State), sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
   let n: u64 = n_count(fg);
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
@@ -253,7 +293,7 @@ let field_ref = func(k: Mut(st.State), g: u64, i: u64, var_sym: u64, fname: u64,
 };
 
 // 已知符号的成员引用：M.bump(...)、M.answer、M.table、M.Struct { ... }、M.gen(...)。
-let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let kd: u64 = modules.sym_kind(e);
   let q: u64 = modules.sym_qual(e);
   let has_call: u64 = if i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_paren() { 1 } else { 0 };
@@ -265,6 +305,18 @@ let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.SymEntr
   }
   if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() {
     if has_call == 1 {
+      // 编译期工厂：名字在当前作用域确实绑到同一个符号时才就地求值。
+      if tb.sig_types(modules.sym_sig(e)) == 1 {
+        let same: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i));
+        if is_null(same) == 0 and (same as u64) == (e as u64) {
+          let fv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+          let fj: u64 = ctfn.eval_factory_call(k, g, i, fv);
+          if fj != 0 and st.st_ok(k) == 0 {
+            let used: u64 = factory_value(k, g, fj, fv, want, out);
+            if used != 0 { return used; }
+          }
+        }
+      }
       let j: u64 = cl.call_sig(k, q, modules.sym_sig(e), n_at(g, i + 1), want, out);
       return i + 2;
     }
@@ -310,7 +362,7 @@ let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.SymEntr
 };
 
 // 内建调用：实参先各自求值，再由 builtins 按名字分派。
-let builtin_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let builtin_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let name: u64 = n_sym(g, i);
   let argsg: u64 = n_at(g, i + 1);
   if name == s.b_symbol_addr() {

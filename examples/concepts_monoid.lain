@@ -1,11 +1,16 @@
-// Concept-based polymorphism: Monoid(T) + generic array fold + witness override + generic SoA setter
+// Concept-based polymorphism: Monoid sig + module witnesses + generic array fold
+// + witness override + generic SoA setter
 let io = import("std::io");
 
 let Vec2 = struct { x: i64, y: i64 };
 let Vec3 = struct { x: i64, y: i64, z: i64 };
 
-// 1. Define Monoid(T) as a first-class Type factory (struct of function pointers)
-let Monoid = func(T: Type) -> Type { return struct { zero: Fn(() -> T), combine: Fn((T, T) -> T) }; };
+// 1. Monoid 是一份模块签名：Self 加上 zero / combine 两个公开成员
+let Monoid = sig {
+  pub let Self: Type;
+  pub let zero: Fn(() -> Self);
+  pub let combine: Fn((Self, Self) -> Self);
+};
 
 let i64_zero = func() -> i64 { return 0; };
 let i64_add = func(a: i64, b: i64) -> i64 { return a + b; };
@@ -15,11 +20,31 @@ let i64_mul = func(a: i64, b: i64) -> i64 { return a * b; };
 let vec2_zero = func() -> Vec2 { return Vec2 { x: 0, y: 0 }; };
 let vec2_add = func(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y }; };
 
-given Monoid(i64) { zero: i64_zero, combine: i64_add };
-given Monoid(Vec2) { zero: vec2_zero, combine: vec2_add };
+// 三份 Monoid 实现模块；同一个类型可以有任意多份策略
+let SumI64: Monoid = module {
+  pub let Self = i64;
+  pub let zero = func() -> i64 { return i64_zero(); };
+  pub let combine = func(a: i64, b: i64) -> i64 { return i64_add(a, b); };
+};
 
-// 2. Generic fixed-array fold: deduces T, N and resolves Monoid(T) witness automatically
-let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid(T) } -> T {
+let SumVec2: Monoid = module {
+  pub let Self = Vec2;
+  pub let zero = func() -> Vec2 { return vec2_zero(); };
+  pub let combine = func(a: Vec2, b: Vec2) -> Vec2 { return vec2_add(a, b); };
+};
+
+let ProdI64: Monoid = module {
+  pub let Self = i64;
+  pub let zero = func() -> i64 { return i64_one(); };
+  pub let combine = func(a: i64, b: i64) -> i64 { return i64_mul(a, b); };
+};
+
+// use 把模块激活为当前作用域的 Witness
+use SumI64;
+use SumVec2;
+
+// 2. Generic fixed-array fold: deduces T, N and resolves the Monoid witness automatically
+let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid } -> T {
   let acc: T = m.zero();
   comptime for i in 0..N {
     acc = m.combine(acc, deref(arr)[i]);
@@ -27,8 +52,8 @@ let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid(T) } ->
   return acc;
 };
 
-// Generic 3-way combine (also tests sret struct return through witness)
-let combine3 = func(a: T, b: T, c: T) ?{ T: Type, m: Monoid(T) } -> T {
+// Generic 3-way combine (also tests struct return through the witness)
+let combine3 = func(a: T, b: T, c: T) ?{ T: Type, m: Monoid } -> T {
   return m.combine(m.combine(a, b), c);
 };
 
@@ -54,9 +79,8 @@ let main = func() -> i64 {
   let nums: Array(i64, 4) = [2, 3, 4, 5];
   let sum_n: i64 = fold_arr(ref_of(nums)); // 2+3+4+5 = 14
 
-  // Override witness explicitly with multiplicative monoid
-  let prod_i64 = Monoid(i64) { zero: i64_one, combine: i64_mul };
-  let prod_n: i64 = fold_arr(ref_of(nums)) ?{ m: prod_i64 }; // 2*3*4*5 = 120
+  // Override the witness explicitly with the multiplicative monoid module
+  let prod_n: i64 = fold_arr(ref_of(nums)) ?{ m: ProdI64 }; // 2*3*4*5 = 120
 
   let vsum: Vec2 = combine3(Vec2 { x: 10, y: 1 }, Vec2 { x: 20, y: 2 }, Vec2 { x: 0, y: 0 }); // { 30, 3 }
 

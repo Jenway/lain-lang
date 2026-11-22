@@ -1,5 +1,5 @@
-// given.lain —— Witness 实例求值、given 作用域栈与歧义校验、Witness 成员解析、模块 Witness 校验。
-// 单向依赖 state/types/ast/sym/agg/ir/modules/tyreg/ctypes/ctfor/ctprim/ctfn/ctx。
+// given.lain —— 模块见证作用域栈与歧义校验、模块 Witness 校验、?{ m: Mod } 实参求值。
+// 单向依赖 state/types/ast/sym/agg/modules/tyreg/ctypes/ctfor/ctfn/ctx。
 let st = import("state");
 let ty = import("types");
 let ax = import("ast");
@@ -9,11 +9,10 @@ let modules = import("modules");
 let ireg = import("tyreg");
 let ct = import("ctypes");
 let ctf = import("ctfor");
-let ctp = import("ctprim");
 let ctfn = import("ctfn");
 let cx = import("ctx");
 
-let GivenEntry = struct {
+pub let GivenEntry = struct {
   name: u64,
   tid: u64,
   wrec: u64,
@@ -27,7 +26,7 @@ let GivenBlk = struct {
   depth: u64
 };
 
-let WField = struct {
+pub let WField = struct {
   fname: u64,
   fkind: u64,
   fa: u64,
@@ -38,15 +37,7 @@ let given_at = func(base: Mut(GivenEntry), off: u64) -> Mut(GivenEntry) {
   return ptr_cast(Mut(GivenEntry), ptr_cast(Mut(u8), base) + off);
 };
 
-let wfield_at = func(wrec: Mut(u8), i: u64) -> Mut(WField) {
-  return ptr_cast(Mut(WField), wrec + 8 + i * 32);
-};
-
-let wrec_len = func(wrec: Mut(u8)) -> Mut(u64) {
-  return ptr_cast(Mut(u64), wrec);
-};
-
-// --- given 栈（存在 st_genblk +0/+8/+16，每条 40 字节） --------------------
+// --- 记录栈（存在 st_genblk +0/+8/+16，每条 40 字节） ----------------------
 // [name@0, tid@8, wrec@16, depth@24, implicit@32]
 let g_blk = func(k: Mut(st.State)) -> Mut(GivenBlk) {
   return ptr_cast(Mut(GivenBlk), st.st_genblk(k));
@@ -64,21 +55,21 @@ let g_set_used = func(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) =
 let g_depth = func(k: Mut(st.State)) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); return gb.depth; };
 let g_set_depth = func(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); gb.depth = v; return v; };
 
-let mark = func(k: Mut(st.State)) -> u64 {
+pub let mark = func(k: Mut(st.State)) -> u64 {
   let d: u64 = g_depth(k);
   g_set_depth(k, d + 1);
   return g_used(k);
 };
 
-let release = func(k: Mut(st.State), m: u64) -> u64 {
+pub let release = func(k: Mut(st.State), m: u64) -> u64 {
   let d: u64 = g_depth(k);
   if d > 0 { g_set_depth(k, d - 1); }
   return g_set_used(k, m);
 };
 
-let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64) -> u64 {
+pub let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64) -> u64 {
   let u: u64 = g_used(k);
-  if u + 40 > 5120 { ctf.fail_msg(k, "given table full", 16, ax.e_ast()); return 0; }
+  if u + 40 > 5120 { ctf.fail_msg(k, "witness table full", 18, ax.e_ast()); return 0; }
   let p: Mut(GivenEntry) = given_at(g_base(k), u);
   p.name = name;
   p.tid = tid;
@@ -88,232 +79,11 @@ let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit
   return g_set_used(k, u + 40);
 };
 
-let find_name_scan = func(base: Mut(GivenEntry), name: u64, u: u64) -> Mut(GivenEntry) {
-  if u == 0 { return null_ref(Mut(GivenEntry)); }
-  let back: u64 = u - 40;
-  let p: Mut(GivenEntry) = given_at(base, back);
-  if p.name == name { return p; }
-  return find_name_scan(base, name, back);
-};
-
-let find_by_name = func(k: Mut(st.State), name: u64) -> Mut(GivenEntry) {
-  if name == 0 { return null_ref(Mut(GivenEntry)); }
-  return find_name_scan(g_base(k), name, g_used(k));
-};
-
-let find_imp_scan = func(k: Mut(st.State), base: Mut(GivenEntry), tid: u64, u: u64, hit_d: u64, hit_p: Mut(GivenEntry)) -> Mut(GivenEntry) {
-  if u == 0 { return hit_p; }
-  let back: u64 = u - 40;
-  let p: Mut(GivenEntry) = given_at(base, back);
-  let imp: u64 = p.implicit;
-  let rt: u64 = p.tid;
-  let dp: u64 = p.depth;
-  if (hit_p as u64) != 0 {
-    if dp < hit_d { return hit_p; }
-    if imp == 1 and rt == tid {
-      ctf.fail_msg(k, "ambiguous given instance", 24, ax.e_type());
-      return null_ref(Mut(GivenEntry));
-    }
-    return find_imp_scan(k, base, tid, back, hit_d, hit_p);
-  }
-  if imp == 1 and rt == tid { return find_imp_scan(k, base, tid, back, dp, p); }
-  return find_imp_scan(k, base, tid, back, hit_d, hit_p);
-};
-
-let find_implicit = func(k: Mut(st.State), tid: u64) -> Mut(GivenEntry) {
-  let hit: Mut(GivenEntry) = find_imp_scan(k, g_base(k), tid, g_used(k), 0, null_ref(Mut(GivenEntry)));
-  if st.st_ok(k) != 0 { return null_ref(Mut(GivenEntry)); }
-  if is_null(hit) { ctf.fail_msg(k, "missing given instance", 22, ax.e_type()); return null_ref(Mut(GivenEntry)); }
-  return hit;
-};
-
-// --- Witness 构造与求值 --------------------------------------------------
-// wrec：[nfields@0, field0..]，每字段 32B：[fname@0, fkind@8, fa@16, fb@24]
-let wrec_find = func(wrec: Mut(u8), fname: u64, i: u64, n: u64) -> Mut(WField) {
-  if i >= n { return null_ref(Mut(WField)); }
-  let f: Mut(WField) = wfield_at(wrec, i);
-  if f.fname == fname { return f; }
-  return wrec_find(wrec, fname, i + 1, n);
-};
-
-let wrec_lookup = func(wrec: Mut(u8), fname: u64) -> Mut(WField) {
-  let nf: u64 = deref(wrec_len(wrec));
-  return wrec_find(wrec, fname, 0, nf);
-};
-
-let parse_wfields = func(k: Mut(st.State), sh: u64, fg: u64, i: u64, wrec: Mut(u8), idx: u64) -> u64 {
-  let n: u64 = ax.n_count(fg);
-  if i >= n { deref(wrec_len(wrec)) = idx; return idx; }
-  if ax.is_comma(fg, i) == 1 { return parse_wfields(k, sh, fg, i + 1, wrec, idx); }
-  if ax.is_name(fg, i) == 0 { ctf.fail_msg(k, "expected field name", 19, ax.e_ast()); return idx; }
-  let fname: u64 = ax.n_sym(fg, i);
-  if is_null(agg.mem_find(sh, fname)) { ctf.fail_msg(k, "unknown witness field", 21, ax.e_type()); return idx; }
-  if ctf.has_tok(fg, i + 1, s.p_colon()) == 0 { ctf.fail_msg(k, "expected colon", 14, ax.e_ast()); return idx; }
-  let fv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-  let nj: u64 = eval_witness(k, fg, i + 2, fv);
-  if st.st_ok(k) != 0 { return idx; }
-  let slot: Mut(WField) = wfield_at(wrec, idx);
-  slot.fname = fname;
-  slot.fkind = ctf.v_kind(fv);
-  slot.fa = ctf.v_a(fv);
-  slot.fb = ctf.v_b(fv);
-  return parse_wfields(k, sh, fg, nj, wrec, idx + 1);
-};
-
-let make_witness = func(k: Mut(st.State), tid: u64, fg: u64, out: Mut(ctf.CtVal)) -> u64 {
-  let sh: u64 = ireg.ty_shape(k, tid);
-  if sh == 0 or agg.shp_kind(sh) != agg.kind_struct() {
-    ctf.fail_msg(k, "witness needs struct", 20, ax.e_type());
-    return 0;
-  }
-  let nf: u64 = agg.shp_count(sh);
-  let wsz: u64 = 8 + nf * 32 + 64;
-  let wrec: Mut(u8) = st.st_ralloc(k, wsz);
-  parse_wfields(k, sh, fg, 0, wrec, 0);
-  if st.st_ok(k) != 0 { return 0; }
-  let wu: u64 = wrec as u64;
-  ctf.v_set(out, 7, tid, wu);
-  return 1;
-};
-
-let eval_witness = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
-  let n: u64 = ax.n_count(g);
-  if i >= n { ctf.fail_msg(k, "empty witness expr", 18, ax.e_ast()); return i; }
-  // 1) Name(args...) { fields... }
-  if ax.is_name(g, i) == 1 {
-    if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
-      if ctf.has_delim(g, i + 2, ax.dl_brace()) == 1 {
-        let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-        let j: u64 = ctfn.eval_factory_call(k, g, i, tv);
-        if j != 0 {
-          if st.st_ok(k) != 0 { return i + 3; }
-          make_witness(k, ctp.as_type(k, tv), ax.n_at(g, i + 2), out);
-          return i + 3;
-        }
-      }
-    }
-  }
-  // 2) StructName { fields... }
-  if ax.is_name(g, i) == 1 {
-    if ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
-      let se: Mut(modules.SymEntry) = modules.find_here(k, ax.n_sym(g, i));
-      if (se as u64) != 0 {
-        if modules.sym_kind(se) == modules.sym_kind_struct() {
-          let tid: u64 = ctf.tid_of_shape(k, modules.sym_shape(se));
-          make_witness(k, tid, ax.n_at(g, i + 1), out);
-          return i + 2;
-        }
-      }
-    }
-  }
-  // 3) 命名 given 引用、过程名引用、或常规编译期表达式
-  if ax.is_name(g, i) == 1 {
-    if ctf.has_delim(g, i + 1, ax.dl_paren()) == 0 {
-      let nm: u64 = ax.n_sym(g, i);
-      let bv: Mut(ctf.CtVal) = ctf.lookup(k, nm);
-      if (bv as u64) != 0 {
-        ctf.v_set(out, ctf.v_kind(bv), ctf.v_a(bv), ctf.v_b(bv));
-        return i + 1;
-      }
-      let ge: Mut(GivenEntry) = find_by_name(k, nm);
-      if (ge as u64) != 0 {
-        ctf.v_set(out, 7, ge.tid, ge.wrec);
-        return i + 1;
-      }
-      let se2: Mut(modules.SymEntry) = modules.find_here(k, nm);
-      if (se2 as u64) != 0 {
-        let kd: u64 = modules.sym_kind(se2);
-        if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() {
-          let seu: u64 = se2 as u64;
-          ctf.v_set(out, 8, seu, 0);
-          return i + 1;
-        }
-      }
-    }
-  }
-  return ctfn.ct_eval(k, g, i, 0, out);
-};
-
-// --- 编译期/运行期查询 Witness 成员 --------------------------------------
-// 若 g[i] 是编译期 Witness 绑定且 g[i+1] == '.'，返回其字段记录地址，否则空引用。
-let witness_field_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
-  if ax.is_name(g, i) == 0 { return null_ref(Mut(WField)); }
-  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return null_ref(Mut(WField)); }
-  if i + 2 >= ax.n_count(g) { return null_ref(Mut(WField)); }
-  if ax.is_name(g, i + 2) == 0 { return null_ref(Mut(WField)); }
-  let bv: Mut(ctf.CtVal) = ctf.lookup(k, ax.n_sym(g, i));
-  if is_null(bv) { return null_ref(Mut(WField)); }
-  if ctf.v_kind(bv) != 7 { return null_ref(Mut(WField)); }
-  let wrec: Mut(u8) = ptr_cast(Mut(u8), ctf.v_b(bv));
-  let fld: Mut(WField) = wrec_lookup(wrec, ax.n_sym(g, i + 2));
-  if is_null(fld) { ctf.fail_msg(k, "no such witness field", 21, ax.e_type()); return null_ref(Mut(WField)); }
-  return fld;
-};
-
-let parse_want_tid = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
-  if ctf.has_tok(g, j0, s.p_colon()) == 0 { return 0; }
-  let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-  let tj: u64 = ctfn.ct_eval(k, g, j0 + 1, 0, tv);
-  if st.st_ok(k) != 0 { return 0; }
-  return ctp.as_type(k, tv);
-};
-
-// 登记 given / 编译期 witness let 声明：decl_i 指向 given 或 let。
-let reg_given = func(k: Mut(st.State), g: u64, decl_i: u64, implicit: u64) -> u64 {
-  let n: u64 = ax.n_count(g);
-  if decl_i + 1 >= n {
-    ctf.fail_msg(k, "expected given name", 19, ax.e_ast());
-    return decl_i + 1;
-  }
-  let is_named: u64 = ax.is_name(g, decl_i + 1);
-  let has_colon: u64 = ctf.has_tok(g, decl_i + 2, s.p_colon());
-  let has_eq: u64 = ctf.has_tok(g, decl_i + 2, s.p_eq());
-  if is_named == 1 and has_colon == 1 {
-    let nm: u64 = ax.n_sym(g, decl_i + 1);
-    let want_tid: u64 = parse_want_tid(k, g, decl_i + 2);
-    if st.st_ok(k) != 0 { return decl_i + 2; }
-    let eqi: u64 = ctfn.skip_eq(g, decl_i + 2);
-    if ctf.has_tok(g, eqi, s.p_eq()) == 0 { ctf.fail_msg(k, "expected =", 10, ax.e_ast()); return eqi; }
-    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-    let nj: u64 = eval_witness(k, g, eqi + 1, v);
-    if st.st_ok(k) != 0 { return ax.skip_semi(g, nj); }
-    if ctf.v_kind(v) != 7 { ctf.fail_msg(k, "given needs struct witness", 26, ax.e_type()); return ax.skip_semi(g, nj); }
-    let got_tid: u64 = ctf.v_a(v);
-    if want_tid != 0 and want_tid != got_tid {
-      ctf.fail_msg(k, "given type mismatch", 19, ax.e_type());
-      return ax.skip_semi(g, nj);
-    }
-    push_given(k, nm, got_tid, ctf.v_b(v), implicit);
-    return ax.skip_semi(g, nj);
-  }
-  if is_named == 1 and has_eq == 1 {
-    let nm: u64 = ax.n_sym(g, decl_i + 1);
-    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-    let nj: u64 = eval_witness(k, g, decl_i + 3, v);
-    if st.st_ok(k) != 0 { return ax.skip_semi(g, nj); }
-    if ctf.v_kind(v) != 7 { ctf.fail_msg(k, "given needs struct witness", 26, ax.e_type()); return ax.skip_semi(g, nj); }
-    let got_tid: u64 = ctf.v_a(v);
-    push_given(k, nm, got_tid, ctf.v_b(v), implicit);
-    return ax.skip_semi(g, nj);
-  }
-  if implicit == 1 and has_colon == 0 and has_eq == 0 {
-    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
-    let nj: u64 = eval_witness(k, g, decl_i + 1, v);
-    if st.st_ok(k) != 0 { return ax.skip_semi(g, nj); }
-    if ctf.v_kind(v) != 7 { ctf.fail_msg(k, "given needs struct witness", 26, ax.e_type()); return ax.skip_semi(g, nj); }
-    push_given(k, 0, ctf.v_a(v), ctf.v_b(v), implicit);
-    return ax.skip_semi(g, nj);
-  }
-  ctf.fail_msg(k, "expected given name", 19, ax.e_ast());
-  return decl_i + 1;
-};
-
 // --- Phase 4：模块 Witness ------------------------------------------------
-// implicit = 2 的条目记模块见证：[name@0 = 0, tid@8 = 模块号, wrec@16 = 封签视图,
-// depth@24, implicit@32 = 2]。模块见证与 Step A 的结构见证永不混淆：
-// find_implicit 只认 implicit == 1，模板搜索只认 implicit == 2。
+// 模块见证条目记模块信息：[name@0 = 0, tid@8 = 模块号, wrec@16 = 封签视图,
+// depth@24, implicit@32 = 2]。模板搜索只认 implicit == 2。
 
-let push_mod_implicit = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
+pub let push_mod_implicit = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
   return push_given(k, 0, modv, seal, 2);
 };
 
@@ -334,7 +104,7 @@ let type_tid_of = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
 };
 
 // 模块导出的 pub let Self = T 的类型编号；没有则回 0。
-let mod_self_tid = func(k: Mut(st.State), modv: u64) -> u64 {
+pub let mod_self_tid = func(k: Mut(st.State), modv: u64) -> u64 {
   let e: Mut(modules.SymEntry) = modules.sym_find(k, modv, s.b_self_type());
   if is_null(e) { return 0; }
   if modules.sym_pub(e) == 0 { return 0; }
@@ -394,11 +164,12 @@ let sig_ref_mod = func(k: Mut(st.State), base_mod: u64, g: u64, ts: u64, te: u64
   let segs: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), names) + 8);
   let mv: u64 = modules.mod_resolve_path(k, base_mod, deref(u64_at(names, 0)), segs, cnt - 2, seal);
   if mv == 0 { return null_ref(Mut(modules.SymEntry)); }
-  return sig_only(modules.sym_find(k, mv, deref(u64_at(names, cnt - 1))));
+  let last: u64 = deref(u64_at(names, cnt - 1));
+  return sig_only(modules.sym_lookup_in(k, mv, deref(seal), last, modules.cur(k)));
 };
 
 // 按当前词法作用域解析名称或点号路径对应的 sig。
-let sig_at = func(k: Mut(st.State), g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
+pub let sig_at = func(k: Mut(st.State), g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
   return sig_ref_mod(k, modules.cur(k), g, ts, te);
 };
 
@@ -413,7 +184,7 @@ let sig_has_self_scan = func(g: u64, i: u64) -> u64 {
   return sig_has_self_scan(g, i + 1);
 };
 
-let sig_has_self = func(sig_e: Mut(modules.SymEntry)) -> u64 {
+pub let sig_has_self = func(sig_e: Mut(modules.SymEntry)) -> u64 {
   return sig_has_self_scan(modules.sym_decl(sig_e), 0);
 };
 
@@ -521,7 +292,7 @@ let sig_check_items = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.
 };
 
 // 模块实现是否满足签名：逐条核对公开成员与类型。emit_diag = 0 时只判定、不报错。
-let check_mod_matches_sig = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), emit_diag: u64) -> u64 {
+pub let check_mod_matches_sig = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), emit_diag: u64) -> u64 {
   let saved_src: u64 = st.st_src(k);
   let saved_vmod: u64 = st.st_vmod(k);
   st.st_set_src(k, modules.sym_src(sig_e));
@@ -577,8 +348,8 @@ let sig_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, sig_e: Mu
   return sig_scan(k, base, back, sig_e, self_tid, has_self, pick);
 };
 
-// 在当前 given 记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
-let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
+// 在当前见证记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
+pub let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
   let pick: Mut(SigPick) = ptr_cast(Mut(SigPick), st.st_alloc(k, 32));
   pick.has = 0;
   pick.best = 0;
@@ -599,8 +370,8 @@ let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), sel
 };
 
 // --- ?{ m: Mod } 实参是模块时求出模块见证值 ---------------------------------
-// 名字、点号路径、函子调用三种形状；不是模块就回 0，交给常规 Witness 求值。
-let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+// 名字、点号路径、函子调用三种形状；不是模块就回 0，交给常规编译期求值。
+pub let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
   if i >= ax.n_count(g) { return 0; }
   if ax.is_name(g, i) == 0 { return 0; }
   if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
@@ -641,4 +412,10 @@ let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -
     }
   }
   return 0;
+};
+
+// 编译期 Witness 成员查询的兼容入口：结构见证已随旧式 witness 语法退场，
+// 这里恒回空引用，调用方保留自己的常规编译期投影分支。
+pub let witness_field_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
+  return null_ref(Mut(WField));
 };

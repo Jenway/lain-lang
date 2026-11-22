@@ -346,7 +346,8 @@ META_CASES = [
     {"file": "soa_typebuilder.lain", "entry": "s0__main", "value": 1753,
      "folds": [], "procs": ["s0__soa_set", "s0__soa_get_sum", "s0__inline_soa_x"],
      "absent": ["#loop", "s0__make_soa"]},
-    # Phase 2B：Concept (Ord(T)) + given + ?{} 覆写 + 单态化缓存（零 icall 虚表）。
+    # Phase 4：Ord 模块签名 + use 自动命中 + ?{} 覆写 + 块内 use 就近优先
+    # + 单态化缓存（零 icall 虚表）。
     {"file": "concepts_max.lain", "entry": "s0__main", "value": 124,
      "folds": [], "procs": ["s0__i64_less", "s0__i64_gt", "s0__u64_less"],
      "absent": ["#call [("]},
@@ -354,6 +355,21 @@ META_CASES = [
     {"file": "modern_no_addr.lain", "entry": "s0__main", "value": 255,
      "folds": [], "procs": ["s0__push_item", "s0__read_item_val"],
      "absent": []},
+    # Phase 4：嵌套模块 + 多级路径 + 模块级 open + 块级 use 词法边界。
+    # 226 = add(3,4)+(6,7)= (20,27) 的 47 + add(c,c)+(51,70) 的 121
+    # + OuterTotal 3 + 块内 total(make(2,3))+2 的 7 + total(c) 47 + make(1,1).x 1。
+    {"file": "module_basic.lain", "entry": "s0__main", "value": 226,
+     "folds": [], "procs": [], "absent": ["#call [("]},
+    # Phase 4：函子 + 同实参记忆化 + 过程内实例化。
+    # 64 = R4 环形覆盖后的 15 + R4Again 的 15 + R3 的 17 + 未满追加的 1
+    # + 过程内 RingBuf(u64, 2) 的 16。
+    {"file": "module_functor.lain", "entry": "s0__main", "value": 64,
+     "folds": [], "procs": [], "absent": []},
+    # Phase 4：自定义结构体 Eq 见证 + 同类型两份策略 + 显式 ?{ } 覆写 + 块内 use 切换。
+    # 1110 = EqVec2 命中的 1000 + 块内 EqMod10 的 10 + 显式 EqMod10 的 100；
+    # 两个应判不等的调用各占 500 / 50，命中即为错。
+    {"file": "module_concept_self.lain", "entry": "s0__main", "value": 1110,
+     "folds": [], "procs": [], "absent": ["#call [("]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -383,11 +399,14 @@ META_NEGATIVE = [
     {"file": "record_empty_err.lain", "why": "record_end 不能构造空结构体"},
     {"file": "record_dup_err.lain", "why": "record_add 不能添加重复字段名"},
     {"file": "concept_conflict.lain", "why": "泛型实参类型推导冲突"},
-    {"file": "concept_missing_given.lain", "why": "缺少对应的 given 实例"},
-    {"file": "concept_ambig_given.lain", "why": "同层多个 given 实例歧义"},
+    {"file": "concept_missing_given.lain", "why": "缺少对应类型的模块见证"},
+    {"file": "concept_ambig_given.lain", "why": "同层多个模块见证歧义"},
     {"file": "concept_rec_limit.lain", "why": "泛型递归实例化超过深度上限"},
     {"file": "legacy_top_func_err.lain", "why": "顶层 func 已移除，必须改用 let = func"},
     {"file": "legacy_top_struct_err.lain", "why": "顶层 struct 已移除，必须改用 let = struct"},
+    {"file": "legacy_given_err.lain", "why": "given 关键字已退场，必须改用 sig + module + use"},
+    {"file": "mod_private_err.lain", "why": "模块私有成员不能被模块外访问"},
+    {"file": "sig_mismatch_err.lain", "why": "实现模块缺少签名要求的公开成员"},
 ]
 
 
@@ -686,29 +705,40 @@ def main():
     elif args.update_bootstrap:
         print("自举快照 未刷新（固定点未通过或检查被跳过）")
 
-    # 现代源码零 addr 审查：tests/meta 里的现代样例与 legacy/std 负测试也必须零 addr。
+    # 现代源码零 addr / 零 given 审查：tests/meta 里的现代样例与 legacy/std 负测试
+    # 也必须零 addr；given 关键字已退场，只有 legacy_given_err.lain 故意用它测诊断。
     meta_zero_names = ["modern_no_addr.lain", "legacy_top_func_err.lain",
                        "legacy_top_struct_err.lain", "std_test_self.lain",
-                       "std_test_fail.lain", "std_bench_smoke.lain", "std_io_oob.lain"]
-    zero_addr_targets = [os.path.join(META_TESTS, n)
-                         for n in meta_zero_names]
+                       "std_test_fail.lain", "std_bench_smoke.lain", "std_io_oob.lain",
+                       "module_basic.lain", "module_functor.lain", "module_concept_self.lain",
+                       "concepts_max.lain", "concept_ambig_given.lain",
+                       "concept_conflict.lain", "concept_missing_given.lain",
+                       "legacy_given_err.lain", "mod_private_err.lain",
+                       "sig_mismatch_err.lain"]
+    modern_targets = [os.path.join(META_TESTS, n) for n in meta_zero_names]
     if os.path.isdir(EXAMPLES):
-        zero_addr_targets += [os.path.join(EXAMPLES, n)
-                              for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]
+        modern_targets += [os.path.join(EXAMPLES, n)
+                           for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]
     std_dir = os.path.join(ROOT, "std")
     if os.path.isdir(std_dir):
-        zero_addr_targets += [os.path.join(std_dir, n)
-                              for n in sorted(os.listdir(std_dir)) if n.endswith(".lain")]
+        modern_targets += [os.path.join(std_dir, n)
+                           for n in sorted(os.listdir(std_dir)) if n.endswith(".lain")]
     src_dir = os.path.join(ROOT, "src")
     if os.path.isdir(src_dir):
-        zero_addr_targets += [os.path.join(src_dir, n)
-                              for n in sorted(os.listdir(src_dir)) if n.endswith(".lain")]
-    for zpath in zero_addr_targets:
+        modern_targets += [os.path.join(src_dir, n)
+                           for n in sorted(os.listdir(src_dir)) if n.endswith(".lain")]
+    given_exempt = {os.path.join(META_TESTS, "legacy_given_err.lain")}
+    for zpath in modern_targets:
         with open(zpath, "r", encoding="utf-8") as zh:
-            zsrc = re.sub(r"//.*", "", zh.read())
+            zraw = zh.read()
+        zsrc = re.sub(r"//.*", "", zraw)
+        zcode = re.sub(r'"(?:\\.|[^"\\])*"', '""', zsrc)
+        zrel = os.path.relpath(zpath, ROOT)
         if re.search(r"\baddr\b", zsrc):
-            problems.append("零 addr 审查失败: %s 仍含裸 addr 类型" % os.path.relpath(zpath, ROOT))
-    print("零 addr 现代文件检查 %d 份通过" % len(zero_addr_targets))
+            problems.append("零 addr 审查失败: %s 仍含裸 addr 类型" % zrel)
+        if zpath not in given_exempt and re.search(r"\bgiven\b", zcode):
+            problems.append("零 given 审查失败: %s 仍含旧式 given 关键字" % zrel)
+    print("零 addr / 零 given 现代文件检查 %d 份通过" % len(modern_targets))
 
     if problems:
         print()

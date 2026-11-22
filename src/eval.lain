@@ -164,6 +164,32 @@ let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u6
   return modules.mod_resolve_path(k, m0, deref(rest), tail, cnt - 2, seal);
 };
 
+// 沿点号路径逐段下探；某段在目标模块里存在却没通过可见性判定时报私有符号。
+let private_walk = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, m: u64, seal: u64, i: u64) -> u64 {
+  if i >= cnt { return 0; }
+  let nm: u64 = deref(ptr_cast(Mut(u64), ptr_cast(Mut(u8), segs) + i * 8));
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, seal, nm, modules.cur(k));
+  if is_null(e) == 0 {
+    if modules.sym_kind(e) != modules.sym_kind_mod() { return 0; }
+    return private_walk(k, segs, cnt, modules.sym_qual(e), modules.sym_decl(e), i + 1);
+  }
+  let raw: Mut(modules.SymEntry) = modules.sym_find(k, m, nm);
+  if is_null(raw) != 0 { return 0; }
+  let pm: Ref(u8) = "private symbol";
+  let pd: u64 = ir.diag(k, 0, 1, pm, 14);
+  st.st_fail(k, ax.e_unbound());
+  return 1;
+};
+
+// 路径解析失败时为「存在但不可见」的那一段补上诊断。
+let private_deny = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
+  if cnt < 2 { return 0; }
+  let sb: Mut(u64) = box(k);
+  let m: u64 = ctf.find_used_mod(k, deref(segs), sb);
+  if m == 0 { return 0; }
+  return private_walk(k, segs, cnt, m, box_get(sb), 1);
+};
+
 // 名字型封签标注：只有同名符号确实登记为 sig 才算标注。
 let sig_named = func(k: Mut(st.State), g: u64, i: u64) -> Mut(modules.SymEntry) {
   let n: u64 = n_count(g);
@@ -173,6 +199,18 @@ let sig_named = func(k: Mut(st.State), g: u64, i: u64) -> Mut(modules.SymEntry) 
   if is_null(e) { return null_ref(Mut(modules.SymEntry)); }
   if modules.sym_kind(e) != modules.sym_kind_sig() { return null_ref(Mut(modules.SymEntry)); }
   return e;
+};
+
+// 旧式 witness 声明关键字：语法已退场，只保留一句可读的诊断。
+let is_legacy_witness = func(sym: u64) -> u64 {
+  if sym == s.intern("given", 5) { return 1; }
+  return 0;
+};
+
+let deny_legacy_witness = func(k: Mut(st.State)) -> u64 {
+  let m: Ref(u8) = "legacy witness syntax removed";
+  let d: u64 = ir.diag(k, 0, 1, m, 29);
+  return st.st_fail(k, e_ast());
 };
 
 // 名字对应的本模块符号补记公开标志。
@@ -479,7 +517,10 @@ let p1_mod_alias = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64
   if end < n and is_semi(g, end) == 0 { return 0; }
   let seal: Mut(u64) = box(k);
   let m: u64 = path_resolve(k, segs, box_get(cnt), seal);
-  if m == 0 { return 0; }
+  if m == 0 {
+    let pd: u64 = private_deny(k, segs, box_get(cnt));
+    return 0;
+  }
   let bm: u64 = bind_mod_alias(k, m, name, is_pub, sig_e, deref(seal), 0);
   return skip_semi(g, end);
 };
@@ -494,7 +535,9 @@ let type_name_at = func(k: Mut(st.State), name: u64) -> u64 {
   if name == s.t_type() or name == s.t_module() { return 1; }
   if prim_type_name(k, name) == 1 { return 1; }
   let cv: Mut(ctf.CtVal) = ctf.lookup(k, name);
-  if is_null(cv) == 0 and ctf.v_kind(cv) == 1 { return 1; }
+  if is_null(cv) == 0 {
+    if ctf.v_kind(cv) == 1 { return 1; }
+  }
   let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
   if is_null(e) { return 0; }
   let kd: u64 = modules.sym_kind(e);
@@ -516,7 +559,15 @@ let type_path_name = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
   if head == 0 { return 0; }
   let lastp: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), segs) + (cnt - 1) * 8);
   let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, head, deref(seal), deref(lastp), modules.cur(k));
-  if is_null(e) { return 0; }
+  if is_null(e) {
+    let raw: Mut(modules.SymEntry) = modules.sym_find(k, head, deref(lastp));
+    if is_null(raw) == 0 {
+      let pm: Ref(u8) = "private symbol";
+      let pd: u64 = ir.diag(k, 0, 1, pm, 14);
+      st.st_fail(k, ax.e_unbound());
+    }
+    return 0;
+  }
   let kd: u64 = modules.sym_kind(e);
   if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() or kd == modules.sym_kind_type_alias() { return 1; }
   return 0;
@@ -715,7 +766,7 @@ let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   }
   if hs == s.k_extern() { let a: u64 = p1_extern(k, g, h, is_pub); return phase1(k, g, a, n); }
   if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1(k, g, a, n); }
-  if hs == s.k_given() { let a: u64 = gv.reg_given(k, g, h, 1); return phase1(k, g, a, n); }
+  if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1(k, g, a, n); }
   // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
   if hs == s.k_inject() { let a: u64 = inject_decl(k, g, h); return phase1(k, g, a, n); }
@@ -794,7 +845,7 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let h: u64 = if is_pub == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }
   let hs: u64 = n_sym(g, h);
-  if hs == s.k_given() { let a: u64 = skip_stmt(g, h + 1, n); return phase2(k, g, a, n); }
+  if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_let() { let a: u64 = p2_let(k, g, h, n); return phase2(k, g, a, n); }
   if hs == s.k_extern() {
     // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
@@ -841,7 +892,7 @@ let restore_arena = func(k: Mut(st.State), am: u64, sp: u64, saved_ct: u64, save
   return st.st_ok(k);
 };
 
-let compile_source = func(k: Mut(st.State), src: u64) -> u64 {
+pub let compile_source = func(k: Mut(st.State), src: u64) -> u64 {
   if st.st_done(k, src) == 1 { return st.st_ok(k); }
   let m: u64 = st.st_mark_done(k, src);
   let root: u64 = lain2_source_root(src);

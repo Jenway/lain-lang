@@ -23,7 +23,7 @@ extern core_tail(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), 
 // 数组是地址。所以定位成员只有一种读法——按成员类型的宽度把那个字 load 出来。
 // 只有「被指向的对象」是原地数据：deref 之后聚合与切片直接就是那块的视图，
 // 标量才需要按真实宽度读一次。
-let deref_loads = func(sh: u64) -> u64 {
+pub let deref_loads = func(sh: u64) -> u64 {
   if sh == 0 { return 1; }
   let kd: u64 = agg.shp_kind(sh);
   if kd == agg.kind_ref() or kd == agg.kind_mut() or kd == agg.kind_fn() { return 1; }
@@ -37,14 +37,14 @@ let is_ref_shape = func(sh: u64) -> u64 {
   return 0;
 };
 
-let fn_val_p = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
+pub let fn_val_p = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
   let sh: u64 = ty.tsh(ty.vty(out));
   if sh == 0 { return 0; }
   if agg.shp_kind(sh) == agg.kind_fn() { return 1; }
   return 0;
 };
 
-let unwrap_ref = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
+pub let unwrap_ref = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
   let sh: u64 = ty.tsh(ty.vty(out));
   if sh == 0 { return 0; }
   if is_ref_shape(sh) == 0 { return 0; }
@@ -177,6 +177,22 @@ let slice_target = func(k: Mut(st.State), want: Mut(ty.Ty), mutv: u64) -> Mut(ty
   return def_slice_ty(k, mutv);
 };
 
+// 数组元素类型保持：1 参 slice_of(arr) 的缺省目标为 Slice(元素类型)。
+let elem_slice_ty = func(k: Mut(st.State), elem: u64) -> Mut(ty.Ty) {
+  let sid: u64 = ct.slice_t(k, elem, 0);
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  let p: u64 = ireg.project(k, sid, t);
+  return t;
+};
+
+let want_is_slice = func(want: Mut(ty.Ty)) -> u64 {
+  let wsh: u64 = ty.tsh(want);
+  if wsh == 0 { return 0; }
+  let kd: u64 = agg.shp_kind(wsh);
+  if kd == agg.kind_slice() or kd == agg.kind_mutslice() { return 1; }
+  return 0;
+};
+
 // 16 字节切片头 {ptr@0, len@8}。
 let make_head = func(k: Mut(st.State), pv: Mut(ty.Val), lv: Mut(ty.Val), tgt: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let obj: Mut(ty.Val) = ax.new_val(k);
@@ -211,6 +227,9 @@ let slice_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: M
       return i + 2;
     }
     let tgt: Mut(ty.Ty) = slice_target(k, want, 0);
+    if kd == agg.kind_array() {
+      if want_is_slice(want) == 0 { tgt = elem_slice_ty(k, ct.elem_tid(k, sh)); }
+    }
     let c: Mut(ty.Val) = ax.new_val(k);
     coerce(k, v1, ty.vty(v1), tgt, c);
     ty.val_at(out, c);
@@ -420,7 +439,7 @@ let make_slice_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   return i + 2;
 };
 
-let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let name: u64 = ax.n_sym(g, i);
   if name == s.b_ref_of() { return ref_call(k, g, i, want, out, 0); }
   if name == s.b_mut_of() { return ref_call(k, g, i, want, out, 1); }
@@ -436,7 +455,7 @@ let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
 };
 
 // 值的成员：切片的 len / ptr，其余按形状查字段。引用族与 Fn 字段 load 出来。
-let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   // obj.[:expr]：成员名由编译期常量给出（SymId 或字节切片）。
   let interp: u64 = ctf.interp_at(g, i + 1);
   let fname: u64 = if interp == 1 { ctf.interp_name(k, ax.n_at(g, i + 1)) } else { ax.n_sym(g, i + 1) };
@@ -486,7 +505,7 @@ let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(
 };
 
 // 值上直接调用：当前值是 Fn(...) 形状时按签名发间接 #call。
-let postfix_call = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let postfix_call = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let argsg: u64 = ax.n_at(g, i);
   let sh: u64 = ty.tsh(ty.vty(out));
   let sk: Mut(u8) = ct.sig_of_fn(k, sh);

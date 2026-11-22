@@ -97,10 +97,12 @@ def render(groups, checks):
         "",
     ]
     # 一律发成零参过程：常量以调用形式出现。
+    # 指令与物理类型常量是模块的公开常量表，其余分组仅本模块内可用。
     for title, values in groups:
         lines.append("// " + title)
         for name, value in values:
-            lines.append("let %s = func() -> u64 { return %d; };" % (name, value))
+            vis = "pub " if name.startswith(("INST_", "TY_")) else ""
+            lines.append("%slet %s = func() -> u64 { return %d; };" % (vis, name, value))
         lines.append("")
     lines.append("// 验证器诊断码（verify.h）")
     for name, value in checks:

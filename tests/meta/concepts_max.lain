@@ -1,31 +1,45 @@
-// Phase 2B 正例：Concept (Ord(T))、given 实例自动匹配、显式 ?{ ord: ... } 覆写、
-// 嵌套泛型调用与单态化缓存（同类型两次调用只生成一份 #proc，且产物零 icall 虚表）。
-let Ord = func(T: Type) -> Type {
-  let b = record_begin();
-  record_add(b, "less", Fn((T, T) -> bool));
-  return record_end(b);
+// Phase 4 正例：Concept（Ord 签名）、module 见证自动匹配、显式 ?{ ord: ... } 覆写、
+// 块内 use 的最近作用域优先、嵌套泛型调用与单态化缓存（产物零 icall 虚表）。
+let Ord = sig {
+  pub let Self: Type;
+  pub let less: Fn((Self, Self) -> bool);
 };
 
 let i64_less = func(a: i64, b: i64) -> bool { return a < b; };
 let i64_gt = func(a: i64, b: i64) -> bool { return a > b; };
 let u64_less = func(a: u64, b: u64) -> bool { return a < b; };
 
-given ord_i64: Ord(i64) = Ord(i64) { less: i64_less };
-given ord_u64: Ord(u64) = Ord(u64) { less: u64_less };
+let OrdI64: Ord = module {
+  pub let Self = i64;
+  pub let less = func(a: i64, b: i64) -> bool { return i64_less(a, b); };
+};
 
-let max = func(a: T, b: T) ?{ T: Type, ord: Ord(T) } -> T {
+let OrdU64: Ord = module {
+  pub let Self = u64;
+  pub let less = func(a: u64, b: u64) -> bool { return u64_less(a, b); };
+};
+
+let OrdI64Rev: Ord = module {
+  pub let Self = i64;
+  pub let less = func(a: i64, b: i64) -> bool { return i64_gt(a, b); };
+};
+
+use OrdI64;
+use OrdU64;
+
+let max = func(a: T, b: T) ?{ T: Type, ord: Ord } -> T {
   if ord.less(a, b) { return b; }
   return a;
 };
 
-let clamp = func(x: T, lo: T, hi: T) ?{ T: Type, ord: Ord(T) } -> T {
+let clamp = func(x: T, lo: T, hi: T) ?{ T: Type, ord: Ord } -> T {
   let m: T = max(x, lo);
   if ord.less(hi, m) { return hi; }
   return m;
 };
 
 let local_min = func(a: i64, b: i64) -> i64 {
-  given rev: Ord(i64) = Ord(i64) { less: i64_gt };
+  use OrdI64Rev;
   return max(a, b);
 };
 
@@ -34,8 +48,7 @@ let main = func() -> i64 {
   let b: i64 = 20;
   let m1: i64 = max(a, b);
   let m2: i64 = max(a + 5, b - 15);
-  let rev_ord = Ord(i64) { less: i64_gt };
-  let mn: i64 = max(a, b) ?{ ord: rev_ord };
+  let mn: i64 = max(a, b) ?{ ord: OrdI64Rev };
   let lm: i64 = local_min(33, 17);
   let cl: i64 = clamp(100 as i64, 0, 50);
   let mu: u64 = max(7 as u64, 12 as u64);

@@ -179,7 +179,7 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
   return expr_tail(k, g, rj, minp, want, out);
 };
 
-let expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+pub let expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let j: u64 = expr_prefix(k, g, i, want, out);
   if st.st_ok(k) != 0 { return j; }
   return expr_tail(k, g, j, minp, want, out);
@@ -241,6 +241,21 @@ let reflect_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), ou
   let ok: u64 = rf.query(k, m, v1, v2, want, out);
   if ok == 0 { st.st_fail(k, e_unsup()); }
   return i + 2;
+};
+
+// 名字后跟花括号的聚合构造：struct 条目直接命中，类型别名看它的逻辑形状是否 struct。
+let brace_struct_at = func(k: Mut(st.State), sym: u64) -> u64 {
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
+  if is_null(e) { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_struct() { return 1; }
+  if kd == modules.sym_kind_type_alias() {
+    let sh: u64 = ireg.ty_shape(k, modules.sym_qual(e));
+    if sh != 0 {
+      if agg.shp_kind(sh) == agg.kind_struct() { return 1; }
+    }
+  }
+  return 0;
 };
 
 let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
@@ -382,8 +397,10 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   // 名字 { 字段... }：聚合构造。只有结构名后跟花括号才算构造，
   // 否则 if 语句里的条件变量会被误当成构造名。
   if i + 1 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
-    if delim_of(g, i + 1) == dl_brace() and modules.is_struct_name(k, sym) == 1 {
-      return me.agg_construct(k, g, i, out);
+    if delim_of(g, i + 1) == dl_brace() {
+      if brace_struct_at(k, sym) == 1 {
+        return me.agg_construct(k, g, i, out);
+      }
     }
   }
   // 编译期反射与类型句柄：类型名在表达式位置折成 TypeId 字面量，
