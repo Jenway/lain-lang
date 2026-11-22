@@ -241,13 +241,32 @@ let param_ty = func(p: vf.IrParam) -> vf.IrType {
   return vf.param_ty(p);
 };
 
+let find_non_extern_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
+  let found: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= m.proc_count { break c(vf.NO_REGION()); }
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if (p.is_extern == 0) and (p.name == name) { break c(at); }
+    at = at + 1;
+  };
+  return found;
+};
+
 let find_proc_at = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
+  let direct: u64 = find_non_extern_proc(m, name);
+  if direct != vf.NO_REGION() { return direct; }
   let found: u64 = loop c(at: u64 = i) while 1 {
     if at >= m.proc_count { break c(vf.NO_REGION()); }
     let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
     if p.name == name { break c(at); }
     at = at + 1;
   };
+  if found != vf.NO_REGION() {
+    let ext: vf.IrProc = proc_at(m, found);
+    if (ext.is_extern == 1) and (ext.link_name != 0) {
+      let redir: u64 = find_non_extern_proc(m, ext.link_name);
+      if redir != vf.NO_REGION() { return redir; }
+    }
+  }
   return found;
 };
 
@@ -1059,15 +1078,35 @@ let region_uses_name = func(m: Ref(vf.IrModule), ri: u64, name: u64) -> u64 {
 let emit_alloca = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   if it.result_count == 0 { return 1; }
   let p: vf.IrProc = proc_at(em.m, em.proc);
-  if region_uses_name(em.m, p.body, vf.inst_result_name(it, 0)) == 0 { return 1; }
+  let rname: u64 = vf.inst_result_name(it, 0);
+  if region_uses_name(em.m, p.body, rname) == 0 { return 1; }
   let bytes: u64 = type_byte_size(it_ty(it));
+  let cnt_op: vf.IrOperand = vf.inst_op(it, 0);
+  if (em.depth == 1) and (em.loop_depth == 0) and (cnt_op.kind == vf.OP_INT()) {
+    let total: u64 = bytes * cnt_op.bits;
+    let words: u64 = 1;
+    if total > 0 { words = (total + 7) / 8; }
+    let a0: u64 = emit_indent(em, em.depth);
+    let a1: u64 = put_str(em.w, "uint64_t _a");
+    let a2: u64 = put_u64_dec(em.w, rname);
+    let a3: u64 = put_str(em.w, "[");
+    let a4: u64 = put_u64_dec(em.w, words);
+    let a5: u64 = put_str(em.w, "] = {0};\n");
+    let b0: u64 = emit_indent(em, em.depth);
+    let b1: u64 = put_str(em.w, "void *");
+    let b2: u64 = emit_value_name(em.w, rname);
+    let b3: u64 = put_str(em.w, " = (void *)_a");
+    let b4: u64 = put_u64_dec(em.w, rname);
+    let b5: u64 = put_str(em.w, ";\n");
+    return 1;
+  }
   let a: u64 = emit_indent(em, em.depth);
   let b: u64 = put_str(em.w, "void *");
-  let c: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let c: u64 = emit_value_name(em.w, rname);
   let d: u64 = put_str(em.w, " = lain_alloca_push(&_alloca_head, (size_t)");
   let e: u64 = put_u64_dec(em.w, bytes);
   let f: u64 = put_str(em.w, " * (size_t)(");
-  let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let g: u64 = emit_operand_u64(em, cnt_op);
   let h: u64 = put_str(em.w, "));\n");
   return 1;
 };
@@ -1490,21 +1529,27 @@ let current_proc = func(em: Mut(C99Emitter)) -> vf.IrProc {
 };
 
 let emit_return = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
-  let a: u64 = emit_indent(em, em.depth);
   if it.operand_count == 0 {
+    let a0: u64 = emit_indent(em, em.depth);
+    let a1: u64 = put_str(em.w, "lain_alloca_free(&_alloca_head);\n");
+    let a2: u64 = emit_indent(em, em.depth);
     let b: u64 = put_str(em.w, "return;\n");
     return 1;
   }
   let p: vf.IrProc = current_proc(em);
   if it.operand_count == 1 {
     let t: vf.IrType = proc_type(p, 0);
-    let b: u64 = put_str(em.w, "return (");
-    let c: u64 = emit_type(em.w, t);
+    let a0: u64 = emit_indent(em, em.depth);
+    let a1: u64 = put_str(em.w, "{ ");
+    let b: u64 = emit_type(em.w, t);
+    let c: u64 = put_str(em.w, " _ret_val = (");
+    let c2: u64 = emit_type(em.w, t);
     let d: u64 = put_str(em.w, ")(");
     let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
-    let f: u64 = put_str(em.w, ");\n");
+    let f: u64 = put_str(em.w, "); lain_alloca_free(&_alloca_head); return _ret_val; }\n");
     return 1;
   }
+  let a: u64 = emit_indent(em, em.depth);
   let b: u64 = put_str(em.w, "{\n");
   let c: u64 = emit_indent(em, em.depth + 1);
   let d: u64 = put_str(em.w, "LainPair _ret;\n");
@@ -1519,6 +1564,8 @@ let emit_return = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
     }
     i = i + 1;
   };
+  let l0: u64 = emit_indent(em, em.depth + 1);
+  let l1: u64 = put_str(em.w, "lain_alloca_free(&_alloca_head);\n");
   let l: u64 = emit_indent(em, em.depth + 1);
   let m: u64 = put_str(em.w, "return _ret;\n");
   let n: u64 = emit_indent(em, em.depth);
@@ -1565,12 +1612,18 @@ pub let emit_proc_signature = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
   return put_byte(w, 41);
 };
 
-let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
+pub let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
   let ok: u64 = loop c(at: u64 = i) while 1 {
     if at >= m.proc_count { break c(1); }
     let p: vf.IrProc = proc_at(m, at);
-    let a: u64 = emit_proc_signature(w, p);
-    let b: u64 = put_str(w, ";\n");
+    let skip: u64 = 0;
+    if p.is_extern == 1 {
+      if find_proc(m, p.name) != at { skip = 1; }
+    }
+    if skip == 0 {
+      let a: u64 = emit_proc_signature(w, p);
+      let b: u64 = put_str(w, ";\n");
+    }
     at = at + 1;
   };
   return ok;
@@ -1611,13 +1664,11 @@ pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), 
   return w.len - start;
 };
 
-pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+pub let emit_proc_body_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
   let start: u64 = w.len;
   if pi >= m.proc_count { return 0; }
   let p: vf.IrProc = proc_at(m, pi);
   if p.is_extern == 1 { return 0; }
-  let a: u64 = emit_all_proc_decls(w, m, 0);
-  let b: u64 = put_byte(w, 10);
   let c: u64 = emit_proc_signature(w, p);
   let d: u64 = put_str(w, " {\n");
   let e: u64 = put_str(w, "  LainAllocaNode *_alloca_head = NULL;\n");
@@ -1630,6 +1681,18 @@ pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) ->
   let h: u64 = put_str(w, "}\n\n");
   if g == 0 { return 0; }
   if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  let start: u64 = w.len;
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = proc_at(m, pi);
+  if p.is_extern == 1 { return 0; }
+  let a: u64 = emit_all_proc_decls(w, m, 0);
+  let b: u64 = put_byte(w, 10);
+  let body_rc: u64 = emit_proc_body_c99(w, m, pi);
+  if body_rc == 0 { return 0; }
   return w.len - start;
 };
 
@@ -1647,7 +1710,7 @@ let preamble_io = func() -> Slice(u8) {
 };
 
 let preamble_os = func() -> Slice(u8) {
-  return "static int g_lain_argc = 0;\nstatic char **g_lain_argv = NULL;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_alloc(uint64_t bytes) {\n  void *p = calloc(1, (size_t)(bytes ? bytes : 1));\n  return (uint64_t)(uintptr_t)p;\n}\n\nstatic uint64_t lain_os_free(uint64_t ptr) {\n  free((void *)(uintptr_t)ptr);\n  return 0;\n}\n\nstatic uint64_t lain_os_read_file(void *path_ptr, uint64_t path_len, void *out_ptr, void *out_len) {\n  uint64_t *op = (uint64_t *)out_ptr;\n  uint64_t *ol = (uint64_t *)out_len;\n  char *path;\n  FILE *f;\n  long sz;\n  void *buf;\n  size_t got;\n  if (op) *op = 0;\n  if (ol) *ol = 0;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"rb\");\n  free(path);\n  if (!f) return 1;\n  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }\n  sz = ftell(f);\n  if (sz < 0) { fclose(f); return 1; }\n  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }\n  buf = malloc((size_t)sz + 1u);\n  if (!buf) { fclose(f); return 1; }\n  got = fread(buf, 1, (size_t)sz, f);\n  fclose(f);\n  if (got != (size_t)sz) { free(buf); return 1; }\n  ((char *)buf)[got] = '\\0';\n  if (op) *op = (uint64_t)(uintptr_t)buf;\n  if (ol) *ol = (uint64_t)got;\n  return 0;\n}\n\nstatic uint64_t lain_os_write_file(void *path_ptr, uint64_t path_len, void *data_ptr, uint64_t data_len) {\n  char *path;\n  FILE *f;\n  size_t wrote;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"wb\");\n  free(path);\n  if (!f) return 1;\n  wrote = (data_len > 0 && data_ptr) ? fwrite(data_ptr, 1, (size_t)data_len, f) : 0;\n  if (fclose(f) != 0) return 1;\n  if (wrote != (size_t)data_len) return 1;\n  return 0;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n";
+  return "static int g_lain_argc = 0;\nstatic char **g_lain_argv = NULL;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_alloc(uint64_t bytes) {\n  void *p = calloc(1, (size_t)(bytes ? bytes : 1));\n  return (uint64_t)(uintptr_t)p;\n}\n\nstatic uint64_t lain_os_free(uint64_t ptr) {\n  free((void *)(uintptr_t)ptr);\n  return 0;\n}\n\nstatic uint64_t lain_os_read_file(void *path_ptr, uint64_t path_len, void *out_ptr, void *out_len) {\n  uint64_t *op = (uint64_t *)out_ptr;\n  uint64_t *ol = (uint64_t *)out_len;\n  char *path;\n  FILE *f;\n  long sz;\n  void *buf;\n  size_t got;\n  if (op) *op = 0;\n  if (ol) *ol = 0;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"rb\");\n  free(path);\n  if (!f) return 1;\n  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }\n  sz = ftell(f);\n  if (sz < 0) { fclose(f); return 1; }\n  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }\n  buf = malloc((size_t)sz + 1u);\n  if (!buf) { fclose(f); return 1; }\n  got = fread(buf, 1, (size_t)sz, f);\n  fclose(f);\n  if (got != (size_t)sz) { free(buf); return 1; }\n  ((char *)buf)[got] = '\\0';\n  if (op) *op = (uint64_t)(uintptr_t)buf;\n  if (ol) *ol = (uint64_t)got;\n  return 0;\n}\n\nstatic uint64_t lain_os_write_file(void *path_ptr, uint64_t path_len, void *data_ptr, uint64_t data_len) {\n  char *path;\n  FILE *f;\n  size_t wrote;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"wb\");\n  free(path);\n  if (!f) return 1;\n  wrote = (data_len > 0 && data_ptr) ? fwrite(data_ptr, 1, (size_t)data_len, f) : 0;\n  if (fclose(f) != 0) return 1;\n  if (wrote != (size_t)data_len) return 1;\n  return 0;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n\nstatic uint64_t lain_os_exec(void *cmd_ptr, uint64_t cmd_len) {\n  char *cmd;\n  int rc;\n  cmd = (char *)malloc((size_t)cmd_len + 1u);\n  if (!cmd) return 127;\n  if (cmd_len > 0 && cmd_ptr) memcpy(cmd, cmd_ptr, (size_t)cmd_len);\n  cmd[cmd_len] = '\\0';\n  rc = system(cmd);\n  free(cmd);\n  return (uint64_t)(rc < 0 ? 127 : rc);\n}\n\nstatic uint64_t lain_os_file_exists(void *path_ptr, uint64_t path_len) {\n  char *path;\n  FILE *f;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 0;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"rb\");\n  free(path);\n  if (!f) return 0;\n  fclose(f);\n  return 1;\n}\n\nstatic uint64_t lain_os_remove_file(void *path_ptr, uint64_t path_len) {\n  char *path;\n  int rc;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  rc = remove(path);\n  free(path);\n  return (uint64_t)(rc == 0 ? 0 : 1);\n}\n";
 };
 
 let preamble_entry = func() -> Slice(u8) {

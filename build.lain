@@ -1,0 +1,160 @@
+// build.lain —— 纯 Lain 自举构建与全量验证入口（类比 `build.zig`）。
+// 零 Python / 零 CMake / 零 seed C 工具链：直接编排 Stage-1 -> Stage-2 -> Stage-3 固定点，
+// 再跑 examples/overhaul_showcase.lain 冒烟与 test.lain 全量回归。
+let io = import("std::io");
+let os = import("std::os");
+let bld = import("std::build");
+
+use bld;
+
+let bytes_equal = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  if a.len != b.len { return false; }
+  let ok: u64 = loop c(i: u64 = 0, eq: u64 = 1) while (i < a.len) and (eq == 1) {
+    if a[i] != b[i] { eq = 0; }
+    i = i + 1;
+  };
+  return ok == 1;
+};
+
+// 执行一步并播报；非零退出码另外打一行 [FAIL]。
+let step = func(label: Slice(u8), cmd: Slice(u8)) -> u64 {
+  io.print("[build] ");
+  io.println(label);
+  let rc: u64 = os.exec(cmd);
+  if rc != 0 {
+    io.print("[FAIL] ");
+    io.print(label);
+    io.print(" (exit=");
+    io.print_u64(rc);
+    io.println(")");
+  }
+  return rc;
+};
+
+// 只播报阶段标题、不解释退出码：用于期望非零退出的冒烟步骤。
+let note = func(label: Slice(u8)) -> u64 {
+  io.print("[build] ");
+  return io.println(label);
+};
+
+let is_windows = func() -> bool {
+  return os.file_exists("build/lainc.exe") or os.file_exists("C:\\Windows\\System32\\cmd.exe");
+};
+
+let main = func() -> i64 {
+  let win: bool = is_windows();
+
+  let os_tag: bld.Os = bld.Os.Linux { };
+  if win { os_tag = bld.Os.Windows { }; }
+  let arch_x: bld.Arch = bld.Arch.X86_64 { };
+  let opt_r: bld.OptMode = bld.OptMode.ReleaseFast { };
+  let env: bld.TargetEnv = bld.TargetEnv {
+    os: ref_of(os_tag),
+    arch: ref_of(arch_x),
+    opt: ref_of(opt_r),
+  };
+  let g: bld.Graph = bld.new_graph(env);
+  let c_id: u64 = g.add_executable("lainc", "src/entry.lain", "src", "entry");
+  let t_id: u64 = g.add_test("all_tests", "test.lain", "test", "test");
+  g.link(t_id, c_id);
+  io.print("[build.lain] graph steps=");
+  io.print_u64(g.step_count());
+  io.print(", edges=");
+  io.print_u64(g.edge_count());
+  io.newline();
+
+  let mk_cmd: Slice(u8) = "mkdir -p build";
+  if win { mk_cmd = "cmd /c if not exist build mkdir build"; }
+  if os.exec(mk_cmd) != 0 { return 1; }
+
+  // 1. Stage-1：用 C99 自举快照冷启动。
+  let s1_cmd: Slice(u8) = "clang -std=c99 -O2 bootstrap/lainc_boot.c -o build/lainc";
+  if win { s1_cmd = "clang -std=c99 -O2 -Wl,/STACK:16777216 bootstrap/lainc_boot.c -o build/lainc.exe"; }
+  if step("Stage-1: compile lainc_boot.c", s1_cmd) != 0 { return 1; }
+
+  // 2. Stage-1 -> Stage-2（.l1 与 .c 各一份）
+  let s2_l1_cmd: Slice(u8) = "./build/lainc src/entry.lain --out build/stage2.l1";
+  if win { s2_l1_cmd = "build\\lainc.exe src/entry.lain --out build/stage2.l1"; }
+  if step("Stage-2 IR: lainc src/entry.lain -> build/stage2.l1", s2_l1_cmd) != 0 { return 1; }
+
+  let s2_c_cmd: Slice(u8) = "./build/lainc src/entry.lain --entry main --out build/stage2.c";
+  if win { s2_c_cmd = "build\\lainc.exe src/entry.lain --entry main --out build/stage2.c"; }
+  if step("Stage-2 C99: lainc src/entry.lain -> build/stage2.c", s2_c_cmd) != 0 { return 1; }
+
+  // 3. 编 Stage-2 可执行文件
+  let s2_bin_cmd: Slice(u8) = "clang -std=c99 -O2 build/stage2.c -o build/lainc_stage2";
+  if win { s2_bin_cmd = "clang -std=c99 -O2 -Wl,/STACK:16777216 build/stage2.c -o build/lainc_stage2.exe"; }
+  if step("Stage-2 bin: compile build/stage2.c", s2_bin_cmd) != 0 { return 1; }
+
+  // 4. Stage-2 -> Stage-3（.l1）并校验固定点
+  let s3_l1_cmd: Slice(u8) = "./build/lainc_stage2 src/entry.lain --out build/stage3.l1";
+  if win { s3_l1_cmd = "build\\lainc_stage2.exe src/entry.lain --out build/stage3.l1"; }
+  if step("Stage-3 IR: lainc_stage2 src/entry.lain -> build/stage3.l1", s3_l1_cmd) != 0 { return 1; }
+
+  let p2a: Array(u64, 1) = [0];
+  let n2a: Array(u64, 1) = [0];
+  let p3a: Array(u64, 1) = [0];
+  let n3a: Array(u64, 1) = [0];
+  if os.read_file("build/stage2.l1", ptr_cast(Mut(u64), mut_of(p2a)), ptr_cast(Mut(u64), mut_of(n2a))) != 0 {
+    io.println("[FAIL] cannot read build/stage2.l1");
+    return 1;
+  }
+  if os.read_file("build/stage3.l1", ptr_cast(Mut(u64), mut_of(p3a)), ptr_cast(Mut(u64), mut_of(n3a))) != 0 {
+    os.free_bytes(p2a[0]);
+    io.println("[FAIL] cannot read build/stage3.l1");
+    return 1;
+  }
+  let p2: u64 = p2a[0];
+  let n2: u64 = n2a[0];
+  let p3: u64 = p3a[0];
+  let n3: u64 = n3a[0];
+  let s2_bytes: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), p2), n2);
+  let s3_bytes: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), p3), n3);
+  let fp_ok: bool = bytes_equal(s2_bytes, s3_bytes);
+  os.free_bytes(p2);
+  os.free_bytes(p3);
+  if fp_ok == false {
+    io.println("[FAIL] Stage-2 != Stage-3 fixed point mismatch");
+    return 1;
+  }
+  io.print("[PASS] Fixed point verified (stage2.l1 == stage3.l1, bytes=");
+  io.print_u64(n2);
+  io.println(")");
+
+  // 5. 冒烟：examples/overhaul_showcase.lain 的约定退出码是 126
+  let sc_c_cmd: Slice(u8) = "./build/lainc_stage2 examples/overhaul_showcase.lain --out build/showcase.c";
+  if win { sc_c_cmd = "build\\lainc_stage2.exe examples/overhaul_showcase.lain --out build/showcase.c"; }
+  if step("Showcase C99: lainc_stage2 examples/overhaul_showcase.lain -> build/showcase.c", sc_c_cmd) != 0 { return 1; }
+
+  let sc_bin_cmd: Slice(u8) = "clang -std=c99 -O2 build/showcase.c -o build/showcase";
+  if win { sc_bin_cmd = "clang -std=c99 -O2 -Wl,/STACK:16777216 build/showcase.c -o build/showcase.exe"; }
+  if step("Showcase bin: compile build/showcase.c", sc_bin_cmd) != 0 { return 1; }
+
+  let sc_run_cmd: Slice(u8) = "./build/showcase";
+  if win { sc_run_cmd = "build\\showcase.exe"; }
+  note("Run examples/overhaul_showcase.lain (expected exit=126)");
+  let sc_rc: u64 = os.exec(sc_run_cmd);
+  if sc_rc != 126 {
+    io.print("[FAIL] showcase exit=");
+    io.print_u64(sc_rc);
+    io.println(", expected 126");
+    return 1;
+  }
+  io.println("[PASS] showcase exit=126");
+
+  // 6. 全量回归：test.lain
+  let tc_cmd: Slice(u8) = "./build/lainc_stage2 test.lain --out build/test_runner.c";
+  if win { tc_cmd = "build\\lainc_stage2.exe test.lain --out build/test_runner.c"; }
+  if step("Tests C99: lainc_stage2 test.lain -> build/test_runner.c", tc_cmd) != 0 { return 1; }
+
+  let tb_cmd: Slice(u8) = "clang -std=c99 -O2 build/test_runner.c -o build/test_runner";
+  if win { tb_cmd = "clang -std=c99 -O2 -Wl,/STACK:16777216 build/test_runner.c -o build/test_runner.exe"; }
+  if step("Tests bin: compile build/test_runner.c", tb_cmd) != 0 { return 1; }
+
+  let tr_cmd: Slice(u8) = "./build/test_runner";
+  if win { tr_cmd = "build\\test_runner.exe"; }
+  if step("Run test.lain", tr_cmd) != 0 { return 1; }
+
+  io.println("[build.lain] ALL DONE");
+  return 0;
+};

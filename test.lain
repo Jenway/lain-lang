@@ -1,0 +1,112 @@
+// test.lain —— 根目录库级测试入口（类比 `go test ./...`）。
+// 聚合标准库与编译器核心套件，通过 `std::test` 输出统一 PASS/FAIL 汇总。
+let io = import("std::io");
+let os = import("std::os");
+let t = import("std::test");
+let col = import("std::collections");
+let bld = import("std::build");
+let fmt = import("std::fmt");
+let ir_test = import("tests::ir_verify_test");
+
+use bld;
+
+let Vec64 = col.ArenaVec(u64, 16);
+let Map64 = col.HashMapU64(u64, 32);
+
+let run_collections_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::collections");
+  let v: Vec64.Vec = Vec64.new();
+  Vec64.push(mut_of(v), 10);
+  Vec64.push(mut_of(v), 20);
+  Vec64.push(mut_of(v), 30);
+  t.eq_u64(mut_of(st), "vec count", Vec64.count(ref_of(v)), 3);
+  t.eq_u64(mut_of(st), "vec get[1]", Vec64.get(ref_of(v), 1), 20);
+  Vec64.set(mut_of(v), 1, 99);
+  t.eq_u64(mut_of(st), "vec set[1]", Vec64.get(ref_of(v), 1), 99);
+  Vec64.clear(mut_of(v));
+  t.eq_u64(mut_of(st), "vec clear", Vec64.count(ref_of(v)), 0);
+
+  let m: Map64.Map = Map64.new();
+  Map64.put(mut_of(m), 101, 42);
+  Map64.put(mut_of(m), 202, 84);
+  t.eq_u64(mut_of(st), "map count", Map64.count(ref_of(m)), 2);
+  t.eq_u64(mut_of(st), "map has 101", Map64.has(ref_of(m), 101), 1);
+  t.eq_u64(mut_of(st), "map has 999", Map64.has(ref_of(m), 999), 0);
+  let out_arr: Array(u64, 1) = [0];
+  let ok: u64 = Map64.get(ref_of(m), 202, ptr_cast(Mut(u64), mut_of(out_arr)));
+  t.eq_u64(mut_of(st), "map get ok", ok, 1);
+  t.eq_u64(mut_of(st), "map get val", out_arr[0], 84);
+  return t.finish(mut_of(st));
+};
+
+let run_build_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::build");
+  let os_l: bld.Os = bld.Os.Linux { };
+  let arch_x: bld.Arch = bld.Arch.X86_64 { };
+  let opt_r: bld.OptMode = bld.OptMode.ReleaseFast { };
+  let env: bld.TargetEnv = bld.TargetEnv {
+    os: ref_of(os_l),
+    arch: ref_of(arch_x),
+    opt: ref_of(opt_r),
+  };
+  let g: bld.Graph = bld.new_graph(env);
+  let lib_id: u64 = g.add_static_lib("core", "src/core.lain", "body1", "iface1");
+  let app_id: u64 = g.add_executable("app", "src/entry.lain", "body2", "iface2");
+  let linked: u64 = g.link(app_id, lib_id);
+  // 每个单元自身一步、每条链接边一步：2 个单元 + 1 条边 = 3
+  t.eq_u64(mut_of(st), "graph step_count", g.step_count(), 3);
+  t.eq_u64(mut_of(st), "graph edge_count", g.edge_count(), 1);
+  t.eq_u64(mut_of(st), "graph link", linked, 1);
+  let h1: u64 = bld.fnv1a_bytes("iface_v1");
+  let h2: u64 = bld.fnv1a_bytes("iface_v1");
+  let h3: u64 = bld.fnv1a_bytes("iface_v2");
+  t.eq_u64(mut_of(st), "iface unchanged", bld.interface_unchanged(h1, h2), 1);
+  t.eq_u64(mut_of(st), "iface changed", bld.interface_unchanged(h1, h3), 0);
+  return t.finish(mut_of(st));
+};
+
+let run_os_fmt_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::os_and_fmt");
+  let c0: fmt.Cursor = fmt.fmt_begin();
+  let c1: fmt.Cursor = fmt.write_str(c0, "lain-");
+  let c2: fmt.Cursor = fmt.write_u64(c1, 7);
+  let txt: Slice(u8) = fmt.fmt_done(c2);
+  t.eq_bytes(mut_of(st), "fmt_done", txt, "lain-7");
+
+  let tmp: Slice(u8) = "build/std_os_probe.tmp";
+  let wrc: u64 = os.write_file(tmp, txt);
+  t.eq_u64(mut_of(st), "write_file", wrc, 0);
+  t.eq_bool(mut_of(st), "file_exists true", os.file_exists(tmp), true);
+
+  let rptr_arr: Array(u64, 1) = [0];
+  let rlen_arr: Array(u64, 1) = [0];
+  let rrc: u64 = os.read_file(tmp, ptr_cast(Mut(u64), mut_of(rptr_arr)), ptr_cast(Mut(u64), mut_of(rlen_arr)));
+  t.eq_u64(mut_of(st), "read_file", rrc, 0);
+  let rptr: u64 = rptr_arr[0];
+  let rlen: u64 = rlen_arr[0];
+  let got: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), rptr), rlen);
+  t.eq_bytes(mut_of(st), "read_file bytes", got, "lain-7");
+  if rptr != 0 { os.free_bytes(rptr); }
+
+  let drc: u64 = os.remove_file(tmp);
+  t.eq_u64(mut_of(st), "remove_file", drc, 0);
+  t.eq_bool(mut_of(st), "file_exists false", os.file_exists(tmp), false);
+  return t.finish(mut_of(st));
+};
+
+let main = func() -> i64 {
+  io.println("=== Lain Library Test Runner (test.lain) ===");
+  let f0: i64 = ir_test.run_suite();
+  let f1: i64 = run_collections_suite();
+  let f2: i64 = run_build_suite();
+  let f3: i64 = run_os_fmt_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3;
+  if total_fail == 0 {
+    io.println("ALL SUITES PASSED");
+  } else {
+    io.print("TOTAL FAILURES: ");
+    io.print_i64(total_fail);
+    io.newline();
+  }
+  return total_fail;
+};
