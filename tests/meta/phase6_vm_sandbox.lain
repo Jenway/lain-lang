@@ -16,8 +16,11 @@ let eng = import("src::vm::engine");
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 // 手工模块工作区：28 条指令、10 个区域、2 个过程、4 个形参、1 个类型、
-// 1 个分支与 208 个字的验证器绑定栈。所有表按固定偏移切分。
-let arena_blocks: Array(Array(u64, 16), 144) = [
+// 1 个分支、VF_SCRATCH() 个字的验证器 scratch 与 10 行区域下标表。160 个
+// 字块共 20480 字节，实际占用 18784 字节。
+let arena_blocks: Array(Array(u64, 16), 160) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
@@ -89,8 +92,15 @@ let cap_blocks: Array(Array(u64, 16), 16) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
 
-// 工作区里各表的字节边界。IrInst=320、IrRegion=48、IrProc=64、IrParam=24、
-// IrType=16、IrCase=16。
+// 各表的槽数。
+let N_INSTS = func() -> u64 { return 28; };
+let N_REGIONS = func() -> u64 { return 10; };
+let N_PROCS = func() -> u64 { return 2; };
+let N_PARAMS = func() -> u64 { return 4; };
+let N_TYPES = func() -> u64 { return 1; };
+let N_CASES = func() -> u64 { return 1; };
+let LIST_STRIDE = func() -> u64 { return 16; };
+
 let arena_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(arena_blocks)); };
 let mem_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(mem_blocks)); };
 let win_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(win_blocks)); };
@@ -98,29 +108,58 @@ let layout_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(layout_bloc
 let tcb_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(tcb_blocks)); };
 let cap_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(cap_blocks)); };
 
+// 各表的字节边界由槽数推出：每张表的结尾取 vf 的 *_slot 越过最后一条记录后的
+// 地址，所以记录自身变大（IrInst 现为 512 字节）时偏移自动跟随。当前布局：
+// 指令 0..14336、区域 ..14816、过程 ..14944、形参 ..15040、类型 ..15056、
+// 分支 ..15072，随后是 VF_SCRATCH() 个字的 scratch 与 10 行 16 字的下标表。
 let insts_base = func() -> Mut(vf.IrInst) {
   return ptr_cast(Mut(vf.IrInst), arena_ptr());
 };
+let insts_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.inst_slot(ptr_cast(Ref(vf.IrInst), insts_base()), N_INSTS()));
+};
 let regions_base = func() -> Mut(vf.IrRegion) {
-  return ptr_cast(Mut(vf.IrRegion), arena_ptr() + 10240);
+  return ptr_cast(Mut(vf.IrRegion), insts_end());
+};
+let regions_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.region_slot(ptr_cast(Ref(vf.IrRegion), regions_base()), N_REGIONS()));
 };
 let procs_base = func() -> Mut(vf.IrProc) {
-  return ptr_cast(Mut(vf.IrProc), arena_ptr() + 10816);
+  return ptr_cast(Mut(vf.IrProc), regions_end());
+};
+let procs_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.proc_slot(ptr_cast(Ref(vf.IrProc), procs_base()), N_PROCS()));
 };
 let params_base = func() -> Mut(vf.IrParam) {
-  return ptr_cast(Mut(vf.IrParam), arena_ptr() + 10944);
+  return ptr_cast(Mut(vf.IrParam), procs_end());
+};
+let params_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.param_slot(ptr_cast(Ref(vf.IrParam), params_base()), N_PARAMS()));
 };
 let types_base = func() -> Mut(vf.IrType) {
-  return ptr_cast(Mut(vf.IrType), arena_ptr() + 11136);
+  return ptr_cast(Mut(vf.IrType), params_end());
+};
+let types_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.type_slot(ptr_cast(Ref(vf.IrType), types_base()), N_TYPES()));
 };
 let cases_base = func() -> Mut(vf.IrCase) {
-  return ptr_cast(Mut(vf.IrCase), arena_ptr() + 11200);
+  return ptr_cast(Mut(vf.IrCase), types_end());
+};
+let cases_end = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8),
+      vf.case_slot(ptr_cast(Ref(vf.IrCase), cases_base()), N_CASES()));
 };
 let scratch_base = func() -> Mut(u64) {
-  return ptr_cast(Mut(u64), arena_ptr() + 11328);
+  return ptr_cast(Mut(u64), cases_end());
 };
 let lists_base = func() -> Mut(u64) {
-  return ptr_cast(Mut(u64), arena_ptr() + 14656);
+  return ptr_cast(Mut(u64),
+      ptr_cast(Mut(u8), scratch_base()) + vf.VF_SCRATCH() * size_of(u64));
 };
 
 let inst_p = func(i: u64) -> Mut(vf.IrInst) {
@@ -142,10 +181,12 @@ let case_p = func(i: u64) -> Mut(vf.IrCase) {
   return ptr_cast(Mut(vf.IrCase), vf.case_slot(ptr_cast(Ref(vf.IrCase), cases_base()), i));
 };
 let list_slot = func(r: u64, i: u64) -> Mut(u64) {
-  return lists_base() + r * 16 * 8 + i * 8;
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), lists_base())
+      + r * LIST_STRIDE() * size_of(u64) + i * size_of(u64));
 };
 let list_ref = func(r: u64) -> Ref(u64) {
-  return ptr_cast(Ref(u64), lists_base() + r * 16 * 8);
+  return ptr_cast(Ref(u64),
+      ptr_cast(Mut(u8), lists_base()) + r * LIST_STRIDE() * size_of(u64));
 };
 
 let add_inst = func(i: u64, kind: u64) -> Mut(vf.IrInst) {
@@ -161,7 +202,7 @@ let set_regions = func(tr: Ref(vf.IrType)) -> u64 {
   deref(r1) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(1), 1);
   let r2: Mut(vf.IrRegion) = region_p(2);
   deref(r2) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(2), 1);
-  let rp: Ref(vf.IrParam) = ptr_cast(Ref(vf.IrParam), ptr_cast(Mut(vf.IrParam), params_base()) + 24);
+  let rp: Ref(vf.IrParam) = ptr_cast(Ref(vf.IrParam), param_p(1));
   let r3: Mut(vf.IrRegion) = region_p(3);
   deref(r3) = vf.region_new(rp, 2, tr, 1, list_ref(3), 2);
   let r4: Mut(vf.IrRegion) = region_p(4);
@@ -361,11 +402,13 @@ let small_ptr = func() -> Mut(u8) {
 };
 
 let small_list = func(r: u64, i: u64) -> Mut(u64) {
-  return lists_base() + r * 16 * 8 + i * 8;
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), lists_base())
+      + r * LIST_STRIDE() * size_of(u64) + i * size_of(u64));
 };
 
 let small_list_ref = func(r: u64) -> Ref(u64) {
-  return ptr_cast(Ref(u64), lists_base() + r * 16 * 8);
+  return ptr_cast(Ref(u64),
+      ptr_cast(Mut(u8), lists_base()) + r * LIST_STRIDE() * size_of(u64));
 };
 
 let build_fuel = func() -> vf.IrModule {

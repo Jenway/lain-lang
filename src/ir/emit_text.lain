@@ -24,6 +24,19 @@ let halt = func(cause: u64) -> u64 {
   return halt_at(h);
 };
 
+// 违例出口：先借符号表上登记的钩子打一行说明，再就地终止。钩子在 host_rt
+// 的 rt_init 里登记，所以发射期的违例与宿主原语一样打出 [host_trap] 行，
+// 不会只剩一句算术陷阱。
+let trap_u64 = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+  let seen: u64 = tab.trap_report(syms, msg, detail);
+  return halt(detail);
+};
+
+let trap_text = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> Slice(u8) {
+  let dead: u64 = trap_u64(syms, msg, detail);
+  return "";
+};
+
 // --- writer ---------------------------------------------------------------
 pub let TextWriter = struct {
   buf: MutSlice(u8),
@@ -94,7 +107,7 @@ pub let IrDataView = struct {
 };
 
 // --- 算子名 ---------------------------------------------------------------
-pub let opcode_name = func(k: u64) -> Slice(u8) {
+pub let opcode_name = func(syms: Mut(tab.HostSymTab), k: u64) -> Slice(u8) {
   if k == codes.INST_ADD() { return "add"; }
   if k == codes.INST_SUB() { return "sub"; }
   if k == codes.INST_MUL() { return "mul"; }
@@ -181,12 +194,12 @@ pub let opcode_name = func(k: u64) -> Slice(u8) {
   if k == codes.INST_CONTINUE() { return "continue"; }
   if k == codes.INST_RETURN() { return "return"; }
   if k == codes.INST_UNREACHABLE() { return "unreachable"; }
-  return halt(k);
+  return trap_text(syms, "emit_text: opcode kind out of range", k);
 };
 
 // --- 物理类型 -------------------------------------------------------------
 // 拼写与 print.c 一致：浮点写 `#f<N>`，布尔写 `#bits<1>`。
-pub let emit_type = func(w: Mut(TextWriter), t: vf.IrType) -> u64 {
+pub let emit_type = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), t: vf.IrType) -> u64 {
   if t.kind == vf.TY_ADDR() {
     let n: u64 = put_str(w, "#ad");
     return n + put_str(w, "dr");
@@ -207,11 +220,11 @@ pub let emit_type = func(w: Mut(TextWriter), t: vf.IrType) -> u64 {
     let b: u64 = put_u64_dec(w, t.width);
     return put_byte(w, 62);
   }
-  return halt(t.kind);
+  return trap_u64(syms, "emit_text: type kind out of range", t.kind);
 };
 
 // --- 发射上下文 -----------------------------------------------------------
-// 绑定表复用模块自带的 scratch 区（与验证器同一套布局），只记录名字到物理
+// 绑定表借用验证器静态区里的大表（见 vf.LARGE_BINDINGS），只记录名字到物理
 // 类型的映射：间接 #call 的签名参数与结果类型都要从这里取。
 pub let TextEmitter = struct {
   w: Mut(TextWriter),
@@ -228,24 +241,29 @@ let word_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), base) + i * size_of(u64));
 };
 
+// 绑定表用的是验证器静态区里那张 LARGE_BINDINGS 槽的大表：真实模块的一个
+// 过程里同时可见的参数与指令结果远超模块 scratch 的 96 槽。验证与文本发射
+// 先后进行，双方都从第 0 槽开始写，不会互相覆盖。
 pub let emitter_new = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
                           m: Ref(vf.IrModule)) -> TextEmitter {
-  let scratch: Mut(u64) = m.scratch;
+  let base: Mut(u64) = vf.large_bind_base();
   return TextEmitter {
     w: w,
     syms: syms,
     m: m,
     depth: 0,
     count: 0,
-    names: scratch,
-    kinds: word_slot(scratch, vf.MAX_BINDINGS()),
-    widths: word_slot(scratch, vf.MAX_BINDINGS() * 2),
+    names: base,
+    kinds: word_slot(base, vf.LARGE_BINDINGS()),
+    widths: word_slot(base, vf.LARGE_BINDINGS() * 2),
   };
 };
 
 let bind_one = func(em: Mut(TextEmitter), name: u64, kind: u64, width: u64) -> u64 {
-  if name == 0 { return halt(name); }
-  if em.count >= vf.MAX_BINDINGS() { return halt(em.count); }
+  if name == 0 { return trap_u64(em.syms, "emit_text: binding name is zero", name); }
+  if em.count >= vf.LARGE_BINDINGS() {
+    return trap_u64(em.syms, "emit_text: binding table exhausted", em.count);
+  }
   let at: u64 = em.count;
   deref(word_slot(em.names, at)) = name;
   deref(word_slot(em.kinds, at)) = kind;
@@ -274,18 +292,26 @@ let bind_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, 
 
 // --- 模块记录 -------------------------------------------------------------
 let region_of = func(em: Mut(TextEmitter), ri: u64) -> vf.IrRegion {
-  if ri == vf.NO_REGION() { return halt(ri); }
-  if ri >= em.m.region_count { return halt(ri); }
+  if ri == vf.NO_REGION() {
+    let dead: u64 = trap_u64(em.syms, "emit_text: region handle is NO_REGION", ri);
+  }
+  if ri >= em.m.region_count {
+    let dead: u64 = trap_u64(em.syms, "emit_text: region index out of range", ri);
+  }
   return vf.region_at_ref(em.m.regions, ri);
 };
 
 let inst_of = func(em: Mut(TextEmitter), ii: u64) -> vf.IrInst {
-  if ii >= em.m.inst_count { return halt(ii); }
+  if ii >= em.m.inst_count {
+    let dead: u64 = trap_u64(em.syms, "emit_text: instruction index out of range", ii);
+  }
   return vf.inst_at_ref(em.m.insts, ii);
 };
 
 let case_of = func(em: Mut(TextEmitter), ci: u64) -> vf.IrCase {
-  if ci >= em.m.case_count { return halt(ci); }
+  if ci >= em.m.case_count {
+    let dead: u64 = trap_u64(em.syms, "emit_text: case index out of range", ci);
+  }
   return vf.case_at_ref(em.m.cases, ci);
 };
 
@@ -373,12 +399,12 @@ let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
 let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
   if op.kind != vf.OP_VALUE() { return put_str(em.w, "#bits<64>"); }
   let p: u64 = find_binding(em, op.name);
-  if p == 0 { return halt(op.name); }
+  if p == 0 { return trap_u64(em.syms, "emit_text: operand binding is not defined", op.name); }
   let t: vf.IrType = vf.IrType {
     kind: deref(word_slot(em.kinds, p - 1)),
     width: deref(word_slot(em.widths, p - 1)),
   };
-  return emit_type(em.w, t);
+  return emit_type(em.w, em.syms, t);
 };
 
 let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
@@ -417,7 +443,7 @@ let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.has_ty == 0 { return 1; }
   let a: u64 = put_byte(em.w, 91);
   let t: vf.IrType = vf.inst_ty(it);
-  let b: u64 = emit_type(em.w, t);
+  let b: u64 = emit_type(em.w, em.syms, t);
   return put_byte(em.w, 93);
 };
 
@@ -445,7 +471,7 @@ let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
       let sep: u64 = put_str(em.w, ", ");
     }
     let t: vf.IrType = vf.type_at_ref(r.results, i);
-    let rc: u64 = emit_type(em.w, t);
+    let rc: u64 = emit_type(em.w, em.syms, t);
     i = i + 1;
   };
   return put_byte(em.w, 41);
@@ -457,7 +483,7 @@ let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
   let a: u64 = put_str(em.w, " -> ");
   if p.result_count == 1 {
     let t: vf.IrType = vf.type_at_ref(p.results, 0);
-    return emit_type(em.w, t);
+    return emit_type(em.w, em.syms, t);
   }
   let b: u64 = put_byte(em.w, 40);
   let i: u64 = loop c(i: u64 = 0) while i < p.result_count {
@@ -465,7 +491,7 @@ let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
       let sep: u64 = put_str(em.w, ", ");
     }
     let t: vf.IrType = vf.type_at_ref(p.results, i);
-    let rc: u64 = emit_type(em.w, t);
+    let rc: u64 = emit_type(em.w, em.syms, t);
     i = i + 1;
   };
   return put_byte(em.w, 41);
@@ -481,7 +507,7 @@ let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, 
   let b: u64 = put_symbol(em.w, em.syms, p.name);
   let c: u64 = put_str(em.w, ": ");
   let t: vf.IrType = vf.param_ty(p);
-  let d: u64 = emit_type(em.w, t);
+  let d: u64 = emit_type(em.w, em.syms, t);
   return emit_params(em, base, count, i + 1);
 };
 
@@ -497,14 +523,14 @@ let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64
   let b: u64 = put_symbol(em.w, em.syms, p.name);
   let c: u64 = put_str(em.w, ": ");
   let t: vf.IrType = vf.param_ty(p);
-  let d: u64 = emit_type(em.w, t);
+  let d: u64 = emit_type(em.w, em.syms, t);
   let e: u64 = put_str(em.w, " = 0");
   return emit_loop_params(em, r, i + 1);
 };
 
 let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> u64 {
   let a: u64 = put_byte(em.w, 35);
-  return put_str(em.w, opcode_name(k));
+  return put_str(em.w, opcode_name(em.syms, k));
 };
 
 // --- 指令 -----------------------------------------------------------------
@@ -667,7 +693,7 @@ let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.has_ty == 1 {
     let c: u64 = put_str(em.w, " -> ");
     let t: vf.IrType = vf.inst_ty(it);
-    let d: u64 = emit_type(em.w, t);
+    let d: u64 = emit_type(em.w, em.syms, t);
   }
   return put_byte(em.w, 93);
 };

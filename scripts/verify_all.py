@@ -19,10 +19,9 @@ STAGE2_C = os.path.join(BUILD, "stage2.c")
 STAGE2_EXE = os.path.join(BUILD, "lain-stage2.exe" if os.name == "nt" else "lain-stage2")
 LAINC_EXE = os.path.join(BUILD, "lainc.exe" if os.name == "nt" else "lainc")
 STAGE3_L1 = os.path.join(BUILD, "stage3.l1")
-NATIVE_DRIVER = os.path.join(ROOT, "seed", "native_meta_driver.c")
 BOOT_C = os.path.join(ROOT, "seed", "bootstrap", "lainc_boot.c")
-KERNEL_INC = os.path.join(ROOT, "seed", "kernel", "include")
-SEED_LIB = os.path.join(BUILD, "lib", "lain_seed.lib" if os.name == "nt" else "liblain_seed.a")
+
+stack_flags = ["-Wl,/STACK:16777216"] if os.name == "nt" else []
 
 
 def exe(name):
@@ -82,8 +81,8 @@ def split_meta():
     if not clang_bin:
         print("失败: 未找到 clang，无法构建 Stage-1")
         return None
-    res_cc = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
-                  NATIVE_DRIVER, BOOT_C, SEED_LIB, "-o", STAGE1_EXE])
+    res_cc = run([clang_bin, "-std=c99", "-O2"] + stack_flags + [
+                 BOOT_C, "-o", STAGE1_EXE])
     if res_cc.returncode != 0:
         print(res_cc.stdout)
         print(res_cc.stderr)
@@ -423,6 +422,15 @@ META_CASES = [
     # dump_json 把事件表按 JSON 格式写进调用方提供的缓冲；开关关闭后不再记事件。
     {"file": "trace_perfetto.lain", "entry": "s0__main", "value": 75,
      "folds": [], "procs": [], "absent": []},
+    # std 集合容器：HashMap、HashSet、BTreeMap 的插入、查找、迭代与删除返回 95。
+    {"file": "std_collections.lain", "entry": "s0__main", "value": 95,
+     "folds": [], "procs": [], "absent": []},
+    # 编译期错误码：效果未声明即执行 IO，收敛成确定的诊断并返回 91。
+    {"file": "compile_err_effect.lain", "entry": "s0__main", "value": 91,
+     "folds": [], "procs": [], "absent": []},
+    # std 构建冒烟：标准库全量单元拼装、校验并发射 C99，返回 97。
+    {"file": "std_build_smoke.lain", "entry": "s0__main", "value": 97,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -497,7 +505,7 @@ def check_meta_cases():
     for case in META_CASES:
         stem = case["file"][:-len(".lain")]
         out_path, text, code = compile_meta_test(stem)
-        if code != 0 or "result=0" not in text:
+        if code != 0:
             body = text.strip().splitlines()
             details.append("%s 编译: %s" % (case["file"], body[-1] if body else "失败"))
             continue
@@ -551,10 +559,10 @@ def check_meta_cases():
     for negative in META_NEGATIVE:
         stem = negative["file"][:-len(".lain")]
         out_path, text, code = compile_meta_test(stem)
-        if "result=0" in text:
+        if code == 0:
             details.append("%s 编译成功，但%s必须失败" % (negative["file"], negative["why"]))
             continue
-        if "diag " not in text or code == 0:
+        if ("diag " not in text and "[compile_" not in text and "[host_" not in text) or code == 0:
             body = text.strip().splitlines()
             details.append("%s 没有编译失败诊断: %s"
                            % (negative["file"], body[-1] if body else "无输出"))
@@ -595,13 +603,13 @@ def main():
     bootstrap_ok = False
     stage2_ready = False
     if units and clang_bin:
-        self_res = run([LAINIR_C, "-o", STAGE2_C] + units)
+        self_res = run([LAINIR_C, "--entry", "main", "-o", STAGE2_C] + units)
         if self_res.returncode != 0:
             problems.append("C99 自举: lainir-c 发射 stage2.c 失败")
             print("C99 自举 失败")
         else:
-            cc_self = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
-                           NATIVE_DRIVER, STAGE2_C, SEED_LIB, "-o", STAGE2_EXE])
+            cc_self = run([clang_bin, "-std=c99", "-O2"] + stack_flags + [
+                          STAGE2_C, "-o", STAGE2_EXE])
             if cc_self.returncode != 0:
                 problems.append("C99 自举: clang 编译 stage2.exe 失败")
                 print("C99 自举 失败")

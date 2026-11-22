@@ -42,7 +42,7 @@
 #define V2_INST_MAX 4096u
 #define V2_PROC_PARAM_MAX 16u
 #define V2_PROC_MAX 4096u
-#define V2_DATA_MAX 1024u
+#define V2_DATA_MAX 4096u
 #define V2_FRAME_MAX 64u
 #define V2_CASE_MAX 64u
 #define V2_NAME_MAX 512u

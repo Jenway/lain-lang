@@ -5,7 +5,7 @@
 // 不依赖数组下标的元素步长。调用方用 IrBuilder 在一块原始字节区上顺序追加
 // 记录，构造过程不产生任何堆分配。
 // 验证器只读模块；小模块的绑定表与循环标签表放在调用方提供的模块 scratch
-// 区里，真实模块的绑定表放在本文件的静态区里（见 LARGE_BINDINGS）。
+// 区里，真实模块与文本发射器的绑定表放在本文件的静态区里（见 LARGE_BINDINGS）。
 let codes = import("src::ir_codes");
 
 // --- 类型类别 -------------------------------------------------------------
@@ -43,8 +43,8 @@ pub let MAX_RESULTS = func() -> u64 { return 2; };
 // 之间的取值。
 pub let MAX_BINDINGS = func() -> u64 { return 96; };
 // 真实模块（宿主构造的 IR）用的绑定表槽数放在本文件自己的静态区里，不占
-// 模块 scratch；只有 verify_module_with_data 走这张表，所以小 arena 的切割
-// 测试仍然只需要 96 槽的那块 scratch。
+// 模块 scratch；验证与文本发射都走这张表，所以小 arena 的切割测试仍然只
+// 需要 96 槽的那块 scratch。
 pub let LARGE_BINDINGS = func() -> u64 { return 2048; };
 pub let MAX_LOOPS = func() -> u64 { return 8; };
 pub let MAX_DEPTH = func() -> u64 { return 64; };
@@ -654,8 +654,9 @@ pub let VfCtx = struct {
   loop_regions: Mut(u64),
 };
 
-// 模块 scratch 的布局：文本发射器的三张定长表（名字、类别、宽度）占前
-// 3 * MAX_BINDINGS 个字，验证器的循环标签与循环区域接在后面。
+// 模块 scratch 的布局：小模块验证器的三张定长表（名字、类别、宽度）占前
+// 3 * MAX_BINDINGS 个字，验证器的循环标签与循环区域接在后面。文本发射器用
+// 的是下面的静态大表，不碰模块 scratch。
 pub let VF_SCRATCH = func() -> u64 {
   return MAX_BINDINGS() * 3 + MAX_LOOPS() * 2;
 };
@@ -705,6 +706,12 @@ let large_store: Array(Array(u64, 512), 12) = [
 
 let large_store_ptr = func() -> Mut(u64) {
   return ptr_cast(Mut(u64), mut_of(large_store));
+};
+
+// 文本发射器按同样的槽数借用这张表：它把名字、类别、宽度三张表放在与验证
+// 器相同的起点上，两边都从第 0 槽开始写，验证完成之后再发射文本。
+pub let large_bind_base = func() -> Mut(u64) {
+  return large_store_ptr();
 };
 
 // 绑定记录与循环标签都是 u64 数组；指针算术按字节推进，所以下标必须乘上元素宽度。
@@ -1787,8 +1794,19 @@ let check_procs = func(c: Mut(VfCtx), i: u64) -> u64 {
   return err;
 };
 
+// 小 arena 的切割测试专用：绑定表与循环标签表都取模块 scratch 里的 96 槽。
 pub let verify_module = func(m: Ref(IrModule)) -> u64 {
   let c0: VfCtx = vf_new_with_data(m, null_ref(Ref(u64)), 0);
+  let c: Mut(VfCtx) = mut_of(c0);
+  let de: u64 = check_dup_procs(c, 0);
+  if de != 0 { return de; }
+  return check_procs(c, 0);
+};
+
+// 真实模块的校验入口：没有静态数据时也走本文件静态区里的大表。真实过程的
+// 参数与指令结果轻易超过 96 个，模块里有没有 data 与绑定表容量无关。
+pub let verify_module_large = func(m: Ref(IrModule)) -> u64 {
+  let c0: VfCtx = vf_new_large(m, null_ref(Ref(u64)), 0);
   let c: Mut(VfCtx) = mut_of(c0);
   let de: u64 = check_dup_procs(c, 0);
   if de != 0 { return de; }

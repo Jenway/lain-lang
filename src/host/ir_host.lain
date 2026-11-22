@@ -48,6 +48,9 @@ let halt = func(cause: u64) -> u64 {
   return halt_at(h);
 };
 
+// 未挂钩子时用的空回调：宿主默认行为就是直接终止。
+let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
+
 // --- 记录 -----------------------------------------------------------------
 pub let DataRec = struct {
   symbol: u64,
@@ -134,6 +137,8 @@ pub let HostIr = struct {
   diags: Mut(Diag),
   diag_cap: u64,
   diag_count: u64,
+  has_hook: u64,
+  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
 
 // 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
@@ -169,12 +174,24 @@ let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return 0;
 };
 
+// 安装违例钩子。钩子收到说明文本与细节值，在终止之前被调用一次。
+pub let set_trap_hook = func(h: Mut(HostIr),
+                             cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
+  h.has_hook = 1;
+  h.hook = cb;
+  return 0;
+};
+
 let fail_msg = func(h: Mut(HostIr), msg: Slice(u8), code: u64) -> u64 {
   if h.err == 0 {
     h.err = code;
     h.err_msg_ptr = msg.ptr;
     h.err_msg_len = msg.len;
     h.err_detail = code;
+  }
+  if h.has_hook != 0 {
+    let f: Fn((Ref(u8), u64, u64) -> u64) = h.hook;
+    let dead: u64 = f(msg.ptr, msg.len, code);
   }
   return halt(code);
 };
@@ -338,6 +355,8 @@ pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
     diags: null_ref(Mut(Diag)),
     diag_cap: 0,
     diag_count: 0,
+    has_hook: 0,
+    hook: noop_trap,
   };
   let mod_bytes: u64 = MODULE_CAP() * size_of(ModState);
   let mp: Mut(u8) = arena_zero(hp, mod_bytes, 8);
@@ -1280,7 +1299,7 @@ pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
   let modval: vf.IrModule = module_of(h, m);
   let code: u64 = 0;
   if m.data_count == 0 {
-    code = vf.verify_module(ref_of(modval));
+    code = vf.verify_module_large(ref_of(modval));
   } else {
     let raw: Mut(u8) = arena_take(h, m.data_count * size_of(u64), 8);
     if is_null(raw) {
@@ -1427,7 +1446,7 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let modval: vf.IrModule = module_of(h, m);
   let mv: Ref(vf.IrModule) = ref_of(modval);
-  let code: u64 = vf.verify_module(mv);
+  let code: u64 = vf.verify_module_large(mv);
   h.last_verify = code;
   if code != 0 { return fail(h, HOST_ERR_IR()); }
   let w0: c99.C99Writer = c99.new_writer(buf);

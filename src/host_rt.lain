@@ -12,12 +12,15 @@
 // 容量与句柄上的任何违例都在发生位置就地终止，绝不返回半成品。
 
 let os = import("std::os");
+let fmt = import("std::fmt");
+let tr = import("std::trace");
 let err = import("src::err");
 let symtab = import("src::host::symtab");
 let ao = import("src::meta::ast_out");
 let sh = import("src::host::source_host");
 let irh = import("src::host::ir_host");
 let vmh = import("src::host::vm_host");
+let eng = import("src::vm::engine");
 let emit_text = import("src::ir::emit_text");
 let c99 = import("src::backend::c99");
 let vf = import("src::ir::verify");
@@ -53,6 +56,21 @@ let note_fail = func(msg: Slice(u8)) -> u64 {
   return 1;
 };
 
+// --- 违例钩子 ---------------------------------------------------------------
+// 下层四个宿主模块在就地终止之前把说明文本与细节值交给这个钩子，钩子把它们
+// 写成一行 "[host_trap] <msg> (detail=<u64>)\n" 交给标准错误。说明文本一律是
+// 静态字面量，格式化的落脚点只有 std::fmt 的静态字符池，所以递增区耗尽或堆
+// 分配失败的时候这一行仍然能打出来。
+let host_trap_cb = func(p: Ref(u8), n: u64, detail: u64) -> u64 {
+  let c0: fmt.Cursor = fmt.fmt_begin();
+  let c1: fmt.Cursor = fmt.write_str(c0, "[host_trap] ");
+  let c2: fmt.Cursor = fmt.write_str(c1, make_slice(Slice(u8), p, n));
+  let c3: fmt.Cursor = fmt.write_str(c2, " (detail=");
+  let c4: fmt.Cursor = fmt.write_u64(c3, detail);
+  let c5: fmt.Cursor = fmt.write_str(c4, ")\n");
+  return os.eprint(fmt.fmt_done(c5));
+};
+
 // --- 容量 -------------------------------------------------------------------
 // 符号表的共享区段同时承载符号原文与每份源码的 Reader Arena，所以按整个编译
 // 单元的规模预留；mem_alloc 走另一块独立的递增区，编译器自己的状态表、类型
@@ -67,7 +85,9 @@ let bump_bytes = func() -> u64 { return 536870912; };
 // 已超过 256 MB，所以按 512 MB 预留。
 let ir_bytes = func() -> u64 { return 536870912; };
 let vm_bytes = func() -> u64 { return 4194304; };
-let out_bytes = func() -> u64 { return 16777216; };
+// 输出缓冲区承载 emit_c99_file 生成的整份 C99 源码；大型模块（src/err.lain、
+// src/entry.lain）展开后的 C 文本会超出 16 MiB，所以按 64 MiB 预留。
+let out_bytes = func() -> u64 { return 67108864; };
 
 let ast_node_cap = func() -> u64 { return 262144; };
 let ast_kid_cap = func() -> u64 { return 1048576; };
@@ -238,6 +258,13 @@ pub let rt_init = func() -> u64 {
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   let rc: u64 = c99.set_syms(h.syms);
   if rc != 0 { return die_u64("[host_rt] c99 symbol table wiring failed\n", rc); }
+  let cb: Fn((Ref(u8), u64, u64) -> u64) = fn_of(host_trap_cb);
+  let w0: u64 = symtab.set_trap_hook(h.syms, cb);
+  let w1: u64 = ao.set_trap_hook(h.ast_out, cb);
+  let w2: u64 = sh.set_trap_hook(h.sources, cb);
+  let w3: u64 = irh.set_trap_hook(h.ir, cb);
+  let wired: u64 = (w0 + w1) + (w2 + w3);
+  if wired != 0 { return die_u64("[host_rt] trap hook wiring failed\n", wired); }
   return raw_ptr;
 };
 
@@ -861,17 +888,60 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
 };
 
 // --- 虚拟机 -----------------------------------------------------------------
+// 虚拟机的事件落在 Perfetto 的第二条泳道上：调用轨迹按条展开成 span，已用步数
+// 记成计数事件，整次调用再包一层 vm_apply 区间，区间附带轨迹条数。
+let trace_kind_cat = func(kind: u64) -> Slice(u8) {
+  if kind == eng.TRACE_ENTER() { return "vm_enter"; }
+  if kind == eng.TRACE_EXIT() { return "vm_exit"; }
+  if kind == eng.TRACE_TRAP() { return "vm_trap"; }
+  return "vm_trace";
+};
+
+let sub_name = func(h: Mut(HostRt), sym: u64) -> Slice(u8) {
+  if sym == 0 { return "<vm>"; }
+  let n: u64 = symtab.sym_len(h.syms, sym);
+  let p: Ref(u8) = symtab.sym_addr(h.syms, sym);
+  return make_slice(Slice(u8), p, n);
+};
+
+let emit_vm_trace = func(h: Mut(HostRt), i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let ev: eng.VmTraceEvent = vmh.last_trace_at(h.vm, i);
+  let ts: u64 = tr.span_begin_tid();
+  tr.span_end_tid(sub_name(h, ev.sub_sym), trace_kind_cat(ev.kind), ts, ev.steps,
+                  tr.tid_vm());
+  return emit_vm_trace(h, i + 1, n);
+};
+
+let trace_vm_result = func(h: Mut(HostRt), t0: u64, rc: u64) -> u64 {
+  let count: u64 = vmh.last_trace_count(h.vm);
+  tr.counter_tid("vm.steps", vmh.host_last_steps(h.vm), tr.tid_vm());
+  emit_vm_trace(h, 0, count);
+  tr.span_end_tid("vm_apply", "vm", t0, count, tr.tid_vm());
+  return rc;
+};
+
 pub let apply_module = func(modv: u64, entry: u64, args: Ref(u8), arg_n: u64,
                             out: Mut(u8), out_cap: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   let av: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), args), arg_n);
-  return vmh.apply_module(h.vm, modv, entry, av, out, out_cap);
+  if tr.trace_is_enabled() == 0 {
+    return vmh.apply_module(h.vm, modv, entry, av, out, out_cap);
+  }
+  let t0: u64 = tr.span_begin_tid();
+  let rc: u64 = vmh.apply_module(h.vm, modv, entry, av, out, out_cap);
+  return trace_vm_result(h, t0, rc);
 };
 
 pub let apply_module_bytes = func(modv: u64, entry: u64, out: Mut(u8),
                                   out_cap: u64) -> u64 {
   let h: Mut(HostRt) = rt();
-  return vmh.apply_module_bytes(h.vm, modv, entry, out, out_cap);
+  if tr.trace_is_enabled() == 0 {
+    return vmh.apply_module_bytes(h.vm, modv, entry, out, out_cap);
+  }
+  let t0: u64 = tr.span_begin_tid();
+  let rc: u64 = vmh.apply_module_bytes(h.vm, modv, entry, out, out_cap);
+  return trace_vm_result(h, t0, rc);
 };
 
 // --- 追踪 -------------------------------------------------------------------

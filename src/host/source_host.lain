@@ -33,6 +33,9 @@ let halt = func(cause: u64) -> u64 {
   return halt_at(h);
 };
 
+// 未挂钩子时用的空回调：宿主默认行为就是直接终止。
+let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
+
 // --- 句柄编码 ---------------------------------------------------------------
 pub let CLASS_AST_IN = func() -> u64 { return 1; };
 pub let CLASS_AST_OUT = func() -> u64 { return 2; };
@@ -114,17 +117,32 @@ pub let HostSources = struct {
   err_msg_ptr: Ref(u8),
   err_msg_len: u64,
   err_detail: u64,
+  has_hook: u64,
+  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
 
 // 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
 pub let Self = HostSources;
 
+// 安装违例钩子。钩子收到说明文本与细节值，在终止之前被调用一次。
+pub let set_trap_hook = func(h: Mut(HostSources),
+                             cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
+  h.has_hook = 1;
+  h.hook = cb;
+  return 0;
+};
+
 // --- 违例出口 ---------------------------------------------------------------
-// 说明文本一律是静态字面量，生命周期不依赖调用方的帧。先写记录再终止。
+// 说明文本一律是静态字面量，生命周期不依赖调用方的帧。先写记录、再调钩子，
+// 最后终止。
 let trap_with = func(h: Mut(HostSources), msg: Slice(u8), detail: u64) -> u64 {
   h.err_msg_ptr = msg.ptr;
   h.err_msg_len = msg.len;
   h.err_detail = detail;
+  if h.has_hook != 0 {
+    let f: Fn((Ref(u8), u64, u64) -> u64) = h.hook;
+    let dead: u64 = f(msg.ptr, msg.len, detail);
+  }
   return halt(detail);
 };
 
@@ -180,6 +198,8 @@ pub let host_sources_new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut),
     err_msg_ptr: null_ref(Ref(u8)),
     err_msg_len: 0,
     err_detail: 0,
+    has_hook: 0,
+    hook: noop_trap,
   };
 };
 

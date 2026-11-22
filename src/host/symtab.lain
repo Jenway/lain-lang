@@ -19,6 +19,9 @@ let halt = func(cause: u64) -> u64 {
   return halt_at(h);
 };
 
+// 没有登记钩子时的默认回调：什么都不做，终止照常由 halt 完成。
+let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
+
 // --- 记录 -------------------------------------------------------------------
 // 一个符号：原文在共享区段里的起点、字节数与整段原文的散列值。
 pub let SymEntry = struct {
@@ -27,6 +30,8 @@ pub let SymEntry = struct {
   hash: u64,
 };
 
+// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值；
+// has_hook / hook 是调用方登记的终止钩子，钩子非空时在崩溃之前先被调用一次。
 pub let HostSymTab = struct {
   buckets: Mut(u32),
   bucket_cap: u64,
@@ -38,7 +43,46 @@ pub let HostSymTab = struct {
   pool_used: u64,
   arena_used: u64,
   arena_peak: u64,
+  err_msg_ptr: Ref(u8),
+  err_msg_len: u64,
+  err_detail: u64,
+  has_hook: u64,
+  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
+
+// --- 违例出口 ---------------------------------------------------------------
+// 说明文本一律是静态字面量，生命周期不依赖调用方的帧。先写记录、再调钩子，
+// 最后终止。
+let trap_with = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+  t.err_msg_ptr = msg.ptr;
+  t.err_msg_len = msg.len;
+  t.err_detail = detail;
+  if t.has_hook != 0 {
+    let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
+    let seen: u64 = f(msg.ptr, msg.len, detail);
+  }
+  return halt(detail);
+};
+
+pub let set_trap_hook = func(t: Mut(HostSymTab), cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
+  t.has_hook = 1;
+  t.hook = cb;
+  return 0;
+};
+
+// 只报告、不终止：其它模块的违例出口借这张表上登记的钩子打一行说明，再由
+// 自己的 halt 就地终止。没登记钩子时什么都不做。
+pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+  if t.has_hook == 0 { return 0; }
+  let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
+  return f(msg.ptr, msg.len, detail);
+};
+
+pub let last_err_msg = func(t: Mut(HostSymTab)) -> Slice(u8) {
+  return make_slice(Slice(u8), t.err_msg_ptr, t.err_msg_len);
+};
+
+pub let last_err_detail = func(t: Mut(HostSymTab)) -> u64 { return t.err_detail; };
 
 // --- 记录地址 ---------------------------------------------------------------
 // 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
@@ -103,6 +147,11 @@ pub let symtab_new = func(buf: MutSlice(u8)) -> HostSymTab {
     pool_used: 0,
     arena_used: 0,
     arena_peak: 0,
+    err_msg_ptr: null_ref(Ref(u8)),
+    err_msg_len: 0,
+    err_detail: 0,
+    has_hook: 0,
+    hook: fn_of(noop_trap),
   };
 };
 
@@ -161,8 +210,8 @@ let entry_match = func(t: Mut(HostSymTab), h: u64, hash: u64, p: Ref(u8), n: u64
 // --- 句柄检查 ---------------------------------------------------------------
 // 句柄 0 与超过当前符号数的句柄都没有对应条目。
 let check_handle = func(t: Mut(HostSymTab), h: u64) -> u64 {
-  if h == 0 { return halt(h); }
-  if h > t.count { return halt(h); }
+  if h == 0 { return trap_with(t, "HostSymTab::check_handle: zero handle", h); }
+  if h > t.count { return trap_with(t, "HostSymTab::check_handle: handle out of range", h); }
   return h;
 };
 
@@ -180,7 +229,7 @@ let probe_find = func(t: Mut(HostSymTab), hash: u64, p: Ref(u8), n: u64) -> u64 
     if entry_match(t, h, hash, p, n) == 1 { break f(h); }
     k = k + 1;
   };
-  if res > t.count { return halt(res); }
+  if res > t.count { return trap_with(t, "HostSymTab::probe_find: bucket table corrupt", res); }
   return res;
 };
 
@@ -193,7 +242,7 @@ let probe_place = func(t: Mut(HostSymTab), hash: u64, h: u64) -> u64 {
     if deref(s) == 0 { break f(i); }
     k = k + 1;
   };
-  if at >= t.bucket_cap { return halt(at); }
+  if at >= t.bucket_cap { return trap_with(t, "HostSymTab::probe_place: bucket table full", at); }
   let slot: Mut(u32) = slot_at(t, at);
   deref(slot) = h as u32;
   return at;
@@ -202,7 +251,7 @@ let probe_place = func(t: Mut(HostSymTab), hash: u64, h: u64) -> u64 {
 // --- 驻留池低端 -------------------------------------------------------------
 // 符号文本从共享区段的低端向上紧排，返回可写入的起点偏移。
 let room_pool = func(t: Mut(HostSymTab), n: u64) -> u64 {
-  if n > free_bytes(t) { return halt(n); }
+  if n > free_bytes(t) { return trap_with(t, "HostSymTab::room_pool: symbol pool exhausted", n); }
   return t.pool_used;
 };
 
@@ -221,11 +270,13 @@ let copy_pool = func(t: Mut(HostSymTab), off: u64, p: Ref(u8), n: u64) -> u64 {
 // 依次写正文、写条目、挂进桶表。容量不足时在第一处终止，区段里不留任何
 // 半条记录。
 pub let sym_intern = func(t: Mut(HostSymTab), p: Ref(u8), n: u64) -> u64 {
-  if n == 0 { return halt(n); }
+  if n == 0 { return trap_with(t, "HostSymTab::sym_intern: empty symbol text", n); }
   let hash: u64 = hash_bytes(p, n);
   let have: u64 = probe_find(t, hash, p, n);
   if have != 0 { return have; }
-  if t.count >= t.entry_cap { return halt(t.count); }
+  if t.count >= t.entry_cap {
+    return trap_with(t, "HostSymTab::sym_intern: entry capacity exhausted", t.count);
+  }
   let off: u64 = room_pool(t, n);
   let copied: u64 = copy_pool(t, off, p, n);
   let h: u64 = t.count + 1;
@@ -259,7 +310,7 @@ pub let sym_same = func(t: Mut(HostSymTab), a: u64, b: u64) -> u64 {
 };
 
 let trap_ref = func(t: Mut(HostSymTab), cause: u64) -> Ref(u8) {
-  let dead: u64 = halt(cause);
+  let dead: u64 = trap_with(t, "HostSymTab::sym_addr: handle out of range", cause);
   return ptr_cast(Ref(u8), t.region);
 };
 
@@ -284,8 +335,8 @@ let check_align = func(align: u64) -> u64 {
   return a;
 };
 
-let trap_mut = func(t: Mut(HostSymTab), cause: u64) -> Mut(u8) {
-  let dead: u64 = halt(cause);
+let trap_mut = func(t: Mut(HostSymTab), msg: Slice(u8), cause: u64) -> Mut(u8) {
+  let dead: u64 = trap_with(t, msg, cause);
   return t.region;
 };
 
@@ -294,13 +345,17 @@ let trap_mut = func(t: Mut(HostSymTab), cause: u64) -> Mut(u8) {
 // 因此返回的地址无论 align 多大都是真对齐的。
 pub let mem_alloc = func(t: Mut(HostSymTab), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = check_align(align);
-  if bytes > free_bytes(t) { return trap_mut(t, bytes); }
+  if bytes > free_bytes(t) {
+    return trap_mut(t, "HostSymTab::mem_alloc: request exceeds free bytes", bytes);
+  }
   let base: u64 = t.region as u64;
   let end: u64 = base + t.region_cap;
   let front: u64 = end - t.arena_used;
   let target: u64 = front - bytes;
   let aligned: u64 = target / a * a;
-  if aligned < base + t.pool_used { return trap_mut(t, target); }
+  if aligned < base + t.pool_used {
+    return trap_mut(t, "HostSymTab::mem_alloc: allocation crosses pool watermark", target);
+  }
   let used: u64 = end - aligned;
   t.arena_used = used;
   if used > t.arena_peak { t.arena_peak = used; }
