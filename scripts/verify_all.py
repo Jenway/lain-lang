@@ -413,6 +413,11 @@ META_CASES = [
     # 只读窗口写入、除零与裸地址逃逸各自收敛成确定 Trap。
     {"file": "phase6_vm_sandbox.lain", "entry": "s0__main", "value": 63,
      "folds": [], "procs": [], "absent": []},
+    # Phase 6.4：纯 Lain 宿主层切割。HostSymTab 驻留与工作区切分、HostSources
+    # 源码/片段解析与 AstOut 回滚/提交、HostIr 双过程模块校验/克隆/C99 发射、
+    # HostVmHost 在全新地址空间执行标量与字节入口，返回 64。
+    {"file": "phase6_host_cutover.lain", "entry": "s0__main", "value": 64,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},

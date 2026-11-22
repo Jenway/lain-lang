@@ -1,0 +1,487 @@
+// src/host/source_host.lain —— 纯 Lain 的宿主源码管理与统一 AST 句柄层（HostSources）。
+//
+// 源码单元的文本由调用方持有，HostSources 只记下它的起点与长度。每个单元的
+// Reader Arena 与源码记录表都从 HostSymTab 的共享工作区切出：Reader 先拿一段
+// 零长度 Arena 跑计数遍，用 RawAst.needed 算出确切字节数，再一次性切出这块
+// 空间并填表，因此没有预留、没有扩容、没有复制。
+//
+// 节点句柄沿用一套编码，把两类来源放进同一条查询通道：
+//   AST_IN   (1 << 28) | (源码号 << 20) | 节点下标    Reader 的 RawAst 节点
+//   AST_OUT  (2 << 28) | 节点下标                    AstOut 的合成节点
+//   SYM      (3 << 28) | 符号号                      宿主符号表句柄
+// 统一后的节点类别只有词与组两种；Reader 的四种词都归一词，四种组都归一为组。
+// 词的文本对两类来源都落在各自 Arena 里，组没有文本。
+//
+// AstOut 的事务与构造原语在这里翻译句柄：开事务、提交、回滚，以及带符号与
+// 来源节点的造词、按统一句柄数组造组。事务之外造节点由 AstOut 自己拒绝。
+
+let sym = import("src::host::symtab");
+let rd = import("src::frontend::reader");
+let ao = import("src::meta::ast_out");
+
+// --- 违例终止 ---------------------------------------------------------------
+// 容量不足、句柄类别不符、下标越界、源码号越界一律就地终止。参数只用来让
+// 除数在运行期求成零，编译器无法把这条除法折叠成常数。
+let Halt = struct { zero: u64 };
+let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
+let halt = func(cause: u64) -> u64 {
+  let h: Halt = Halt { zero: cause - cause };
+  return halt_at(h);
+};
+
+// --- 句柄编码 ---------------------------------------------------------------
+pub let CLASS_AST_IN = func() -> u64 { return 1; };
+pub let CLASS_AST_OUT = func() -> u64 { return 2; };
+pub let CLASS_SYM = func() -> u64 { return 3; };
+
+let CLASS_SHIFT = func() -> u64 { return 28; };
+let SOURCE_SHIFT = func() -> u64 { return 20; };
+let INDEX_MASK = func() -> u64 { return 0x0FFFFFFF; };
+let SOURCE_MASK = func() -> u64 { return 0xFF; };
+let SLOT_MASK = func() -> u64 { return 0xFFFFF; };
+
+// 没有节点：整字全 1，类别位为 0，不会与任何真实句柄混同。
+pub let NO_NODE = func() -> u64 { return 0xFFFFFFFF; };
+
+// 没有源码：源码号从这里开始不合法。
+pub let NO_SOURCE = func() -> u64 { return 0xFFFFFFFF; };
+
+let handle_ast_in = func(source: u64, slot: u64) -> u64 {
+  return (CLASS_AST_IN() << CLASS_SHIFT()) |
+         ((source & SOURCE_MASK()) << SOURCE_SHIFT()) | (slot & SLOT_MASK());
+};
+
+let handle_ast_out = func(index: u64) -> u64 {
+  return (CLASS_AST_OUT() << CLASS_SHIFT()) | (index & INDEX_MASK());
+};
+
+let handle_sym = func(id: u64) -> u64 {
+  return (CLASS_SYM() << CLASS_SHIFT()) | (id & INDEX_MASK());
+};
+
+let class_of = func(h: u64) -> u64 { return h >> CLASS_SHIFT(); };
+let source_of = func(h: u64) -> u64 { return (h >> SOURCE_SHIFT()) & SOURCE_MASK(); };
+let slot_of = func(h: u64) -> u64 { return h & SLOT_MASK(); };
+let out_index_of = func(h: u64) -> u64 { return h & INDEX_MASK(); };
+
+let out_handle = func(index: u64) -> u64 {
+  if index == ao.NO_NODE() { return NO_NODE(); }
+  if index > INDEX_MASK() { return halt(index); }
+  return handle_ast_out(index);
+};
+
+// --- 记录 -------------------------------------------------------------------
+// 源码记录全部平铺成标量：Reader 的 RawAst 也拆成字段存放，避免嵌套结构体
+// 字段在按值写入时多解一层引用。查询时再拼回 RawAst 值。
+pub let Source = struct {
+  name: u64,
+  text_ptr: Ref(u8),
+  text_len: u64,
+  ast_nodes: Ref(rd.RawNode),
+  ast_node_count: u64,
+  ast_children: Ref(u32),
+  ast_child_count: u64,
+  ast_spans: Ref(rd.Span),
+  ast_root: u64,
+  ast_kind: u64,
+  ast_err_line: u64,
+  ast_err_col: u64,
+  ast_err_offset: u64,
+  ast_needed: u64,
+  ast_bytes: u64,
+};
+
+// err_* 记录最近一次 source_add 被拒绝的原因；成功时全部清零。
+pub let HostSources = struct {
+  syms: Mut(sym.HostSymTab),
+  out: Mut(ao.AstOut),
+  sources: Mut(Source),
+  source_cap: u64,
+  source_count: u64,
+  kids: Mut(u32),
+  kids_cap: u64,
+  err_kind: u64,
+  err_line: u64,
+  err_col: u64,
+  err_offset: u64,
+  err_needed: u64,
+};
+
+// --- 记录地址 ---------------------------------------------------------------
+// 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
+let trap_source = func(h: Mut(HostSources), cause: u64) -> Mut(Source) {
+  let dead: u64 = halt(cause);
+  return h.sources;
+};
+
+let source_at = func(h: Mut(HostSources), src: u64) -> Mut(Source) {
+  if src >= h.source_count { return trap_source(h, src); }
+  return h.sources + src * size_of(Source);
+};
+
+let trap_ref = func(cause: u64) -> Ref(u8) {
+  let dead: u64 = halt(cause);
+  return null_ref(Ref(u8));
+};
+
+// --- 构造 -------------------------------------------------------------------
+// 源码记录表与造组用的孩子暂存区都从符号表的共享工作区切出。源码单元的 Reader
+// Arena 在 source_add 里按确切字节数单独切。
+pub let host_sources_new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut),
+                                source_cap: u64, kids_cap: u64) -> HostSources {
+  if source_cap == 0 { return halt(source_cap); }
+  if kids_cap == 0 { return halt(kids_cap); }
+  let src_bytes: u64 = source_cap * size_of(Source);
+  let kid_bytes: u64 = kids_cap * 4;
+  let src_mem: Mut(u8) = sym.mem_alloc(syms, src_bytes, 8);
+  let kid_mem: Mut(u8) = sym.mem_alloc(syms, kid_bytes, 8);
+  return HostSources {
+    syms: syms,
+    out: out,
+    sources: ptr_cast(Mut(Source), src_mem),
+    source_cap: source_cap,
+    source_count: 0,
+    kids: ptr_cast(Mut(u32), kid_mem),
+    kids_cap: kids_cap,
+    err_kind: rd.RD_OK(),
+    err_line: 0,
+    err_col: 0,
+    err_offset: 0,
+    err_needed: 0,
+  };
+};
+
+pub let new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut), source_cap: u64,
+                   kids_cap: u64) -> HostSources {
+  return host_sources_new(syms, out, source_cap, kids_cap);
+};
+
+// --- 诊断字段 ---------------------------------------------------------------
+let clear_error = func(h: Mut(HostSources)) {
+  h.err_kind = rd.RD_OK();
+  h.err_line = 0;
+  h.err_col = 0;
+  h.err_offset = 0;
+  h.err_needed = 0;
+};
+
+let fail_with = func(h: Mut(HostSources), ast: rd.RawAst) -> u64 {
+  h.err_kind = ast.kind;
+  h.err_line = ast.err_line;
+  h.err_col = ast.err_col;
+  h.err_offset = ast.err_offset;
+  h.err_needed = ast.needed;
+  return NO_SOURCE();
+};
+
+pub let last_error_kind = func(h: Mut(HostSources)) -> u64 { return h.err_kind; };
+pub let last_error_line = func(h: Mut(HostSources)) -> u64 { return h.err_line; };
+pub let last_error_col = func(h: Mut(HostSources)) -> u64 { return h.err_col; };
+pub let last_error_offset = func(h: Mut(HostSources)) -> u64 { return h.err_offset; };
+pub let last_error_needed = func(h: Mut(HostSources)) -> u64 { return h.err_needed; };
+
+// --- 源码管理 ---------------------------------------------------------------
+pub let source_count = func(h: Mut(HostSources)) -> u64 { return h.source_count; };
+
+// 登记一份源码。name 为空表示没有路径（片段），此时 source_name 返回 0。
+// 词法或语法错误不是宿主故障：写诊断并交回 NO_SOURCE，宿主水位不动。
+pub let source_add = func(h: Mut(HostSources), name: Slice(u8), text: Slice(u8)) -> u64 {
+  clear_error(h);
+  if h.source_count >= h.source_cap { return halt(h.source_count); }
+  // 计数遍：零长度 Arena 不会写任何字节，只在容量不足时把确切需求放进 needed。
+  let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
+  let counted: rd.RawAst = rd.parse(text, probe);
+  if counted.kind != rd.RD_ERR_CAPACITY() {
+    if counted.kind != rd.RD_OK() { return fail_with(h, counted); }
+    return halt(counted.kind);
+  }
+  let need: u64 = counted.needed;
+  if need == 0 { return halt(need); }
+  let mem: Mut(u8) = sym.mem_alloc(h.syms, need, 8);
+  let arena: MutSlice(u8) = make_slice(MutSlice(u8), mem, need);
+  let ast: rd.RawAst = rd.parse(text, arena);
+  if ast.kind != rd.RD_OK() { return halt(ast.kind); }
+  if ast.root > SLOT_MASK() { return halt(ast.root); }
+  if ast.node_count > SLOT_MASK() { return halt(ast.node_count); }
+  let id: u64 = h.source_count;
+  if id > SOURCE_MASK() { return halt(id); }
+  // 只有解析成功的源码才名字进符号表，被拒绝的源码不留下符号。
+  let name_sym: u64 = 0;
+  if name.len > 0 {
+    name_sym = sym.sym_intern(h.syms, name.ptr, name.len);
+    if name_sym > INDEX_MASK() { return halt(name_sym); }
+  }
+  let rec: Mut(Source) = h.sources + id * size_of(Source);
+  rec.name = name_sym;
+  rec.text_ptr = text.ptr;
+  rec.text_len = text.len;
+  rec.ast_nodes = ast.nodes;
+  rec.ast_node_count = ast.node_count;
+  rec.ast_children = ast.children;
+  rec.ast_child_count = ast.child_count;
+  rec.ast_spans = ast.spans;
+  rec.ast_root = ast.root;
+  rec.ast_kind = ast.kind;
+  rec.ast_err_line = ast.err_line;
+  rec.ast_err_col = ast.err_col;
+  rec.ast_err_offset = ast.err_offset;
+  rec.ast_needed = ast.needed;
+  rec.ast_bytes = ast.bytes;
+  h.source_count = id + 1;
+  return id;
+};
+
+// 把一段文本登记成匿名源码单元，供宏展开期临时求值使用。
+pub let ast_parse_snippet = func(h: Mut(HostSources), text: Slice(u8)) -> u64 {
+  let empty: Slice(u8) = "";
+  return source_add(h, empty, text);
+};
+
+// 源码的名字符号号；匿名源码回 0。这里交回符号表原生编号，句柄包装由
+// 需要 SYM 句柄的调用方自己做。
+pub let source_name = func(h: Mut(HostSources), src: u64) -> u64 {
+  let rec: Mut(Source) = source_at(h, src);
+  return rec.name;
+};
+
+// 把平铺的字段拼回 Reader 的 RawAst 值。组与孩子的下标都在里面。
+let source_ast = func(rec: Mut(Source)) -> rd.RawAst {
+  return rd.RawAst {
+    nodes: rec.ast_nodes,
+    node_count: rec.ast_node_count,
+    children: rec.ast_children,
+    child_count: rec.ast_child_count,
+    spans: rec.ast_spans,
+    root: rec.ast_root,
+    kind: rec.ast_kind,
+    err_line: rec.ast_err_line,
+    err_col: rec.ast_err_col,
+    err_offset: rec.ast_err_offset,
+    needed: rec.ast_needed,
+    bytes: rec.ast_bytes,
+  };
+};
+
+// 源码根组的节点句柄。
+pub let source_root = func(h: Mut(HostSources), src: u64) -> u64 {
+  let rec: Mut(Source) = source_at(h, src);
+  let ast: rd.RawAst = source_ast(rec);
+  return handle_ast_in(src, ast.root);
+};
+
+// --- Reader 节点读取 --------------------------------------------------------
+let trap_raw = func(h: Mut(HostSources), cause: u64) -> rd.RawNode {
+  let dead: u64 = halt(cause);
+  return rd.RawNode {
+    kind: 0,
+    flags: 0,
+    payload: 0,
+    child_count: 0,
+    span_id: 0,
+  };
+};
+
+let raw_at = func(h: Mut(HostSources), src: u64, slot: u64) -> rd.RawNode {
+  let rec: Mut(Source) = source_at(h, src);
+  let ast: rd.RawAst = source_ast(rec);
+  if slot >= ast.node_count { return trap_raw(h, slot); }
+  return rd.node_get(ast.nodes, slot);
+};
+
+let is_raw_group = func(kind: u64) -> u64 {
+  if kind >= rd.RAW_GROUP_PAREN() { return 1; }
+  return 0;
+};
+
+let raw_group_delim = func(kind: u64) -> u64 {
+  if kind == rd.RAW_GROUP_PAREN() { return 40; }
+  if kind == rd.RAW_GROUP_BRACKET() { return 91; }
+  if kind == rd.RAW_GROUP_BRACE() { return 123; }
+  return 0;
+};
+
+// --- 统一节点查询 -----------------------------------------------------------
+// 词与组这两个类别与 AstOut 的取值一致，两类来源因此可以共用同一套判断。
+pub let ast_kind = func(h: Mut(HostSources), node: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
+    if is_raw_group(n.kind) == 1 { return ao.KIND_GROUP(); }
+    return ao.KIND_TOKEN();
+  }
+  if cls == CLASS_AST_OUT() { return ao.node_kind(h.out, out_index_of(node)); }
+  return halt(node);
+};
+
+pub let ast_delim = func(h: Mut(HostSources), node: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
+    return raw_group_delim(n.kind);
+  }
+  if cls == CLASS_AST_OUT() { return ao.node_delim(h.out, out_index_of(node)); }
+  return halt(node);
+};
+
+pub let ast_sym = func(h: Mut(HostSources), node: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    // Reader 只产出零语义形式，标识符尚未驻留成符号。
+    let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
+    return 0;
+  }
+  if cls == CLASS_AST_OUT() {
+    let id: u64 = ao.node_sym(h.out, out_index_of(node));
+    if id == 0 { return 0; }
+    if id > INDEX_MASK() { return halt(id); }
+    return handle_sym(id);
+  }
+  return halt(node);
+};
+
+// 词没有孩子，回 0；调用方不必先判种类。
+pub let ast_child_count = func(h: Mut(HostSources), node: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
+    if is_raw_group(n.kind) == 0 { return 0; }
+    return n.child_count;
+  }
+  if cls == CLASS_AST_OUT() { return ao.child_count(h.out, out_index_of(node)); }
+  return halt(node);
+};
+
+pub let ast_child = func(h: Mut(HostSources), node: u64, i: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let src: u64 = source_of(node);
+    let slot: u64 = slot_of(node);
+    let n: rd.RawNode = raw_at(h, src, slot);
+    if is_raw_group(n.kind) == 0 { return halt(node); }
+    if i >= n.child_count { return halt(i); }
+    let rec: Mut(Source) = source_at(h, src);
+    let ast: rd.RawAst = source_ast(rec);
+    let child: u64 = rd.child_id(ast, slot, i);
+    if child > SLOT_MASK() { return halt(child); }
+    return handle_ast_in(src, child);
+  }
+  if cls == CLASS_AST_OUT() {
+    let child: u64 = ao.child_at(h.out, out_index_of(node), i);
+    if child > INDEX_MASK() { return halt(child); }
+    return handle_ast_out(child);
+  }
+  return halt(node);
+};
+
+// 词文本的起点。组没有文本，调用它就是程序错误。
+pub let ast_literal_addr = func(h: Mut(HostSources), node: u64) -> Ref(u8) {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let src: u64 = source_of(node);
+    let slot: u64 = slot_of(node);
+    let n: rd.RawNode = raw_at(h, src, slot);
+    if is_raw_group(n.kind) == 1 { return trap_ref(node); }
+    let rec: Mut(Source) = source_at(h, src);
+    let ast: rd.RawAst = source_ast(rec);
+    let sp: rd.Span = rd.node_span(ast, slot);
+    return rec.text_ptr + sp.offset;
+  }
+  if cls == CLASS_AST_OUT() {
+    let a: Mut(ao.AstOut) = h.out;
+    let idx: u64 = out_index_of(node);
+    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return trap_ref(node); }
+    let text: Slice(u8) = ao.text_of(a, idx);
+    return text.ptr;
+  }
+  return trap_ref(node);
+};
+
+// 词文本的字节数。组没有文本，回 0。
+pub let ast_literal_len = func(h: Mut(HostSources), node: u64) -> u64 {
+  let cls: u64 = class_of(node);
+  if cls == CLASS_AST_IN() {
+    let src: u64 = source_of(node);
+    let slot: u64 = slot_of(node);
+    let n: rd.RawNode = raw_at(h, src, slot);
+    if is_raw_group(n.kind) == 1 { return 0; }
+    let rec: Mut(Source) = source_at(h, src);
+    let ast: rd.RawAst = source_ast(rec);
+    let sp: rd.Span = rd.node_span(ast, slot);
+    return sp.len;
+  }
+  if cls == CLASS_AST_OUT() {
+    let a: Mut(ao.AstOut) = h.out;
+    let idx: u64 = out_index_of(node);
+    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return 0; }
+    let text: Slice(u8) = ao.text_of(a, idx);
+    return text.len;
+  }
+  return halt(node);
+};
+
+// --- AstOut 事务桥 ----------------------------------------------------------
+let root_index = func(root: u64) -> u64 {
+  if root == NO_NODE() { return ao.NO_NODE(); }
+  if class_of(root) != CLASS_AST_OUT() { return halt(root); }
+  return out_index_of(root);
+};
+
+// 符号句柄只接受 0（没有符号）或 SYM 类别。
+let sym_index = func(v: u64) -> u64 {
+  if v == 0 { return 0; }
+  if class_of(v) != CLASS_SYM() { return halt(v); }
+  return out_index_of(v);
+};
+
+// 来源节点可以是任一类 AST 句柄；AstOut 只把它当驻留键的一段。
+let origin_key = func(v: u64) -> u64 {
+  if v == 0 { return 0; }
+  if v == NO_NODE() { return NO_NODE(); }
+  let cls: u64 = class_of(v);
+  if (cls == CLASS_AST_IN()) or (cls == CLASS_AST_OUT()) { return v; }
+  return halt(v);
+};
+
+pub let ast_tx_begin = func(h: Mut(HostSources)) -> u64 {
+  return ao.tx_begin(h.out);
+};
+
+// 根句柄必须是本次事务里构造的 AstOut 节点，或者 NO_NODE。
+pub let ast_tx_commit = func(h: Mut(HostSources), tx: u64, root: u64) -> u64 {
+  let idx: u64 = root_index(root);
+  let committed: u64 = ao.tx_commit(h.out, tx, idx);
+  return out_handle(committed);
+};
+
+pub let ast_tx_rollback = func(h: Mut(HostSources), tx: u64) -> u64 {
+  let restored: u64 = ao.tx_rollback(h.out, tx);
+  return out_handle(restored);
+};
+
+// 造词：sym 是符号句柄，origin 是来源节点句柄，text 是原始字节。
+pub let ast_mk_token = func(h: Mut(HostSources), sym_handle: u64, origin: u64,
+                            text: Slice(u8)) -> u64 {
+  let sym_id: u64 = sym_index(sym_handle);
+  let origin_id: u64 = origin_key(origin);
+  let id: u64 = ao.mk_token(h.out, sym_id, origin_id, 0, text);
+  return out_handle(id);
+};
+
+// 造组：kids 是紧排的 32 位统一句柄，逐个翻成 AstOut 下标后写进暂存区。
+// AstOut 只能引用自己节点表里的节点，所以孩子必须是 AST_OUT 句柄。
+pub let ast_mk_group = func(h: Mut(HostSources), delim: u64, kids: Slice(u32)) -> u64 {
+  let n: u64 = kids.len;
+  if n > h.kids_cap { return halt(n); }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let raw: u32 = kids[i];
+    let kid: u64 = raw as u64;
+    if class_of(kid) != CLASS_AST_OUT() { return halt(kid); }
+    let idx: u64 = out_index_of(kid);
+    let slot: Mut(u32) = h.kids + i * 4;
+    deref(slot) = idx as u32;
+    i = i + 1;
+  };
+  let view: Slice(u32) = make_slice(Slice(u32), ptr_cast(Ref(u32), h.kids), n);
+  let id: u64 = ao.mk_group(h.out, delim, 0, view);
+  return out_handle(id);
+};

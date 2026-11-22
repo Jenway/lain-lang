@@ -1,0 +1,247 @@
+// Phase 6.4：纯 Lain 宿主层的端到端切割。
+//
+// 四个宿主模块串联在同一块工作区上：HostSymTab 驻留符号并切出内存，HostSources
+// 登记源码与片段并桥接 AstOut 事务，HostIr 构造、校验、克隆一个三过程模块并
+// 发射 C99，HostVmHost 在全新的 Lain-VM 地址空间里执行克隆模块的标量与字节
+// 入口。所有表都从静态 Arena 里按容量切出，返回值逐项核对后交回 64。
+let sym = import("src::host::symtab");
+let src = import("src::host::source_host");
+let irh = import("src::host::ir_host");
+let vmh = import("src::host::vm_host");
+let ao = import("src::meta::ast_out");
+let codes = import("src::ir_codes");
+
+// 一块 448 × 128 字节 = 57344 字节的静态 Arena：
+//   [0, 4096)         AstOut 追加缓冲区（构造阶段结束后被 IR 宿主复用）
+//   [0, 39424)        IR 宿主
+//   [39424, 55808)    符号表与源码；符号工作结束后这一段整体回收，依次
+//                     充当 C99 文本缓冲区与 VM 宿主的地址空间
+let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+let arena_blocks: Array(Array(u64, 16), 448) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+let arena_ptr = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), mut_of(arena_blocks));
+};
+
+let IR_BYTES = func() -> u64 { return 39424; };
+let SYM_BYTES = func() -> u64 { return 16384; };
+let VM_BYTES = func() -> u64 { return 16384; };
+
+let bytes_eq = func(a: Slice(u8), b: Slice(u8), i: u64) -> u64 {
+  if i >= b.len { return 1; }
+  if i >= a.len { return 0; }
+  if a[i] != b[i] { return 0; }
+  return bytes_eq(a, b, i + 1);
+};
+
+let sym_is = func(syms: Mut(sym.HostSymTab), h: u64, lit: Slice(u8)) -> u64 {
+  let n: u64 = sym.sym_len(syms, h);
+  if n != lit.len { return 0; }
+  let a: Slice(u8) = make_slice(Slice(u8), sym.sym_addr(syms, h), n);
+  return bytes_eq(a, lit, 0);
+};
+
+let node_text_is = func(hs: Mut(src.HostSources), node: u64, lit: Slice(u8)) -> u64 {
+  let n: u64 = src.ast_literal_len(hs, node);
+  if n != lit.len { return 0; }
+  let p: Ref(u8) = src.ast_literal_addr(hs, node);
+  let a: Slice(u8) = make_slice(Slice(u8), p, n);
+  return bytes_eq(a, lit, 0);
+};
+
+let wrap_sym = func(id: u64) -> u64 {
+  return (src.CLASS_SYM() * 268435456) + id;
+};
+
+let main = func() -> i64 {
+  let arena: Mut(u8) = arena_ptr();
+  if (arena as u64) == 0 { return 89; }
+
+  // --- HostSymTab ---------------------------------------------------------
+  let sym_base: Mut(u8) = arena + IR_BYTES();
+  let syms0: sym.HostSymTab = sym.symtab_new(make_slice(MutSlice(u8), sym_base, SYM_BYTES()));
+  let syms: Mut(sym.HostSymTab) = mut_of(syms0);
+  let h_alpha: u64 = sym.sym_intern(syms, "alpha", 5);
+  let h_beta: u64 = sym.sym_intern(syms, "beta", 4);
+  let h_alpha2: u64 = sym.sym_intern(syms, "alpha", 5);
+  if h_alpha != h_alpha2 { return 10; }
+  if sym.sym_count(syms) != 2 { return 11; }
+  if sym_is(syms, h_alpha, "alpha") == 0 { return 12; }
+  if sym_is(syms, h_beta, "beta") == 0 { return 13; }
+  if sym.sym_same(syms, h_alpha, h_alpha2) != 1 { return 14; }
+  if sym.sym_same(syms, h_alpha, h_beta) != 0 { return 15; }
+  if sym.sym_find(syms, "beta", 4) != h_beta { return 16; }
+  if sym.sym_find(syms, "gamma", 5) != 0 { return 17; }
+
+  // --- HostSources：源码与片段解析 ----------------------------------------
+  let out0: ao.AstOut = ao.new(make_slice(MutSlice(u8), arena, 4096));
+  let out: Mut(ao.AstOut) = mut_of(out0);
+  let hs0: src.HostSources = src.host_sources_new(syms, out, 4, 64);
+  let hs: Mut(src.HostSources) = mut_of(hs0);
+  let text: Slice(u8) = "// host cutover\nlet pair = (a, b);\nlet tag = \"phase6\";";
+  let unit: u64 = src.source_add(hs, "phase6/host.lain", text);
+  if unit == src.NO_SOURCE() { return 20; }
+  if src.source_count(hs) != 1 { return 21; }
+  if sym_is(syms, src.source_name(hs, unit), "phase6/host.lain") == 0 { return 22; }
+  let root: u64 = src.source_root(hs, unit);
+  if src.ast_kind(hs, root) != ao.KIND_GROUP() { return 23; }
+  if src.ast_child_count(hs, root) != 10 { return 24; }
+  let first: u64 = src.ast_child(hs, root, 0);
+  if src.ast_kind(hs, first) != ao.KIND_TOKEN() { return 25; }
+  if node_text_is(hs, first, "let") == 0 { return 26; }
+  let second: u64 = src.ast_child(hs, root, 1);
+  if node_text_is(hs, second, "pair") == 0 { return 27; }
+  let pair_group: u64 = src.ast_child(hs, root, 3);
+  if src.ast_child_count(hs, pair_group) != 3 { return 28; }
+
+  let snippet: u64 = src.ast_parse_snippet(hs, "(sum 1 2)");
+  if snippet == src.NO_SOURCE() { return 29; }
+  let sroot: u64 = src.source_root(hs, snippet);
+  if src.ast_child_count(hs, sroot) != 1 { return 30; }
+  let sinner: u64 = src.ast_child(hs, sroot, 0);
+  if src.ast_child_count(hs, sinner) != 3 { return 39; }
+
+  // --- AstOut 事务：先回滚，再提交一棵 (sum 1 2) 子树 ---------------------
+  let before: u64 = ao.node_count(out);
+  let tx0: u64 = src.ast_tx_begin(hs);
+  let wasted: u64 = src.ast_mk_token(hs, wrap_sym(h_alpha), 0, "wasted");
+  if ao.node_count(out) != (before + 1) { return 31; }
+  let rolled: u64 = src.ast_tx_rollback(hs, tx0);
+  if ao.node_count(out) != before { return 32; }
+  if ao.tx_depth(out) != 0 { return 33; }
+
+  let s_sum: u64 = wrap_sym(sym.sym_intern(syms, "sum", 3));
+  let s_one: u64 = wrap_sym(sym.sym_intern(syms, "1", 1));
+  let s_two: u64 = wrap_sym(sym.sym_intern(syms, "2", 1));
+  let tx1: u64 = src.ast_tx_begin(hs);
+  let t0: u64 = src.ast_mk_token(hs, s_sum, 0, "sum");
+  let t1: u64 = src.ast_mk_token(hs, s_one, 0, "1");
+  let t2: u64 = src.ast_mk_token(hs, s_two, 0, "2");
+  let kids: Array(u32, 3) = [0, 0, 0];
+  kids[0] = t0 as u32;
+  kids[1] = t1 as u32;
+  kids[2] = t2 as u32;
+  let group: u64 = src.ast_mk_group(hs, ao.DL_PAREN(),
+      make_slice(Slice(u32), ptr_cast(Ref(u32), ref_of(kids)), 3));
+  let committed: u64 = src.ast_tx_commit(hs, tx1, group);
+  if committed == src.NO_NODE() { return 34; }
+  if ao.tx_depth(out) != 0 { return 35; }
+  if src.ast_kind(hs, committed) != ao.KIND_GROUP() { return 36; }
+  if src.ast_child_count(hs, committed) != 3 { return 37; }
+  let c0: u64 = src.ast_child(hs, committed, 0);
+  if node_text_is(hs, c0, "sum") == 0 { return 38; }
+
+  // --- HostIr：三过程模块、校验、克隆与 C99 发射 --------------------------
+  let s_mod: u64 = sym.sym_intern(syms, "phase6_cutover", 14);
+  let s_twice: u64 = sym.sym_intern(syms, "twice", 5);
+  let s_main: u64 = sym.sym_intern(syms, "main", 4);
+  let s_x: u64 = sym.sym_intern(syms, "x", 1);
+  let s_blob: u64 = sym.sym_intern(syms, "blob", 4);
+  let hir: Mut(irh.HostIr) = irh.host_new(arena, IR_BYTES());
+  if is_null(hir) { return 40; }
+  let mod: u64 = irh.ir_mod_new(hir, s_mod);
+  if mod == 0 { return 41; }
+  let e0: u64 = irh.ir_proc_begin(hir, mod, s_twice);
+  let e1: u64 = irh.ir_proc_param(hir, mod, s_x, 1, 64);
+  let e2: u64 = irh.ir_proc_result(hir, mod, 1, 64);
+  let e3: u64 = irh.ir_region_begin(hir, mod);
+  let e4: u64 = irh.ir_args_reset(hir, mod);
+  let e5: u64 = irh.ir_arg_ref(hir, mod, s_x);
+  let e6: u64 = irh.ir_arg_ref(hir, mod, s_x);
+  let e7: u64 = irh.ir_inst(hir, mod, codes.INST_ADD(), 1000, 1, 64);
+  let e8: u64 = irh.ir_args_reset(hir, mod);
+  let e9: u64 = irh.ir_arg_ref(hir, mod, 1000);
+  let e10: u64 = irh.ir_inst_jump(hir, mod, codes.INST_RETURN(), 0);
+  let e11: u64 = irh.ir_region_end(hir, mod);
+  if irh.host_error(hir) != irh.HOST_OK() { return 42; }
+
+  let m0: u64 = irh.ir_proc_begin(hir, mod, s_main);
+  let m1: u64 = irh.ir_proc_result(hir, mod, 1, 64);
+  let m2: u64 = irh.ir_region_begin(hir, mod);
+  let m3: u64 = irh.ir_args_reset(hir, mod);
+  let m4: u64 = irh.ir_arg_int(hir, mod, 21);
+  let m5: u64 = irh.ir_inst_call(hir, mod, 2000, s_twice, 0);
+  let m6: u64 = irh.ir_args_reset(hir, mod);
+  let m7: u64 = irh.ir_arg_ref(hir, mod, 2000);
+  let m8: u64 = irh.ir_arg_int(hir, mod, 1);
+  let m9: u64 = irh.ir_inst(hir, mod, codes.INST_ADD(), 2100, 1, 64);
+  let m10: u64 = irh.ir_args_reset(hir, mod);
+  let m11: u64 = irh.ir_arg_ref(hir, mod, 2100);
+  let m12: u64 = irh.ir_inst_jump(hir, mod, codes.INST_RETURN(), 0);
+  let m13: u64 = irh.ir_region_end(hir, mod);
+
+  let b0: u64 = irh.ir_proc_begin(hir, mod, s_blob);
+  let b1: u64 = irh.ir_proc_result(hir, mod, 4, 0);
+  let b2: u64 = irh.ir_region_begin(hir, mod);
+  let b3: u64 = irh.ir_args_reset(hir, mod);
+  let b4: u64 = irh.ir_arg_int(hir, mod, 1);
+  let b5: u64 = irh.ir_inst_mem(hir, mod, codes.INST_ALLOCA(), 3000, 1, 64, 0, 0, 8);
+  let b6: u64 = irh.ir_args_reset(hir, mod);
+  // 常量 0x4E49414C 小端存下来是 "LAIN"。
+  let b7: u64 = irh.ir_arg_int(hir, mod, 1313423692);
+  let b8: u64 = irh.ir_arg_ref(hir, mod, 3000);
+  let b9: u64 = irh.ir_inst_mem(hir, mod, codes.INST_STORE(), 0, 1, 64, 0, 0, 8);
+  let b10: u64 = irh.ir_args_reset(hir, mod);
+  let b11: u64 = irh.ir_arg_ref(hir, mod, 3000);
+  let b12: u64 = irh.ir_inst_jump(hir, mod, codes.INST_RETURN(), 0);
+  let b13: u64 = irh.ir_region_end(hir, mod);
+
+  let verified: u64 = irh.ir_mod_verify(hir, mod);
+  if verified != 0 { return verified; }
+  if irh.host_last_verify(hir) != 0 { return 44; }
+  let c99_len: u64 = irh.ir_mod_emit_c99(hir, mod,
+      make_slice(MutSlice(u8), arena + IR_BYTES(), VM_BYTES()));
+  if c99_len == 0 { return 45; }
+  let cloned: u64 = irh.ir_mod_clone_completed(hir, mod);
+  if cloned == 0 { return 46; }
+  let clone_verify: u64 = irh.ir_mod_verify(hir, cloned);
+  if clone_verify != 0 { return 47; }
+
+  // --- HostVmHost：在全新地址空间里执行克隆模块 --------------------------
+  let vhost: Mut(vmh.VmHost) = vmh.host_new(arena + IR_BYTES(), VM_BYTES(), hir);
+  if is_null(vhost) { return 50; }
+  let empty: Slice(u64) = make_slice(Slice(u64), null_ref(Ref(u64)), 0);
+  let rec_words: Array(u64, 2) = [99, 99];
+  let rec: Mut(u8) = ptr_cast(Mut(u8), mut_of(rec_words));
+  let applied: u64 = vmh.apply_module(vhost, cloned, s_main, empty, rec, 16);
+  if applied != vmh.VMH_OK() { return 51; }
+  let rec_view: Slice(u64) = make_slice(Slice(u64),
+      ptr_cast(Ref(u64), ref_of(rec_words)), 2);
+  let status: u64 = rec_view[0];
+  let bits: u64 = rec_view[1];
+  if status != 0 { return 52; }
+  if bits != 43 { return 53; }
+  if vmh.host_last_trap(vhost) != 0 { return 54; }
+  if vmh.host_last_steps(vhost) == 0 { return 55; }
+
+  let bytes: Array(u8, 4) = [0, 0, 0, 0];
+  let bdst: Mut(u8) = ptr_cast(Mut(u8), mut_of(bytes));
+  let got: u64 = vmh.apply_module_bytes(vhost, cloned, s_blob, bdst, 4);
+  if got != 4 { return 59; }
+  if (bytes[0] as u64) != 76 { return 60; }
+  if (bytes[1] as u64) != 65 { return 61; }
+  if (bytes[2] as u64) != 73 { return 62; }
+  if (bytes[3] as u64) != 78 { return 63; }
+
+  let freed: u64 = irh.ir_mod_free(hir, cloned);
+  return 64;
+};
+
+
+

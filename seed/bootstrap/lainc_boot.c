@@ -3357,7 +3357,7 @@ static void * lain_fn_s1__st_new(uint64_t arg_0) {
   void * v__t14_109 = lain2_mem_alloc((uint64_t)UINT64_C(1048576), (uint64_t)UINT64_C(8));
   uint64_t v__t15_110 = (uint64_t)(uintptr_t)v__t14_109;
   lain_store_bits(v__v7_7, (uint64_t)v__t15_110, 64);
-  void * v__t16_111 = lain2_mem_alloc((uint64_t)UINT64_C(65536), (uint64_t)UINT64_C(8));
+  void * v__t16_111 = lain2_mem_alloc((uint64_t)UINT64_C(262144), (uint64_t)UINT64_C(8));
   uint64_t v__t17_112 = (uint64_t)(uintptr_t)v__t16_111;
   lain_store_bits(v__v8_8, (uint64_t)v__t17_112, 64);
   void * v__t18_113 = lain2_mem_alloc((uint64_t)UINT64_C(64), (uint64_t)UINT64_C(8));
@@ -3597,7 +3597,7 @@ static void * lain_fn_s1__st_new(uint64_t arg_0) {
   void *v__t174_272 = lain_load_addr(v__t173_271);
   void *v__t175_273 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t174_272) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(248)));
   void *v__t176_274 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t175_273) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
-  lain_store_bits(v__t176_274, (uint64_t)(uint64_t)UINT64_C(65536), 64);
+  lain_store_bits(v__t176_274, (uint64_t)(uint64_t)UINT64_C(262144), 64);
   void *v__t177_275 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__v30_30) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
   void *v__t178_276 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t177_275) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
   void *v__t179_277 = lain_load_addr(v__t178_276);

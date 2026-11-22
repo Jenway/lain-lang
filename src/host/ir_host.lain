@@ -1,0 +1,1394 @@
+// 纯 Lain 的 IR 宿主：在内存里累积 LAINIR 模块，替代 lain2_ir_* 宿主原语。
+//
+// 句柄与邮箱语义对齐 src/ir.lain：
+//   模块句柄从 1 起，0 表示无效；
+//   区域句柄把模块序号与区域序号打包成一个整数；
+//   操作数邮箱跟着模块走，下一条 #inst* 取走并清空。
+// 这里只负责表示与追加，类型检查交给 src::ir::verify，C99 文本交给
+// src::backend::c99。容量、句柄、状态上的任何违例都在发生位置就地终止。
+// 诊断是普通输出，不写进失败状态。
+let codes = import("src::ir_codes");
+let vf = import("src::ir::verify");
+let c99 = import("src::backend::c99");
+
+// --- 容量与句柄 -----------------------------------------------------------
+pub let MODULE_CAP = func() -> u64 { return 16; };
+pub let FRAME_CAP = func() -> u64 { return 64; };
+pub let DIAG_CAP = func() -> u64 { return 256; };
+pub let DIAG_MESSAGE_MAX = func() -> u64 { return 512; };
+pub let INIT_CAP = func() -> u64 { return 4; };
+pub let INIT_INST_CAP = func() -> u64 { return 16; };
+pub let HANDLE_STRIDE = func() -> u64 { return 4294967296; };
+
+// 内存序编号与 ir_codes 的 L1MemOrder 一致。
+pub let ORDER_RELAXED = func() -> u64 { return 0; };
+pub let ORDER_ACQUIRE = func() -> u64 { return 1; };
+pub let ORDER_RELEASE = func() -> u64 { return 2; };
+pub let ORDER_ACQ_REL = func() -> u64 { return 3; };
+pub let ORDER_SEQ_CST = func() -> u64 { return 4; };
+
+// 宿主错误码：只作为就地终止的原因值，不从 ir_* 的返回值里推断。
+pub let HOST_OK = func() -> u64 { return 0; };
+pub let HOST_ERR_STATE = func() -> u64 { return 1; };
+pub let HOST_ERR_ARG = func() -> u64 { return 2; };
+pub let HOST_ERR_HANDLE = func() -> u64 { return 3; };
+pub let HOST_ERR_CAPACITY = func() -> u64 { return 4; };
+pub let HOST_ERR_RANGE = func() -> u64 { return 5; };
+pub let HOST_ERR_TYPE = func() -> u64 { return 6; };
+pub let HOST_ERR_IR = func() -> u64 { return 7; };
+
+// --- 违例终止 ---------------------------------------------------------------
+// 容量不足、句柄不符、状态错位一律就地终止：参数只用来让除数在运行期求成零，
+// 编译器无法把这条除法折叠成常数。
+let Halt = struct { zero: u64 };
+let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
+let halt = func(cause: u64) -> u64 {
+  let h: Halt = Halt { zero: cause - cause };
+  return halt_at(h);
+};
+
+// --- 记录 -----------------------------------------------------------------
+pub let DataRec = struct {
+  symbol: u64,
+  bytes: Ref(u8),
+  size: u64,
+  is_writable: u64,
+};
+
+pub let Diag = struct {
+  span: u64,
+  level: u64,
+  message: Ref(u8),
+  length: u64,
+};
+
+// 一个打开的区域：形参、结果与已追加的指令序号。
+pub let Frame = struct {
+  params: Mut(vf.IrParam),
+  param_cap: u64,
+  param_count: u64,
+  results: Mut(vf.IrType),
+  result_cap: u64,
+  result_count: u64,
+  insts: Mut(u64),
+  inst_cap: u64,
+  inst_count: u64,
+};
+
+// 一段打开的过程：形参、结果、已闭合区域深度与 switch 暂存分支。
+pub let ProcState = struct {
+  open: u64,
+  is_extern: u64,
+  name: u64,
+  link_name: u64,
+  params: Mut(vf.IrParam),
+  param_cap: u64,
+  param_count: u64,
+  results: Mut(vf.IrType),
+  result_cap: u64,
+  result_count: u64,
+  depth: u64,
+  cases: Mut(vf.IrCase),
+  case_cap: u64,
+  case_count: u64,
+};
+
+pub let ModState = struct {
+  in_use: u64,
+  name: u64,
+  procs: Mut(vf.IrProc),
+  proc_cap: u64,
+  proc_count: u64,
+  regions: Mut(vf.IrRegion),
+  region_cap: u64,
+  region_count: u64,
+  insts: Mut(vf.IrInst),
+  inst_cap: u64,
+  inst_count: u64,
+  cases: Mut(vf.IrCase),
+  case_cap: u64,
+  case_count: u64,
+  scratch: Mut(u64),
+  data: Mut(DataRec),
+  data_cap: u64,
+  data_count: u64,
+  args: Mut(vf.IrOperand),
+  arg_count: u64,
+  frames: Mut(Frame),
+  depth: u64,
+  proc: Mut(ProcState),
+};
+
+pub let HostIr = struct {
+  arena: Mut(u8),
+  cap: u64,
+  used: u64,
+  err: u64,
+  last_verify: u64,
+  mods: Mut(ModState),
+  mod_cap: u64,
+  diags: Mut(Diag),
+  diag_cap: u64,
+  diag_count: u64,
+};
+
+// 记录步长：导入的结构类型不能直接出现在 size_of 的实参里，用本地单元
+// 结构包一层，字段仍在偏移 0。
+let IrProcCell = struct { v: vf.IrProc };
+let IrRegionCell = struct { v: vf.IrRegion };
+let IrInstCell = struct { v: vf.IrInst };
+let IrParamCell = struct { v: vf.IrParam };
+let IrTypeCell = struct { v: vf.IrType };
+let IrCaseCell = struct { v: vf.IrCase };
+let IrOperandCell = struct { v: vf.IrOperand };
+
+// --- 字节搬运 -------------------------------------------------------------
+let zero_bytes = func(p: Mut(u8), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let q: Mut(u8) = p + i;
+    deref(q) = 0;
+    i = i + 1;
+  };
+  return 0;
+};
+
+let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let d: Mut(u8) = dst + i;
+    let s: Ref(u8) = src + i;
+    deref(d) = deref(s);
+    i = i + 1;
+  };
+  return 0;
+};
+
+let fail = func(h: Mut(HostIr), code: u64) -> u64 {
+  if h.err == 0 { h.err = code; }
+  return halt(code);
+};
+
+let trap_host = func(cause: u64) -> Mut(HostIr) {
+  let dead: u64 = halt(cause);
+  return null_ref(Mut(HostIr));
+};
+
+// --- 槽位 -----------------------------------------------------------------
+let mod_slot = func(base: Mut(ModState), i: u64) -> Mut(ModState) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(ModState), raw + i * size_of(ModState));
+};
+
+let frame_slot = func(base: Mut(Frame), i: u64) -> Mut(Frame) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Frame), raw + i * size_of(Frame));
+};
+
+let proc_slot = func(base: Mut(vf.IrProc), i: u64) -> Mut(vf.IrProc) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrProc), raw + i * size_of(IrProcCell));
+};
+
+let region_slot = func(base: Mut(vf.IrRegion), i: u64) -> Mut(vf.IrRegion) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrRegion), raw + i * size_of(IrRegionCell));
+};
+
+let inst_slot = func(base: Mut(vf.IrInst), i: u64) -> Mut(vf.IrInst) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrInst), raw + i * size_of(IrInstCell));
+};
+
+let param_slot = func(base: Mut(vf.IrParam), i: u64) -> Mut(vf.IrParam) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrParam), raw + i * size_of(IrParamCell));
+};
+
+let type_slot = func(base: Mut(vf.IrType), i: u64) -> Mut(vf.IrType) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrType), raw + i * size_of(IrTypeCell));
+};
+
+let case_slot = func(base: Mut(vf.IrCase), i: u64) -> Mut(vf.IrCase) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrCase), raw + i * size_of(IrCaseCell));
+};
+
+let u64_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(u64), raw + i * size_of(u64));
+};
+
+let data_slot = func(base: Mut(DataRec), i: u64) -> Mut(DataRec) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(DataRec), raw + i * size_of(DataRec));
+};
+
+let diag_slot = func(base: Mut(Diag), i: u64) -> Mut(Diag) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Diag), raw + i * size_of(Diag));
+};
+
+let operand_slot = func(base: Mut(vf.IrOperand), i: u64) -> Mut(vf.IrOperand) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(vf.IrOperand), raw + i * size_of(IrOperandCell));
+};
+
+// --- 区域分配 -------------------------------------------------------------
+let arena_take = func(h: Mut(HostIr), bytes: u64, align: u64) -> Mut(u8) {
+  if bytes == 0 { return null_ref(Mut(u8)); }
+  let a: u64 = if align == 0 { 1 } else { align };
+  let base: u64 = h.arena as u64;
+  let want: u64 = h.used;
+  let miss: u64 = want % a;
+  let off: u64 = if miss == 0 { want } else { want + (a - miss) };
+  if (off + bytes) > h.cap {
+    let dead: u64 = fail(h, HOST_ERR_CAPACITY());
+    return null_ref(Mut(u8));
+  }
+  h.used = off + bytes;
+  return h.arena + off;
+};
+
+let arena_zero = func(h: Mut(HostIr), bytes: u64, align: u64) -> Mut(u8) {
+  let p: Mut(u8) = arena_take(h, bytes, align);
+  if is_null(p) { return p; }
+  let rc: u64 = zero_bytes(p, bytes);
+  return p;
+};
+
+let grow_bytes = func(h: Mut(HostIr), old: Mut(u8), old_cap: u64, new_cap: u64,
+                      elem: u64) -> Mut(u8) {
+  let p: Mut(u8) = arena_zero(h, new_cap * elem, 8);
+  if is_null(p) { return p; }
+  if old_cap != 0 {
+    let rc: u64 = copy_bytes(p, ptr_cast(Ref(u8), old), old_cap * elem);
+  }
+  return p;
+};
+
+// --- 宿主 -----------------------------------------------------------------
+pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
+  if is_null(arena) { return trap_host(HOST_ERR_ARG()); }
+  let need: u64 = size_of(HostIr);
+  let raw: u64 = arena as u64;
+  let miss: u64 = raw % 8;
+  let pad: u64 = if miss == 0 { 0 } else { 8 - miss };
+  let used: u64 = pad + need;
+  if bytes < used { return trap_host(HOST_ERR_CAPACITY()); }
+  let hp: Mut(HostIr) = ptr_cast(Mut(HostIr), arena + pad);
+  deref(hp) = HostIr {
+    arena: arena,
+    cap: bytes,
+    used: used,
+    err: 0,
+    last_verify: 0,
+    mods: null_ref(Mut(ModState)),
+    mod_cap: 0,
+    diags: null_ref(Mut(Diag)),
+    diag_cap: 0,
+    diag_count: 0,
+  };
+  let mod_bytes: u64 = MODULE_CAP() * size_of(ModState);
+  let mp: Mut(u8) = arena_zero(hp, mod_bytes, 8);
+  hp.mods = ptr_cast(Mut(ModState), mp);
+  hp.mod_cap = MODULE_CAP();
+  let diag_bytes: u64 = DIAG_CAP() * size_of(Diag);
+  let dp: Mut(u8) = arena_zero(hp, diag_bytes, 8);
+  hp.diags = ptr_cast(Mut(Diag), dp);
+  hp.diag_cap = DIAG_CAP();
+  return hp;
+};
+
+pub let host_ok = func(h: Mut(HostIr)) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err == 0 { return 1; }
+  return 0;
+};
+
+pub let host_error = func(h: Mut(HostIr)) -> u64 {
+  if is_null(h) { return HOST_ERR_HANDLE(); }
+  return h.err;
+};
+
+pub let host_last_verify = func(h: Mut(HostIr)) -> u64 {
+  if is_null(h) { return HOST_ERR_HANDLE(); }
+  return h.last_verify;
+};
+
+pub let host_diag_count = func(h: Mut(HostIr)) -> u64 {
+  if is_null(h) { return 0; }
+  return h.diag_count;
+};
+
+pub let host_diag_span = func(h: Mut(HostIr), i: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if i >= h.diag_count { return 0; }
+  let d: Mut(Diag) = diag_slot(h.diags, i);
+  return d.span;
+};
+
+pub let host_diag_level = func(h: Mut(HostIr), i: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if i >= h.diag_count { return 0; }
+  let d: Mut(Diag) = diag_slot(h.diags, i);
+  return d.level;
+};
+
+pub let host_diag_message = func(h: Mut(HostIr), i: u64) -> Slice(u8) {
+  if is_null(h) { return make_slice(Slice(u8), null_ref(Ref(u8)), 0); }
+  if i >= h.diag_count { return make_slice(Slice(u8), null_ref(Ref(u8)), 0); }
+  let d: Mut(Diag) = diag_slot(h.diags, i);
+  return make_slice(Slice(u8), d.message, d.length);
+};
+
+// --- 模块查找 -------------------------------------------------------------
+let mod_at = func(h: Mut(HostIr), i: u64) -> Mut(ModState) {
+  if i >= h.mod_cap { return null_ref(Mut(ModState)); }
+  return mod_slot(h.mods, i);
+};
+
+let mod_index = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  let base: u64 = h.mods as u64;
+  let here: u64 = m as u64;
+  return (here - base) / size_of(ModState);
+};
+
+let mod_of_handle = func(h: Mut(HostIr), modv: u64) -> Mut(ModState) {
+  if modv == 0 { return null_ref(Mut(ModState)); }
+  let i: u64 = modv - 1;
+  let m: Mut(ModState) = mod_at(h, i);
+  if is_null(m) { return m; }
+  if m.in_use == 0 { return null_ref(Mut(ModState)); }
+  return m;
+};
+
+let free_slot_at = func(h: Mut(HostIr), i: u64) -> u64 {
+  if i >= h.mod_cap { return i; }
+  let m: Mut(ModState) = mod_slot(h.mods, i);
+  if m.in_use == 0 { return i; }
+  return free_slot_at(h, i + 1);
+};
+
+let free_slot = func(h: Mut(HostIr)) -> u64 {
+  return free_slot_at(h, 0);
+};
+
+// --- 类型编码 -------------------------------------------------------------
+// 上游传 L1TypeKind + 1：0 表示无类型，1..4 表示 BITS/FLOATS/VEC/ADDR。
+let type_code_ok = func(k: u64) -> u64 {
+  if k <= 4 { return 1; }
+  return 0;
+};
+
+let type_from = func(k: u64, w: u64) -> vf.IrType {
+  if k == 1 { return vf.type_bits(w); }
+  if k == 2 { return vf.type_float(w); }
+  if k == 3 { return vf.type_vec(w); }
+  if k == 4 { return vf.type_addr(); }
+  return vf.type_void();
+};
+
+let set_inst_type = func(it: Mut(vf.IrInst), k: u64, w: u64) -> u64 {
+  if k == 0 { return 0; }
+  let t: vf.IrType = type_from(k, w);
+  return vf.inst_set_type(it, t.kind, t.width);
+};
+
+// --- 容量扩展 -------------------------------------------------------------
+let mod_ensure_proc = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  if m.proc_count < m.proc_cap { return 0; }
+  let nc: u64 = if m.proc_cap == 0 { INIT_CAP() } else { m.proc_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.procs), m.proc_cap, nc,
+                              size_of(IrProcCell));
+  if is_null(p) { return 1; }
+  m.procs = ptr_cast(Mut(vf.IrProc), p);
+  m.proc_cap = nc;
+  return 0;
+};
+
+let mod_ensure_region = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  if m.region_count < m.region_cap { return 0; }
+  let nc: u64 = if m.region_cap == 0 { INIT_CAP() } else { m.region_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.regions), m.region_cap, nc,
+                              size_of(IrRegionCell));
+  if is_null(p) { return 1; }
+  m.regions = ptr_cast(Mut(vf.IrRegion), p);
+  m.region_cap = nc;
+  return 0;
+};
+
+let mod_ensure_inst = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  if m.inst_count < m.inst_cap { return 0; }
+  let nc: u64 = if m.inst_cap == 0 { INIT_INST_CAP() } else { m.inst_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.insts), m.inst_cap, nc,
+                              size_of(IrInstCell));
+  if is_null(p) { return 1; }
+  m.insts = ptr_cast(Mut(vf.IrInst), p);
+  m.inst_cap = nc;
+  return 0;
+};
+
+let mod_ensure_case = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  if m.case_count < m.case_cap { return 0; }
+  let nc: u64 = if m.case_cap == 0 { INIT_CAP() } else { m.case_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.cases), m.case_cap, nc,
+                              size_of(IrCaseCell));
+  if is_null(p) { return 1; }
+  m.cases = ptr_cast(Mut(vf.IrCase), p);
+  m.case_cap = nc;
+  return 0;
+};
+
+let mod_ensure_data = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  if m.data_count < m.data_cap { return 0; }
+  let nc: u64 = if m.data_cap == 0 { INIT_CAP() } else { m.data_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.data), m.data_cap, nc,
+                              size_of(DataRec));
+  if is_null(p) { return 1; }
+  m.data = ptr_cast(Mut(DataRec), p);
+  m.data_cap = nc;
+  return 0;
+};
+
+let frame_ensure_param = func(h: Mut(HostIr), f: Mut(Frame)) -> u64 {
+  if f.param_count < f.param_cap { return 0; }
+  let nc: u64 = if f.param_cap == 0 { INIT_CAP() } else { f.param_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), f.params), f.param_cap, nc,
+                              size_of(IrParamCell));
+  if is_null(p) { return 1; }
+  f.params = ptr_cast(Mut(vf.IrParam), p);
+  f.param_cap = nc;
+  return 0;
+};
+
+let frame_ensure_result = func(h: Mut(HostIr), f: Mut(Frame)) -> u64 {
+  if f.result_count < f.result_cap { return 0; }
+  let nc: u64 = if f.result_cap == 0 { INIT_CAP() } else { f.result_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), f.results), f.result_cap, nc,
+                              size_of(IrTypeCell));
+  if is_null(p) { return 1; }
+  f.results = ptr_cast(Mut(vf.IrType), p);
+  f.result_cap = nc;
+  return 0;
+};
+
+let frame_ensure_inst = func(h: Mut(HostIr), f: Mut(Frame)) -> u64 {
+  if f.inst_count < f.inst_cap { return 0; }
+  let nc: u64 = if f.inst_cap == 0 { INIT_CAP() } else { f.inst_cap * 2 };
+  let p: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), f.insts), f.inst_cap, nc,
+                              size_of(u64));
+  if is_null(p) { return 1; }
+  f.insts = ptr_cast(Mut(u64), p);
+  f.inst_cap = nc;
+  return 0;
+};
+
+let proc_ensure_param = func(h: Mut(HostIr), p: Mut(ProcState)) -> u64 {
+  if p.param_count < p.param_cap { return 0; }
+  let nc: u64 = if p.param_cap == 0 { INIT_CAP() } else { p.param_cap * 2 };
+  let q: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), p.params), p.param_cap, nc,
+                              size_of(IrParamCell));
+  if is_null(q) { return 1; }
+  p.params = ptr_cast(Mut(vf.IrParam), q);
+  p.param_cap = nc;
+  return 0;
+};
+
+let proc_ensure_result = func(h: Mut(HostIr), p: Mut(ProcState)) -> u64 {
+  let none: u64 = vf.MAX_RESULTS();
+  if p.result_count >= none { return 1; }
+  if p.result_count < p.result_cap { return 0; }
+  let nc: u64 = if p.result_cap == 0 { none } else { p.result_cap * 2 };
+  let q: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), p.results), p.result_cap, nc,
+                              size_of(IrTypeCell));
+  if is_null(q) { return 1; }
+  p.results = ptr_cast(Mut(vf.IrType), q);
+  p.result_cap = nc;
+  return 0;
+};
+
+let proc_ensure_case = func(h: Mut(HostIr), p: Mut(ProcState)) -> u64 {
+  if p.case_count < p.case_cap { return 0; }
+  let nc: u64 = if p.case_cap == 0 { INIT_CAP() } else { p.case_cap * 2 };
+  let q: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), p.cases), p.case_cap, nc,
+                              size_of(IrCaseCell));
+  if is_null(q) { return 1; }
+  p.cases = ptr_cast(Mut(vf.IrCase), q);
+  p.case_cap = nc;
+  return 0;
+};
+
+// --- 稳定副本 -------------------------------------------------------------
+let publish_params = func(h: Mut(HostIr), src: Ref(vf.IrParam), count: u64) -> Ref(vf.IrParam) {
+  if count == 0 { return null_ref(Ref(vf.IrParam)); }
+  let bytes: u64 = count * size_of(IrParamCell);
+  let p: Mut(u8) = arena_zero(h, bytes, 8);
+  if is_null(p) { return null_ref(Ref(vf.IrParam)); }
+  let rc: u64 = copy_bytes(p, ptr_cast(Ref(u8), src), bytes);
+  return ptr_cast(Ref(vf.IrParam), p);
+};
+
+let publish_types = func(h: Mut(HostIr), src: Ref(vf.IrType), count: u64) -> Ref(vf.IrType) {
+  if count == 0 { return null_ref(Ref(vf.IrType)); }
+  let bytes: u64 = count * size_of(IrTypeCell);
+  let p: Mut(u8) = arena_zero(h, bytes, 8);
+  if is_null(p) { return null_ref(Ref(vf.IrType)); }
+  let rc: u64 = copy_bytes(p, ptr_cast(Ref(u8), src), bytes);
+  return ptr_cast(Ref(vf.IrType), p);
+};
+
+let publish_insts = func(h: Mut(HostIr), src: Ref(u64), count: u64) -> Ref(u64) {
+  if count == 0 { return null_ref(Ref(u64)); }
+  let bytes: u64 = count * size_of(u64);
+  let p: Mut(u8) = arena_zero(h, bytes, 8);
+  if is_null(p) { return null_ref(Ref(u64)); }
+  let rc: u64 = copy_bytes(p, ptr_cast(Ref(u8), src), bytes);
+  return ptr_cast(Ref(u64), p);
+};
+
+// --- 过程收尾 -------------------------------------------------------------
+let finalize_proc = func(h: Mut(HostIr), m: Mut(ModState), body: u64) -> u64 {
+  let p: Mut(ProcState) = m.proc;
+  let rc: u64 = mod_ensure_proc(h, m);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let params: Ref(vf.IrParam) = publish_params(h, ptr_cast(Ref(vf.IrParam), p.params),
+                                              p.param_count);
+  let results: Ref(vf.IrType) = publish_types(h, ptr_cast(Ref(vf.IrType), p.results),
+                                              p.result_count);
+  let slot: Mut(vf.IrProc) = proc_slot(m.procs, m.proc_count);
+  deref(slot) = vf.proc_new(p.name, params, p.param_count, results, p.result_count);
+  let brc: u64 = vf.proc_set_body(slot, body);
+  m.proc_count = m.proc_count + 1;
+  p.open = 0;
+  return 0;
+};
+
+let find_extern_at = func(m: Mut(ModState), name: u64, link: u64, i: u64) -> u64 {
+  if i >= m.proc_count { return 0; }
+  let p: Mut(vf.IrProc) = proc_slot(m.procs, i);
+  if p.is_extern == 1 {
+    if (p.name == name) and (p.link_name == link) { return i + 1; }
+  }
+  return find_extern_at(m, name, link, i + 1);
+};
+
+let find_extern = func(m: Mut(ModState), name: u64, link: u64) -> u64 {
+  return find_extern_at(m, name, link, 0);
+};
+
+let finalize_extern = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
+  let p: Mut(ProcState) = m.proc;
+  let dup: u64 = find_extern(m, p.name, p.link_name);
+  if dup != 0 {
+    p.open = 0;
+    return 0;
+  }
+  let rc: u64 = mod_ensure_proc(h, m);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let params: Ref(vf.IrParam) = publish_params(h, ptr_cast(Ref(vf.IrParam), p.params),
+                                              p.param_count);
+  let results: Ref(vf.IrType) = publish_types(h, ptr_cast(Ref(vf.IrType), p.results),
+                                              p.result_count);
+  let slot: Mut(vf.IrProc) = proc_slot(m.procs, m.proc_count);
+  deref(slot) = vf.proc_new(p.name, params, p.param_count, results, p.result_count);
+  let erc: u64 = vf.proc_set_extern(slot, p.link_name);
+  m.proc_count = m.proc_count + 1;
+  p.open = 0;
+  return 0;
+};
+
+// --- 指令构造 -------------------------------------------------------------
+let make_inst = func(h: Mut(HostIr), m: Mut(ModState), kind: u64) -> Mut(vf.IrInst) {
+  let src: u64 = mod_ensure_inst(h, m);
+  if src != 0 { fail(h, HOST_ERR_CAPACITY()); return null_ref(Mut(vf.IrInst)); }
+  let ii: u64 = m.inst_count;
+  let slot: Mut(vf.IrInst) = inst_slot(m.insts, ii);
+  deref(slot) = vf.inst_new(kind);
+  m.inst_count = ii + 1;
+  let f: Mut(Frame) = frame_slot(m.frames, m.depth - 1);
+  let frc: u64 = frame_ensure_inst(h, f);
+  if frc != 0 { fail(h, HOST_ERR_CAPACITY()); return null_ref(Mut(vf.IrInst)); }
+  let at: Mut(u64) = u64_slot(f.insts, f.inst_count);
+  deref(at) = ii;
+  f.inst_count = f.inst_count + 1;
+  return slot;
+};
+
+let take_args = func(h: Mut(HostIr), m: Mut(ModState), it: Mut(vf.IrInst)) -> u64 {
+  let n: u64 = m.arg_count;
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let op: Mut(vf.IrOperand) = operand_slot(m.args, i);
+    let rc: u64 = vf.inst_add_operand(it, deref(op));
+    i = i + 1;
+  };
+  m.arg_count = 0;
+  return 0;
+};
+
+let drop_args = func(m: Mut(ModState)) -> u64 {
+  m.arg_count = 0;
+  return 0;
+};
+
+let data_find_at = func(m: Mut(ModState), name: u64, i: u64) -> u64 {
+  if i >= m.data_count { return 0; }
+  let rec: Mut(DataRec) = data_slot(m.data, i);
+  if rec.symbol == name { return i + 1; }
+  return data_find_at(m, name, i + 1);
+};
+
+// --- 区域句柄 -------------------------------------------------------------
+let region_handle = func(mi: u64, ri: u64) -> u64 {
+  return (mi + 1) * HANDLE_STRIDE() + ri + 1;
+};
+
+let handle_mod = func(raw: u64) -> u64 {
+  return raw / HANDLE_STRIDE() - 1;
+};
+
+let handle_region = func(raw: u64) -> u64 {
+  return raw % HANDLE_STRIDE() - 1;
+};
+
+let resolve_region = func(h: Mut(HostIr), m: Mut(ModState), raw: u64) -> u64 {
+  if raw == 0 { return vf.NO_REGION(); }
+  let mm: Mut(ModState) = mod_of_handle(h, handle_mod(raw) + 1);
+  if is_null(mm) { fail(h, HOST_ERR_HANDLE()); return vf.NO_REGION(); }
+  if (mm as u64) != (m as u64) { fail(h, HOST_ERR_HANDLE()); return vf.NO_REGION(); }
+  let ri: u64 = handle_region(raw);
+  if ri >= m.region_count { fail(h, HOST_ERR_HANDLE()); return vf.NO_REGION(); }
+  return ri;
+};
+
+// --- 模块构造 -------------------------------------------------------------
+let init_module = func(h: Mut(HostIr), slot: u64, name: u64) -> Mut(ModState) {
+  let m: Mut(ModState) = mod_slot(h.mods, slot);
+  let rc: u64 = zero_bytes(ptr_cast(Mut(u8), m), size_of(ModState));
+  m.name = name;
+  let pc: u64 = INIT_CAP();
+  let pr: Mut(u8) = arena_zero(h, pc * size_of(IrProcCell), 8);
+  m.procs = ptr_cast(Mut(vf.IrProc), pr);
+  m.proc_cap = pc;
+  let rr: Mut(u8) = arena_zero(h, pc * size_of(IrRegionCell), 8);
+  m.regions = ptr_cast(Mut(vf.IrRegion), rr);
+  m.region_cap = pc;
+  let ic: u64 = INIT_INST_CAP();
+  let ir: Mut(u8) = arena_zero(h, ic * size_of(IrInstCell), 8);
+  m.insts = ptr_cast(Mut(vf.IrInst), ir);
+  m.inst_cap = ic;
+  let cr: Mut(u8) = arena_zero(h, pc * size_of(IrCaseCell), 8);
+  m.cases = ptr_cast(Mut(vf.IrCase), cr);
+  m.case_cap = pc;
+  let srf: Mut(u8) = arena_zero(h, vf.VF_SCRATCH() * size_of(u64), 8);
+  m.scratch = ptr_cast(Mut(u64), srf);
+  let dr: Mut(u8) = arena_zero(h, pc * size_of(DataRec), 8);
+  m.data = ptr_cast(Mut(DataRec), dr);
+  m.data_cap = pc;
+  let ar: Mut(u8) = arena_zero(h, vf.MAX_OPERANDS() * size_of(IrOperandCell), 8);
+  m.args = ptr_cast(Mut(vf.IrOperand), ar);
+  let fr: Mut(u8) = arena_zero(h, FRAME_CAP() * size_of(Frame), 8);
+  m.frames = ptr_cast(Mut(Frame), fr);
+  let psr: Mut(u8) = arena_zero(h, size_of(ProcState), 8);
+  m.proc = ptr_cast(Mut(ProcState), psr);
+  if h.err != 0 { return m; }
+  m.in_use = 1;
+  return m;
+};
+
+let module_of = func(h: Mut(HostIr), m: Mut(ModState)) -> vf.IrModule {
+  return vf.module_new(m.name,
+                       ptr_cast(Ref(vf.IrProc), m.procs), m.proc_count,
+                       ptr_cast(Ref(vf.IrRegion), m.regions), m.region_count,
+                       ptr_cast(Ref(vf.IrInst), m.insts), m.inst_count,
+                       ptr_cast(Ref(vf.IrCase), m.cases), m.case_count,
+                       m.scratch);
+};
+
+// --- 公共原语：模块与数据 -------------------------------------------------
+pub let ir_mod_new = func(h: Mut(HostIr), name: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let slot: u64 = free_slot(h);
+  if slot >= h.mod_cap { return fail(h, HOST_ERR_CAPACITY()); }
+  let m: Mut(ModState) = init_module(h, slot, name);
+  if h.err != 0 { return 0; }
+  return slot + 1;
+};
+
+pub let ir_data_add = func(h: Mut(HostIr), modv: u64, name: u64, bytes: Ref(u8),
+                           size: u64, is_writable: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  if (size != 0) and is_null(bytes) { return fail(h, HOST_ERR_RANGE()); }
+  let rc: u64 = mod_ensure_data(h, m);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let stored: Mut(u8) = arena_take(h, size, 8);
+  if (size != 0) and is_null(stored) { return 0; }
+  if size != 0 {
+    let cc: u64 = copy_bytes(stored, bytes, size);
+  }
+  let slot: Mut(DataRec) = data_slot(m.data, m.data_count);
+  slot.symbol = name;
+  slot.bytes = ptr_cast(Ref(u8), stored);
+  slot.size = size;
+  slot.is_writable = is_writable;
+  m.data_count = m.data_count + 1;
+  return m.data_count;
+};
+
+pub let ir_data_find = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  return data_find_at(m, name, 0);
+};
+
+// --- 公共原语：过程 -------------------------------------------------------
+pub let ir_proc_begin = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open != 0 { return fail(h, HOST_ERR_STATE()); }
+  p.open = 1;
+  p.is_extern = 0;
+  p.name = name;
+  p.link_name = 0;
+  p.param_count = 0;
+  p.result_count = 0;
+  p.depth = 0;
+  p.case_count = 0;
+  m.depth = 0;
+  return 0;
+};
+
+pub let ir_proc_extern = func(h: Mut(HostIr), modv: u64, name: u64, link: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open != 0 { return fail(h, HOST_ERR_STATE()); }
+  p.open = 1;
+  p.is_extern = 1;
+  p.name = name;
+  p.link_name = link;
+  p.param_count = 0;
+  p.result_count = 0;
+  p.depth = 0;
+  p.case_count = 0;
+  m.depth = 0;
+  return 0;
+};
+
+pub let ir_proc_param = func(h: Mut(HostIr), modv: u64, name: u64, k: u64,
+                             w: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open == 0 { return fail(h, HOST_ERR_STATE()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if k == 0 { return fail(h, HOST_ERR_TYPE()); }
+  let rc: u64 = proc_ensure_param(h, p);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrParam) = param_slot(p.params, p.param_count);
+  deref(slot) = vf.param_new(name, type_from(k, w));
+  p.param_count = p.param_count + 1;
+  return p.param_count;
+};
+
+pub let ir_proc_result = func(h: Mut(HostIr), modv: u64, k: u64, w: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open == 0 { return fail(h, HOST_ERR_STATE()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if k == 0 { return fail(h, HOST_ERR_TYPE()); }
+  let rc: u64 = proc_ensure_result(h, p);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrType) = type_slot(p.results, p.result_count);
+  deref(slot) = type_from(k, w);
+  p.result_count = p.result_count + 1;
+  return p.result_count;
+};
+
+pub let ir_proc_end = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.is_extern == 1 {
+    if p.open == 0 { return m.proc_count; }
+    if p.depth != 0 { return fail(h, HOST_ERR_STATE()); }
+    let rc: u64 = finalize_extern(h, m);
+    if rc != 0 { return 0; }
+    return m.proc_count;
+  }
+  if p.open != 0 { return fail(h, HOST_ERR_STATE()); }
+  return m.proc_count;
+};
+
+// --- 公共原语：区域 -------------------------------------------------------
+pub let ir_region_begin = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open == 0 { return fail(h, HOST_ERR_STATE()); }
+  if m.depth >= FRAME_CAP() { return fail(h, HOST_ERR_CAPACITY()); }
+  let f: Mut(Frame) = frame_slot(m.frames, m.depth);
+  f.param_count = 0;
+  f.result_count = 0;
+  f.inst_count = 0;
+  // 过程体区域的结果就是过程声明的结果：最外层区域开区时直接把过程结果表
+  // 当成本区域的结果，收区发布的区域结果因此与过程签名一致。
+  if m.depth == 0 {
+    f.result_count = p.result_count;
+    f.result_cap = p.result_count;
+    if p.result_count == 0 {
+      f.results = null_ref(Mut(vf.IrType));
+    } else {
+      f.results = p.results;
+    }
+  }
+  m.depth = m.depth + 1;
+  p.depth = m.depth;
+  return m.depth;
+};
+
+// 区域形参的初值只在宿主侧使用；LAINIR 表示只记录名字与类型。
+pub let ir_region_param = func(h: Mut(HostIr), modv: u64, name: u64, k: u64,
+                               w: u64, ik: u64, ib: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  if m.depth == 0 { return fail(h, HOST_ERR_STATE()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if k == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if ik > 2 { return fail(h, HOST_ERR_ARG()); }
+  if (ik == 2) and (ib == 0) { return fail(h, HOST_ERR_ARG()); }
+  let f: Mut(Frame) = frame_slot(m.frames, m.depth - 1);
+  let rc: u64 = frame_ensure_param(h, f);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrParam) = param_slot(f.params, f.param_count);
+  deref(slot) = vf.param_new(name, type_from(k, w));
+  f.param_count = f.param_count + 1;
+  return f.param_count;
+};
+
+pub let ir_region_result = func(h: Mut(HostIr), modv: u64, k: u64, w: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  if m.depth == 0 { return fail(h, HOST_ERR_STATE()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if k == 0 { return fail(h, HOST_ERR_TYPE()); }
+  let f: Mut(Frame) = frame_slot(m.frames, m.depth - 1);
+  if f.result_count >= vf.MAX_RESULTS() { return fail(h, HOST_ERR_CAPACITY()); }
+  let rc: u64 = frame_ensure_result(h, f);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrType) = type_slot(f.results, f.result_count);
+  deref(slot) = type_from(k, w);
+  f.result_count = f.result_count + 1;
+  return f.result_count;
+};
+
+pub let ir_region_end = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open == 0 { return fail(h, HOST_ERR_STATE()); }
+  let depth: u64 = m.depth;
+  if depth == 0 { return fail(h, HOST_ERR_STATE()); }
+  let frc: u64 = mod_ensure_region(h, m);
+  if frc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let f: Mut(Frame) = frame_slot(m.frames, depth - 1);
+  let params: Ref(vf.IrParam) = publish_params(h, ptr_cast(Ref(vf.IrParam), f.params),
+                                              f.param_count);
+  let results: Ref(vf.IrType) = publish_types(h, ptr_cast(Ref(vf.IrType), f.results),
+                                              f.result_count);
+  let insts: Ref(u64) = publish_insts(h, ptr_cast(Ref(u64), f.insts), f.inst_count);
+  if h.err != 0 { return 0; }
+  let ri: u64 = m.region_count;
+  let slot: Mut(vf.IrRegion) = region_slot(m.regions, ri);
+  deref(slot) = vf.region_new(params, f.param_count, results, f.result_count,
+                              insts, f.inst_count);
+  m.region_count = ri + 1;
+  m.depth = depth - 1;
+  p.depth = m.depth;
+  if m.depth == 0 {
+    let rc: u64 = finalize_proc(h, m, ri);
+    if rc != 0 { return 0; }
+  }
+  let mi: u64 = mod_index(h, m);
+  return region_handle(mi, ri);
+};
+
+// --- 公共原语：操作数邮箱 -------------------------------------------------
+pub let ir_args_reset = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  return drop_args(m);
+};
+
+pub let ir_arg_ref = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  if m.arg_count >= vf.MAX_OPERANDS() { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrOperand) = operand_slot(m.args, m.arg_count);
+  deref(slot) = vf.op_value(name);
+  m.arg_count = m.arg_count + 1;
+  return m.arg_count;
+};
+
+pub let ir_arg_int = func(h: Mut(HostIr), modv: u64, bits: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  if m.arg_count >= vf.MAX_OPERANDS() { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrOperand) = operand_slot(m.args, m.arg_count);
+  deref(slot) = vf.op_int(bits);
+  m.arg_count = m.arg_count + 1;
+  return m.arg_count;
+};
+
+// --- 公共原语：指令 -------------------------------------------------------
+pub let ir_inst = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u64,
+                       w: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if kind >= codes.INST_COUNT() { return fail(h, HOST_ERR_ARG()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  let it: Mut(vf.IrInst) = make_inst(h, m, kind);
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rc: u64 = vf.inst_add_result(it, res);
+  }
+  let tc: u64 = set_inst_type(it, k, w);
+  let ac: u64 = take_args(h, m, it);
+  return 1;
+};
+
+pub let ir_inst_if = func(h: Mut(HostIr), modv: u64, res: u64, cond: u64,
+                          then_r: u64, else_r: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if cond == 0 { return fail(h, HOST_ERR_ARG()); }
+  let then_i: u64 = resolve_region(h, m, then_r);
+  if then_i == vf.NO_REGION() { return 0; }
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_IF());
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let op: u64 = vf.inst_add_operand(it, vf.op_value(cond));
+  let b1: u64 = vf.inst_set_body(it, then_i);
+  if else_r != 0 {
+    let else_i: u64 = resolve_region(h, m, else_r);
+    if else_i == vf.NO_REGION() { return 0; }
+    let b2: u64 = vf.inst_set_else(it, else_i);
+  }
+  return 1;
+};
+
+pub let ir_inst_loop = func(h: Mut(HostIr), modv: u64, res: u64, label: u64,
+                            body: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if label == 0 { return fail(h, HOST_ERR_ARG()); }
+  let body_i: u64 = resolve_region(h, m, body);
+  if body_i == vf.NO_REGION() { return 0; }
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_LOOP());
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let lb: u64 = vf.inst_set_label(it, label);
+  let bd: u64 = vf.inst_set_body(it, body_i);
+  return 1;
+};
+
+pub let ir_case_add = func(h: Mut(HostIr), modv: u64, value: u64, body: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if p.open == 0 { return fail(h, HOST_ERR_STATE()); }
+  let body_i: u64 = resolve_region(h, m, body);
+  if body_i == vf.NO_REGION() { return 0; }
+  let rc: u64 = proc_ensure_case(h, p);
+  if rc != 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let slot: Mut(vf.IrCase) = case_slot(p.cases, p.case_count);
+  deref(slot) = vf.case_new(value, body_i);
+  p.case_count = p.case_count + 1;
+  return p.case_count;
+};
+
+pub let ir_inst_switch = func(h: Mut(HostIr), modv: u64, res: u64, selector: u64,
+                              k: u64, w: u64, def: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if selector == 0 { return fail(h, HOST_ERR_ARG()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if k == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if def == 0 { return fail(h, HOST_ERR_ARG()); }
+  let def_i: u64 = resolve_region(h, m, def);
+  if def_i == vf.NO_REGION() { return 0; }
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_SWITCH());
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let tc: u64 = set_inst_type(it, k, w);
+  let op: u64 = vf.inst_add_operand(it, vf.op_value(selector));
+  let at: u64 = m.case_count;
+  let n: u64 = p.case_count;
+  if n != 0 {
+    let need: u64 = at + n;
+    if need > m.case_cap {
+      let nc: u64 = if need > m.case_cap * 2 { need } else { m.case_cap * 2 };
+      let grown: Mut(u8) = grow_bytes(h, ptr_cast(Mut(u8), m.cases), m.case_cap,
+                                     nc, size_of(IrCaseCell));
+      if is_null(grown) { return 0; }
+      m.cases = ptr_cast(Mut(vf.IrCase), grown);
+      m.case_cap = nc;
+    }
+    let bytes: u64 = n * size_of(IrCaseCell);
+    let dst: Mut(u8) = ptr_cast(Mut(u8), case_slot(m.cases, at));
+    let rc: u64 = copy_bytes(dst, ptr_cast(Ref(u8), p.cases), bytes);
+    m.case_count = need;
+  }
+  let cs: u64 = vf.inst_set_cases(it, at, n);
+  let db: u64 = vf.inst_set_default(it, def_i);
+  p.case_count = 0;
+  return 1;
+};
+
+pub let ir_inst_jump = func(h: Mut(HostIr), modv: u64, kind: u64, label: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if kind != codes.INST_BREAK() {
+    if kind != codes.INST_CONTINUE() {
+      if kind != codes.INST_RETURN() {
+        if kind != codes.INST_YIELD() {
+          if kind != codes.INST_UNREACHABLE() {
+            return fail(h, HOST_ERR_ARG());
+          }
+        }
+      }
+    }
+  }
+  let it: Mut(vf.IrInst) = make_inst(h, m, kind);
+  if is_null(it) { return 0; }
+  if label != 0 {
+    let lb: u64 = vf.inst_set_label(it, label);
+  }
+  let ac: u64 = take_args(h, m, it);
+  return 1;
+};
+
+// 尾调用标志不进入 LAINIR 表示，C99 后端对直接调用一视同仁。
+pub let ir_inst_call = func(h: Mut(HostIr), modv: u64, res: u64, callee: u64,
+                            tail: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if callee == 0 { return fail(h, HOST_ERR_ARG()); }
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_CALL());
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let sy: u64 = vf.inst_set_symbol(it, callee);
+  let ac: u64 = take_args(h, m, it);
+  return 1;
+};
+
+// 间接调用：被调值由调用方压进邮箱第 0 项。返回类型码 0 表示无返回值，
+// 此时结果名必须为空。形参类型码在 LAINIR 表示里没有对应字段，C99 后端
+// 也按 uint64_t 逐个传参，这里只校验结果类型。
+pub let ir_inst_call_indirect = func(h: Mut(HostIr), modv: u64, res: u64, k: u64,
+                                     w: u64, plo: u64, phi: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  if (k == 0) and (res != 0) { return fail(h, HOST_ERR_ARG()); }
+  if (k != 0) and (res == 0) { return fail(h, HOST_ERR_ARG()); }
+  if m.arg_count == 0 { return fail(h, HOST_ERR_ARG()); }
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_CALL());
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let tc: u64 = set_inst_type(it, k, w);
+  let ac: u64 = take_args(h, m, it);
+  return 1;
+};
+
+// 内存序与 volatile 不进入 LAINIR 表示，只保留对齐；C99 后端同样只用对齐。
+pub let ir_inst_mem = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u64,
+                           w: u64, order: u64, vol: u64, align: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if kind != codes.INST_LOAD() {
+    if kind != codes.INST_STORE() {
+      if kind != codes.INST_ALLOCA() { return fail(h, HOST_ERR_ARG()); }
+    }
+  }
+  if order > ORDER_SEQ_CST() { return fail(h, HOST_ERR_ARG()); }
+  if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
+  let it: Mut(vf.IrInst) = make_inst(h, m, kind);
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let tc: u64 = set_inst_type(it, k, w);
+  let al: u64 = vf.inst_set_align(it, align);
+  let ac: u64 = take_args(h, m, it);
+  return 1;
+};
+
+pub let ir_inst_symbol = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64,
+                              symbol: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let p: Mut(ProcState) = m.proc;
+  if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
+  if kind >= codes.INST_COUNT() { return fail(h, HOST_ERR_ARG()); }
+  if symbol == 0 { return fail(h, HOST_ERR_ARG()); }
+  let it: Mut(vf.IrInst) = make_inst(h, m, kind);
+  if is_null(it) { return 0; }
+  if res != 0 {
+    let rr: u64 = vf.inst_add_result(it, res);
+  }
+  let sy: u64 = vf.inst_set_symbol(it, symbol);
+  return 1;
+};
+
+// --- 校验与克隆 -----------------------------------------------------------
+pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return HOST_ERR_HANDLE(); }
+  if h.err != 0 { return h.err; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let modval: vf.IrModule = module_of(h, m);
+  let code: u64 = vf.verify_module(ref_of(modval));
+  h.last_verify = code;
+  return code;
+};
+
+let clone_region = func(h: Mut(HostIr), src: Mut(vf.IrRegion), dst: Mut(vf.IrRegion)) -> u64 {
+  let r: vf.IrRegion = deref(src);
+  let params: Ref(vf.IrParam) = publish_params(h, r.params, r.param_count);
+  let results: Ref(vf.IrType) = publish_types(h, r.results, r.result_count);
+  let insts: Ref(u64) = publish_insts(h, r.insts, r.inst_count);
+  deref(dst) = vf.region_new(params, r.param_count, results, r.result_count,
+                             insts, r.inst_count);
+  return 0;
+};
+
+let clone_proc = func(h: Mut(HostIr), src: Mut(vf.IrProc), dst: Mut(vf.IrProc)) -> u64 {
+  let p: vf.IrProc = deref(src);
+  let params: Ref(vf.IrParam) = publish_params(h, p.params, p.param_count);
+  let results: Ref(vf.IrType) = publish_types(h, p.results, p.result_count);
+  deref(dst) = vf.proc_new(p.name, params, p.param_count, results, p.result_count);
+  if p.is_extern == 1 {
+    let rc: u64 = vf.proc_set_extern(dst, p.link_name);
+  } else {
+    let rc: u64 = vf.proc_set_body(dst, p.body);
+  }
+  return 0;
+};
+
+pub let ir_mod_clone_completed = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let src: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(src) { return fail(h, HOST_ERR_HANDLE()); }
+  let slot: u64 = free_slot(h);
+  if slot >= h.mod_cap { return fail(h, HOST_ERR_CAPACITY()); }
+  let m: Mut(ModState) = init_module(h, slot, src.name);
+  if h.err != 0 { return 0; }
+  let di: u64 = loop c(di: u64 = 0) while di < src.data_count {
+    let s: Mut(DataRec) = data_slot(src.data, di);
+    let rc: u64 = mod_ensure_data(h, m);
+    if h.err != 0 { break c(di); }
+    let stored: Mut(u8) = arena_take(h, s.size, 8);
+    if h.err != 0 { break c(di); }
+    if s.size != 0 {
+      let cc: u64 = copy_bytes(stored, s.bytes, s.size);
+    }
+    let d: Mut(DataRec) = data_slot(m.data, m.data_count);
+    d.symbol = s.symbol;
+    d.bytes = ptr_cast(Ref(u8), stored);
+    d.size = s.size;
+    d.is_writable = s.is_writable;
+    m.data_count = m.data_count + 1;
+    di = di + 1;
+  };
+  let ii: u64 = loop c(ii: u64 = 0) while ii < src.inst_count {
+    let s: Mut(vf.IrInst) = inst_slot(src.insts, ii);
+    let rc: u64 = mod_ensure_inst(h, m);
+    if h.err != 0 { break c(ii); }
+    let d: Mut(vf.IrInst) = inst_slot(m.insts, ii);
+    deref(d) = deref(s);
+    m.inst_count = ii + 1;
+    ii = ii + 1;
+  };
+  let ri: u64 = loop c(ri: u64 = 0) while ri < src.region_count {
+    let rc: u64 = mod_ensure_region(h, m);
+    if h.err != 0 { break c(ri); }
+    let s: Mut(vf.IrRegion) = region_slot(src.regions, ri);
+    let d: Mut(vf.IrRegion) = region_slot(m.regions, ri);
+    let cc: u64 = clone_region(h, s, d);
+    m.region_count = ri + 1;
+    ri = ri + 1;
+  };
+  let ci: u64 = loop c(ci: u64 = 0) while ci < src.case_count {
+    let rc: u64 = mod_ensure_case(h, m);
+    if h.err != 0 { break c(ci); }
+    let s: Mut(vf.IrCase) = case_slot(src.cases, ci);
+    let d: Mut(vf.IrCase) = case_slot(m.cases, ci);
+    deref(d) = deref(s);
+    m.case_count = ci + 1;
+    ci = ci + 1;
+  };
+  let pi: u64 = loop c(pi: u64 = 0) while pi < src.proc_count {
+    let rc: u64 = mod_ensure_proc(h, m);
+    if h.err != 0 { break c(pi); }
+    let s: Mut(vf.IrProc) = proc_slot(src.procs, pi);
+    let d: Mut(vf.IrProc) = proc_slot(m.procs, pi);
+    let cc: u64 = clone_proc(h, s, d);
+    m.proc_count = pi + 1;
+    pi = pi + 1;
+  };
+  if h.err != 0 { m.in_use = 0; return 0; }
+  return slot + 1;
+};
+
+pub let ir_mod_free = func(h: Mut(HostIr), modv: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  m.in_use = 0;
+  return 0;
+};
+
+// --- C99 发射 -------------------------------------------------------------
+let emit_data = func(w: Mut(c99.C99Writer), m: Mut(ModState), i: u64) -> u64 {
+  if i >= m.data_count { return 1; }
+  let rec: Mut(DataRec) = data_slot(m.data, i);
+  let bytes: Slice(u8) = make_slice(Slice(u8), rec.bytes, rec.size);
+  let n: u64 = c99.emit_data_decl(w, rec.symbol, bytes, rec.is_writable);
+  if n == 0 { return 0; }
+  return emit_data(w, m, i + 1);
+};
+
+let emit_procs = func(w: Mut(c99.C99Writer), mv: Ref(vf.IrModule), count: u64,
+                      i: u64) -> u64 {
+  if i >= count { return 1; }
+  let n: u64 = c99.emit_proc_c99(w, mv, i);
+  let modv: vf.IrModule = deref(mv);
+  let p: vf.IrProc = vf.proc_at_ref(modv.procs, i);
+  if p.is_extern == 0 {
+    if n == 0 { return 0; }
+  }
+  return emit_procs(w, mv, count, i + 1);
+};
+
+pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  let m: Mut(ModState) = mod_of_handle(h, modv);
+  if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
+  let modval: vf.IrModule = module_of(h, m);
+  let mv: Ref(vf.IrModule) = ref_of(modval);
+  let code: u64 = vf.verify_module(mv);
+  h.last_verify = code;
+  if code != 0 { return fail(h, HOST_ERR_IR()); }
+  let w0: c99.C99Writer = c99.new_writer(buf);
+  let w: Mut(c99.C99Writer) = mut_of(w0);
+  let pn: u64 = c99.emit_preamble(w);
+  let dn: u64 = emit_data(w, m, 0);
+  if dn == 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  let prc: u64 = emit_procs(w, mv, m.proc_count, 0);
+  if prc == 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  if c99.writer_ok(w) == 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  return c99.writer_len(w);
+};
+
+// --- 诊断 -----------------------------------------------------------------
+pub let diag_emit = func(h: Mut(HostIr), span: u64, level: u64, p: Ref(u8),
+                         n: u64) -> u64 {
+  if is_null(h) { return 0; }
+  if h.err != 0 { return 0; }
+  if n >= DIAG_MESSAGE_MAX() { return fail(h, HOST_ERR_ARG()); }
+  if (n != 0) and is_null(p) { return fail(h, HOST_ERR_RANGE()); }
+  if h.diag_count >= h.diag_cap { return 0; }
+  let stored: Mut(u8) = arena_take(h, n, 1);
+  if (n != 0) and is_null(stored) { return 0; }
+  if n != 0 {
+    let rc: u64 = copy_bytes(stored, p, n);
+  }
+  let slot: Mut(Diag) = diag_slot(h.diags, h.diag_count);
+  slot.span = span;
+  slot.level = level;
+  slot.message = ptr_cast(Ref(u8), stored);
+  slot.length = n;
+  h.diag_count = h.diag_count + 1;
+  return 0;
+};
