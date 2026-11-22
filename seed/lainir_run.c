@@ -9,6 +9,10 @@
  *         3 = Trap；4 = 跑完但没有结果；5 = 燃料耗尽；2 = 用法或 IO 失败。
  */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 199309L
+#endif
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
