@@ -1,0 +1,119 @@
+name: Lain Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.6.5)'
+        required: true
+        default: 'v0.6.5'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            ext: ""
+            stack_flags: ""
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: windows-x86_64
+            ext: ".exe"
+            stack_flags: "-Wl,/STACK:16777216"
+            archive_ext: zip
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Ensure clang is available (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v clang >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
+          clang --version
+
+      - name: Check clang (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: clang --version
+
+      - name: Build standalone lainc (${{ matrix.target }})
+        shell: bash
+        run: |
+          mkdir -p dist/lainc-${{ matrix.target }}
+          clang -std=c99 -O2 ${{ matrix.stack_flags }} seed/bootstrap/lainc_boot.c -o dist/lainc-${{ matrix.target }}/lainc${{ matrix.ext }}
+
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          mkdir -p build/smoke
+          ./dist/lainc-${{ matrix.target }}/lainc${{ matrix.ext }} examples/overhaul_showcase.lain --out build/smoke/showcase.c
+          clang -std=c99 -O2 build/smoke/showcase.c -o build/smoke/showcase${{ matrix.ext }}
+          set +e
+          ./build/smoke/showcase${{ matrix.ext }}
+          rc=$?
+          set -e
+          echo "showcase exit code: $rc"
+          test "$rc" -eq 126
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          cp -r std dist/lainc-${{ matrix.target }}/std
+          cp -r examples dist/lainc-${{ matrix.target }}/examples
+          cp README.md dist/lainc-${{ matrix.target }}/README.md
+          mkdir -p artifacts
+          if [ "${{ matrix.archive_ext }}" = "tar.gz" ]; then
+            tar -czf artifacts/lainc-${{ matrix.target }}.tar.gz -C dist lainc-${{ matrix.target }}
+          else
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/lainc-${{ matrix.target }}' -DestinationPath 'artifacts/lainc-${{ matrix.target }}.zip' -Force"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lainc-${{ matrix.target }}
+          path: artifacts/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          ls -lh release-assets
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "Lain $TAG" \
+              --notes "Automated standalone \`lainc\` release build from \`seed/bootstrap/lainc_boot.c\` (Linux x86_64 & Windows x86_64)." \
+              --target "${{ github.sha }}"
+          fi

@@ -1,49 +1,47 @@
-name: Lain core
+name: Lain CI
 
 on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  core:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Ensure clang and ninja are installed
+        run: |
+          if ! command -v clang >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang ninja-build
+          fi
+          clang --version
+
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '4.0.3'
 
-      - name: Configure
-        run: cmake -S seed -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Run full verification suite (Stage-1 -> Stage-2 -> Stage-3 fixed point)
+        run: python3 scripts/verify_all.py
 
-      - name: Build
-        run: cmake --build build
-
-      - name: Compile and round-trip every lain0 compat test
+      - name: Smoke test standalone lainc C99 pipeline
         run: |
-          fail=0
-          for f in seed/lain0/tests/*.lain; do
-            ./build/lain0/lain0 "$f" || { echo "FAIL $f"; fail=1; }
-            ./build/lain0/lain0 --round-trip "$f" || { echo "FAIL round-trip $f"; fail=1; }
-          done
-          exit $fail
-
-      - name: Split Meta into per-module units
-        run: ./build/lain0/lain0 --entry src/entry.lain --split build/units
-
-      - name: Meta compiles arith
-        run: |
-          ./build/lain-meta-v2 build/units/*.l1 seed/lain0/tests/arith.lain \
-            --out build/arith.l1 | tee build/meta-arith.log
-          grep -q 'result=0' build/meta-arith.log
-          ./build/lainir-verify build/arith.l1
-          ./build/lainir-run --entry s0__total build/arith.l1 | tee build/arith-run.log
-          grep -q 'result value=3' build/arith-run.log
+          mkdir -p build/ci-smoke
+          clang -std=c99 -O2 seed/bootstrap/lainc_boot.c -o build/ci-smoke/lainc
+          ./build/ci-smoke/lainc examples/overhaul_showcase.lain --out build/ci-smoke/showcase.c
+          clang -std=c99 -O2 build/ci-smoke/showcase.c -o build/ci-smoke/showcase
+          set +e
+          ./build/ci-smoke/showcase
+          rc=$?
+          set -e
+          echo "showcase exit code: $rc"
+          test "$rc" -eq 126
