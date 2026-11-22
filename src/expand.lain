@@ -1,0 +1,103 @@
+// expand.lain —— 展开遍次：RawAst -> RawAst。
+// 管线次序是 Expand -> Elaborate -> Lower：展开只认语法形式，不建符号、
+// 不求值、不碰类型。命中的子树经 AstOut 事务重发到输出段，没有命中的
+// 子树原样交回，连事务都不开。
+let st = import("state");
+let ax = import("ast");
+let s = import("sym");
+
+// --- AstOut 构造 -------------------------------------------------------
+// 展开只重发组：词的原文与符号已经在输入段里，组的孩子句柄可以直接引用
+// 它们，所以一次展开的开销与改写点的个数成正比，与树里有多少词无关。
+let put_u32 = func(b: Mut(u8), i: u64, v: u64) -> u64 {
+  let p: Mut(u8) = b + i * 4;
+  deref(p) = v as u8;
+  deref(p + 1) = (v >> 8) as u8;
+  deref(p + 2) = (v >> 16) as u8;
+  deref(p + 3) = (v >> 24) as u8;
+  return v;
+};
+
+let fill_kids = func(k: Mut(st.State), g: u64, i: u64, cnt: u64, buf: Mut(u8)) -> u64 {
+  if i >= cnt { return i; }
+  let c: u64 = copy_node(k, ax.n_at(g, i));
+  if st.st_ok(k) != 0 { return i; }
+  let w: u64 = put_u32(buf, i, c);
+  return fill_kids(k, g, i + 1, cnt, buf);
+};
+
+let copy_group = func(k: Mut(st.State), g: u64) -> u64 {
+  let cnt: u64 = ax.node_count(g);
+  let buf: Mut(u8) = st.st_alloc(k, cnt * 4 + 8);
+  if is_null(buf) { return g; }
+  let done: u64 = fill_kids(k, g, 0, cnt, buf);
+  if st.st_ok(k) != 0 { return g; }
+  return ax.mk_group(ax.delim(g), cnt, ptr_cast(Ref(u32), buf));
+};
+
+// 把一棵子树搬到输出段：组按孩子顺序重发，词原样引用输入段的节点。
+// 必须在已经打开的事务里调用。
+pub let copy_node = func(k: Mut(st.State), h: u64) -> u64 {
+  if h == 0 { return 0; }
+  if ax.is_group_node(h) == 0 { return h; }
+  return copy_group(k, h);
+};
+
+// 整棵树的复制：源文件的根组进来，输出段的根组出去。
+// 事务里构造好的树只有提交过才能被后续阶段引用；root 必须是根组（分隔符 0）。
+// 输出段容量由宿主的 ast_out_node_capacity 决定，因此只用于小树与自检。
+pub let copy_tree = func(k: Mut(st.State), root: u64) -> u64 {
+  let tid: u64 = ax.tx_begin();
+  let nr: u64 = copy_node(k, root);
+  let rc: u64 = ax.tx_commit(nr);
+  return nr;
+};
+
+// --- 候选识别 ----------------------------------------------------------
+// 一个词是不是单字节记号 code。
+let word_is = func(g: u64, i: u64, code: u64) -> u64 {
+  let h: u64 = ax.n_at(g, i);
+  if h == 0 { return 0; }
+  if ax.lit_len(h) != 1 { return 0; }
+  if ax.tok_first(g, i) == code { return 1; }
+  return 0;
+};
+
+// 第 i 个记号是不是待脱糖的形式之首：f"..." 的 f，或 match 关键字。
+// 首字节先筛一遍，普通名字不会付符号查询的代价。
+let is_candidate = func(g: u64, i: u64, m: u64) -> u64 {
+  let b: u64 = ax.tok_first(g, i);
+  if b == 102 {
+    if word_is(g, i, 102) == 0 { return 0; }
+    if ax.tok_first(g, i + 1) == 34 { return 1; }
+    return 0;
+  }
+  if b == 109 {
+    if ax.n_sym(g, i) == m { return 1; }
+  }
+  return 0;
+};
+
+// 深度优先找第一个候选：1 = 找到。
+let scan_kids = func(g: u64, i: u64, cnt: u64, m: u64) -> u64 {
+  if i >= cnt { return 0; }
+  if is_candidate(g, i, m) == 1 { return 1; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if scan_kids(h, 0, ax.node_count(h), m) == 1 { return 1; }
+  }
+  return scan_kids(g, i + 1, cnt, m);
+};
+
+// --- 遍次入口 ----------------------------------------------------------
+// root 是源文件的根组。没有候选时原样返回，一个节点也不分配，也不开事务。
+pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
+  if root == 0 { return 0; }
+  if ax.is_group_node(root) == 0 { return root; }
+  let m: u64 = s.k_match();
+  if scan_kids(root, 0, ax.node_count(root), m) == 0 { return root; }
+  // 候选形式的改写规则要到 Milestone 5.2 才装上；规则缺席时把形式原样交给
+  // 细化阶段只会换出一串找不到名字的诊断，所以在这里就地停下。
+  st.st_fail(k, ax.e_unsup());
+  return root;
+};

@@ -370,6 +370,11 @@ META_CASES = [
     # 两个应判不等的调用各占 500 / 50，命中即为错。
     {"file": "module_concept_self.lain", "entry": "s0__main", "value": 1110,
      "folds": [], "procs": [], "absent": ["#call [("]},
+    # Phase 5.1：Expand -> Elaborate -> Lower 管线端到端回归。
+    # 42 = comptime for 0..3 展开的 3 + Vec2Add.sum(Vec2{5, 9}) 的 14
+    # + 数组 tail 的 10 + 15。
+    {"file": "ast_out_expand.lain", "entry": "s0__main", "value": 42,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
