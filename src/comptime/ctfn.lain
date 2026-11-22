@@ -1,0 +1,479 @@
+// ctfn.lain —— Phase 2A-2 编译期类型工厂求值器（解释签名含 Type 的函数体）。
+// 复用 ctfor 的值单元/绑定栈与 ctprim 的类型原语，单文件保持精简。
+let st = import("src::driver::state");
+let hr = import("src::driver::host_rt");
+let ax = import("src::syntax::ast");
+let s = import("src::driver::sym");
+let ty = import("src::sema::types");
+let modules = import("src::sema::modules");
+let ireg = import("src::sema::tyreg");
+let agg = import("src::sema::agg");
+let ct = import("src::comptime::ctypes");
+let tb = import("src::sema::tbuild");
+let ctf = import("src::comptime::ctfor");
+let ctp = import("src::comptime::ctprim");
+
+extern ctfn_compile_vmod(k: Mut(st.State), src: u64, bodyg: u64, parent_modv: u64, vmod: u64) -> u64 = lainc_compile_functor_mod;
+
+let ct_val_at = func(ab: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
+  return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), ab) + idx * 24);
+};
+
+// 编译期绑定栈的槽位：[名字@0, 种类@8, 值一@16, 值二@24]。
+let CtStackSlot = struct {
+  name: u64,
+  kind: u64,
+  a: u64,
+  b: u64
+};
+
+// 当前编译期调用帧里最近绑定的类型（种类 1）：参数化效应靠它记住自己的类型实参。
+let frame_type_scan = func(k: Mut(st.State), used: u64) -> u64 {
+  if used == 0 { return 0; }
+  let back: u64 = used - 32;
+  let b: Mut(CtStackSlot) = ptr_cast(Mut(CtStackSlot), st.st_ctbase(k) + back);
+  if b.kind == 1 { return b.a; }
+  return frame_type_scan(k, back);
+};
+
+let word_at = func(tbl: Mut(u64), idx: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + idx * 8);
+};
+
+let collect = func(k: Mut(st.State), ag: u64, i: u64, idx: u64, need: u64, ab: Mut(ctf.CtVal)) -> u64 {
+  let n: u64 = ax.n_count(ag);
+  if idx >= need {
+    if i < n { ctf.fail_msg(k, "too many args", 13, ax.e_ast()); return 0; }
+    return 1;
+  }
+  if i >= n { ctf.fail_msg(k, "missing args", 12, ax.e_ast()); return 0; }
+  let j: u64 = ct_eval(k, ag, i, 0, ct_val_at(ab, idx));
+  if st.st_ok(k) != 0 { return 0; }
+  let nj: u64 = if ax.is_comma(ag, j) == 1 { j + 1 } else { j };
+  return collect(k, ag, nj, idx + 1, need, ab);
+};
+
+let fill_fn_params = func(k: Mut(st.State), pg: u64, i: u64, idx: u64, np: u64, tbl: Mut(u64)) -> u64 {
+  if idx >= np { return idx; }
+  let t: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = ct_eval(k, pg, i, 0, t);
+  if st.st_ok(k) != 0 { return idx; }
+  deref(word_at(tbl, idx)) = ctp.as_type(k, t);
+  let nj: u64 = if ax.is_comma(pg, j) == 1 { j + 1 } else { j };
+  return fill_fn_params(k, pg, nj, idx + 1, np, tbl);
+};
+
+let fn_factory = func(k: Mut(st.State), ag: u64) -> u64 {
+  if ax.n_count(ag) < 3 { ctf.fail_msg(k, "bad Fn type", 11, ax.e_ast()); return 0; }
+  let pg: u64 = ax.n_at(ag, 0);
+  let np: u64 = ctp.arg_count_at(pg, 0, 0);
+  let tbl: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
+  fill_fn_params(k, pg, 0, 0, np, tbl);
+  if st.st_ok(k) != 0 { return 0; }
+  let rt: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  ct_eval(k, ag, 2, 0, rt);
+  if st.st_ok(k) != 0 { return 0; }
+  return ct.fn_t(k, ctp.as_type(k, rt), np, tbl as u64);
+};
+
+let ct_call = func(k: Mut(st.State), name: u64, ag: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if name == s.t_fn() {
+    let id: u64 = fn_factory(k, ag);
+    if st.st_ok(k) != 0 { return 2; }
+    ctf.v_set(out, 1, id, 0);
+    return 1;
+  }
+  let ar1: u64 = ctp.prim_arity(name);
+  if ar1 != 0 {
+    let nargs: u64 = ar1 - 1;
+    let ab: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 72));
+    if collect(k, ag, 0, 0, nargs, ab) == 0 { return 2; }
+    return ctp.apply_prim(k, name, ag, ab, nargs, out);
+  }
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
+  if is_null(e) {
+    let qr: u64 = ctf.prim(k, name, ag, out);
+    if qr != 0 { return qr; }
+    ctf.fail_msg(k, "unknown comptime fn", 19, ax.e_unbound());
+    return 2;
+  }
+  if modules.sym_kind(e) != modules.sym_kind_func() { ctf.fail_msg(k, "not callable", 12, ax.e_type()); return 2; }
+  call_user(k, e, ag, out);
+  return 1;
+};
+
+let ct_meta_tid = func(k: Mut(st.State), name: u64) -> u64 {
+  if name == s.t_type() { return tb.type_tid(k); }
+  if name == s.t_effect() { return tb.effect_tid(k); }
+  if name == s.t_effect_row() { return tb.effect_row_tid(k); }
+  if name == s.t_never() { return tb.never_tid(k); }
+  return ctf.tid_of_name(k, name);
+};
+
+let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { ctf.fail_msg(k, "empty comptime expr", 19, ax.e_ast()); return i; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if ax.delim(h) == ax.dl_paren() {
+      let j: u64 = ct_eval(k, h, 0, 0, out);
+      if st.st_ok(k) == 0 and j != ax.n_count(h) { ctf.fail_msg(k, "bad comptime expr", 17, ax.e_ast()); }
+      return i + 1;
+    }
+    ctf.fail_msg(k, "bad comptime expr", 17, ax.e_ast());
+    return i + 1;
+  }
+  if ax.is_digit_token(g, i) == 1 {
+    ctf.v_set(out, 0, ax.num_value(ax.lit_addr(h), ax.lit_len(h)), 0);
+    return i + 1;
+  }
+  if ax.tok_first(g, i) == 34 {
+    let pa: Ref(u8) = ax.lit_addr(h);
+    let pu: u64 = (pa as u64) + 1;
+    ctf.v_set(out, 3, pu, ax.lit_len(h) - 2);
+    return i + 1;
+  }
+  let name: u64 = ax.node_sym(h);
+  if name == s.k_true() or name == s.k_false() {
+    let bv0: u64 = if name == s.k_true() { 1 } else { 0 };
+    ctf.v_set(out, 0, bv0, 0);
+    return i + 1;
+  }
+  if name == 0 { ctf.fail_msg(k, "bad comptime expr", 17, ax.e_op()); return i + 1; }
+  if name == s.k_struct() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    eval_struct_expr(k, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
+  if name == s.k_module() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    eval_mod_expr(k, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
+  // effect { op ... }：值一记下操作声明所在的括号组，值二记下当前帧的类型实参。
+  if name == s.k_effect() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    let ptid: u64 = frame_type_scan(k, st.st_ctused(k));
+    ctf.v_set(out, 11, ax.n_at(g, i + 1), ptid);
+    return i + 2;
+  }
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
+    let m: u64 = modules.mod_lookup(k, name);
+    if m != 0 {
+      let mem: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m - 1, 0, ax.n_sym(g, i + 2), modules.cur(k));
+      if (mem as u64) != 0 {
+        let mk: u64 = modules.sym_kind(mem);
+        if mk == modules.sym_kind_func() and ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
+          call_user(k, mem, ax.n_at(g, i + 3), out);
+          return i + 4;
+        }
+        if mk == modules.sym_kind_struct() or mk == modules.sym_kind_enum() {
+          ctf.v_set(out, 1, ctf.tid_of_shape(k, modules.sym_shape(mem)), 0);
+          return i + 3;
+        }
+      }
+    }
+  }
+  if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    ct_call(k, name, ax.n_at(g, i + 1), out);
+    return i + 2;
+  }
+  let bv: Mut(ctf.CtVal) = ctf.lookup(k, name);
+  if (bv as u64) != 0 {
+    if ctf.has_tok(g, i + 1, s.p_dot()) == 1 {
+      if i + 2 < n and ax.is_name(g, i + 2) == 1 {
+        let pv: Mut(ctf.CtVal) = ctf.proj(k, bv, ax.n_sym(g, i + 2));
+        if (pv as u64) != 0 { ctf.v_set(out, ctf.v_kind(pv), ctf.v_a(pv), ctf.v_b(pv)); return i + 3; }
+        ctf.fail_msg(k, "bad FieldInfo member", 20, ax.e_op());
+        return i + 3;
+      }
+    }
+    ctf.v_set(out, ctf.v_kind(bv), ctf.v_a(bv), ctf.v_b(bv));
+    return i + 1;
+  }
+  let tid: u64 = ct_meta_tid(k, name);
+  if tid != 0 { ctf.v_set(out, 1, tid, 0); return i + 1; }
+  ctf.fail_msg(k, "unknown comptime name", 21, ax.e_unbound());
+  return i + 1;
+};
+
+let ct_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  let p: u64 = ctp.ct_prio(g, i);
+  if p == 0 or p < minp { return i; }
+  if ctf.v_kind(out) != 0 { ctf.fail_msg(k, "comptime op needs int", 21, ax.e_type()); return i; }
+  let op: u64 = ax.n_sym(g, i);
+  let rhs: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = ct_prefix(k, g, i + 1, rhs);
+  if st.st_ok(k) != 0 { return j; }
+  let j2: u64 = ct_tail(k, g, j, p + 1, rhs);
+  if st.st_ok(k) != 0 { return j2; }
+  if ctf.v_kind(rhs) != 0 { ctf.fail_msg(k, "comptime op needs int", 21, ax.e_type()); return j2; }
+  let r: u64 = ctp.ct_bin(k, op, ctf.v_a(out), ctf.v_a(rhs));
+  ctf.v_set(out, 0, r, 0);
+  return ct_tail(k, g, j2, minp, out);
+};
+
+pub let ct_eval = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let j: u64 = ct_prefix(k, g, i, out);
+  if st.st_ok(k) != 0 { return j; }
+  return ct_tail(k, g, j, minp, out);
+};
+
+// --- 过程体解释 -----------------------------------------------------------
+let skip_param_ty = func(pg: u64, i: u64) -> u64 {
+  if i >= ax.n_count(pg) { return i; }
+  if ax.is_comma(pg, i) == 1 { return i + 1; }
+  return skip_param_ty(pg, i + 1);
+};
+
+let eval_params = func(k: Mut(st.State), pg: u64, i: u64, ag: u64, ai: u64, ab: Mut(ctf.CtVal), nms: Mut(u64), idx: u64) -> u64 {
+  let pn: u64 = ax.n_count(pg);
+  let an: u64 = ax.n_count(ag);
+  if i >= pn {
+    if ai < an { ctf.fail_msg(k, "too many args", 13, ax.e_ast()); }
+    return idx;
+  }
+  if ax.is_comma(pg, i) == 1 { return eval_params(k, pg, i + 1, ag, ai, ab, nms, idx); }
+  if ai >= an { ctf.fail_msg(k, "missing args", 12, ax.e_ast()); return idx; }
+  if idx >= 8 { ctf.fail_msg(k, "too many params", 15, ax.e_ast()); return idx; }
+  deref(word_at(nms, idx)) = ax.node_sym(ax.n_at(pg, i));
+  let aj: u64 = ct_eval(k, ag, ai, 0, ct_val_at(ab, idx));
+  if st.st_ok(k) != 0 { return idx; }
+  let i2: u64 = if ctf.has_tok(pg, i + 1, s.p_colon()) == 1 { skip_param_ty(pg, i + 2) } else { i + 1 };
+  let a2: u64 = if ax.is_comma(ag, aj) == 1 { aj + 1 } else { aj };
+  return eval_params(k, pg, i2, ag, a2, ab, nms, idx + 1);
+};
+
+let bind_arr = func(k: Mut(st.State), nms: Mut(u64), ab: Mut(ctf.CtVal), i: u64, n: u64) -> u64 {
+  if i >= n { return 1; }
+  let v: Mut(ctf.CtVal) = ct_val_at(ab, i);
+  let nm: u64 = deref(word_at(nms, i));
+  ctf.bind(k, nm, ctf.v_kind(v), ctf.v_a(v), ctf.v_b(v));
+  if st.st_ok(k) != 0 { return 0; }
+  return bind_arr(k, nms, ab, i + 1, n);
+};
+
+let find_body = func(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ctf.has_delim(g, i, ax.dl_brace()) == 1 { return i; }
+  return find_body(g, i + 1);
+};
+
+let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let d: u64 = modules.sym_decl(e);
+  let root: u64 = hr.source_root(modules.sym_src(e));
+  let pi: u64 = if ax.is_group(root, d + 1) == 1 { d + 1 } else { d + 2 };
+  let body: u64 = find_body(root, pi + 1);
+  if body == 0 { ctf.fail_msg(k, "no body", 7, ax.e_ast()); return 0; }
+  let ab: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 192));
+  let nms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
+  let nargs: u64 = eval_params(k, ax.n_at(root, pi), 0, ag, 0, ab, nms, 0);
+  if st.st_ok(k) != 0 { return 0; }
+  let hit: Mut(tb.FactoryCacheEntry) = tb.cache_find(k, ptr_cast(Mut(u8), e), nargs, ptr_cast(Mut(u8), ab));
+  if (hit as u64) != 0 {
+    ctf.v_set(out, hit.rk, hit.ra, hit.rb);
+    return 1;
+  }
+  let prev: u64 = st.st_ctdone(k);
+  let prev_src: u64 = st.st_src(k);
+  let prev_vmod: u64 = st.st_vmod(k);
+  let mark: u64 = ctf.mark(k);
+  st.st_set_ctdone(k, 0);
+  st.st_set_src(k, modules.sym_src(e));
+  st.st_set_vmod(k, modules.sym_mod(e));
+  bind_arr(k, nms, ab, 0, nargs);
+  if st.st_ok(k) == 0 { run(k, ax.n_at(root, body)); }
+  ctf.release(k, mark);
+  st.st_set_vmod(k, prev_vmod);
+  st.st_set_src(k, prev_src);
+  st.st_set_ctdone(k, prev);
+  if st.st_ok(k) != 0 { return 0; }
+  let ret: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_ctret(k));
+  let rk: u64 = ctf.v_kind(ret); let ra: u64 = ctf.v_a(ret); let rb: u64 = ctf.v_b(ret);
+  tb.cache_put(k, ptr_cast(Mut(u8), e), nargs, ptr_cast(Mut(u8), ab), rk, ra, rb);
+  ctf.v_set(out, rk, ra, rb);
+  return 1;
+};
+
+// module { ... } 作为编译期表达式：分配一个新的虚拟模块号，把体交给求值侧编译
+// （@root lainc_compile_functor_mod），返回 Module 值。
+let eval_mod_expr = func(k: Mut(st.State), bodyg: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let vmod: u64 = st.st_next_vmod(k);
+  let parent: u64 = modules.cur(k);
+  let src: u64 = st.st_src(k);
+  ctfn_compile_vmod(k, src, bodyg, parent, vmod);
+  if st.st_ok(k) == 0 { ctf.v_set(out, 9, vmod, 0); }
+  return 1;
+};
+
+let eval_struct_expr = func(k: Mut(st.State), fg: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let b: Mut(tb.TypeBuilder) = tb.record_begin(k);
+  let n: u64 = ax.n_count(fg);
+  let j: u64 = loop fe(j: u64 = 0) while j < n {
+    if ax.is_comma(fg, j) == 1 or ax.is_semi(fg, j) == 1 {
+      j = j + 1;
+    } else {
+      let fname: u64 = ax.n_sym(fg, j);
+      if ctf.has_tok(fg, j + 1, s.p_colon()) == 0 { ctf.fail_msg(k, "expected colon", 14, ax.e_ast()); return 0; }
+      let ftv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+      let nj: u64 = ct_eval(k, fg, j + 2, 0, ftv);
+      if st.st_ok(k) != 0 { return nj; }
+      let ftid: u64 = ctp.as_type(k, ftv);
+      if st.st_ok(k) != 0 { return nj; }
+      tb.record_add(k, b, fname, ftid);
+      if st.st_ok(k) != 0 { return nj; }
+      j = nj;
+    }
+  };
+  if st.st_ok(k) != 0 { return j; }
+  let id: u64 = tb.record_end(k, b);
+  if st.st_ok(k) != 0 { return 0; }
+  ctf.v_set(out, 1, id, 0);
+  return 1;
+};
+
+pub let skip_eq = func(g: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  if ctf.has_tok(g, i, s.p_eq()) == 1 { return i; }
+  return skip_eq(g, i + 1);
+};
+
+let run = func(k: Mut(st.State), g: u64) -> u64 { return run_at(k, g, 0); };
+
+let run_at = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { return i; }
+  if st.st_ok(k) != 0 or st.st_ctdone(k) == 1 { return n; }
+  if ax.is_semi(g, i) == 1 { return run_at(k, g, i + 1); }
+  if ax.is_group(g, i) == 1 {
+    let mark: u64 = ctf.mark(k);
+    run(k, ax.n_at(g, i));
+    ctf.release(k, mark);
+    return run_at(k, g, i + 1);
+  }
+  let name: u64 = ax.node_sym(ax.n_at(g, i));
+  if name == s.k_let() {
+    let nm: u64 = ax.node_sym(ax.n_at(g, i + 1));
+    let j1: u64 = if ctf.has_tok(g, i + 2, s.p_colon()) == 1 { skip_eq(g, i + 3) } else { i + 2 };
+    let e: u64 = if ctf.has_tok(g, j1, s.p_eq()) == 1 { j1 + 1 } else { j1 };
+    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let j: u64 = ct_eval(k, g, e, 0, v);
+    if st.st_ok(k) != 0 { return j; }
+    ctf.bind(k, nm, ctf.v_kind(v), ctf.v_a(v), ctf.v_b(v));
+    return run_at(k, g, ax.skip_semi(g, j));
+  }
+  if name == s.k_if() {
+    let c: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let j: u64 = ct_eval(k, g, i + 1, 0, c);
+    if st.st_ok(k) != 0 { return j; }
+    let he: u64 = ctf.has_tok(g, j + 1, s.k_else());
+    let mark: u64 = ctf.mark(k);
+    if ctf.v_a(c) != 0 { run(k, ax.n_at(g, j)); } else { if he == 1 { run(k, ax.n_at(g, j + 2)); } }
+    ctf.release(k, mark);
+    return run_at(k, g, j + 1 + he * 2);
+  }
+  if name == s.k_return() {
+    let ret: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_ctret(k));
+    let j: u64 = if i + 1 < n { ct_eval(k, g, i + 1, 0, ret) } else { i + 1 };
+    st.st_set_ctdone(k, 1);
+    return j;
+  }
+  if name == s.k_comptime() {
+    if ctf.has_tok(g, i + 1, s.k_for()) == 0 { ctf.fail_msg(k, "expected for", 12, ax.e_ast()); return i + 1; }
+    let d: Mut(ctf.ForDesc) = ctf.for_open(k, g, i);
+    if st.st_ok(k) != 0 { return i + 4; }
+    let body: u64 = ctf.for_body(d);
+    let ctmark: u64 = ctf.mark(k);
+    let m0: u64 = ctf.for_step(k, d);
+    let m1: u64 = loop step(m: u64 = m0) while m == 1 {
+      let m2: u64 = ctf.mark(k);
+      run(k, ax.n_at(g, body));
+      ctf.release(k, m2);
+      let stop: u64 = if st.st_ok(k) != 0 or st.st_ctdone(k) == 1 { 1 } else { 0 };
+      m = if stop == 1 { 0 } else { ctf.for_step(k, d) };
+    };
+    ctf.release(k, ctmark);
+    return run_at(k, g, body + 1);
+  }
+  if ax.is_name(g, i) == 1 and ctf.has_tok(g, i + 1, s.p_eq()) == 1 {
+    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let j: u64 = ct_eval(k, g, i + 2, 0, v);
+    if st.st_ok(k) != 0 { return j; }
+    ctf.set_binding(k, name, v);
+    return run_at(k, g, ax.skip_semi(g, j));
+  }
+  let v2: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j2: u64 = ct_eval(k, g, i, 0, v2);
+  return run_at(k, g, ax.skip_semi(g, j2));
+};
+
+// --- 对外入口：顶层 let 绑定与类型位置调用 -------------------------------
+// 只有返回 Type / Module / Effect 的函数算类型工厂：这三种值都只在编译期存在。
+let factory_call_user = func(k: Mut(st.State), fn: Mut(modules.SymEntry), ag: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if is_null(fn) == 1 { return 0; }
+  if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
+  if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
+  call_user(k, fn, ag, out);
+  if st.st_ok(k) != 0 { return 1; }
+  let fk: u64 = ctf.v_kind(out);
+  if (fk == 1) or (fk == 9) or (fk == 11) { return 1; }
+  return 0;
+};
+
+let path_call_at = func(k: Mut(st.State), g: u64, i: u64, owner: u64, seal: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return 0; }
+  if i + 2 >= n { return 0; }
+  if ax.is_name(g, i + 2) == 0 { return 0; }
+  let nm: u64 = ax.n_sym(g, i + 2);
+  if ctf.has_delim(g, i + 3, ax.dl_paren()) == 1 {
+    let fn: Mut(modules.SymEntry) = modules.sym_lookup_in(k, owner, seal, nm, modules.cur(k));
+    if factory_call_user(k, fn, ax.n_at(g, i + 3), out) == 1 { return i + 4; }
+    return 0;
+  }
+  if ctf.has_tok(g, i + 3, s.p_dot()) == 0 { return 0; }
+  let seal2: Mut(u64) = ax.box(k);
+  let m: u64 = modules.resolve_child_mod(k, owner, seal, nm, modules.cur(k), seal2);
+  if m == 0 { return 0; }
+  return path_call_at(k, g, i + 2, m, deref(seal2), out);
+};
+
+// A.B.C.MakeRing(args)：首段落到模块号，中间各段逐段下钻，最后一段当函子名查。
+let eval_path_call = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let seal: Mut(u64) = ax.box(k);
+  let m: u64 = ctf.find_used_mod(k, ax.n_sym(g, i), seal);
+  if m == 0 { return 0; }
+  return path_call_at(k, g, i, m, deref(seal), out);
+};
+
+pub let eval_factory_call = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if ax.is_name(g, i) == 0 { return 0; }
+  if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    let fn: Mut(modules.SymEntry) = ctf.find_sym(k, ax.n_sym(g, i));
+    if factory_call_user(k, fn, ax.n_at(g, i + 1), out) == 1 { return i + 2; }
+    return 0;
+  }
+  return eval_path_call(k, g, i, out);
+};
+
+pub let type_binding = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64) -> u64 {
+  let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = eval_factory_call(k, g, e, v);
+  if j == 0 or st.st_ok(k) != 0 { return j; }
+  let tid: u64 = ctp.as_type(k, v);
+  if st.st_ok(k) != 0 { return j; }
+  let sh: u64 = ireg.ty_shape(k, tid);
+  if sh == 0 { ctf.fail_msg(k, "not a record type", 17, ax.e_type()); return j; }
+  agg.shp_set_name(sh, name);
+  agg.shp_set_mod(sh, st.st_src(k));
+  modules.sym_add(k, modules.sym_kind_struct(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
+  return j;
+};
+
+pub let type_from_call = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
+  let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = eval_factory_call(k, g, i, v);
+  if j == 0 or st.st_ok(k) != 0 { return j; }
+  let tid: u64 = ctp.as_type(k, v);
+  if st.st_ok(k) != 0 { return j; }
+  ireg.project(k, tid, out);
+  return j;
+};

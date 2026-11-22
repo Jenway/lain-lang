@@ -1,0 +1,244 @@
+// 类型与值：全部是 caller 分配的 32 / 56 字节块，只有标量与引用指针参与签名。
+let codes = import("src::ir::ir_codes");
+let s = import("src::driver::sym");
+
+pub let Ty = struct {
+  k: u64,
+  w: u64,
+  sg: u64,
+  sh: u64
+};
+
+pub let Val = struct {
+  n: u64,
+  lit: u64,
+  bits: u64,
+  tk: u64,
+  tw: u64,
+  tsg: u64,
+  tsh: u64
+};
+
+// --- 类型块：k @0，w @8，sg @16，sh @24。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
+// sh 是形状号：非 0 表示指向 struct/enum/数组/字符串，布局在 agg.lain。
+pub let ty_save = func(p: Mut(Ty), k: u64, w: u64, sg: u64) -> u64 {
+  p.k = k;
+  p.w = w;
+  p.sg = sg;
+  p.sh = 0;
+  return k;
+}
+
+pub let tk = func(p: Mut(Ty)) -> u64 { return p.k; };
+pub let tw = func(p: Mut(Ty)) -> u64 { return p.w; };
+pub let tsg = func(p: Mut(Ty)) -> u64 { return p.sg; };
+pub let tsh = func(p: Mut(Ty)) -> u64 { return p.sh; };
+pub let ty_set_sh = func(p: Mut(Ty), v: u64) -> u64 { p.sh = v; return v; };
+
+pub let ty_at = func(dst: Mut(Ty), src: Mut(Ty)) -> u64 {
+  let a: u64 = src.k;
+  let b: u64 = src.w;
+  let c: u64 = src.sg;
+  let d: u64 = src.sh;
+  ty_save(dst, a, b, c);
+  return ty_set_sh(dst, d);
+};
+
+pub let ty_known = func(p: Mut(Ty)) -> u64 {
+  if p.k == 9 { return 0; }
+  return 1;
+};
+
+pub let ty_same = func(a: Mut(Ty), b: Mut(Ty)) -> u64 {
+  if a.k != b.k { return 0; }
+  if a.w != b.w { return 0; }
+  if a.sg != b.sg { return 0; }
+  if a.sh != b.sh { return 0; }
+  return 1;
+};
+
+// bool 只有 1 位，不能进 #load/#store。
+pub let ty_byte_ok = func(p: Mut(Ty)) -> u64 {
+  let w: u64 = p.w;
+  if w == 0 { return 0; }
+  let r: u64 = w - w / 8 * 8;
+  if r != 0 { return 0; }
+  return 1;
+};
+
+pub let ty_none = func(p: Mut(Ty)) -> u64 { return ty_save(p, 9, 0, 0); };
+
+pub let ty_bits = func(p: Mut(Ty), w: u64, sg: u64) -> u64 {
+  return ty_save(p, codes.TY_BITS(), w, sg);
+};
+
+pub let ty_addr = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_ADDR(), 0, 0); };
+
+// 带形状的地址：聚合与数组值在 IR 里一律是指针类型。
+let ty_agg = func(p: Mut(Ty), sh: u64) -> u64 {
+  ty_addr(p);
+  return ty_set_sh(p, sh);
+};
+pub let ty_bool = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 1, 0); };
+pub let ty_i32 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 32, 1); };
+pub let ty_u64 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 64, 0); };
+pub let ty_u8 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 8, 0); };
+
+// 类型名 → 类型。认不出来返回 0，调用方负责报错。
+pub let ty_of_sym = func(h: u64, out: Mut(Ty)) -> u64 {
+  if h == s.t_i8() { ty_bits(out, 8, 1); return 1; }
+  if h == s.t_i16() { ty_bits(out, 16, 1); return 1; }
+  if h == s.t_i32() { ty_bits(out, 32, 1); return 1; }
+  if h == s.t_i64() { ty_bits(out, 64, 1); return 1; }
+  if h == s.t_u8() { ty_bits(out, 8, 0); return 1; }
+  if h == s.t_u16() { ty_bits(out, 16, 0); return 1; }
+  if h == s.t_u32() { ty_bits(out, 32, 0); return 1; }
+  if h == s.t_u64() { ty_bits(out, 64, 0); return 1; }
+  if h == s.t_usize() { ty_bits(out, 64, 0); return 1; }
+  if h == s.t_bool() { ty_bool(out); return 1; }
+  if h == s.t_addr() { ty_addr(out); return 1; }
+  if h == s.t_void() { ty_none(out); return 1; }
+  return 0;
+};
+
+// --- 值块：n @0，lit @8，bits @16，类型 @24。
+let val_save = func(p: Mut(Val), n: u64, lit: u64, bits: u64, t: Mut(Ty)) -> u64 {
+  p.n = n;
+  p.lit = lit;
+  p.bits = bits;
+  ty_at(vty(p), t);
+  return n;
+};
+
+pub let val_at = func(dst: Mut(Val), src: Mut(Val)) -> u64 {
+  dst.n = src.n;
+  dst.lit = src.lit;
+  dst.bits = src.bits;
+  let srct: Mut(Ty) = ptr_cast(Mut(Ty), ptr_cast(Mut(u8), src) + 24);
+  return ty_at(vty(dst), srct);
+};
+
+pub let vn = func(p: Mut(Val)) -> u64 { return p.n; };
+pub let vlit = func(p: Mut(Val)) -> u64 { return p.lit; };
+pub let vbits = func(p: Mut(Val)) -> u64 { return p.bits; };
+pub let vty = func(p: Mut(Val)) -> Mut(Ty) { return ptr_cast(Mut(Ty), ptr_cast(Mut(u8), p) + 24); };
+
+pub let val_none = func(p: Mut(Val)) -> u64 {
+  p.n = 0;
+  p.lit = 0;
+  p.bits = 0;
+  ty_none(vty(p));
+  return 0;
+};
+
+pub let val_lit = func(p: Mut(Val), bits: u64, t: Mut(Ty)) -> u64 {
+  return val_save(p, 0, 1, bits, t);
+};
+
+pub let val_ref = func(p: Mut(Val), n: u64, t: Mut(Ty)) -> u64 {
+  return val_save(p, n, 0, 0, t);
+};
+
+pub let val_known = func(p: Mut(Val)) -> u64 {
+  if p.lit == 1 { return 1; }
+  if p.n != 0 { return 1; }
+  return 0;
+};
+
+// --- 算子表 ------------------------------------------------------------
+// 优先级与 seed/lain0/src/Lexer.cpp:306 binaryPrecedence 一致。
+pub let prec = func(h: u64) -> u64 {
+  if h == s.k_or() { return 1; }
+  if h == s.k_and() { return 2; }
+  if h == s.o_pipe() { return 3; }
+  if h == s.o_caret() { return 4; }
+  if h == s.o_amp() { return 5; }
+  if h == s.o_eq() { return 6; }
+  if h == s.o_ne() { return 6; }
+  if h == s.o_lt() { return 7; }
+  if h == s.o_le() { return 7; }
+  if h == s.o_gt() { return 7; }
+  if h == s.o_ge() { return 7; }
+  if h == s.o_shl() { return 8; }
+  if h == s.o_shr() { return 8; }
+  if h == s.o_plus() { return 9; }
+  if h == s.o_minus() { return 9; }
+  if h == s.o_star() { return 10; }
+  if h == s.o_slash() { return 10; }
+  if h == s.o_percent() { return 10; }
+  return 0;
+};
+
+let is_cmp = func(h: u64) -> u64 {
+  if h == s.o_eq() { return 1; }
+  if h == s.o_ne() { return 1; }
+  if h == s.o_lt() { return 1; }
+  if h == s.o_le() { return 1; }
+  if h == s.o_gt() { return 1; }
+  if h == s.o_ge() { return 1; }
+  return 0;
+};
+
+// 与 seed/lain0/src/Sema.cpp:495 selectBinary 逐条对齐。
+pub let bin_inst = func(h: u64, sg: u64) -> u64 {
+  if h == s.o_plus() { return codes.INST_ADD(); }
+  if h == s.o_minus() { return codes.INST_SUB(); }
+  if h == s.o_star() { return codes.INST_MUL(); }
+  if h == s.o_slash() {
+    if sg == 1 { return codes.INST_SDIV(); }
+    return codes.INST_UDIV();
+  }
+  if h == s.o_percent() {
+    if sg == 1 { return codes.INST_SREM(); }
+    return codes.INST_UREM();
+  }
+  if h == s.o_amp() { return codes.INST_AND(); }
+  if h == s.o_pipe() { return codes.INST_OR(); }
+  if h == s.o_caret() { return codes.INST_XOR(); }
+  if h == s.o_shl() { return codes.INST_SHL(); }
+  if h == s.o_shr() {
+    if sg == 1 { return codes.INST_ASHR(); }
+    return codes.INST_LSHR();
+  }
+  if h == s.k_and() { return codes.INST_AND(); }
+  if h == s.k_or() { return codes.INST_OR(); }
+  if h == s.o_eq() { return codes.INST_EQ(); }
+  if h == s.o_ne() { return codes.INST_NE(); }
+  if h == s.o_lt() {
+    if sg == 1 { return codes.INST_SLT(); }
+    return codes.INST_ULT();
+  }
+  if h == s.o_le() {
+    if sg == 1 { return codes.INST_SLE(); }
+    return codes.INST_ULE();
+  }
+  if h == s.o_gt() {
+    if sg == 1 { return codes.INST_SGT(); }
+    return codes.INST_UGT();
+  }
+  if h == s.o_ge() {
+    if sg == 1 { return codes.INST_SGE(); }
+    return codes.INST_UGE();
+  }
+  return 999;
+};
+
+// 转换指令：0 表示等宽、不需要指令（调用方发 #add(x, 0)）。
+pub let cast_inst = func(fk: u64, fw: u64, fsg: u64, tk: u64, tw: u64) -> u64 {
+  if fk == codes.TY_ADDR() { return codes.INST_BITCAST(); }
+  if tk == codes.TY_ADDR() { return codes.INST_BITCAST(); }
+  if fw == tw { return 0; }
+  if fw == 0 { return 0; }
+  if tw == 0 { return 0; }
+  if tw > fw {
+    if fsg == 1 { return codes.INST_SEXT(); }
+    return codes.INST_ZEXT();
+  }
+  return codes.INST_TRUNC();
+};
+
+// 比较的结果是 bool，其它算子的结果是操作数类型。
+pub let result_ty = func(h: u64, t: Mut(Ty), out: Mut(Ty)) -> u64 {
+  if is_cmp(h) == 1 { return ty_bool(out); }
+  return ty_at(out, t);
+};

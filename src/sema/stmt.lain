@@ -1,0 +1,520 @@
+// stmt.lain —— 语句编排：let、左值赋值、return、break/continue、语句分派与块遍历。
+// 表达式求值经外部链接回到 core（expr 是互递归的另一半），块的归属留在本文件，
+// 所以 flow.lain 的分支体也指回这里。
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let env = import("src::sema::env");
+let ir = import("src::ir::ir");
+let codes = import("src::ir::ir_codes");
+let s = import("src::driver::sym");
+let ax = import("src::syntax::ast");
+let cx = import("src::sema::ctx");
+let agg = import("src::sema::agg");
+let lv = import("src::sema::lval");
+let flow = import("src::sema::flow");
+let ireg = import("src::sema::tyreg");
+let ct = import("src::comptime::ctypes");
+let ctf = import("src::comptime::ctfor");
+let tb = import("src::sema::tbuild");
+let gv = import("src::sema::given");
+let modules = import("src::sema::modules");
+let ctfn = import("src::comptime::ctfn");
+let ef = import("src::sema::effects");
+
+extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
+extern stmt_p1_group(k: Mut(st.State), g: u64) -> u64 = lainc_eval_phase1_group;
+extern stmt_p2_group(k: Mut(st.State), g: u64) -> u64 = lainc_eval_phase2_group;
+
+let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
+let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
+let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
+let box_put = func(p: Mut(u64), v: u64) -> u64 { return ax.box_put(p, v); };
+let box_get = func(p: Mut(u64)) -> u64 { return ax.box_get(p); };
+let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
+let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
+let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
+let node_sym = func(h: u64) -> u64 { return ax.node_sym(h); };
+let is_group_node = func(h: u64) -> u64 { return ax.is_group_node(h); };
+let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
+let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
+let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
+let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
+let skip_semi = func(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); };
+let dl_brace = func() -> u64 { return ax.dl_brace(); };
+let no_slot = func() -> u64 { return ax.no_slot(); };
+let e_ast = func() -> u64 { return ax.e_ast(); };
+let e_type = func() -> u64 { return ax.e_type(); };
+let e_unsup = func() -> u64 { return ax.e_unsup(); };
+let e_frame = func() -> u64 { return ax.e_frame(); };
+let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
+let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
+let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.coerce(k, v, from, to, out); };
+let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.slot_put(k, j, v, tp); };
+let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
+let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
+let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
+let find_loop = func(k: Mut(st.State), label: u64, has_label: u64) -> u64 { return cx.find_loop(k, label, has_label); };
+
+// 点号路径：从 i 起把名字段收进表里，返回路径之后的下标，段数写进 cnt。
+let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(u64), n: u64) -> u64 {
+  if i >= n { return i; }
+  if is_name(g, i) == 0 { return i; }
+  let c: u64 = box_get(cnt);
+  if c >= 8 { return i; }
+  let wp: Mut(u64) = cx.word_idx(segs, c);
+  deref(wp) = n_sym(g, i);
+  box_put(cnt, c + 1);
+  if i + 2 < n and n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
+    return path_take(k, g, i + 2, segs, cnt, n);
+  }
+  return i + 1;
+};
+
+// 名字段序列 → 模块号；首段走编译期绑定与 use 激活的模块，后续各段逐跳下探。
+let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u64)) -> u64 {
+  if cnt == 0 { return 0; }
+  let first: u64 = deref(segs);
+  let m0: u64 = ctf.find_used_mod(k, first, seal);
+  if m0 == 0 { return 0; }
+  if cnt == 1 { return m0; }
+  let rest: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), segs) + 8);
+  let tail: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), rest) + 8);
+  return modules.mod_resolve_path(k, m0, deref(rest), tail, cnt - 2, seal);
+};
+
+// 函数体内的模块绑定：右值是 module { ... }、已有模块路径或返回 Module 的函子调用时，
+// 名字只进编译期绑定栈，不占运行期栈槽。返回下一个语句的下标，无绑定回 0。
+let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if e >= n { return 0; }
+  // module { ... }：分配虚拟模块号，就地编掉成员声明。
+  if n_sym(g, e) == s.k_module() and e + 1 < n and is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == dl_brace() {
+    let bodyg: u64 = n_at(g, e + 1);
+    let vmod: u64 = st.st_next_vmod(k);
+    let reg: u64 = modules.mod_register_vmod(k, vmod, 0);
+    let par: u64 = modules.mod_set_parent(k, vmod, modules.cur(k));
+    let saved: u64 = st.st_vmod(k);
+    st.st_set_vmod(k, vmod);
+    let a: u64 = stmt_p1_group(k, bodyg);
+    if st.st_ok(k) == 0 { let b: u64 = stmt_p2_group(k, bodyg); }
+    st.st_set_vmod(k, saved);
+    if st.st_ok(k) == 0 { let bd: u64 = ctf.bind(k, name, 9, vmod, 0); }
+    return skip_semi(g, e + 2);
+  }
+  // 返回 Module 的函子调用：Lain 编译期解释器直接给出模块号与封签。
+  if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == ax.dl_paren() {
+    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let fc: u64 = ctfn.eval_factory_call(k, g, e, v);
+    if fc != 0 {
+      if st.st_ok(k) != 0 { return fc; }
+      if ctf.v_kind(v) == 9 {
+        let bd: u64 = ctf.bind(k, name, 9, ctf.v_a(v), ctf.v_b(v));
+        return skip_semi(g, fc);
+      }
+    }
+  }
+  // 裸名或点号路径：整条语句就是一个模块路径时才当作模块绑定。
+  if is_name(g, e) == 1 {
+    let segs: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
+    let cnt: Mut(u64) = box(k);
+    let end: u64 = path_take(k, g, e, segs, cnt, n);
+    if end < n and is_semi(g, end) == 0 { return 0; }
+    let seal: Mut(u64) = box(k);
+    let m: u64 = path_resolve(k, segs, box_get(cnt), seal);
+    if m == 0 { return 0; }
+    let bd: u64 = ctf.bind(k, name, 9, m, deref(seal));
+    return skip_semi(g, end);
+  }
+  return 0;
+};
+
+// 块内 use / open：use 激活模块参与 Witness 检索，open 把公开面接进当前模块。
+let stmt_use = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let is_use: u64 = if n_sym(g, i) == s.k_use() { 1 } else { 0 };
+  let segs: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
+  let cnt: Mut(u64) = box(k);
+  let end: u64 = path_take(k, g, i + 1, segs, cnt, n);
+  let c: u64 = box_get(cnt);
+  if c == 0 {
+    let m0: Ref(u8) = "expected module path";
+    let d0: u64 = ir.diag(k, 0, 1, m0, 19);
+    st.st_fail(k, e_ast());
+    return end;
+  }
+  let seal: Mut(u64) = box(k);
+  let target: u64 = path_resolve(k, segs, c, seal);
+  if target == 0 {
+    let m: Ref(u8) = "unknown module";
+    let d: u64 = ir.diag(k, 0, 1, m, 14);
+    st.st_fail(k, e_type());
+    return skip_semi(g, end);
+  }
+  if is_use == 1 {
+    let pu: u64 = ctf.push_use(k, target, deref(seal));
+    let pi: u64 = gv.push_mod_implicit(k, target, deref(seal));
+  } else {
+    let op: u64 = modules.mod_add_open(k, modules.cur(k), target, deref(seal));
+  }
+  return skip_semi(g, end);
+};
+
+// 封签标注：let R: SomeSig = ... 里的 SomeSig 不是类型，跳过标注解析。
+let sig_ann = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if j0 >= n { return 0; }
+  if n_sym(g, j0) != s.p_colon() { return 0; }
+  if j0 + 1 >= n { return 0; }
+  if is_name(g, j0 + 1) == 0 { return 0; }
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, j0 + 1));
+  if is_null(e) { return 0; }
+  if modules.sym_kind(e) != modules.sym_kind_sig() { return 0; }
+  return 1;
+};
+
+let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  let j0: u64 = i + 2;
+  let t: Mut(ty.Ty) = tnone(k);
+  let sa: u64 = sig_ann(k, g, j0);
+  let j: u64 = if j0 < n_count(g) and n_sym(g, j0) == s.p_colon() {
+    if sa == 1 { j0 + 2 } else { parse_type(k, g, j0 + 1, t) }
+  } else { j0 };
+  if tb.ty_is_type(t) == 1 {
+    let m: Ref(u8) = "type value at runtime";
+    let d: u64 = ir.diag(k, 0, 1, m, 21);
+    st.st_fail(k, e_type());
+    return j;
+  }
+  let e: u64 = expect_sym(k, g, j, s.p_eq());
+  let efj: u64 = ef.effect_rhs(k, g, e, name, 0);
+  if efj != 0 { return skip_semi(g, efj); }
+  let mb: u64 = ct_module_rhs(k, g, e, name);
+  if mb != 0 { return mb; }
+  let v: Mut(ty.Val) = new_val(k);
+  let nj: u64 = core_expr(k, g, e, 0, t, v);
+  if st.st_ok(k) != 0 { return nj; }
+  if ef.take_aborts(k) == 1 { return skip_semi(g, nj); }
+  let vt: Mut(ty.Ty) = new_ty(k);
+  if ty.ty_known(t) == 1 {
+    ty.ty_at(vt, t);
+    // 标注是无形状指针而右值带形状时保留形状，长度与字段信息都在形状里。
+    if ty.tk(t) == 3 and ty.tsh(t) == 0 and ty.tsh(ty.vty(v)) != 0 {
+      let sh: u64 = ty.tsh(ty.vty(v));
+      let sv: u64 = ty.ty_set_sh(vt, sh);
+    }
+  } else {
+    let vs: u64 = ty.tsh(ty.vty(v));
+    if vs != 0 {
+      if agg.shp_kind(vs) == agg.kind_string() {
+        let id: u64 = ireg.ty_add(k, ireg.lk_bits(), 8, 0, 0);
+        let sid: u64 = ct.slice_t(k, id, 0);
+        let projected: u64 = ireg.project(k, sid, vt);
+      } else {
+        ty.ty_at(vt, ty.vty(v));
+      }
+    } else {
+      ty.ty_at(vt, ty.vty(v));
+    }
+  }
+  if ty.ty_known(vt) == 0 {
+    // 推导不出来只有两种来源：右值根本没有值（void 调用），或者类型无从确定。
+    let absent: u64 = if ty.vn(v) != 0 { 0 } else { 1 };
+    let m1: Ref(u8) = "void value";
+    let m2: Ref(u8) = "cannot infer type";
+    let mv: Ref(u8) = if absent == 1 { m1 } else { m2 };
+    let ml: u64 = if absent == 1 { 10 } else { 17 };
+    let md: u64 = ir.diag(k, 0, 1, mv, ml);
+    st.st_fail(k, e_type());
+    return nj;
+  }
+  // 标注类型与右值类型可能不同（字符串→切片要现造 16 字节头，Mut→Ref 只改标注）。
+  let cv: Mut(ty.Val) = new_val(k);
+  let c1: u64 = coerce(k, v, ty.vty(v), vt, cv);
+  if st.st_ok(k) != 0 { return nj; }
+  let sl: u64 = st.st_next_slot(k);
+  slot_put(k, sl, cv, ty.vty(cv));
+  env.env_push(k, name, sl, vt);
+  return skip_semi(g, nj);
+};
+
+// --- 左值 -----------------------------------------------------------------
+// 起点与每一步的表达式求值由 core 编排，几何与写入在 lval.lain。
+let stmt_assign = func(k: Mut(st.State), g: u64, i: u64, eqj: u64) -> u64 {
+  let r: Mut(lv.LvalRec) = lv.rec_new(k);
+  let a: u64 = lv.parse_base(k, g, i, r);
+  if st.st_ok(k) != 0 { return eqj + 1; }
+  let b: u64 = lv.parse_walk(k, g, a, eqj, r);
+  if st.st_ok(k) != 0 { return eqj + 1; }
+  let lock: u64 = lv.rec_lock(r);
+  let mr: Ref(u8) = "read-only ref";
+  let ms: Ref(u8) = "read-only slice";
+  let mt: Ref(u8) = "read-only table";
+  if lock == 1 { return lv.lval_bad(k, mr, 13, eqj + 1); }
+  if lock == 2 { return lv.lval_bad(k, ms, 15, eqj + 1); }
+  if lock == 3 { return lv.lval_bad(k, mt, 15, eqj + 1); }
+  let t: Mut(ty.Ty) = lv.rec_ty(r);
+  let v: Mut(ty.Val) = new_val(k);
+  let j: u64 = core_expr(k, g, eqj + 1, 0, t, v);
+  if st.st_ok(k) != 0 { return j; }
+  if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
+  let c: Mut(ty.Val) = new_val(k);
+  let c1: u64 = coerce(k, v, ty.vty(v), t, c);
+  if st.st_ok(k) != 0 { return j; }
+  let s0: u64 = lv.store_value(k, r, c);
+  return skip_semi(g, j);
+};
+
+// 有值 return：算表达式并把实参推好，返回新下标。
+let ret_value = func(k: Mut(st.State), g: u64, j0: u64, rt: Mut(ty.Ty)) -> u64 {
+  let v: Mut(ty.Val) = new_val(k);
+  let j: u64 = core_expr(k, g, j0, 0, rt, v);
+  if st.st_ok(k) != 0 { return j; }
+  if ty.ty_known(rt) == 0 { st.st_fail(k, e_type()); return j; }
+  let c: Mut(ty.Val) = new_val(k);
+  coerce(k, v, ty.vty(v), rt, c);
+  push_val(k, c);
+  return j;
+};
+
+let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
+  box_put(term, 1);
+  let ins: Mut(ef.InlineState) = ef.inline_top(k);
+  if is_null(ins) == 0 {
+    let ct: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), ins.tp);
+    let j0: u64 = i + 1;
+    let has: u64 = if j0 < n_count(g) and is_semi(g, j0) == 0 { 1 } else { 0 };
+    let jj: u64 = if has == 1 {
+      let v: Mut(ty.Val) = new_val(k);
+      let ej: u64 = core_expr(k, g, j0, 0, ct, v);
+      if st.st_ok(k) == 0 and ty.val_known(v) == 1 {
+        let c: Mut(ty.Val) = new_val(k);
+        coerce(k, v, ty.vty(v), ct, c);
+        if st.st_ok(k) == 0 { slot_put(k, ins.slot, c, ct); }
+      }
+      ej
+    } else { j0 };
+    ir.args_reset(k);
+    ir.emit_jump(k, codes.INST_BREAK(), ins.label);
+    return skip_semi(g, jj);
+  }
+  let rt: Mut(ty.Ty) = new_ty(k);
+  ty.ty_save(rt, st.st_retk(k), st.st_retw(k), st.st_retsg(k));
+  let sh: u64 = ty.ty_set_sh(rt, st.st_retsh(k));
+  let rp: u64 = st.st_retptr(k);
+  let j0: u64 = i + 1;
+  let has: u64 = if j0 < n_count(g) and is_semi(g, j0) == 0 { 1 } else { 0 };
+  // sret：把返回值整块拷进隐藏出参，过程本身没有返回值。
+  if rp != 0 and has == 1 {
+    let v: Mut(ty.Val) = new_val(k);
+    let j: u64 = core_expr(k, g, j0, 0, rt, v);
+    if st.st_ok(k) != 0 { return j; }
+    if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
+    let c: Mut(ty.Val) = new_val(k);
+    let c1: u64 = coerce(k, v, ty.vty(v), rt, c);
+    if st.st_ok(k) != 0 { return j; }
+    let sz: u64 = agg.shp_size(ty.tsh(rt));
+    let cp: u64 = agg.copy_block(k, rp, ty.vn(c), sz);
+    ir.args_reset(k);
+    ir.emit_jump(k, codes.INST_RETURN(), 0);
+    return skip_semi(g, j);
+  }
+  ir.args_reset(k);
+  let j: u64 = if has == 1 { ret_value(k, g, j0, rt) } else { j0 };
+  if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  return skip_semi(g, j);
+};
+
+let break_value = func(k: Mut(st.State), bg: u64, resj: u64) -> u64 {
+  let v: Mut(ty.Val) = new_val(k);
+  let noty: Mut(ty.Ty) = tnone(k);
+  let j: u64 = core_expr(k, bg, 0, 0, noty, v);
+  if st.st_ok(k) != 0 { return j; }
+  if resj != no_slot() and ty.val_known(v) == 1 { slot_put(k, resj, v, ty.vty(v)); }
+  return j;
+};
+
+let stmt_break = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
+  box_put(term, 1);
+  let ho: Mut(cx.LoopHeadOut) = ptr_cast(Mut(cx.LoopHeadOut), st.st_alloc(k, 16));
+  let j: u64 = loop_head(k, g, i + 1, ho);
+  let fi: u64 = find_loop(k, ho.label, ho.has);
+  if fi == no_slot() { st.st_fail(k, e_frame()); return j; }
+  let f: Mut(st.LoopFrame) = st.st_lf(k, fi);
+  let resj: u64 = st.st_lf_res(f);
+  let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { break_value(k, n_at(g, j), resj) } else { j };
+  ir.args_reset(k);
+  ir.emit_jump(k, codes.INST_BREAK(), st.st_lf_label(f));
+  return skip_semi(g, j2);
+};
+
+let cont_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, f: Mut(st.LoopFrame)) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  let v: Mut(ty.Val) = new_val(k);
+  let noty: Mut(ty.Ty) = tnone(k);
+  let j: u64 = core_expr(k, g, i, 0, noty, v);
+  if st.st_ok(k) != 0 { return j; }
+  if idx < st.st_lf_np(f) and ty.val_known(v) == 1 {
+    slot_put(k, st.st_lf_slot(f, idx), v, ty.vty(v));
+  }
+  if is_comma(g, j) == 1 { return cont_args(k, g, j + 1, idx + 1, f); }
+  return j;
+};
+
+let stmt_continue = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
+  box_put(term, 1);
+  let ho: Mut(cx.LoopHeadOut) = ptr_cast(Mut(cx.LoopHeadOut), st.st_alloc(k, 16));
+  let j: u64 = loop_head(k, g, i + 1, ho);
+  let fi: u64 = find_loop(k, ho.label, ho.has);
+  if fi == no_slot() { st.st_fail(k, e_frame()); return j; }
+  let f: Mut(st.LoopFrame) = st.st_lf(k, fi);
+  let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { cont_args(k, n_at(g, j), 0, 0, f) } else { j };
+  if st.st_ok(k) != 0 { return j2; }
+  ir.args_reset(k);
+  ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f));
+  return skip_semi(g, j2);
+};
+
+// comptime for 序列：按编译期序列逐次绑定循环变量，把体当普通语句编译，
+// 不发射任何运行期 #loop。每轮结束后释放运行期与编译期绑定栈，防止泄露到后续语句/函数。
+let stmt_ctfor = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
+  let d: Mut(ctf.ForDesc) = ctf.for_open(k, g, i);
+  if st.st_ok(k) != 0 { return i + 1; }
+  let body: u64 = ctf.for_body(d);
+  let ctmark: u64 = ctf.mark(k);
+  let m0: u64 = ctf.for_step(k, d);
+  let m1: u64 = loop step(m: u64 = m0) while m == 1 {
+    let mark: u64 = env.env_mark(k);
+    let j: u64 = block_mode(k, n_at(g, body), 0, term, no_slot(), tnone(k));
+    env.env_release(k, mark);
+    ctf.release(k, ctmark);
+    let bad: u64 = if st.st_ok(k) != 0 { 1 } else { 0 };
+    let tbad: u64 = if box_get(term) == 1 { 1 } else { bad };
+    m = if tbad == 1 { 0 } else { ctf.for_step(k, d) };
+  };
+  ctf.release(k, ctmark);
+  return body + 1;
+};
+
+let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  let h: u64 = n_at(g, i);
+  if is_group_node(h) == 1 {
+    if ax.delim(h) == dl_brace() {
+      let mark: u64 = env.env_mark(k);
+      let t: Mut(u64) = box(k);
+      let j: u64 = block_mode(k, h, 0, t, slot, tp);
+      env.env_release(k, mark);
+      if box_get(t) == 1 { box_put(term, 1); }
+      return i + 1;
+    }
+    st.st_fail(k, e_ast());
+    box_put(term, 1);
+    return i + 1;
+  }
+  let sym: u64 = node_sym(h);
+  if sym == s.k_let() { return stmt_let(k, g, i); }
+  if sym == s.intern("given", 5) {
+    let m: Ref(u8) = "legacy witness syntax removed";
+    let d: u64 = ir.diag(k, 0, 1, m, 29);
+    st.st_fail(k, e_ast());
+    return i + 1;
+  }
+  if sym == s.k_use() or sym == s.k_open() { return stmt_use(k, g, i); }
+  if sym == s.k_if() {
+    let v: Mut(ty.Val) = new_val(k);
+    let nt: Mut(ty.Ty) = tnone(k);
+    let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
+    let j: u64 = flow.if_compile(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
+    return skip_semi(g, j);
+  }
+  if sym == s.k_while() or sym == s.k_loop() {
+    let v: Mut(ty.Val) = new_val(k);
+    let nt: Mut(ty.Ty) = tnone(k);
+    let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
+    let j: u64 = flow.loop_compile(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
+    return skip_semi(g, j);
+  }
+  if sym == s.k_match() {
+    let v: Mut(ty.Val) = new_val(k);
+    let nt: Mut(ty.Ty) = tnone(k);
+    let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
+    let j: u64 = flow.match_compile(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
+    return skip_semi(g, j);
+  }
+  if sym == s.k_return() { return stmt_return(k, g, i, term); }
+  if sym == s.k_break() { return stmt_break(k, g, i, term); }
+  if sym == s.k_continue() { return stmt_continue(k, g, i, term); }
+  if sym == s.k_func() or sym == s.k_extern() or sym == s.k_struct() {
+    st.st_fail(k, e_unsup());
+    box_put(term, 1);
+    return i + 1;
+  }
+  if sym == s.k_enum() or sym == s.k_import() {
+    st.st_fail(k, e_unsup());
+    box_put(term, 1);
+    return i + 1;
+  }
+  if sym == s.k_comptime() {
+    if i + 1 < n and n_sym(g, i + 1) == s.k_for() { return stmt_ctfor(k, g, i, term); }
+    if i + 1 >= n or n_sym(g, i + 1) != s.p_dot() {
+      st.st_fail(k, e_unsup());
+      box_put(term, 1);
+      return i + 1;
+    }
+  }
+  let eqj: u64 = lv.find_eq(g, i, n);
+  if eqj != 0 { return stmt_assign(k, g, i, eqj); }
+  let v: Mut(ty.Val) = new_val(k);
+  let nt: Mut(ty.Ty) = tnone(k);
+  let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
+  let j: u64 = core_expr(k, g, i, 0, hint, v);
+  if st.st_ok(k) != 0 { return j; }
+  if ef.take_aborts(k) == 1 {
+    box_put(term, 1);
+    return skip_semi(g, j);
+  }
+  if slot != no_slot() and ty.val_known(v) == 1 {
+    slot_put(k, slot, v, ty.vty(v));
+  }
+  return skip_semi(g, j);
+};
+
+let block_walk = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  let t: Mut(u64) = box(k);
+  let j: u64 = stmt_mode(k, g, i, t, slot, tp);
+  if st.st_ok(k) != 0 { return j; }
+  if box_get(t) == 1 { box_put(term, 1); return j; }
+  return block_walk(k, g, j, term, slot, tp);
+};
+
+pub let block_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
+  let gm: u64 = gv.mark(k);
+  let ctm: u64 = ctf.mark(k);
+  let r: u64 = block_walk(k, g, i, term, slot, tp);
+  gv.release(k, gm);
+  ctf.release(k, ctm);
+  return r;
+};
+
+@root
+let lainc_stmt_block = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
+  return block_mode(k, g, i, term, slot, tp);
+};

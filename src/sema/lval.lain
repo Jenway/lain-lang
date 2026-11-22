@@ -1,0 +1,295 @@
+// lval.lain —— 通用左值：把 x、p.x、p.pos.x、ref_slot.x[i] 这类目标解析成
+// 「一块能写的存储 + 它的真实类型 + 是否只读」。表达式求值留在 core，
+// 这里只做几何与类型搬运，不反向依赖 core。
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let env = import("src::sema::env");
+let ir = import("src::ir::ir");
+let codes = import("src::ir::ir_codes");
+let s = import("src::driver::sym");
+let ax = import("src::syntax::ast");
+let agg = import("src::sema::agg");
+let modules = import("src::sema::modules");
+let ct = import("src::comptime::ctypes");
+let ireg = import("src::sema::tyreg");
+let ctf = import("src::comptime::ctfor");
+extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
+
+pub let LvalRec = struct {
+  cell: u64,
+  lock: u64
+};
+
+// 记录 128 字节：[存储名字@0, 只读标记@8, ..., 类型@56]。
+// 名字是 IR 里的值名（局部槽、数据符号或 #lea 的结果），不是宿主地址。
+// 只读标记：0 可写，1 只读引用，2 只读切片，3 只读静态表。
+pub let rec_new = func(k: Mut(st.State)) -> Mut(LvalRec) {
+  return ptr_cast(Mut(LvalRec), st.st_alloc(k, 128));
+};
+let rec_cell = func(r: Mut(LvalRec)) -> u64 { return r.cell; };
+let set_cell = func(r: Mut(LvalRec), v: u64) -> u64 { r.cell = v; return v; };
+pub let rec_ty = func(r: Mut(LvalRec)) -> Mut(ty.Ty) {
+  return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), r) + 56);
+};
+pub let rec_lock = func(r: Mut(LvalRec)) -> u64 { return r.lock; };
+let rec_set_lock = func(r: Mut(LvalRec), v: u64) -> u64 { r.lock = v; return v; };
+
+// base + idx * scale，idx 允许是寄存器里的值。
+let lea_idx = func(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, base);
+  let b: u64 = ir.op_val(k, iv);
+  let c: u64 = ir.arg_int(k, scale);
+  let d: u64 = ir.arg_int(k, 0);
+  let ins: u64 = ir.emit(k, codes.INST_LEA(), res, ir.taddr(k));
+  return res;
+};
+
+// 槽里存的是块地址（值聚合）还是值本身：结构、枚举、数组、切片存地址。
+let slot_holds_ptr = func(t: Mut(ty.Ty)) -> u64 { return agg.sret_ty(t); };
+
+// 局部名字：槽地址本身就是左值；值聚合先读出槽里存的那块地址。
+let from_local = func(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
+  let sn: u64 = ir.slot_name(k, env.env_slot(k, off));
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let g0: u64 = env.env_ty(k, off, t);
+  let lk: u64 = rec_set_lock(r, 0);
+  if slot_holds_ptr(t) == 1 {
+    let w: Mut(ty.Val) = ax.new_val(k);
+    let at: Mut(ty.Ty) = ir.taddr(k);
+    let l: u64 = agg.load_at(k, sn, 0, at, w);
+    return set_cell(r, ty.vn(w));
+  }
+  let res: u64 = ir.fresh_t(k);
+  let le: u64 = ir.emit_lea(k, res, sn, 0, 1, 0);
+  return set_cell(r, res);
+};
+
+// deref(引用)：被指向的那块就是左值；只读引用打上标记 1。
+let from_deref = func(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64 {
+  let sh: u64 = ty.tsh(ty.vty(pv));
+  let eid: u64 = ct.elem_tid(k, sh);
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let pr: u64 = ireg.project(k, eid, t);
+  let kd: u64 = agg.shp_kind(sh);
+  let lk: u64 = if kd == agg.kind_ref() { rec_set_lock(r, 1) } else { rec_set_lock(r, 0) };
+  return set_cell(r, ty.vn(pv));
+};
+
+// 静态数据：符号本身就是一个模块级的指针；只读表打上标记 3。
+let from_data = func(k: Mut(st.State), e: Mut(modules.SymEntry), r: Mut(LvalRec)) -> u64 {
+  let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), modules.sym_sig(e));
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let cp: u64 = ty.ty_at(t, tv);
+  let lk: u64 = if modules.sym_ro(e) == 1 { rec_set_lock(r, 3) } else { rec_set_lock(r, 0) };
+  return set_cell(r, modules.sym_qual(e));
+};
+
+// 成员：偏移加上去；成员自己也是值聚合时，先读出它存的那块地址。
+let field_step = func(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> u64 {
+  let off: u64 = agg.mem_off(m);
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let cur: u64 = rec_cell(r);
+  let mt: Mut(ty.Ty) = ax.new_ty(k);
+  let e1: u64 = agg.mem_ty(k, m, mt);
+  let cell: u64 = if off == 0 { cur } else { agg.off_of(k, cur, off) };
+  let cp: u64 = ty.ty_at(t, mt);
+  if slot_holds_ptr(mt) == 1 {
+    let w: Mut(ty.Val) = ax.new_val(k);
+    let at: Mut(ty.Ty) = ir.taddr(k);
+    let l: u64 = agg.load_at(k, cell, 0, at, w);
+    return set_cell(r, ty.vn(w));
+  }
+  return set_cell(r, cell);
+};
+
+// 下标：数组直接落在块上；切片先从头里取列指针，只读切片打上标记 2。
+let index_step = func(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let sh: u64 = ty.tsh(t);
+  let kd: u64 = agg.shp_kind(sh);
+  let cell: u64 = rec_cell(r);
+  let et: Mut(ty.Ty) = ax.new_ty(k);
+  let ew: u64 = if kd == agg.kind_array() {
+    let m: Mut(agg.Member) = agg.mem_index(sh, 0);
+    let e1: u64 = agg.mem_ty(k, m, et);
+    agg.type_size(agg.mem_k(m), agg.mem_w(m), agg.mem_sh(m))
+  } else {
+    let e2: u64 = ct.elem_ty(k, sh, et);
+    ct.elem_size(k, sh)
+  };
+  let base: u64 = if kd == agg.kind_array() {
+    cell
+  } else {
+    let w: Mut(ty.Val) = ax.new_val(k);
+    let at: Mut(ty.Ty) = ir.taddr(k);
+    let l: u64 = agg.load_at(k, cell, 0, at, w);
+    ty.vn(w)
+  };
+  let lk: u64 = if kd == agg.kind_slice() { rec_set_lock(r, 2) } else { 0 };
+  let np: u64 = lea_idx(k, base, iv, ew);
+  let cp: u64 = ty.ty_at(t, et);
+  return set_cell(r, np);
+};
+
+// 写入：值聚合整块拷贝，其余按目标的真实物理类型 #store。
+pub let store_value = func(k: Mut(st.State), r: Mut(LvalRec), v: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let cell: u64 = rec_cell(r);
+  if slot_holds_ptr(t) == 1 {
+    let sz: u64 = agg.shp_size(ty.tsh(t));
+    return agg.copy_block(k, cell, ty.vn(v), sz);
+  }
+  return agg.store_at(k, cell, 0, v, t);
+};
+
+// 语句里第一处 '=' 的位置（到分号为止，括号组整体跳过）；没有则回 0。
+// '==' 是另一个符号，不会误命中。
+pub let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  if ax.is_semi(g, i) == 1 { return 0; }
+  if ax.is_group(g, i) == 0 {
+    if ax.n_sym(g, i) == s.p_eq() { return i; }
+  }
+  return find_eq(g, i + 1, n);
+};
+
+pub let lval_bad = func(k: Mut(st.State), m: Ref(u8), n: u64, back: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, n);
+  st.st_fail(k, ax.e_op());
+  return back;
+};
+
+// 从 pos 起的模块链：还有下一段时先试子模块，末段必须是静态数据。
+// 落定在数据符号上就返回它的下一个位置，后面的 .字段 与 [下标] 留给 parse_walk。
+let module_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64), r: Mut(LvalRec)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  let name: u64 = ax.n_sym(g, pos);
+  let more: u64 = if pos + 2 < n and ax.is_name(g, pos + 2) == 1 and ax.n_sym(g, pos + 1) == s.p_dot() { 1 } else { 0 };
+  if more == 1 {
+    let nb: Mut(u64) = ax.box(k);
+    let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), name, modules.cur(k), nb);
+    if nx != 0 {
+      deref(sn) = ax.box_get(nb);
+      return module_step(k, g, pos + 2, nx, sn, r);
+    }
+  }
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), name, modules.cur(k));
+  if is_null(e) { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd != modules.sym_kind_data() and kd != modules.sym_kind_value() { return 0; }
+  let f: u64 = from_data(k, e, r);
+  return pos + 1;
+};
+
+// 模块成员数据 M.var / A.B.var：从首名落定到模块后再逐段走；未命中回 0。
+let module_data_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i + 2 >= n { return 0; }
+  if ax.n_sym(g, i + 1) != s.p_dot() { return 0; }
+  if ax.is_name(g, i + 2) == 0 { return 0; }
+  let sn: Mut(u64) = ax.box(k);
+  let m0: u64 = ctf.find_used_mod(k, ax.n_sym(g, i), sn);
+  if m0 == 0 { return 0; }
+  return module_step(k, g, i + 2, m0, sn, r);
+};
+
+pub let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
+  let m: Ref(u8) = "bad-lvalue";
+  if ax.is_name(g, i) == 0 { return lval_bad(k, m, 10, i + 1); }
+  let sym: u64 = ax.n_sym(g, i);
+  if sym == s.b_deref() {
+    if i + 1 >= ax.n_count(g) { return lval_bad(k, m, 10, i + 1); }
+    if ax.is_group(g, i + 1) == 0 { return lval_bad(k, m, 10, i + 1); }
+    if ax.delim_of(g, i + 1) != ax.dl_paren() { return lval_bad(k, m, 10, i + 1); }
+    let pv: Mut(ty.Val) = ax.new_val(k);
+    let aty: Mut(ty.Ty) = ir.taddr(k);
+    let j: u64 = core_expr(k, ax.n_at(g, i + 1), 0, 0, aty, pv);
+    if st.st_ok(k) != 0 { return i + 2; }
+    let sh: u64 = ty.tsh(ty.vty(pv));
+    if sh == 0 { return lval_bad(k, m, 10, i + 2); }
+    let kd: u64 = agg.shp_kind(sh);
+    if kd != agg.kind_ref() and kd != agg.kind_mut() { return lval_bad(k, m, 10, i + 2); }
+    let f: u64 = from_deref(k, pv, r);
+    return i + 2;
+  }
+  let off: u64 = env.env_find(k, sym);
+  if off != 0 { let f: u64 = from_local(k, off, r); return i + 1; }
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
+  if (e as u64) != 0 {
+    if modules.sym_kind(e) == modules.sym_kind_data() { let f2: u64 = from_data(k, e, r); return i + 1; }
+  }
+  let mj: u64 = module_data_base(k, g, i, r);
+  if mj != 0 { return mj; }
+  let p: Ref(u8) = modules.sym_addr(sym);
+  let n: u64 = modules.sym_len(sym);
+  let d: u64 = ir.diag(k, ax.e_unbound(), 1, p, n);
+  st.st_fail(k, ax.e_unbound());
+  return i + 1;
+};
+
+let auto_deref = func(k: Mut(st.State), r: Mut(LvalRec)) -> u64 {
+  let t: Mut(ty.Ty) = rec_ty(r);
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd != agg.kind_ref() and kd != agg.kind_mut() { return 0; }
+  let w: Mut(ty.Val) = ax.new_val(k);
+  let l: u64 = agg.load_at(k, rec_cell(r), 0, ir.taddr(k), w);
+  let sc: u64 = set_cell(r, ty.vn(w));
+  if kd == agg.kind_ref() { rec_set_lock(r, 1); }
+  let eid: u64 = ct.elem_tid(k, sh);
+  let pr: u64 = ireg.project(k, eid, t);
+  let ig0: u64 = l;
+  let ig1: u64 = sc;
+  let ig2: u64 = pr;
+  return auto_deref(k, r) + 1;
+};
+
+pub let parse_walk = func(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(LvalRec)) -> u64 {
+  let m: Ref(u8) = "bad-lvalue";
+  if i >= eqj { return i; }
+  let ad: u64 = auto_deref(k, r);
+  let ig_ad: u64 = ad;
+  if ax.is_group(g, i) == 1 {
+    if ax.delim_of(g, i) != ax.dl_bracket() { return lval_bad(k, m, 10, i); }
+    let sh: u64 = ty.tsh(rec_ty(r));
+    if sh == 0 { return lval_bad(k, m, 10, i); }
+    let kd: u64 = agg.shp_kind(sh);
+    if kd != agg.kind_array() and kd != agg.kind_slice() and kd != agg.kind_mutslice() { return lval_bad(k, m, 10, i); }
+    let nt: Mut(ty.Ty) = ax.new_ty(k);
+    let u: u64 = ty.ty_u64(nt);
+    let iv: Mut(ty.Val) = ax.new_val(k);
+    let j: u64 = core_expr(k, ax.n_at(g, i), 0, 0, nt, iv);
+    if st.st_ok(k) != 0 { return i + 1; }
+    let f: u64 = index_step(k, r, iv);
+    return parse_walk(k, g, i + 1, eqj, r);
+  }
+  if ax.n_sym(g, i) == s.p_dot() {
+    if i + 1 < eqj {
+      let interp: u64 = ctf.interp_at(g, i + 1);
+      let fname: u64 = if interp == 1 { ctf.interp_name(k, ax.n_at(g, i + 1)) } else { ax.n_sym(g, i + 1) };
+      if interp == 1 {
+        if st.st_ok(k) != 0 { return i + 2; }
+      } else {
+        if ax.is_name(g, i + 1) == 0 { return lval_bad(k, m, 10, i); }
+      }
+      let sh2: u64 = ty.tsh(rec_ty(r));
+      if sh2 == 0 { return lval_bad(k, m, 10, i); }
+      let mem: Mut(agg.Member) = agg.mem_find(sh2, fname);
+      if is_null(mem) {
+        if interp == 1 {
+          let nf: Ref(u8) = "no such field";
+          let d: u64 = ir.diag(k, 0, 1, nf, 13);
+          st.st_fail(k, ax.e_op());
+          return i + 2;
+        }
+        return lval_bad(k, m, 10, i);
+      }
+      let f2: u64 = field_step(k, r, mem);
+      return parse_walk(k, g, i + 2, eqj, r);
+    }
+  }
+  return lval_bad(k, m, 10, i);
+};

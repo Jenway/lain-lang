@@ -6,12 +6,17 @@ let t = import("std::test");
 let col = import("std::collections");
 let bld = import("std::build");
 let fmt = import("std::fmt");
+let opt = import("std::option");
+let mem = import("std::mem");
 let ir_test = import("tests::ir_verify_test");
 
 use bld;
+open mem;
+use mem.SystemAlloc;
 
 let Vec64 = col.ArenaVec(u64, 16);
 let Map64 = col.HashMapU64(u64, 32);
+let OptI64 = opt.Option(i64);
 
 let run_collections_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::collections");
@@ -94,13 +99,79 @@ let run_os_fmt_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
+let run_option_mem_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::option_and_mem");
+
+  // --- std::option ---
+  let some7: OptI64.Opt = OptI64.some(7);
+  let no_val: OptI64.Opt = OptI64.none();
+  t.eq_bool(mut_of(st), "option some is_some", OptI64.is_some(some7), true);
+  t.eq_bool(mut_of(st), "option some is_none", OptI64.is_none(some7), false);
+  t.eq_bool(mut_of(st), "option none is_some", OptI64.is_some(no_val), false);
+  t.eq_bool(mut_of(st), "option none is_none", OptI64.is_none(no_val), true);
+  t.eq_i64(mut_of(st), "option unwrap_or some", OptI64.unwrap_or(some7, -1), 7);
+  t.eq_i64(mut_of(st), "option unwrap_or none", OptI64.unwrap_or(no_val, -1), -1);
+
+  // --- std::mem.BumpArena ---
+  let arena: mem.BumpArena.Arena = mem.BumpArena.new();
+  t.eq_u64(mut_of(st), "arena capacity", mem.BumpArena.capacity(ref_of(arena)), 8192);
+  t.eq_u64(mut_of(st), "arena remaining empty", mem.BumpArena.remaining(ref_of(arena)), 8192);
+  let a0: u64 = mem.BumpArena.alloc(mut_of(arena), 64);
+  t.check(mut_of(st), "arena alloc nonzero", a0 != 0);
+  t.eq_u64(mut_of(st), "arena remaining after 64", mem.BumpArena.remaining(ref_of(arena)), 8128);
+  let a1: u64 = mem.BumpArena.alloc(mut_of(arena), 8);
+  t.check(mut_of(st), "arena alloc second", a1 == a0 + 64);
+  t.eq_u64(mut_of(st), "arena remaining after 72", mem.BumpArena.remaining(ref_of(arena)), 8120);
+  t.eq_u64(mut_of(st), "arena free inside", mem.BumpArena.free(mut_of(arena), a0), 1);
+  t.eq_u64(mut_of(st), "arena free outside", mem.BumpArena.free(mut_of(arena), a0 + 8192), 0);
+  let fb: u64 = 4096;
+  let oom_addr: u64 = mem.bump_alloc_or(mut_of(arena), 9000, fb);
+  t.eq_u64(mut_of(st), "arena oom fallback", oom_addr, 4096);
+  t.eq_u64(mut_of(st), "arena reset", mem.BumpArena.reset(mut_of(arena)), 1);
+  t.eq_u64(mut_of(st), "arena remaining reset", mem.BumpArena.remaining(ref_of(arena)), 8192);
+
+  // --- std::mem.BudgetTracker ---
+  let tr: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(64);
+  let p0: u64 = mem.BudgetTracker.alloc(mut_of(tr), 16);
+  t.check(mut_of(st), "budget alloc1 nonzero", p0 != 0);
+  t.eq_u64(mut_of(st), "budget live 24", mem.BudgetTracker.live(ref_of(tr)), 24);
+  let p1: u64 = mem.BudgetTracker.alloc(mut_of(tr), 16);
+  t.check(mut_of(st), "budget alloc2 nonzero", p1 != 0);
+  t.eq_u64(mut_of(st), "budget live 48", mem.BudgetTracker.live(ref_of(tr)), 48);
+  t.eq_u64(mut_of(st), "budget peak 48", mem.BudgetTracker.peak(ref_of(tr)), 48);
+  let pd: u64 = mem.BudgetTracker.alloc(mut_of(tr), 40);
+  t.eq_u64(mut_of(st), "budget deny over limit", pd, 0);
+  t.eq_u64(mut_of(st), "budget denied 1", mem.BudgetTracker.denied(ref_of(tr)), 1);
+  let fbk: u64 = 777;
+  let budget_oom: u64 = mem.budget_alloc_or(mut_of(tr), 40, fbk);
+  t.eq_u64(mut_of(st), "budget oom fallback", budget_oom, 777);
+  t.eq_u64(mut_of(st), "budget denied 2", mem.BudgetTracker.denied(ref_of(tr)), 2);
+  t.eq_bool(mut_of(st), "budget has_leaks before free", mem.BudgetTracker.has_leaks(ref_of(tr)), true);
+  t.eq_u64(mut_of(st), "budget free p0", mem.BudgetTracker.free(mut_of(tr), p0), 0);
+  t.eq_u64(mut_of(st), "budget live 24 after free", mem.BudgetTracker.live(ref_of(tr)), 24);
+  t.eq_u64(mut_of(st), "budget free p1", mem.BudgetTracker.free(mut_of(tr), p1), 0);
+  t.eq_u64(mut_of(st), "budget live 0", mem.BudgetTracker.live(ref_of(tr)), 0);
+  t.eq_bool(mut_of(st), "budget has_leaks after free", mem.BudgetTracker.has_leaks(ref_of(tr)), false);
+
+  // --- std::mem.SystemAlloc ---
+  let sa: mem.SystemHandle = mem.SystemAlloc.new();
+  let sp: u64 = mem.SystemAlloc.alloc(mut_of(sa), 128);
+  t.check(mut_of(st), "system alloc nonzero", sp != 0);
+  t.eq_u64(mut_of(st), "system free", mem.SystemAlloc.free(mut_of(sa), sp), 0);
+  let sp2: u64 = mem.alloc_with(mut_of(sa), 32);
+  t.check(mut_of(st), "system alloc_with nonzero", sp2 != 0);
+  t.eq_u64(mut_of(st), "system free alloc_with", mem.SystemAlloc.free(mut_of(sa), sp2), 0);
+  return t.finish(mut_of(st));
+};
+
 let main = func() -> i64 {
   io.println("=== Lain Library Test Runner (test.lain) ===");
   let f0: i64 = ir_test.run_suite();
   let f1: i64 = run_collections_suite();
   let f2: i64 = run_build_suite();
   let f3: i64 = run_os_fmt_suite();
-  let total_fail: i64 = f0 + f1 + f2 + f3;
+  let f4: i64 = run_option_mem_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3 + f4;
   if total_fail == 0 {
     io.println("ALL SUITES PASSED");
   } else {

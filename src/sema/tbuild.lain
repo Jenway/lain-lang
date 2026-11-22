@@ -1,0 +1,295 @@
+// tbuild.lain —— 编译期 Type 一等值与 TypeBuilder（record_begin / record_add / record_end）。
+// 本模块只依赖 state/types/sym/agg/ir/tyreg/ast，单向无环。
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let s = import("src::driver::sym");
+let agg = import("src::sema::agg");
+let ir = import("src::ir::ir");
+let ireg = import("src::sema::tyreg");
+let ax = import("src::syntax::ast");
+
+let SigRec = struct {
+  np: u64,
+  ret: Mut(ty.Ty),
+  params: Mut(ty.Ty)
+};
+
+let TbField = struct {
+  name: u64,
+  tid: u64
+};
+
+pub let TypeBuilder = struct {
+  base: Mut(TbField),
+  count: u64,
+  cap: u64
+};
+
+let FactoryArg = struct {
+  kind: u64,
+  a: u64,
+  b: u64
+};
+
+pub let FactoryCacheEntry = struct {
+  fn_u: u64,
+  nargs: u64,
+  rk: u64,
+  ra: u64,
+  rb: u64,
+  pad: u64
+};
+
+// --- Type 一等元类型与签名检测 --------------------------------------------
+// Type 的逻辑形状只编译期存在：投影一律 unknown，运行期不可物化。
+pub let type_shape = func(k: Mut(st.State)) -> u64 {
+  let got: u64 = st.st_typesh(k);
+  if got != 0 { return got; }
+  let sh: u64 = agg.shp_new(k, agg.kind_type(), s.t_type(), st.st_src(k));
+  st.st_set_typesh(k, sh);
+  return sh;
+};
+
+pub let type_tid = func(k: Mut(st.State)) -> u64 {
+  let sh: u64 = type_shape(k);
+  let got: u64 = agg.shp_tid(sh);
+  if got != 0 { return got; }
+  let id: u64 = ireg.ty_add(k, ireg.lk_type(), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return id;
+};
+
+pub let ty_is_type = func(t: Mut(ty.Ty)) -> u64 {
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  return if agg.shp_kind(sh) == agg.kind_type() { 1 } else { 0 };
+};
+
+// --- Module 一等元类型 ---------------------------------------------------
+// 与 Type 同构：只有编译期的逻辑形状，运行期不物化。形状按名字缓存在注册表里，
+// 同一个编译单元里所有 Module 标注共用同一个 TypeId。
+let module_scan = func(k: Mut(st.State), i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let id: u64 = i + 1;
+  if ireg.ty_kind(k, id) == ireg.lk_type() {
+    let sh: u64 = ireg.ty_shape(k, id);
+    if sh != 0 {
+      if agg.shp_kind(sh) == agg.kind_type() {
+        if agg.shp_name(sh) == s.t_module() { return sh; }
+      }
+    }
+  }
+  return module_scan(k, i + 1, n);
+};
+
+let module_shape = func(k: Mut(st.State)) -> u64 {
+  let got: u64 = module_scan(k, 0, ireg.reg_count(k));
+  if got != 0 { return got; }
+  let sh: u64 = agg.shp_new(k, agg.kind_type(), s.t_module(), st.st_src(k));
+  let id: u64 = ireg.ty_add(k, ireg.lk_type(), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return sh;
+};
+
+pub let module_tid = func(k: Mut(st.State)) -> u64 {
+  let sh: u64 = module_shape(k);
+  return agg.shp_tid(sh);
+};
+
+// --- 效应的编译期元类型：Effect / EffectRow / Never -----------------------
+// Effect 与 EffectRow 与 Type / Module 同构：只有编译期的逻辑形状，运行期不物化。
+// 两者的形状种类都是 kind_type，所以 sig_types 会把带这类形参或返回值的函数
+// 一律当成编译期工厂（它们本来也只能在编译期求值）。
+let meta_scan = func(k: Mut(st.State), sh_kind: u64, name: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let id: u64 = i + 1;
+  let sh: u64 = ireg.ty_shape(k, id);
+  if sh != 0 {
+    if (agg.shp_kind(sh) == sh_kind) and (agg.shp_name(sh) == name) { return sh; }
+  }
+  return meta_scan(k, sh_kind, name, i + 1, n);
+};
+
+// 同一编译单元里同名的元类型形状只存在一份，编号也因此稳定。
+let meta_shape = func(k: Mut(st.State), sh_kind: u64, name: u64) -> u64 {
+  let got: u64 = meta_scan(k, sh_kind, name, 0, ireg.reg_count(k));
+  if got != 0 { return got; }
+  let sh: u64 = agg.shp_new(k, sh_kind, name, st.st_src(k));
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(sh_kind), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return sh;
+};
+
+pub let effect_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_type(), s.t_effect());
+};
+
+pub let effect_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(effect_shape(k));
+};
+
+pub let effect_row_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_type(), s.t_effect_row());
+};
+
+pub let effect_row_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(effect_row_shape(k));
+};
+
+// Never 是中止性操作的返回类型：形状是零成员的记录，投影成 0 字节。
+// 它不是 kind_type，所以返回 Never 的过程不会被当成编译期工厂。
+pub let never_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_struct(), s.t_never());
+};
+
+pub let never_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(never_shape(k));
+};
+
+let scan_params = func(paramp: Mut(ty.Ty), i: u64, np: u64) -> u64 {
+  if i >= np { return 0; }
+  let pt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), paramp) + i * 32);
+  if ty_is_type(pt) == 1 { return 1; }
+  return scan_params(paramp, i + 1, np);
+};
+
+pub let sig_types = func(sg_raw: Mut(u8)) -> u64 {
+  let sg: Mut(SigRec) = ptr_cast(Mut(SigRec), sg_raw);
+  if ty_is_type(sg.ret) == 1 { return 1; }
+  return scan_params(sg.params, 0, sg.np);
+};
+
+// --- TypeBuilder -----------------------------------------------------------
+// 描述符 32 字节：[记录区@0, 已用条数@8, 容量@16]；每条记录 16 字节 [名字@0, TypeId@8]。
+let builder_new = func(k: Mut(st.State)) -> Mut(TypeBuilder) {
+  let d: Mut(TypeBuilder) = ptr_cast(Mut(TypeBuilder), st.st_alloc(k, 32));
+  d.base = null_ref(Mut(TbField));
+  d.count = 0;
+  d.cap = 0;
+  return d;
+};
+
+let builder_field_at = func(base: Mut(TbField), i: u64) -> Mut(TbField) {
+  return ptr_cast(Mut(TbField), ptr_cast(Mut(u8), base) + i * 16);
+};
+
+let builder_slot = func(k: Mut(st.State), d: Mut(TypeBuilder), need: u64) -> Mut(TbField) {
+  let cap: u64 = d.cap;
+  if need <= cap { return d.base; }
+  let ncap: u64 = if cap == 0 { 4 } else { cap * 2 };
+  let nb: Mut(TbField) = ptr_cast(Mut(TbField), st.st_alloc(k, ncap * 16));
+  let old: Mut(TbField) = d.base;
+  let cnt: u64 = d.count;
+  let i: u64 = loop c(i: u64 = 0) while i < cnt {
+    let s0: Mut(TbField) = builder_field_at(old, i);
+    let d0: Mut(TbField) = builder_field_at(nb, i);
+    d0.name = s0.name;
+    d0.tid = s0.tid;
+    i = i + 1;
+  };
+  d.base = nb;
+  d.cap = ncap;
+  return nb;
+};
+
+let builder_find = func(d: Mut(TypeBuilder), name: u64, i: u64) -> u64 {
+  if i >= d.count { return 0; }
+  let bf: Mut(TbField) = builder_field_at(d.base, i);
+  if bf.name == name { return i + 1; }
+  return builder_find(d, name, i + 1);
+};
+
+let fail_tb = func(k: Mut(st.State), m: Ref(u8), n: u64, code: u64) -> u64 {
+  let g: u64 = ir.diag(k, 0, 1, m, n);
+  return st.st_fail(k, code);
+};
+
+pub let record_begin = func(k: Mut(st.State)) -> Mut(TypeBuilder) { return builder_new(k); };
+
+pub let record_add = func(k: Mut(st.State), d: Mut(TypeBuilder), name: u64, tid: u64) -> u64 {
+  if is_null(d) { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
+  if name == 0 { fail_tb(k, "bad field name", 14, ax.e_type()); return 0; }
+  if tid == type_tid(k) { fail_tb(k, "type is compile-time only", 25, ax.e_type()); return 0; }
+  if builder_find(d, name, 0) != 0 { fail_tb(k, "duplicate field", 15, ax.e_type()); return 0; }
+  let c: u64 = d.count;
+  let b: Mut(TbField) = builder_slot(k, d, c + 1);
+  let dst: Mut(TbField) = builder_field_at(b, c);
+  dst.name = name;
+  dst.tid = tid;
+  d.count = c + 1;
+  return 1;
+};
+
+pub let record_end = func(k: Mut(st.State), d: Mut(TypeBuilder)) -> u64 {
+  if is_null(d) { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
+  let c: u64 = d.count;
+  if c == 0 { fail_tb(k, "empty record", 12, ax.e_type()); return 0; }
+  let sh: u64 = agg.shp_new(k, agg.kind_struct(), 0, st.st_src(k));
+  let b: Mut(TbField) = d.base;
+  let i: u64 = loop cc(i: u64 = 0) while i < c {
+    let fld: Mut(TbField) = builder_field_at(b, i);
+    let t: Mut(ty.Ty) = ax.new_ty(k);
+    ireg.project(k, fld.tid, t);
+    agg.field_add(k, sh, fld.name, ty.tk(t), ty.tw(t), ty.tsg(t), ty.tsh(t));
+    i = i + 1;
+  };
+  agg.finish(k, sh);
+  let id: u64 = ireg.ty_add(k, ireg.lk_struct(), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return id;
+};
+
+// --- 编译期类型工厂记忆化缓存 -------------------------------------------
+// 每条 144 字节：[fn@0, nargs@8, rk@16, ra@24, rb@32, 4 个实参单元(各24B)@48]。
+let cache_eq_args = func(rec: Mut(u8), ab: Mut(u8), i: u64, n: u64) -> u64 {
+  if i >= n { return 1; }
+  let r: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), rec + 48 + i * 24);
+  let a: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), ab + i * 24);
+  if r.kind != a.kind { return 0; }
+  if r.a != a.a { return 0; }
+  if r.b != a.b { return 0; }
+  return cache_eq_args(rec, ab, i + 1, n);
+};
+
+let cache_scan = func(base: Mut(u8), e: u64, nargs: u64, ab: Mut(u8), i: u64, n: u64) -> Mut(FactoryCacheEntry) {
+  if i >= n { return null_ref(Mut(FactoryCacheEntry)); }
+  let rec_raw: Mut(u8) = base + i * 144;
+  let rec: Mut(FactoryCacheEntry) = ptr_cast(Mut(FactoryCacheEntry), rec_raw);
+  if rec.fn_u == e and rec.nargs == nargs {
+    if cache_eq_args(rec_raw, ab, 0, nargs) == 1 { return rec; }
+  }
+  return cache_scan(base, e, nargs, ab, i + 1, n);
+};
+
+pub let cache_find = func(k: Mut(st.State), e: Mut(u8), nargs: u64, ab: Mut(u8)) -> Mut(FactoryCacheEntry) {
+  if nargs > 4 { return null_ref(Mut(FactoryCacheEntry)); }
+  let base: Mut(u8) = st.st_ctcache(k);
+  if is_null(base) { return null_ref(Mut(FactoryCacheEntry)); }
+  let eu: u64 = e as u64;
+  return cache_scan(base, eu, nargs, ab, 0, st.st_ctcache_n(k));
+};
+
+pub let cache_put = func(k: Mut(st.State), e: Mut(u8), nargs: u64, ab: Mut(u8), rk: u64, ra: u64, rb: u64) -> u64 {
+  if nargs > 4 { return 0; }
+  let base0: Mut(u8) = st.st_ctcache(k);
+  let csz: u64 = 144 * 128;
+  let base: Mut(u8) = if is_null(base0) { st.st_set_ctcache(k, st.st_ralloc(k, csz)) } else { base0 };
+  let n: u64 = st.st_ctcache_n(k);
+  if n >= 128 { return 0; }
+  let rec_raw: Mut(u8) = base + n * 144;
+  let rec: Mut(FactoryCacheEntry) = ptr_cast(Mut(FactoryCacheEntry), rec_raw);
+  rec.fn_u = e as u64;
+  rec.nargs = nargs;
+  rec.rk = rk;
+  rec.ra = ra;
+  rec.rb = rb;
+  let i: u64 = loop cp(i: u64 = 0) while i < nargs {
+    let r: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), rec_raw + 48 + i * 24);
+    let a: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), ab + i * 24);
+    r.kind = a.kind;
+    r.a = a.a;
+    r.b = a.b;
+    i = i + 1;
+  };
+  return st.st_set_ctcache_n(k, n + 1);
+};

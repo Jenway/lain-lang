@@ -1,0 +1,228 @@
+// IR：宿主 hr.ir_* 原语的薄封装，加上临时名/标签名/槽名的生成。
+// 这里只管「把一条指令塞进当前区域」，终结状态与作用域由 eval.lain 负责。
+let hr = import("src::driver::host_rt");
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let codes = import("src::ir::ir_codes");
+
+// --- 名字 ---------------------------------------------------------------
+// 临时量叫 `_t<n>`、标签叫 `_l<n>`、局部槽叫 `_v<n>`：下划线开头，不与源码
+// 标识符的习惯写法撞车。
+let digits = func(v: u64) -> u64 {
+  let c: u64 = loop c(n: u64 = v, i: u64 = 1) while n >= 10 {
+    n = n / 10;
+    i = i + 1;
+    if n < 10 { break c(i); }
+  };
+  return c;
+};
+
+let name_with = func(s: Mut(st.State), a: u8, b: u8, v: u64) -> u64 {
+  let p: Mut(u8) = st.st_scratch(s);
+  let n: u64 = digits(v);
+  let end: u64 = 2 + n;
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), p, end);
+  buf[0] = a;
+  buf[1] = b;
+  let w: u64 = loop w(i: u64 = 0, num: u64 = v, pos: u64 = end) while i < n {
+    let d: u64 = num % 10;
+    num = num / 10;
+    i = i + 1;
+    pos = pos - 1;
+    buf[pos] = (d + 48) as u8;
+  };
+  return hr.sym_intern(p, end);
+};
+
+pub let fresh_t = func(s: Mut(st.State)) -> u64 {
+  let n: u64 = st.st_next_tmp(s);
+  return name_with(s, 95, 116, n);
+};
+
+pub let fresh_l = func(s: Mut(st.State)) -> u64 {
+  let n: u64 = st.st_next_label(s);
+  return name_with(s, 95, 108, n);
+};
+
+// 局部变量槽的名字由序号决定，不再分配：过程入口按序号发 #alloca。
+pub let slot_name = func(s: Mut(st.State), j: u64) -> u64 {
+  return name_with(s, 95, 118, j);
+};
+
+// --- 模块与过程 -----------------------------------------------------------
+pub let mod_new = func(s: Mut(st.State), name: u64) -> u64 {
+  let m: u64 = hr.ir_mod_new(name);
+  st.st_set_mod(s, m);
+  return m;
+};
+
+// 类型块用 L1TypeKind 编号，9 表示「没有类型」。宿主那边 0 表示无类型、1..4 是
+// L1TypeKind + 1，转换只在这一处发生。
+pub let kcode = func(tp: Mut(ty.Ty)) -> u64 {
+  let k: u64 = ty.tk(tp);
+  if k == 9 { return 0; }
+  return k + 1;
+};
+
+pub let proc_begin = func(s: Mut(st.State), name: u64) -> u64 {
+  return hr.ir_proc_begin(st.st_mod(s), name);
+};
+
+pub let proc_param = func(s: Mut(st.State), name: u64, tp: Mut(ty.Ty)) -> u64 {
+  return hr.ir_proc_param(st.st_mod(s), name, kcode(tp), ty.tw(tp));
+};
+
+pub let proc_result = func(s: Mut(st.State), tp: Mut(ty.Ty)) -> u64 {
+  return hr.ir_proc_result(st.st_mod(s), kcode(tp), ty.tw(tp));
+};
+
+pub let proc_extern = func(s: Mut(st.State), name: u64, link: u64) -> u64 {
+  return hr.ir_proc_extern(st.st_mod(s), name, link);
+};
+
+// 静态数据可以在任何时刻登记；is_writable 为假即落在只读段。
+pub let data_add = func(s: Mut(st.State), name: u64, bytes: Ref(u8), size: u64, is_writable: u64) -> u64 {
+  return hr.ir_data_add(st.st_mod(s), name, bytes, size, is_writable);
+};
+
+// 数据是否已在本模块里（1 起的序号，0 表示没有）。克隆出来的模块带着主模块的
+// 数据段，全局数据靠它判重。
+pub let data_find = func(s: Mut(st.State), name: u64) -> u64 {
+  return hr.ir_data_find(st.st_mod(s), name);
+};
+
+let emit_symbol = func(s: Mut(st.State), kind: u64, res: u64, symbol: u64) -> u64 {
+  return hr.ir_inst_symbol(st.st_mod(s), kind, res, symbol);
+};
+
+pub let proc_end = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_proc_end(st.st_mod(s));
+};
+
+// 任意字节的符号（名字来自 guest 内存）。
+pub let sym_lit = func(p: Ref(u8), n: u64) -> u64 {
+  return hr.sym_intern(p, n);
+};
+
+// 把一个值变成操作数：字面量走立即数，其余按名字引用。
+// 名字为空说明上游少填了一个值：就地报错，绝不把 0 当句柄发给宿主。
+pub let op_val = func(s: Mut(st.State), v: Mut(ty.Val)) -> u64 {
+  if ty.vlit(v) == 1 { return arg_int(s, ty.vbits(v)); }
+  let nm: u64 = ty.vn(v);
+  if nm == 0 {
+    let m: Ref(u8) = "empty-operand";
+    let d: u64 = diag(s, v as u64, 1, m, 13);
+    let d2: u64 = diag(s, ty.vbits(v), 2, m, 13);
+    return st.st_fail(s, 3);
+  }
+  return arg_ref(s, nm);
+};
+
+// 类型块的临时载体：LEA 与字节读写都要一个指针或位宽类型实参。
+// 每个都从 arena 现取 32 字节，随源结束一起作废。
+pub let taddr = func(s: Mut(st.State)) -> Mut(ty.Ty) {
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(s, 32));
+  let rc: u64 = ty.ty_addr(t);
+  return t;
+};
+
+pub let tbits = func(s: Mut(st.State), w: u64) -> Mut(ty.Ty) {
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(s, 32));
+  let rc: u64 = ty.ty_bits(t, w, 0);
+  return t;
+};
+
+// --- 区域 ---------------------------------------------------------------
+pub let region_begin = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_region_begin(st.st_mod(s));
+};
+
+// ik 0 = 立即数，2 = 按名字引用已有值。
+let region_param = func(s: Mut(st.State), name: u64, tp: Mut(ty.Ty), ik: u64, ib: u64) -> u64 {
+  return hr.ir_region_param(st.st_mod(s), name, kcode(tp), ty.tw(tp), ik, ib);
+};
+
+pub let region_result = func(s: Mut(st.State), tp: Mut(ty.Ty)) -> u64 {
+  return hr.ir_region_result(st.st_mod(s), kcode(tp), ty.tw(tp));
+};
+
+pub let region_end = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_region_end(st.st_mod(s));
+};
+
+// --- 指令 ---------------------------------------------------------------
+pub let args_reset = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_args_reset(st.st_mod(s));
+};
+
+pub let arg_ref = func(s: Mut(st.State), name: u64) -> u64 {
+  return hr.ir_arg_ref(st.st_mod(s), name);
+};
+
+pub let arg_int = func(s: Mut(st.State), bits: u64) -> u64 {
+  return hr.ir_arg_int(st.st_mod(s), bits);
+};
+
+pub let emit = func(s: Mut(st.State), kind: u64, res: u64, tp: Mut(ty.Ty)) -> u64 {
+  return hr.ir_inst(st.st_mod(s), kind, res, kcode(tp), ty.tw(tp));
+};
+
+pub let emit_if = func(s: Mut(st.State), res: u64, cond: u64, then_r: u64, else_r: u64) -> u64 {
+  return hr.ir_inst_if(st.st_mod(s), res, cond, then_r, else_r);
+};
+
+pub let emit_loop = func(s: Mut(st.State), res: u64, label: u64, body: u64) -> u64 {
+  return hr.ir_inst_loop(st.st_mod(s), res, label, body);
+};
+
+// switch 的分支先攒在过程上，case_add 返回已攒的分支数；emit_switch 一次性
+// 取走全部分支并清空。selector 必须是值名，字面量得由调用方先物化。
+pub let case_add = func(s: Mut(st.State), value: u64, body: u64) -> u64 {
+  return hr.ir_case_add(st.st_mod(s), value, body);
+};
+
+pub let emit_switch = func(s: Mut(st.State), res: u64, selector: u64, tp: Mut(ty.Ty), def: u64) -> u64 {
+  return hr.ir_inst_switch(st.st_mod(s), res, selector, kcode(tp), ty.tw(tp), def);
+};
+
+pub let emit_jump = func(s: Mut(st.State), kind: u64, label: u64) -> u64 {
+  return hr.ir_inst_jump(st.st_mod(s), kind, label);
+};
+
+pub let emit_call = func(s: Mut(st.State), res: u64, callee: u64, tail: u64) -> u64 {
+  return hr.ir_inst_call(st.st_mod(s), res, callee, tail);
+};
+
+// 间接调用：被调值由调用方先压进操作数列表，形参类型按两个打包字传入。
+pub let emit_call_indirect = func(s: Mut(st.State), res: u64, ret: Mut(ty.Ty), plo: u64, phi: u64) -> u64 {
+  return hr.ir_inst_call_indirect(st.st_mod(s), res, kcode(ret), ty.tw(ret), plo,
+                                  phi);
+};
+
+// kind 只允许 LOAD / STORE / ALLOCA。order 固定 ORDER_RELAXED，对齐按参数。
+pub let emit_mem = func(s: Mut(st.State), kind: u64, res: u64, tp: Mut(ty.Ty), align: u64) -> u64 {
+  return hr.ir_inst_mem(st.st_mod(s), kind, res, kcode(tp), ty.tw(tp), 0, 0, align);
+};
+
+// 指针算术一律走 #lea(base, idx, scale, offset)。
+pub let emit_lea = func(s: Mut(st.State), res: u64, base: u64, idx: u64, scale: u64, off: u64) -> u64 {
+  let rc: u64 = args_reset(s);
+  let a: u64 = arg_ref(s, base);
+  let b: u64 = arg_int(s, idx);
+  let c: u64 = arg_int(s, scale);
+  let d: u64 = arg_int(s, off);
+  return emit(s, codes.INST_LEA(), res, taddr(s));
+};
+
+// --- 收尾 ---------------------------------------------------------------
+pub let verify = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_mod_verify(st.st_mod(s));
+};
+
+pub let emit_output = func(s: Mut(st.State)) -> u64 {
+  return hr.ir_mod_emit_output(st.st_mod(s));
+};
+
+pub let diag = func(s: Mut(st.State), span: u64, level: u64, p: Ref(u8), n: u64) -> u64 {
+  return hr.diag_emit(span, level, p, n);
+};

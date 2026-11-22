@@ -1,0 +1,275 @@
+// std::mem —— 分配器接口、宿主堆、线性分配器与分配预算记账。
+//
+// 分层：
+//   * Allocator 是模块签名（concept）：alloc / free 两个公开成员构成见证接口。
+//     alloc 拿到块就回非零地址，拿不到回 0；两个过程都纯，任何后端都能兑现。
+//   * OomErr 是耗尽效应，操作不可恢复：分配失败之后不存在「继续原路径」的语义。
+//     效应由本文件的 *_or 入口就地捕获，把耗尽换成调用方给的退路地址。
+//   * SystemAlloc / BumpArena / BudgetTracker 是三份具体策略，都满足 Allocator。
+let os = import("std::os");
+
+// 载荷类型由效应参数登记：运行期 tag 由 (效应, 参数类型) 算出，
+// 发起与拦截两端的 tag 因此一致。
+let OomOf = func(B: Type) -> Effect {
+  return effect {
+    op oom(bytes: B) -> Never;
+  };
+};
+
+pub let OomErr = OomOf(u64);
+
+pub let Allocator = sig {
+  pub let Self: Type;
+  pub let alloc: Fn((Mut(Self), u64) -> u64);
+  pub let free: Fn((Mut(Self), u64) -> u64);
+};
+
+// 见证驱动的分派：按第一实参的类型找到满足 Allocator 的模块并转发 alloc。
+// 编译期约束在调用点求值，所以调用方文件要让 `Allocator` 这个名字可见
+// （`open mem;`），并把选中的策略模块激活到当前作用域（`use mem.SystemAlloc;`）。
+pub let alloc_with = func(a: Mut(S), bytes: u64)
+  ?{ S: Type, al: Allocator }
+  -> u64
+{
+  return al.alloc(a, bytes);
+};
+
+// 纯结果与效应之间的唯一桥：地址为 0 就在这里发起 oom，之后不再回到调用点。
+let require_oom = func(ptr: u64, bytes: u64) -> u64 !{ OomErr } {
+  if ptr == 0 {
+    perform OomErr.oom(bytes);
+    return 0;
+  }
+  return ptr;
+};
+
+// 预算下溢（释放的字节多于已登记的字节）属于调用方的记账错误，
+// 与别处耗尽后端块一样用整除零陷阱就地中止。
+let HaltCell = struct { zero: u64 };
+
+let halt_at = func(h: HaltCell) -> u64 {
+  return 1 / h.zero;
+};
+
+// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
+let halt_now = func(cause: u64) -> u64 {
+  let h: HaltCell = HaltCell { zero: cause - cause };
+  return halt_at(h);
+};
+
+// ---------------------------------------------------------------------------
+// SystemAlloc：宿主堆。alloc 拿到块回非零地址，宿主拒绝时回 0。
+// ---------------------------------------------------------------------------
+pub let SystemHandle = struct { tag: u64 };
+
+pub let SystemAlloc = module {
+  pub let Self = SystemHandle;
+
+  pub let new = func() -> SystemHandle {
+    return SystemHandle { tag: 0 };
+  };
+
+  pub let alloc = func(h: Mut(SystemHandle), bytes: u64) -> u64 {
+    return os.alloc_bytes(bytes);
+  };
+
+  pub let free = func(h: Mut(SystemHandle), ptr: u64) -> u64 {
+    if ptr == 0 {
+      return 0;
+    }
+    return os.free_bytes(ptr);
+  };
+};
+
+// 宿主拒绝申请时以 fallback 作为地址继续。
+pub let system_alloc_or = func(h: Mut(SystemHandle), bytes: u64, fallback: u64) -> u64 {
+  return handle require_oom(SystemAlloc.alloc(h, bytes), bytes) with {
+    return(v) => v,
+    oom(n) => fallback,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// BumpArena：固定后端块上的线性分配器。
+//
+// 每次 alloc 只推进游标，代价是 O(1)；单块不可回收，reset 一次性丢弃全部块。
+// 起点与长度都补成 8 字节的整数倍，返回地址因此始终 8 字节对齐。
+// ---------------------------------------------------------------------------
+let ArenaBacking = struct {
+  bytes: Array(u8, 8192),
+};
+
+// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
+let arena_backing: ArenaBacking = ArenaBacking { };
+
+let ArenaCapacity: u64 = 8192;
+
+pub let BumpArena = module {
+  pub let Arena = struct {
+    base: u64,
+    cap: u64,
+    used: u64,
+  };
+
+  pub let Self = Arena;
+
+  // 后端块由调用方提供：base 是块起点，cap 是块的字节数。
+  pub let over = func(base: u64, cap: u64) -> Arena {
+    return Arena { base: base, cap: cap, used: 0 };
+  };
+
+  // 静态后端块：整块归本模块所有，重复调用返回互相覆盖的视图，只取一份。
+  pub let new = func() -> Arena {
+    return Arena { base: ptr_of(arena_backing), cap: ArenaCapacity, used: 0 };
+  };
+
+  pub let alloc = func(a: Mut(Arena), bytes: u64) -> u64 {
+    let start: u64 = ((deref(a).used + 7) / 8) * 8;
+    let end: u64 = start + ((bytes + 7) / 8) * 8;
+    if end > deref(a).cap {
+      return 0;
+    }
+    deref(a).used = end;
+    return deref(a).base + start;
+  };
+
+  // 线性分配器没有逐块回收：落在块内的地址原样确认，块外的地址报 0。
+  pub let free = func(a: Mut(Arena), ptr: u64) -> u64 {
+    if ptr < deref(a).base {
+      return 0;
+    }
+    if ptr >= deref(a).base + deref(a).cap {
+      return 0;
+    }
+    return 1;
+  };
+
+  // 丢弃全部块。
+  pub let reset = func(a: Mut(Arena)) -> u64 {
+    deref(a).used = 0;
+    return 1;
+  };
+
+  pub let used = func(a: Ref(Arena)) -> u64 {
+    return deref(a).used;
+  };
+
+  pub let capacity = func(a: Ref(Arena)) -> u64 {
+    return deref(a).cap;
+  };
+
+  pub let remaining = func(a: Ref(Arena)) -> u64 {
+    return deref(a).cap - deref(a).used;
+  };
+};
+
+// 后端块装不下时以 fallback 作为地址继续。
+pub let bump_alloc_or = func(a: Mut(BumpArena.Arena), bytes: u64, fallback: u64) -> u64 {
+  return handle require_oom(BumpArena.alloc(a, bytes), bytes) with {
+    return(v) => v,
+    oom(n) => fallback,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// BudgetTracker：宿主堆上的记账分配器。
+//
+// 每个宿主块前置 8 字节的块长度头，free 据此回退 live_bytes。
+// alloc 先核验上限再向宿主申请，超限或宿主拒绝都回 0，并把 deny_count 加一。
+// 程序收尾时 live_bytes 非零即为泄漏。
+// ---------------------------------------------------------------------------
+pub let BudgetTracker = module {
+  pub let Tracker = struct {
+    live_bytes: u64,
+    peak_bytes: u64,
+    alloc_count: u64,
+    deny_count: u64,
+    limit_bytes: u64,
+  };
+
+  pub let Self = Tracker;
+
+  pub let new = func(limit_bytes: u64) -> Tracker {
+    return Tracker {
+      live_bytes: 0,
+      peak_bytes: 0,
+      alloc_count: 0,
+      deny_count: 0,
+      limit_bytes: limit_bytes,
+    };
+  };
+
+  pub let alloc = func(t: Mut(Tracker), bytes: u64) -> u64 {
+    let want: u64 = bytes + 8;
+    let next: u64 = deref(t).live_bytes + want;
+    if next > deref(t).limit_bytes {
+      deref(t).deny_count = deref(t).deny_count + 1;
+      return 0;
+    }
+    let block: u64 = os.alloc_bytes(want);
+    if block == 0 {
+      deref(t).deny_count = deref(t).deny_count + 1;
+      return 0;
+    }
+    let head: Mut(u64) = ptr_cast(Mut(u64), block);
+    deref(head) = want;
+    deref(t).live_bytes = next;
+    if next > deref(t).peak_bytes {
+      deref(t).peak_bytes = next;
+    }
+    deref(t).alloc_count = deref(t).alloc_count + 1;
+    return block + 8;
+  };
+
+  pub let free = func(t: Mut(Tracker), ptr: u64) -> u64 {
+    if ptr == 0 {
+      return 0;
+    }
+    let block: u64 = ptr - 8;
+    let head: Ref(u64) = ptr_cast(Ref(u64), block);
+    let want: u64 = deref(head);
+    if want > deref(t).live_bytes {
+      let dead: u64 = halt_now(want);
+      return dead;
+    }
+    deref(t).live_bytes = deref(t).live_bytes - want;
+    return os.free_bytes(block);
+  };
+
+  pub let live = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).live_bytes;
+  };
+
+  pub let peak = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).peak_bytes;
+  };
+
+  pub let allocs = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).alloc_count;
+  };
+
+  pub let denied = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).deny_count;
+  };
+
+  pub let limit = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).limit_bytes;
+  };
+
+  // 尚未归还的字节数；收尾时非零说明有泄漏。
+  pub let leaked = func(t: Ref(Tracker)) -> u64 {
+    return deref(t).live_bytes;
+  };
+
+  pub let has_leaks = func(t: Ref(Tracker)) -> bool {
+    return deref(t).live_bytes != 0;
+  };
+};
+
+// 预算超限时以 fallback 作为地址继续，deny_count 已经记下这次拒绝。
+pub let budget_alloc_or = func(t: Mut(BudgetTracker.Tracker), bytes: u64, fallback: u64) -> u64 {
+  return handle require_oom(BudgetTracker.alloc(t, bytes), bytes) with {
+    return(v) => v,
+    oom(n) => fallback,
+  };
+};

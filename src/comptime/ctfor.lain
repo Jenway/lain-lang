@@ -1,0 +1,458 @@
+// ctfor.lain —— 编译期反射直接查询、comptime for 循环展开与 [:expr] 成员插值。
+// 值单元 24 字节：[种类@0, 值一@8, 值二@16]：
+//   0 整数/SymId、1 Type(TypeId)、2 FieldInfo(类型, 下标)、3 字节切片、4 字段列表(struct TypeId)。
+// 绑定栈住在 st_ctbase 里，每条 32 字节：[名字符号@0, 种类@8, 值一@16, 值二@24]。
+// 种类 10 是块级 use 激活的模块，这类条目名字固定为 0。
+// 本模块只依赖 state/types/ast/sym/agg/ir/modules/tyreg，单向无环。
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let ax = import("src::syntax::ast");
+let s = import("src::driver::sym");
+let agg = import("src::sema::agg");
+let ir = import("src::ir::ir");
+let modules = import("src::sema::modules");
+let ireg = import("src::sema::tyreg");
+
+pub let CtVal = struct {
+  kind: u64,
+  a: u64,
+  b: u64
+};
+
+let CtBind = struct {
+  name: u64,
+  kind: u64,
+  a: u64,
+  b: u64
+};
+
+pub let ForDesc = struct {
+  kind: u64,
+  tid: u64,
+  hi: u64,
+  cur: u64,
+  body: u64,
+  var_name: u64
+};
+
+// --- 值单元、报错与安全 AST 探测 --------------------------------------------
+pub let fail_msg = func(k: Mut(st.State), m: Ref(u8), n: u64, code: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, n);
+  return st.st_fail(k, code);
+};
+pub let v_set = func(v: Mut(CtVal), kind: u64, a: u64, b: u64) -> Mut(CtVal) {
+  v.kind = kind;
+  v.a = a;
+  v.b = b;
+  return v;
+};
+let v_new = func(k: Mut(st.State), kind: u64, a: u64, b: u64) -> Mut(CtVal) {
+  return v_set(ptr_cast(Mut(CtVal), st.st_alloc(k, 24)), kind, a, b);
+};
+pub let v_kind = func(v: Mut(CtVal)) -> u64 { return v.kind; };
+pub let v_a = func(v: Mut(CtVal)) -> u64 { return v.a; };
+pub let v_b = func(v: Mut(CtVal)) -> u64 { return v.b; };
+pub let has_delim = func(g: u64, i: u64, dl: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_group(g, i) == 0 { return 0; }
+  return if ax.delim_of(g, i) == dl { 1 } else { 0 };
+};
+pub let has_tok = func(g: u64, i: u64, sym: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  if ax.is_group(g, i) == 1 { return 0; }
+  return if ax.n_sym(g, i) == sym { 1 } else { 0 };
+};
+
+// --- 编译期绑定栈 -----------------------------------------------------------
+pub let mark = func(k: Mut(st.State)) -> u64 { return st.st_ctused(k); };
+pub let release = func(k: Mut(st.State), m: u64) -> u64 { return st.st_set_ctused(k, m); };
+let reset = func(k: Mut(st.State)) -> u64 { return st.st_set_ctused(k, 0); };
+let look_scan = func(k: Mut(st.State), name: u64, used: u64) -> Mut(CtVal) {
+  if used == 0 { return null_ref(Mut(CtVal)); }
+  let back: u64 = used - 32;
+  let b: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if b.name == name {
+    return v_new(k, b.kind, b.a, b.b);
+  }
+  return look_scan(k, name, back);
+};
+
+pub let lookup = func(k: Mut(st.State), name: u64) -> Mut(CtVal) { return look_scan(k, name, st.st_ctused(k)); };
+
+pub let bind = func(k: Mut(st.State), name: u64, kind: u64, a: u64, b: u64) -> u64 {
+  let used: u64 = st.st_ctused(k);
+  if used + 32 > st.st_ctcap(k) { return st.st_fail(k, 3); }
+  let p: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + used);
+  p.name = name;
+  p.kind = kind;
+  p.a = a;
+  p.b = b;
+  return st.st_set_ctused(k, used + 32);
+};
+
+let set_scan = func(k: Mut(st.State), name: u64, kind: u64, a: u64, b: u64, used: u64) -> u64 {
+  if used == 0 { return st.st_fail(k, 2); }
+  let back: u64 = used - 32;
+  let p: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if p.name == name { p.kind = kind; p.a = a; p.b = b; return 1; }
+  return set_scan(k, name, kind, a, b, back);
+};
+pub let set_binding = func(k: Mut(st.State), name: u64, v: Mut(CtVal)) -> u64 {
+  return set_scan(k, name, v_kind(v), v_a(v), v_b(v), st.st_ctused(k));
+};
+
+// --- 块级 use M;：激活模块而不引入短名 --------------------------------------
+// 条目沿用绑定栈，名字固定为 0；lookup 按名字比较，永远不会把它当成具名变量。
+// 种类 10 表示「本块激活的模块」，值一是模块号，值二是封签模块号。
+pub let push_use = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
+  return bind(k, 0, 10, modv, seal);
+};
+
+let scan_use_sym = func(k: Mut(st.State), name: u64, used: u64) -> Mut(modules.SymEntry) {
+  if used == 0 { return null_ref(Mut(modules.SymEntry)); }
+  let back: u64 = used - 32;
+  let b: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if b.kind == 10 {
+    let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, b.a, b.b, name, modules.cur(k));
+    if is_null(e) == 0 { return e; }
+  }
+  return scan_use_sym(k, name, back);
+};
+
+// 名字解析：本模块优先，其次是块内 use 激活的模块，由近及远。
+pub let find_sym = func(k: Mut(st.State), name: u64) -> Mut(modules.SymEntry) {
+  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  if is_null(e) == 0 { return e; }
+  return scan_use_sym(k, name, st.st_ctused(k));
+};
+
+let scan_use_mod = func(k: Mut(st.State), name: u64, used: u64, out_seal: Mut(u64)) -> u64 {
+  if used == 0 { return 0; }
+  let back: u64 = used - 32;
+  let b: Mut(CtBind) = ptr_cast(Mut(CtBind), st.st_ctbase(k) + back);
+  if b.kind == 10 {
+    let m: u64 = modules.resolve_child_mod(k, b.a, b.b, name, modules.cur(k), out_seal);
+    if m != 0 { return m; }
+  }
+  return scan_use_mod(k, name, back, out_seal);
+};
+
+// 名字当作模块解析：先看编译期绑定里的 Module 值，再看本模块的子模块，
+// 最后逐条走块内 use 激活的模块。
+pub let find_used_mod = func(k: Mut(st.State), name: u64, out_seal: Mut(u64)) -> u64 {
+  let cv: Mut(CtVal) = lookup(k, name);
+  if is_null(cv) == 0 {
+    if v_kind(cv) == 9 {
+      deref(out_seal) = v_b(cv);
+      return v_a(cv);
+    }
+  }
+  let m: u64 = modules.resolve_child_mod(k, modules.cur(k), 0, name, modules.cur(k), out_seal);
+  if m != 0 { return m; }
+  return scan_use_mod(k, name, st.st_ctused(k), out_seal);
+};
+
+// --- 绑定栈快照 -------------------------------------------------------------
+// 函子体在过程里实例化时，它的 phase2 会排到 #proc 结束之后才编；那时块级
+// use 的绑定栈已经出栈。先用快照把活跃条目挪到持久区，编完再照原样压回去。
+pub let snap_save = func(k: Mut(st.State), out_cnt: Mut(u64)) -> Mut(u8) {
+  let cnt: u64 = st.st_ctused(k) / 32;
+  deref(out_cnt) = cnt;
+  if cnt == 0 { return null_ref(Mut(u8)); }
+  let buf: Mut(u8) = st.st_ralloc(k, cnt * 32);
+  let base: Mut(u8) = st.st_ctbase(k);
+  let i: u64 = loop cp(i: u64 = 0) while i < cnt {
+    let src: Mut(CtBind) = ptr_cast(Mut(CtBind), base + i * 32);
+    let dst: Mut(CtBind) = ptr_cast(Mut(CtBind), buf + i * 32);
+    dst.name = src.name;
+    dst.kind = src.kind;
+    dst.a = src.a;
+    dst.b = src.b;
+    i = i + 1;
+  };
+  return buf;
+};
+
+pub let snap_restore = func(k: Mut(st.State), buf: Mut(u8), cnt: u64) -> u64 {
+  if is_null(buf) == 1 { return 0; }
+  let i: u64 = loop rs(i: u64 = 0) while i < cnt {
+    let src: Mut(CtBind) = ptr_cast(Mut(CtBind), buf + i * 32);
+    let b: u64 = bind(k, src.name, src.kind, src.a, src.b);
+    i = i + 1;
+  };
+  return cnt;
+};
+
+// --- 直接读 agg / tyreg 的形状查询（不依赖冻结反射快照，无 8 字段上限） --------
+pub let tid_of_shape = func(k: Mut(st.State), sh: u64) -> u64 {
+  let got: u64 = agg.shp_tid(sh);
+  if got != 0 { return got; }
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(agg.shp_kind(sh)), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return id;
+};
+
+pub let tid_of_name = func(k: Mut(st.State), name: u64) -> u64 {
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  if ty.ty_of_sym(name, t) == 1 { return ireg.tid_of(k, t); }
+  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  if is_null(e) { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
+    return tid_of_shape(k, modules.sym_shape(e));
+  }
+  return 0;
+};
+
+let f_count = func(k: Mut(st.State), tid: u64) -> u64 {
+  let sh: u64 = ireg.ty_shape(k, tid);
+  return if sh == 0 { 0 } else { agg.shp_count(sh) };
+};
+
+let f_name = func(k: Mut(st.State), tid: u64, i: u64) -> u64 { return agg.mem_name(agg.mem_at(ireg.ty_shape(k, tid), i)); };
+let f_off = func(k: Mut(st.State), tid: u64, i: u64) -> u64 { return agg.mem_off(agg.mem_at(ireg.ty_shape(k, tid), i)); };
+
+let f_tid = func(k: Mut(st.State), tid: u64, i: u64) -> u64 {
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  agg.mem_ty(k, agg.mem_at(ireg.ty_shape(k, tid), i), t);
+  return ireg.tid_of(k, t);
+};;
+
+pub let as_tid = func(k: Mut(st.State), v: Mut(CtVal)) -> u64 {
+  let kd: u64 = v_kind(v);
+  if kd == 1 { return v_a(v); }
+  if kd == 0 {
+    let id: u64 = v_a(v);
+    if id >= 1 and id <= ireg.reg_count(k) { return id; }
+    fail_msg(k, "invalid type id", 15, ax.e_type());
+    return 0;
+  }
+  fail_msg(k, "not a type or type id", 21, ax.e_type());
+  return 0;
+};
+
+// --- 编译期查询与 FieldInfo 投影 -------------------------------------------
+let eval_single = func(k: Mut(st.State), ag: u64, out: Mut(CtVal)) -> u64 {
+  let n: u64 = ax.n_count(ag);
+  if n == 0 { fail_msg(k, "missing query arg", 17, ax.e_ast()); return 0; }
+  let j: u64 = eval_expr(k, ag, 0, 0, out);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != n { fail_msg(k, "extra query args", 16, ax.e_ast()); return 0; }
+  return 1;
+};
+
+pub let prim = func(k: Mut(st.State), name: u64, ag: u64, out: Mut(CtVal)) -> u64 {
+  let is_sz: u64 = if name == s.intern("size_of", 7) { 1 } else { 0 };
+  let is_al: u64 = if name == s.intern("align_of", 8) { 1 } else { 0 };
+  let is_fc: u64 = if name == s.intern("field_count", 11) { 1 } else { 0 };
+  let is_fs: u64 = if name == s.intern("fields_of", 9) { 1 } else { 0 };
+  if is_sz == 0 and is_al == 0 and is_fc == 0 and is_fs == 0 { return 0; }
+  let arg: Mut(CtVal) = ptr_cast(Mut(CtVal), st.st_alloc(k, 24));
+  if eval_single(k, ag, arg) == 0 { return 2; }
+  let tid: u64 = as_tid(k, arg);
+  if st.st_ok(k) != 0 { return 2; }
+  if is_sz == 1 { v_set(out, 0, ireg.size_of(k, tid), 0); return 1; }
+  if is_al == 1 { v_set(out, 0, ireg.align_of(k, tid), 0); return 1; }
+  if is_fc == 1 { v_set(out, 0, f_count(k, tid), 0); return 1; }
+  let sh: u64 = ireg.ty_shape(k, tid);
+  if sh == 0 { fail_msg(k, "fields_of needs struct", 22, ax.e_type()); return 2; }
+  if agg.shp_kind(sh) != agg.kind_struct() { fail_msg(k, "fields_of needs struct", 22, ax.e_type()); return 2; }
+  v_set(out, 4, tid, 0);
+  return 1;
+};
+
+pub let query_fold = func(k: Mut(st.State), out: Mut(CtVal), g: u64, i: u64) -> u64 {
+  let nm: u64 = ax.node_sym(ax.n_at(g, i));
+  let ok: u64 = if nm == s.intern("size_of", 7) or nm == s.intern("align_of", 8) or nm == s.intern("field_count", 11) { 1 } else { 0 };
+  if ok == 0 { return 0; }
+  if (modules.find_here(k, nm) as u64) != 0 { return 0; }
+  let rc: u64 = prim(k, nm, ax.n_at(g, i + 1), out);
+  if rc != 1 and st.st_ok(k) == 0 { fail_msg(k, "bad compile-time query", 22, ax.e_type()); }
+  return 1;
+};
+
+pub let proj = func(k: Mut(st.State), v: Mut(CtVal), mn: u64) -> Mut(CtVal) {
+  if v_kind(v) != 2 { return null_ref(Mut(CtVal)); }
+  let tid: u64 = v_a(v);
+  let idx: u64 = v_b(v);
+  if mn == s.t_name() { return v_new(k, 0, f_name(k, tid, idx), 0); }
+  if mn == s.t_fty() or mn == s.t_fld_ty() { return v_new(k, 1, f_tid(k, tid, idx), 0); }
+  if mn == s.t_off() { return v_new(k, 0, f_off(k, tid, idx), 0); }
+  return null_ref(Mut(CtVal));
+};
+
+pub let proj_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(CtVal) {
+  let bv: Mut(CtVal) = lookup(k, ax.node_sym(ax.n_at(g, i)));
+  if is_null(bv) { return null_ref(Mut(CtVal)); }
+  if v_kind(bv) != 2 { return null_ref(Mut(CtVal)); }
+  return proj(k, bv, ax.node_sym(ax.n_at(g, i + 2)));
+};
+
+// --- 轻量编译期常量表达式求值 -----------------------------------------------
+let op_prio = func(g: u64, i: u64) -> u64 {
+  if ax.is_group(g, i) == 1 { return 0; }
+  let op: u64 = ax.n_sym(g, i);
+  if op == s.o_plus() or op == s.o_minus() { return 1; }
+  if op == s.o_star() or op == s.o_slash() or op == s.o_percent() { return 2; }
+  return 0;
+};
+
+pub let bin_int = func(k: Mut(st.State), op: u64, a: u64, b: u64) -> u64 {
+  if op == s.o_plus() { return a + b; }
+  if op == s.o_minus() { return a - b; }
+  if op == s.o_star() { return a * b; }
+  if b == 0 { fail_msg(k, "divide by zero", 14, ax.e_op()); return 0; }
+  return if op == s.o_slash() { a / b } else { a % b };
+};
+
+let ev_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(CtVal)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { fail_msg(k, "empty comptime expr", 19, ax.e_ast()); return i; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if ax.delim(h) == ax.dl_paren() {
+      let j: u64 = eval_expr(k, h, 0, 0, out);
+      if st.st_ok(k) == 0 and j != ax.n_count(h) { fail_msg(k, "bad comptime expr", 17, ax.e_ast()); }
+      return i + 1;
+    }
+    fail_msg(k, "bad comptime expr", 17, ax.e_ast());
+    return i + 1;
+  }
+  if ax.is_digit_token(g, i) == 1 {
+    v_set(out, 0, ax.num_value(ax.lit_addr(h), ax.lit_len(h)), 0);
+    return i + 1;
+  }
+  if ax.tok_first(g, i) == 34 {
+    let pa: Ref(u8) = ax.lit_addr(h);
+    v_set(out, 3, (pa as u64) + 1, ax.lit_len(h) - 2);
+    return i + 1;
+  }
+  let name: u64 = ax.node_sym(h);
+  if name == 0 { fail_msg(k, "not a comptime constant", 23, ax.e_op()); return i + 1; }
+  if has_delim(g, i + 1, ax.dl_paren()) == 1 {
+    let pr: u64 = prim(k, name, ax.n_at(g, i + 1), out);
+    if pr != 0 { return i + 2; }
+    fail_msg(k, "not a comptime query", 20, ax.e_op());
+    return i + 2;
+  }
+  let bv: Mut(CtVal) = lookup(k, name);
+  if (bv as u64) != 0 {
+    if has_tok(g, i + 1, s.p_dot()) == 1 {
+      if i + 2 < n {
+        if ax.is_name(g, i + 2) == 1 {
+          let pv: Mut(CtVal) = proj(k, bv, ax.n_sym(g, i + 2));
+          if (pv as u64) != 0 { v_set(out, v_kind(pv), v_a(pv), v_b(pv)); return i + 3; }
+          fail_msg(k, "bad FieldInfo member", 20, ax.e_op());
+          return i + 3;
+        }
+      }
+    }
+    v_set(out, v_kind(bv), v_a(bv), v_b(bv));
+    return i + 1;
+  }
+  let tid: u64 = tid_of_name(k, name);
+  if tid != 0 { v_set(out, 1, tid, 0); return i + 1; }
+  fail_msg(k, "not a comptime constant", 23, ax.e_op());
+  return i + 1;
+};
+
+let ev_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(CtVal)) -> u64 {
+  if i >= ax.n_count(g) { return i; }
+  let p: u64 = op_prio(g, i);
+  if p == 0 or p < minp { return i; }
+  if v_kind(out) != 0 { fail_msg(k, "comptime op needs int", 21, ax.e_type()); return i; }
+  let op: u64 = ax.n_sym(g, i);
+  let rhs: Mut(CtVal) = ptr_cast(Mut(CtVal), st.st_alloc(k, 24));
+  let j: u64 = ev_prefix(k, g, i + 1, rhs);
+  if st.st_ok(k) != 0 { return j; }
+  let j2: u64 = ev_tail(k, g, j, p + 1, rhs);
+  if st.st_ok(k) != 0 { return j2; }
+  if v_kind(rhs) != 0 { fail_msg(k, "comptime op needs int", 21, ax.e_type()); return j2; }
+  v_set(out, 0, bin_int(k, op, v_a(out), v_a(rhs)), 0);
+  return ev_tail(k, g, j2, minp, out);
+};
+
+pub let eval_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(CtVal)) -> u64 {
+  let j: u64 = ev_prefix(k, g, i, out);
+  if st.st_ok(k) != 0 { return j; }
+  return ev_tail(k, g, j, minp, out);
+};
+
+// --- comptime for 序列与迭代 -----------------------------------------------
+// 描述符 48 字节：[种类@0, 类型@8, 上限@16, 当前位置@24, 体下标@32, 变量名@40]。
+let seq_make = func(k: Mut(st.State), kd: u64, tid: u64, hi: u64, cur: u64, nb: Mut(u64), next_i: u64) -> Mut(ForDesc) {
+  let d: Mut(ForDesc) = ptr_cast(Mut(ForDesc), st.st_alloc(k, 48));
+  d.kind = kd;
+  d.tid = tid;
+  d.hi = hi;
+  d.cur = cur;
+  ax.box_put(nb, next_i);
+  return d;
+};
+
+let seq_open = func(k: Mut(st.State), g: u64, start: u64, nb: Mut(u64)) -> Mut(ForDesc) {
+  if start >= ax.n_count(g) { fail_msg(k, "bad comptime for seq", 20, ax.e_ast()); return null_ref(Mut(ForDesc)); }
+  let v: Mut(CtVal) = ptr_cast(Mut(CtVal), st.st_alloc(k, 24));
+  let j: u64 = eval_expr(k, g, start, 0, v);
+  if st.st_ok(k) != 0 { return null_ref(Mut(ForDesc)); }
+  if v_kind(v) == 4 { return seq_make(k, 4, v_a(v), f_count(k, v_a(v)), 0, nb, j); }
+  if v_kind(v) == 0 {
+    if has_tok(g, j, s.p_dotdot()) == 1 {
+      let w: Mut(CtVal) = ptr_cast(Mut(CtVal), st.st_alloc(k, 24));
+      let j2: u64 = eval_expr(k, g, j + 1, 0, w);
+      if st.st_ok(k) != 0 { return null_ref(Mut(ForDesc)); }
+      if v_kind(w) != 0 { fail_msg(k, "range bound needs int", 21, ax.e_type()); return null_ref(Mut(ForDesc)); }
+      return seq_make(k, 5, 0, v_a(w), v_a(v), nb, j2);
+    }
+  }
+  fail_msg(k, "bad comptime for seq", 20, ax.e_ast());
+  return null_ref(Mut(ForDesc));
+};
+
+pub let for_open = func(k: Mut(st.State), g: u64, i: u64) -> Mut(ForDesc) {
+  if i + 4 >= ax.n_count(g) { fail_msg(k, "bad comptime for", 16, ax.e_ast()); return null_ref(Mut(ForDesc)); }
+  if ax.is_name(g, i + 2) == 0 { fail_msg(k, "expected loop var", 17, ax.e_ast()); return null_ref(Mut(ForDesc)); }
+  if has_tok(g, i + 3, s.k_in()) == 0 { fail_msg(k, "expected in", 11, ax.e_ast()); return null_ref(Mut(ForDesc)); }
+  let nb: Mut(u64) = ax.box(k);
+  let d: Mut(ForDesc) = seq_open(k, g, i + 4, nb);
+  if st.st_ok(k) != 0 { return null_ref(Mut(ForDesc)); }
+  let bi: u64 = ax.box_get(nb);
+  if has_delim(g, bi, ax.dl_brace()) == 0 { fail_msg(k, "expected loop body", 18, ax.e_ast()); return null_ref(Mut(ForDesc)); }
+  d.body = bi;
+  d.var_name = ax.n_sym(g, i + 2);
+  return d;
+};
+
+pub let for_step = func(k: Mut(st.State), d: Mut(ForDesc)) -> u64 {
+  let cur: u64 = d.cur;
+  if cur >= d.hi { return 0; }
+  if d.kind == 4 {
+    bind(k, d.var_name, 2, d.tid, cur);
+  } else {
+    bind(k, d.var_name, 0, cur, 0);
+  }
+  if st.st_ok(k) != 0 { return 0; }
+  d.cur = cur + 1;
+  return 1;
+};
+
+pub let for_body = func(d: Mut(ForDesc)) -> u64 { return d.body; };
+
+// --- [:expr] 成员名插值 -----------------------------------------------------
+pub let interp_at = func(g: u64, i: u64) -> u64 {
+  if has_delim(g, i, ax.dl_bracket()) == 0 { return 0; }
+  return has_tok(ax.n_at(g, i), 0, s.p_colon());
+};;
+
+pub let interp_name = func(k: Mut(st.State), grp: u64) -> u64 {
+  let n: u64 = ax.n_count(grp);
+  if n < 2 { fail_msg(k, "empty member splice", 19, ax.e_ast()); return 0; }
+  let v: Mut(CtVal) = ptr_cast(Mut(CtVal), st.st_alloc(k, 24));
+  let j: u64 = eval_expr(k, grp, 1, 0, v);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != n { fail_msg(k, "bad member splice", 17, ax.e_ast()); return 0; }
+  if v_kind(v) == 0 { return v_a(v); }
+  if v_kind(v) == 3 { return s.intern(ptr_cast(Ref(u8), v_a(v)), v_b(v)); }
+  fail_msg(k, "bad field name", 14, ax.e_type());
+  return 0;
+};

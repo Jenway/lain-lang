@@ -1,0 +1,1893 @@
+// effects.lain —— 单次代数效应：声明登记、效应行、纯度检查与 LainIR 降解。
+// 运行期通道住在静态数据 __eff_state 里：
+//   [status_tag@0, payload_bits@8, resume_val@16, oneshot_used@24]
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let ir = import("src::ir::ir");
+let codes = import("src::ir::ir_codes");
+let s = import("src::driver::sym");
+let ax = import("src::syntax::ast");
+let cx = import("src::sema::ctx");
+let agg = import("src::sema::agg");
+let modules = import("src::sema::modules");
+let ireg = import("src::sema::tyreg");
+let ct = import("src::comptime::ctypes");
+let ctf = import("src::comptime::ctfor");
+let ctfn = import("src::comptime::ctfn");
+let tb = import("src::sema::tbuild");
+let env = import("src::sema::env");
+let cl = import("src::sema::calls");
+let bi = import("src::sema::builtins");
+let hr = import("src::driver::host_rt");
+
+extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
+extern effects_block(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 = lainc_stmt_block;
+
+let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
+let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
+let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
+let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
+let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
+let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
+let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
+let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
+let skip_semi = func(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); };
+let dl_brace = func() -> u64 { return ax.dl_brace(); };
+let dl_paren = func() -> u64 { return ax.dl_paren(); };
+let no_slot = func() -> u64 { return ax.no_slot(); };
+let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
+let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
+let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
+let box_get = func(p: Mut(u64)) -> u64 { return ax.box_get(p); };
+let box_put = func(p: Mut(u64), v: u64) -> u64 { return ax.box_put(p, v); };
+let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
+let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
+let t64 = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.t64(k); };
+let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
+let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
+let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); };
+
+// 效应符号种类。modules.lain 只枚举到 10，这里沿用同一张符号表。
+pub let kind_effect = func() -> u64 { return 11; };
+
+// --- 编译期上下文 ---------------------------------------------------------
+// EffCtx 只存指针与计数器，数组在首次使用时从持久池分配一次。
+pub let EffRow = struct {
+  n: u64,
+  cap: u64,
+  items: Mut(u64)
+};
+
+pub let EffCtx = struct {
+  frames: Mut(u64),
+  fn: u64,
+  fcap: u64,
+  handlers: Mut(u64),
+  hn: u64,
+  hcap: u64,
+  resumes: Mut(u64),
+  rn: u64,
+  rcap: u64,
+  seqs: Mut(u64),
+  sn: u64,
+  scap: u64,
+  disp: Mut(u64),
+  dn: u64,
+  dcap: u64,
+  inl: Mut(u64),
+  inn: u64,
+  inc: u64,
+  in_handle: u64,
+  last_aborts: u64
+};
+
+pub let HArm = struct {
+  kind: u64,
+  tag: u64,
+  bodyg: u64,
+  param_tid: u64,
+  ret_tid: u64,
+  bind: u64,
+  resume_bind: u64,
+  body: u64,
+  blk: u64,
+  has_resume: u64,
+  abortive: u64
+};
+
+pub let HandlerRec = struct {
+  ag: u64,
+  row: u64,
+  arms: Mut(HArm),
+  n: u64,
+  has_return: u64,
+  has_resumable: u64
+};
+
+pub let ResumeState = struct {
+  mode: u64,
+  ret_tid: u64,
+  base_loop: u64,
+  count: u64
+};
+
+pub let OpInfo = struct {
+  found: u64,
+  index: u64,
+  np: u64,
+  param_tid: u64,
+  ret_tid: u64,
+  abortive: u64,
+  param_g: u64,
+  param_i: u64
+};
+
+pub let FnLayout = struct {
+  ret_i: u64,
+  eff_i: u64,
+  body_i: u64,
+  next_i: u64
+};
+
+pub let SEQ_CAP = func() -> u64 { return 128; };
+pub let FRAME_CAP = func() -> u64 { return 64; };
+pub let HANDLER_CAP = func() -> u64 { return 32; };
+pub let RESUME_CAP = func() -> u64 { return 32; };
+
+let ctx_new = func(k: Mut(st.State)) -> Mut(EffCtx) {
+  let c: Mut(EffCtx) = ptr_cast(Mut(EffCtx), st.st_ralloc(k, 160));
+  c.frames = ptr_cast(Mut(u64), st.st_ralloc(k, FRAME_CAP() * 8));
+  c.fn = 0;
+  c.fcap = FRAME_CAP();
+  c.handlers = ptr_cast(Mut(u64), st.st_ralloc(k, HANDLER_CAP() * 8));
+  c.hn = 0;
+  c.hcap = HANDLER_CAP();
+  c.resumes = ptr_cast(Mut(u64), st.st_ralloc(k, RESUME_CAP() * 32));
+  c.rn = 0;
+  c.rcap = RESUME_CAP();
+  c.seqs = ptr_cast(Mut(u64), st.st_ralloc(k, SEQ_CAP() * 24));
+  c.sn = 0;
+  c.scap = SEQ_CAP();
+  c.disp = ptr_cast(Mut(u64), st.st_ralloc(k, HANDLER_CAP() * 48));
+  c.dn = 0;
+  c.dcap = HANDLER_CAP();
+  c.inl = ptr_cast(Mut(u64), st.st_ralloc(k, 8 * 40));
+  c.inn = 0;
+  c.inc = 8;
+  c.in_handle = 0;
+  c.last_aborts = 0;
+  return c;
+};
+
+// 上下文指针住在 genblk 的第 80 字节：前 80 字节已分给模块见证记录栈、
+// 单态化缓存与泛型待编队列，效应上下文占用其后的独立槽位。
+let ctx = func(k: Mut(st.State)) -> Mut(EffCtx) {
+  let slot: Mut(u64) = ptr_cast(Mut(u64), st.st_genblk(k) + 80);
+  let p: u64 = deref(slot);
+  if p != 0 { return ptr_cast(Mut(EffCtx), p); }
+  let c: Mut(EffCtx) = ctx_new(k);
+  deref(slot) = c as u64;
+  return c;
+};
+
+pub let in_handle = func(k: Mut(st.State)) -> u64 { return ctx(k).in_handle; };
+pub let set_in_handle = func(k: Mut(st.State), v: u64) -> u64 { let c: Mut(EffCtx) = ctx(k); c.in_handle = v; return v; };
+pub let last_aborts = func(k: Mut(st.State)) -> u64 { return ctx(k).last_aborts; };
+pub let clear_aborts = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(k); c.last_aborts = 0; return 0; };
+pub let take_aborts = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(k); let v: u64 = c.last_aborts; c.last_aborts = 0; return v; };
+pub let mark_abort = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(k); c.last_aborts = 1; return 1; };
+
+// --- 效应行 ---------------------------------------------------------------
+let row_alloc = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
+  let r: Mut(EffRow) = ptr_cast(Mut(EffRow), st.st_alloc(k, 24));
+  r.n = 0;
+  r.cap = cap;
+  r.items = ptr_cast(Mut(u64), st.st_alloc(k, cap * 24));
+  return r;
+};
+
+pub let row_empty = func(k: Mut(st.State)) -> Mut(EffRow) { return row_alloc(k, 64); };
+
+// 动态结果槽：在当前位置发 #alloca，不占过程入口预排的槽池。
+let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
+  let n: u64 = st.st_next_tmp(k);
+  let j: u64 = 1000000 + n;
+  let nm: u64 = ir.slot_name(k, j);
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, 8);
+  ir.emit_mem(k, codes.INST_ALLOCA(), nm, t8, 0);
+  ir.args_reset(k);
+  let z: u64 = ir.arg_int(k, 0);
+  let r: u64 = ir.arg_ref(k, nm);
+  ir.emit_mem(k, codes.INST_STORE(), 0, ir.tbits(k, 64), 0);
+  return j;
+};
+
+let item_at = func(r: Mut(EffRow), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), r.items) + i * 24);
+};
+
+let row_push = func(k: Mut(st.State), r: Mut(EffRow), tag: u64, a: u64, b: u64) -> u64 {
+  let n: u64 = r.n;
+  if n >= r.cap { return 0; }
+  let p: Mut(u64) = item_at(r, n);
+  deref(p) = tag;
+  let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+  let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+  deref(pa) = a;
+  deref(pb) = b;
+  r.n = n + 1;
+  return 1;
+};
+
+pub let row_is_empty = func(r: Mut(EffRow)) -> u64 {
+  if is_null(r) { return 1; }
+  if r.n == 0 { return 1; }
+  return 0;
+};
+
+let row_union = func(k: Mut(st.State), a: Mut(EffRow), b: Mut(EffRow)) -> Mut(EffRow) {
+  let out: Mut(EffRow) = row_alloc(k, 64);
+  if is_null(a) == 0 {
+    let i: u64 = loop ca(i: u64 = 0) while i < a.n {
+      let p: Mut(u64) = item_at(a, i);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      let r: u64 = row_push(k, out, deref(p), deref(pa), deref(pb));
+      i = i + 1;
+    };
+  }
+  if is_null(b) == 0 {
+    let j: u64 = loop cb(j: u64 = 0) while j < b.n {
+      let p: Mut(u64) = item_at(b, j);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      let r: u64 = row_push(k, out, deref(p), deref(pa), deref(pb));
+      j = j + 1;
+    };
+  }
+  return out;
+};
+
+// 帧栈：函数体与 handle 体各压一层。
+pub let push_frame = func(k: Mut(st.State), row: Mut(EffRow)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.fn >= c.fcap { return st.st_fail(k, ax.e_frame()); }
+  let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.frames) + c.fn * 8);
+  deref(p) = row as u64;
+  c.fn = c.fn + 1;
+  return 1;
+};
+
+pub let pop_frame = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.fn == 0 { return 0; }
+  c.fn = c.fn - 1;
+  return 1;
+};
+
+let frame_at = func(c: Mut(EffCtx), i: u64) -> Mut(EffRow) {
+  let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.frames) + i * 8);
+  return ptr_cast(Mut(EffRow), deref(p));
+};
+
+let current_allows = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  let i: u64 = c.fn;
+  let ok: u64 = loop f(i: u64 = c.fn) while i > 0 {
+    let r: Mut(EffRow) = frame_at(c, i - 1);
+    if is_null(r) == 0 {
+      let j: u64 = loop g(j: u64 = 0) while j < r.n {
+        let p: Mut(u64) = item_at(r, j);
+        let tag: u64 = deref(p);
+        let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+        let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+        if tag == 1 { return 1; }
+        if tag == 0 {
+          if (deref(pa) == bodyg) and ((deref(pb) == param_tid) or (deref(pb) == 0) or (param_tid == 0)) { return 1; }
+        }
+        j = j + 1;
+      };
+    }
+    i = i - 1;
+  };
+  return 0;
+};
+
+// --- 效应声明 -------------------------------------------------------------
+pub let register_effect = func(k: Mut(st.State), name: u64, bodyg: u64, param_tid: u64, is_pub: u64) -> Mut(modules.SymEntry) {
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, kind_effect(), modules.cur(k), name, param_tid, null_ref(Mut(u8)), bodyg);
+  let sp: u64 = modules.sym_set_pub(se, is_pub);
+  return se;
+};
+
+// let 名 = effect { ... } 或 let 名 = Factory(...) 返回 Effect。
+// 返回声明之后的下标；0 表示这个右值不是效应声明。
+pub let effect_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if e >= n { return 0; }
+  if n_sym(g, e) == s.k_effect() {
+    if e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
+      let se: Mut(modules.SymEntry) = register_effect(k, name, n_at(g, e + 1), 0, is_pub);
+      return e + 2;
+    }
+    return 0;
+  }
+  if is_name(g, e) == 0 { return 0; }
+  if e + 1 >= n { return 0; }
+  if is_group(g, e + 1) == 0 { return 0; }
+  if delim_of(g, e + 1) != dl_paren() { return 0; }
+  let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = ctfn.eval_factory_call(k, g, e, v);
+  if j == 0 { return 0; }
+  if st.st_ok(k) != 0 { return j; }
+  if ctf.v_kind(v) != 11 { return 0; }
+  let se2: Mut(modules.SymEntry) = register_effect(k, name, ctf.v_a(v), ctf.v_b(v), is_pub);
+  return j;
+};
+
+pub let effect_symbol = func(k: Mut(st.State), name: u64) -> Mut(modules.SymEntry) {
+  let se: Mut(modules.SymEntry) = ctf.find_sym(k, name);
+  if is_null(se) { return se; }
+  if modules.sym_kind(se) != kind_effect() { return null_ref(Mut(modules.SymEntry)); }
+  return se;
+};
+
+// --- 签名布局 -------------------------------------------------------------
+// 从形参组之后开始：可选 !{...}、可选 -> T、可选 !{...}、体。
+pub let layout_from = func(k: Mut(st.State), g: u64, a0: u64) -> Mut(FnLayout) {
+  let n: u64 = n_count(g);
+  let l: Mut(FnLayout) = ptr_cast(Mut(FnLayout), st.st_alloc(k, 32));
+  l.ret_i = 0;
+  l.eff_i = 0;
+  l.body_i = a0;
+  l.next_i = a0 + 1;
+  let a: u64 = a0;
+  if a + 1 < n and is_group(g, a) == 0 and n_sym(g, a) == s.p_bang() and is_group(g, a + 1) == 1 and delim_of(g, a + 1) == dl_brace() {
+    l.eff_i = a + 1;
+    a = a + 2;
+  }
+  if a < n and is_group(g, a) == 0 and n_sym(g, a) == s.p_arrow() {
+    l.ret_i = a + 1;
+    a = ret_end(g, a + 1);
+    if a + 1 < n and is_group(g, a) == 0 and n_sym(g, a) == s.p_bang() and is_group(g, a + 1) == 1 and delim_of(g, a + 1) == dl_brace() {
+      l.eff_i = a + 1;
+      a = a + 2;
+    }
+  }
+  l.body_i = a;
+  l.next_i = a + 1;
+  return l;
+};
+
+let ret_end = func(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if is_group(g, i) == 1 and delim_of(g, i) == dl_brace() { return i; }
+  if is_group(g, i) == 0 and n_sym(g, i) == s.p_bang() {
+    if i + 1 < n and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() { return i; }
+  }
+  return ret_end(g, i + 1);
+};
+
+pub let fn_layout = func(k: Mut(st.State), g: u64, pg_i: u64) -> Mut(FnLayout) {
+  return layout_from(k, g, pg_i + 1);
+};
+
+// --- op 声明扫描 ----------------------------------------------------------
+let count_commas = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
+  if i >= n { return acc; }
+  if is_comma(g, i) == 1 { return count_commas(g, i + 1, n, acc + 1); }
+  return count_commas(g, i + 1, n, acc);
+};
+
+let op_param = func(k: Mut(st.State), pg: u64, info: Mut(OpInfo)) -> u64 {
+  let n: u64 = n_count(pg);
+  info.param_g = 0;
+  info.param_i = 0;
+  if n == 0 { info.np = 0; return 1; }
+  info.np = count_commas(pg, 0, n, 0) + 1;
+  if is_name(pg, 0) == 0 { return 0; }
+  if n < 3 { return 0; }
+  if n_sym(pg, 1) != s.p_colon() { return 0; }
+  info.param_g = pg;
+  info.param_i = 2;
+  return 1;
+};
+
+pub let op_param_tid = func(k: Mut(st.State), info: Mut(OpInfo)) -> u64 {
+  if info.param_tid != 0 { return info.param_tid; }
+  if info.param_i == 0 { return 0; }
+  let pt: Mut(ty.Ty) = new_ty(k);
+  let j: u64 = parse_type(k, info.param_g, info.param_i, pt);
+  let tid: u64 = ireg.tid_of(k, pt);
+  info.param_tid = tid;
+  return tid;
+};
+
+let op_skip = func(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if is_semi(g, i) == 1 { return i + 1; }
+  return op_skip(g, i + 1);
+};
+
+pub let op_find = func(k: Mut(st.State), bodyg: u64, opname: u64) -> Mut(OpInfo) {
+  let info: Mut(OpInfo) = ptr_cast(Mut(OpInfo), st.st_alloc(k, 64));
+  info.found = 0;
+  info.index = 0;
+  info.np = 0;
+  info.param_tid = 0;
+  info.ret_tid = 0;
+  info.abortive = 0;
+  info.param_g = 0;
+  info.param_i = 0;
+  let n: u64 = n_count(bodyg);
+  let idx: u64 = loop sc(i: u64 = 0, tag: u64 = 0) while i < n {
+    let sym: u64 = n_sym(bodyg, i);
+    if sym == s.k_op() {
+      if i + 2 >= n { break sc(i); }
+      let nm: u64 = n_sym(bodyg, i + 1);
+      let pg: u64 = n_at(bodyg, i + 2);
+      let a: u64 = i + 3;
+      if a >= n or n_sym(bodyg, a) != s.p_arrow() { break sc(i); }
+      let rt: Mut(ty.Ty) = new_ty(k);
+      let b: u64 = parse_type(k, bodyg, a + 1, rt);
+      let rtid: u64 = ireg.tid_of(k, rt);
+      let nt: u64 = tag + 1;
+      if nm == opname and info.found == 0 {
+        info.found = 1;
+        info.index = nt;
+        let ok: u64 = op_param(k, pg, info);
+        info.ret_tid = rtid;
+        if rtid == tb.never_tid(k) { info.abortive = 1; } else { info.abortive = 0; }
+      }
+      i = op_skip(bodyg, b);
+      tag = nt;
+    } else {
+      i = i + 1;
+    }
+  };
+  return info;
+};
+
+// --- 效应行解析 -----------------------------------------------------------
+let skip_seps = func(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if is_comma(g, i) == 1 or is_semi(g, i) == 1 { return skip_seps(g, i + 1); }
+  return i;
+};
+
+let set_ctx = func(k: Mut(st.State), src: u64, modv: u64) -> u64 {
+  let sv: u64 = st.st_set_src(k, src);
+  let mv: u64 = if modv >= 1000 { modv } else { 0 };
+  let sm: u64 = st.st_set_vmod(k, mv);
+  return 1;
+};
+
+let row_parse_group = func(k: Mut(st.State), g: u64, bidx: u64, src: u64, modv: u64) -> Mut(EffRow) {
+  let r: Mut(EffRow) = row_alloc(k, 64);
+  if bidx == 0 { return r; }
+  let bg: u64 = n_at(g, bidx);
+  let saved_src: u64 = st.st_src(k);
+  let saved_vmod: u64 = st.st_vmod(k);
+  let sc: u64 = set_ctx(k, src, modv);
+  let n: u64 = n_count(bg);
+  let i: u64 = 0;
+  let done: u64 = loop it(i: u64 = 0) while i < n {
+    let j: u64 = skip_seps(bg, i);
+    if j >= n { break it(j); }
+    if is_name(bg, j) == 0 { break it(j + 1); }
+    let nm: u64 = n_sym(bg, j);
+    if j + 1 < n and is_group(bg, j + 1) == 1 and delim_of(bg, j + 1) == dl_paren() {
+      let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+      let fj: u64 = ctfn.eval_factory_call(k, bg, j, v);
+      if st.st_ok(k) != 0 { break it(n); }
+      if fj != 0 and ctf.v_kind(v) == 11 {
+        let pp: u64 = row_push(k, r, 0, ctf.v_a(v), ctf.v_b(v));
+        i = fj;
+      } else {
+        let pp2: u64 = row_push(k, r, 1, nm, 0);
+        i = j + 2;
+      }
+    } else {
+      if j + 2 < n and is_group(bg, j + 1) == 0 and n_sym(bg, j + 1) == s.p_dot() {
+        let pp: u64 = row_push(k, r, 1, nm, 0);
+        i = j + 3;
+      } else {
+        let se: Mut(modules.SymEntry) = ctf.find_sym(k, nm);
+        if is_null(se) == 0 and modules.sym_kind(se) == kind_effect() {
+          let pp: u64 = row_push(k, r, 0, modules.sym_shape(se), modules.sym_qual(se));
+          i = j + 1;
+        } else {
+          let pp2: u64 = row_push(k, r, 1, nm, 0);
+          i = j + 1;
+        }
+      }
+    }
+  };
+  st.st_set_src(k, saved_src);
+  st.st_set_vmod(k, saved_vmod);
+  return r;
+};
+
+pub let row_from_hdr = func(k: Mut(st.State), src: u64, modv: u64, bidx: u64) -> Mut(EffRow) {
+  if bidx == 0 { return row_empty(k); }
+  let root: u64 = hr.source_root(src);
+  return row_parse_group(k, root, bidx, src, modv);
+};
+
+// 无载荷枚举变体的裸写法 Opt.None：member 只认带花括号/小括号的构造，补一条。
+pub let bare_variant = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(g);
+  if i + 2 >= n { return 0; }
+  if is_name(g, i) == 0 or is_name(g, i + 2) == 0 { return 0; }
+  if is_group(g, i + 1) == 0 and n_sym(g, i + 1) != s.p_dot() { return 0; }
+  if i + 3 < n and is_group(g, i + 3) == 1 {
+    if delim_of(g, i + 3) == dl_brace() or delim_of(g, i + 3) == dl_paren() { return 0; }
+  }
+  let se: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i));
+  if is_null(se) { return 0; }
+  if modules.sym_kind(se) != modules.sym_kind_enum() { return 0; }
+  let sh: u64 = modules.sym_shape(se);
+  let m: Mut(agg.Member) = agg.mem_find(sh, n_sym(g, i + 2));
+  if is_null(m) { return 0; }
+  if agg.mem_has(m) == 1 { return 0; }
+  let objv: Mut(ty.Val) = new_val(k);
+  let obj: u64 = agg.new_obj(k, sh, objv);
+  let tg: u64 = agg.tag_write(k, obj, agg.mem_tag(m));
+  ty.val_at(out, objv);
+  return i + 3;
+};
+
+pub let callee_row = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> Mut(EffRow) {
+  if is_null(se) { return row_empty(k); }
+  let kd: u64 = modules.sym_kind(se);
+  if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() { return row_empty(k); }
+  let bidx: u64 = modules.sym_shape(se);
+  if bidx == 0 { return row_empty(k); }
+  return row_from_hdr(k, modules.sym_src(se), modules.sym_mod(se), bidx);
+};
+
+// --- 运行期通道 -----------------------------------------------------------
+let state_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_state", 11);
+};
+
+let ensure_state = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = state_name(k);
+  if ir.data_find(k, nm) != 0 { return nm; }
+  let buf: Mut(u8) = st.st_databuf(k) + st.st_dataused(k);
+  let zs: MutSlice(u8) = make_slice(MutSlice(u8), buf, 32);
+  let z: u64 = loop w(i: u64 = 0) while i < 32 {
+    zs[i] = 0;
+    i = i + 1;
+  };
+  let used: u64 = st.st_set_dataused(k, st.st_dataused(k) + 32);
+  let add: u64 = ir.data_add(k, nm, buf, 32, 1);
+  return nm;
+};
+
+let state_addr = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = ensure_state(k);
+  let res: u64 = ir.fresh_t(k);
+  let e: u64 = ir.emit_lea(k, res, nm, 0, 1, 0);
+  return res;
+};
+
+// 当前可恢复效应的处理器入口：一个 (tag, payload) -> u64 的函数指针。
+let handler_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_handler", 13);
+};
+
+let ensure_handler = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = handler_name(k);
+  if ir.data_find(k, nm) != 0 { return nm; }
+  let buf: Mut(u8) = st.st_databuf(k) + st.st_dataused(k);
+  let zs: MutSlice(u8) = make_slice(MutSlice(u8), buf, 8);
+  let z: u64 = loop w(i: u64 = 0) while i < 8 {
+    zs[i] = 0;
+    i = i + 1;
+  };
+  let used: u64 = st.st_set_dataused(k, st.st_dataused(k) + 8);
+  let add: u64 = ir.data_add(k, nm, buf, 8, 1);
+  return nm;
+};
+
+let handler_addr = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = ensure_handler(k);
+  let res: u64 = ir.fresh_t(k);
+  let e: u64 = ir.emit_lea(k, res, nm, 0, 1, 0);
+  return res;
+};
+
+let load_addr_field = func(k: Mut(st.State), nm: u64, off: u64) -> Mut(ty.Val) {
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let p: u64 = agg.off_of(k, nm, off);
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, p);
+  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, at, 0);
+  let v: Mut(ty.Val) = new_val(k);
+  return ty.val_ref(v, res, at);
+};
+
+let load_u64 = func(k: Mut(st.State), base: u64, off: u64) -> u64 {
+  let p: u64 = agg.off_of(k, base, off);
+  let t: Mut(ty.Ty) = t64(k);
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, p);
+  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t, 0);
+  return res;
+};
+
+let store_lit = func(k: Mut(st.State), base: u64, off: u64, bits: u64) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let v: Mut(ty.Val) = new_val(k);
+  ty.val_lit(v, bits, t);
+  return agg.store_at(k, base, off, v, t);
+};
+
+let store_val = func(k: Mut(st.State), base: u64, off: u64, v: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let c: Mut(ty.Val) = new_val(k);
+  let rc: u64 = cx.coerce(k, v, ty.vty(v), t, c);
+  return agg.store_at(k, base, off, c, t);
+};
+
+pub let emit_default_return = func(k: Mut(st.State)) -> u64 {
+  let rt: Mut(ty.Ty) = new_ty(k);
+  let a: u64 = ty.ty_save(rt, st.st_retk(k), st.st_retw(k), st.st_retsg(k));
+  let b: u64 = ty.ty_set_sh(rt, st.st_retsh(k));
+  let sr: u64 = agg.sret_ty(rt);
+  ir.args_reset(k);
+  if sr == 0 and ty.ty_known(rt) == 1 {
+    let c: u64 = ir.arg_int(k, 0);
+  }
+  return ir.emit_jump(k, codes.INST_RETURN(), 0);
+};
+
+pub let propagate = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = ensure_state(k);
+  let stv: u64 = load_u64(k, nm, 0);
+  let t: Mut(ty.Ty) = t64(k);
+  let cond: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, stv);
+  let b: u64 = ir.arg_int(k, 0);
+  let cmp: u64 = ir.emit(k, codes.INST_NE(), cond, t);
+  let r: u64 = ir.region_begin(k);
+  let d: u64 = emit_default_return(k);
+  let re: u64 = ir.region_end(k);
+  return ir.emit_if(k, 0, cond, re, 0);
+};
+
+// --- 效应序号（运行期 state_tag 的高位） ------------------------------------
+let eff_seq = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  let fb: Mut(u64) = box(k);
+  let done: u64 = loop sc(i: u64 = 0) while i < c.sn {
+    let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.seqs) + i * 24);
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+    if (deref(p) == bodyg) and ((deref(pa) == param_tid) or (param_tid == 0)) {
+      box_put(fb, i + 1);
+      break sc(i + 1);
+    }
+    i = i + 1;
+  };
+  let hit: u64 = box_get(fb);
+  if hit != 0 { return hit; }
+  let idx: u64 = c.sn;
+  if idx >= c.scap { return 1; }
+  let q: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.seqs) + idx * 24);
+  let qa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), q) + 8);
+  let qb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), q) + 16);
+  deref(q) = bodyg;
+  deref(qa) = param_tid;
+  deref(qb) = 0;
+  c.sn = idx + 1;
+  return idx + 1;
+};
+
+let runtime_tag = func(k: Mut(st.State), bodyg: u64, param_tid: u64, op_index: u64) -> u64 {
+  let seq: u64 = eff_seq(k, bodyg, param_tid);
+  return seq * 256 + op_index;
+};
+
+// --- resume 状态 ----------------------------------------------------------
+let resume_at = func(c: Mut(EffCtx), i: u64) -> Mut(ResumeState) {
+  return ptr_cast(Mut(ResumeState), ptr_cast(Mut(u8), c.resumes) + i * 32);
+};
+
+let push_resume = func(k: Mut(st.State), mode: u64, ret_tid: u64, base_loop: u64) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.rn >= c.rcap { return st.st_fail(k, ax.e_frame()); }
+  let r: Mut(ResumeState) = resume_at(c, c.rn);
+  r.mode = mode;
+  r.ret_tid = ret_tid;
+  r.base_loop = base_loop;
+  r.count = 0;
+  c.rn = c.rn + 1;
+  return 1;
+};
+
+let pop_resume = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.rn == 0 { return 0; }
+  c.rn = c.rn - 1;
+  return 1;
+};
+
+pub let InlineState = struct {
+  active: u64,
+  label: u64,
+  slot: u64,
+  tp: u64
+};
+
+let inline_at = func(c: Mut(EffCtx), i: u64) -> Mut(InlineState) {
+  return ptr_cast(Mut(InlineState), ptr_cast(Mut(u8), c.inl) + i * 40);
+};
+
+pub let push_inline = func(k: Mut(st.State), label: u64, slot: u64, tp: u64) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.inn >= c.inc { return st.st_fail(k, ax.e_frame()); }
+  let s: Mut(InlineState) = inline_at(c, c.inn);
+  s.active = 1;
+  s.label = label;
+  s.slot = slot;
+  s.tp = tp;
+  c.inn = c.inn + 1;
+  return 1;
+};
+
+pub let pop_inline = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.inn == 0 { return 0; }
+  c.inn = c.inn - 1;
+  return 1;
+};
+
+pub let inline_top = func(k: Mut(st.State)) -> Mut(InlineState) {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.inn == 0 { return null_ref(Mut(InlineState)); }
+  return inline_at(c, c.inn - 1);
+};
+
+pub let inline_active = func(k: Mut(st.State)) -> u64 {
+  let s: Mut(InlineState) = inline_top(k);
+  if is_null(s) { return 0; }
+  return s.active;
+};
+
+let top_resume = func(k: Mut(st.State)) -> Mut(ResumeState) {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.rn == 0 { return null_ref(Mut(ResumeState)); }
+  return resume_at(c, c.rn - 1);
+};
+
+pub let resume_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let r: Mut(ResumeState) = top_resume(k);
+  let n: u64 = n_count(g);
+  if is_null(r) {
+    let m: Ref(u8) = "resume outside handler";
+    let d: u64 = ir.diag(k, n_at(g, i), 1, m, 22);
+    st.st_fail(k, ax.e_ast());
+    return i + 1;
+  }
+  if r.ret_tid == tb.never_tid(k) {
+    let m2: Ref(u8) = "cannot resume abortive effect";
+    let d2: u64 = ir.diag(k, n_at(g, i), 1, m2, 29);
+    st.st_fail(k, ax.e_type());
+    return i + 1;
+  }
+  if r.count >= 1 {
+    let m3: Ref(u8) = "one-shot continuation resumed multiple times";
+    let d3: u64 = ir.diag(k, n_at(g, i), 1, m3, 44);
+    st.st_fail(k, ax.e_type());
+    return i + 1;
+  }
+  if st.st_loopdepth(k) > r.base_loop {
+    let m4: Ref(u8) = "one-shot continuation resumed multiple times";
+    let d4: u64 = ir.diag(k, n_at(g, i), 1, m4, 44);
+    st.st_fail(k, ax.e_type());
+    return i + 1;
+  }
+  r.count = r.count + 1;
+  let rt: Mut(ty.Ty) = new_ty(k);
+  let pj: u64 = ireg.project(k, r.ret_tid, rt);
+  let j: u64 = i + 1;
+  if j < n and is_group(g, j) == 1 and delim_of(g, j) == dl_paren() {
+    let pg: u64 = n_at(g, j);
+    if n_count(pg) == 0 {
+      ty.val_none(out);
+    } else {
+      let v: Mut(ty.Val) = new_val(k);
+      let ej: u64 = core_expr(k, pg, 0, 0, rt, v);
+      if r.mode == 0 {
+        ty.val_at(out, v);
+      } else {
+        let base: u64 = state_addr(k);
+        let sv: u64 = store_val(k, base, 16, v);
+        let sz: u64 = store_lit(k, base, 0, 0);
+        let so: u64 = store_lit(k, base, 24, 1);
+        ty.val_at(out, v);
+      }
+    }
+    return j + 1;
+  }
+  ty.val_none(out);
+  return j;
+};
+
+// --- perform --------------------------------------------------------------
+let payload_bits = func(k: Mut(st.State), argsg: u64, info: Mut(OpInfo)) -> Mut(ty.Val) {
+  let v: Mut(ty.Val) = new_val(k);
+  if info.np == 0 {
+    let t: Mut(ty.Ty) = t64(k);
+    ty.val_lit(v, 0, t);
+    return v;
+  }
+  if info.np > 1 {
+    let m: Ref(u8) = "effect op needs one payload";
+    let d: u64 = ir.diag(k, 0, 1, m, 27);
+    st.st_fail(k, ax.e_unsup());
+    ty.val_none(v);
+    return v;
+  }
+  let tid: u64 = op_param_tid(k, info);
+  let pt: Mut(ty.Ty) = new_ty(k);
+  let pj: u64 = ireg.project(k, tid, pt);
+  let j: u64 = core_expr(k, argsg, 0, 0, pt, v);
+  return v;
+};
+
+// 在词法上直接包住 perform 的 handle 里做内联恢复：
+// 处理器分支在 perform 的位置求值，resume(r) 就是这个表达式的值。
+let inline_handler = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> Mut(HandlerRec) {
+  let c: Mut(EffCtx) = ctx(k);
+  let i: u64 = c.hn;
+  let found: Mut(HandlerRec) = null_ref(Mut(HandlerRec));
+  let done: u64 = loop h(i: u64 = c.hn) while i > 0 {
+    let hp: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.handlers) + (i - 1) * 8);
+    let hr: Mut(HandlerRec) = ptr_cast(Mut(HandlerRec), deref(hp));
+    let j: u64 = loop a(j: u64 = 0) while j < hr.n {
+      let arm: Mut(HArm) = ptr_cast(Mut(HArm), ptr_cast(Mut(u8), hr.arms) + j * 88);
+      if arm.kind == 1 and arm.has_resume == 1 and arm.abortive == 0 {
+        if (arm.bodyg == bodyg) and ((arm.param_tid == param_tid) or (param_tid == 0) or (arm.param_tid == 0)) {
+          return hr;
+        }
+      }
+      j = j + 1;
+    };
+    i = i - 1;
+  };
+  return found;
+};
+
+let arm_inline = func(k: Mut(st.State), hr: Mut(HandlerRec), bodyg: u64, param_tid: u64, payload: Mut(ty.Val), info: Mut(OpInfo), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = hr.n;
+  let a: Mut(HArm) = null_ref(Mut(HArm));
+  let found: u64 = loop f(i: u64 = 0) while i < n {
+    let ar: Mut(HArm) = ptr_cast(Mut(HArm), ptr_cast(Mut(u8), hr.arms) + i * 88);
+    if ar.kind == 1 and ar.has_resume == 1 and ar.abortive == 0 {
+      if (ar.bodyg == bodyg) and ((ar.param_tid == param_tid) or (param_tid == 0) or (ar.param_tid == 0)) {
+        a = ar;
+        break f(1);
+      }
+    }
+    i = i + 1;
+  };
+  if found == 0 { return 0; }
+  let mark: u64 = env.env_mark(k);
+  if a.bind != 0 {
+    let sl: u64 = st.st_next_slot(k);
+    let pt: Mut(ty.Ty) = new_ty(k);
+    let pj: u64 = ireg.project(k, a.param_tid, pt);
+    let cv: Mut(ty.Val) = new_val(k);
+    let rc: u64 = cx.coerce(k, payload, ty.vty(payload), pt, cv);
+    cx.slot_put(k, sl, cv, pt);
+    env.env_push(k, a.bind, sl, pt);
+  }
+  let rt: Mut(ty.Ty) = new_ty(k);
+  let rj: u64 = ireg.project(k, info.ret_tid, rt);
+  let pr: u64 = push_resume(k, 0, info.ret_tid, st.st_loopdepth(k));
+  let term: Mut(u64) = box(k);
+  let slot: u64 = if ty.ty_known(rt) == 1 { alloc_dyn_slot(k) } else { no_slot() };
+  if a.blk == 1 {
+    let bg: u64 = n_at(hr.ag, a.body);
+    let bj: u64 = effects_block(k, bg, 0, term, slot, rt);
+  } else {
+    let v: Mut(ty.Val) = new_val(k);
+    let ej: u64 = core_expr(k, hr.ag, a.body, 0, rt, v);
+    if st.st_ok(k) == 0 and slot != no_slot() and ty.val_known(v) == 1 {
+      cx.slot_put(k, slot, v, ty.vty(v));
+    }
+  }
+  let pp: u64 = pop_resume(k);
+  if slot != no_slot() {
+    cx.slot_get(k, slot, rt, out);
+  } else {
+    ty.val_none(out);
+  }
+  env.env_release(k, mark);
+  if st.st_ok(k) != 0 { return 1; }
+  return 1;
+};
+
+let handler_fn = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
+  let u64t: Mut(ty.Ty) = t64(k);
+  let u64id: u64 = ireg.tid_of(k, u64t);
+  let tbl: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 24));
+  deref(tbl) = u64id;
+  let w1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + 8);
+  deref(w1) = u64id;
+  let fid: u64 = ct.fn_t(k, u64id, 2, tbl as u64);
+  let ft: Mut(ty.Ty) = new_ty(k);
+  let fp: u64 = ireg.project(k, fid, ft);
+  let fv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(fv, name, ft);
+  return fv;
+};
+
+let save_handler = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = handler_name(k);
+  let hv: Mut(ty.Val) = load_addr_field(k, nm, 0);
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let sl: u64 = st.st_next_slot(k);
+  cx.slot_put(k, sl, hv, at);
+  return sl;
+};
+
+let restore_handler = func(k: Mut(st.State), slot: u64) -> u64 {
+  let nm: u64 = handler_name(k);
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let v: Mut(ty.Val) = new_val(k);
+  cx.slot_get(k, slot, at, v);
+  return agg.store_at(k, nm, 0, v, at);
+};
+
+let install_handler = func(k: Mut(st.State), name: u64) -> u64 {
+  let nm: u64 = handler_name(k);
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let ares: u64 = ir.fresh_t(k);
+  let e: u64 = ir.emit_lea(k, ares, name, 0, 1, 0);
+  let av: Mut(ty.Val) = new_val(k);
+  ty.val_ref(av, ares, at);
+  return agg.store_at(k, nm, 0, av, at);
+};
+
+// 可恢复操作的同步回调：当前处理器存在时直接调用它拿回 resume 值。
+let resumable_dispatch = func(k: Mut(st.State), tag: u64, payload: Mut(ty.Val), info: Mut(OpInfo), out: Mut(ty.Val)) -> u64 {
+  let hv: Mut(ty.Val) = load_addr_field(k, handler_name(k), 0);
+  let at: Mut(ty.Ty) = ty.vty(hv);
+  let u64t: Mut(ty.Ty) = t64(k);
+  let hv64: Mut(ty.Val) = new_val(k);
+  let hc: u64 = cx.coerce(k, hv, at, u64t, hv64);
+  let cond: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let ca: u64 = ir.arg_ref(k, ty.vn(hv64));
+  let cb: u64 = ir.arg_int(k, 0);
+  let cmp: u64 = ir.emit(k, codes.INST_NE(), cond, u64t);
+  let slot: u64 = alloc_dyn_slot(k);
+  let tr: u64 = ir.region_begin(k);
+  let pv: Mut(ty.Val) = new_val(k);
+  let pc: u64 = cx.coerce(k, payload, ty.vty(payload), u64t, pv);
+  let ptbl: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 64));
+  let p0: u64 = ty.ty_at(cx.ty_idx(ptbl, 0), u64t);
+  let p1: u64 = ty.ty_at(cx.ty_idx(ptbl, 1), u64t);
+  let u64id: u64 = ireg.tid_of(k, u64t);
+  let tbl: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 24));
+  deref(tbl) = u64id;
+  let w1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + 8);
+  deref(w1) = u64id;
+  let item: u64 = 1 + 64 * 256;
+  let plo: u64 = item + item * 65536;
+  ir.args_reset(k);
+  let tgt: u64 = ir.arg_ref(k, ty.vn(hv));
+  let t1: u64 = ir.arg_int(k, tag);
+  let pv2: u64 = ir.op_val(k, pv);
+  let rv: u64 = ir.fresh_t(k);
+  let ic: u64 = ir.emit_call_indirect(k, rv, u64t, plo, 0);
+  let rvv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(rvv, rv, u64t);
+  cx.slot_put(k, slot, rvv, u64t);
+  let tre: u64 = ir.region_end(k);
+  let er: u64 = ir.region_begin(k);
+  let sa: u64 = state_addr(k);
+  let s0: u64 = store_lit(k, sa, 0, tag);
+  let s1: u64 = store_val(k, sa, 8, payload);
+  let s2: u64 = store_lit(k, sa, 24, 0);
+  let ere: u64 = ir.region_end(k);
+  let ifi: u64 = ir.emit_if(k, 0, cond, tre, ere);
+  if in_handle(k) == 1 {
+    let rv2: Mut(ty.Val) = new_val(k);
+    cx.slot_get(k, slot, u64t, rv2);
+    let rt: Mut(ty.Ty) = new_ty(k);
+    let rj: u64 = ireg.project(k, info.ret_tid, rt);
+    let c2: u64 = cx.coerce(k, rv2, u64t, rt, out);
+    return 1;
+  }
+  let stv: u64 = load_u64(k, sa, 0);
+  let cond2: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let qa: u64 = ir.arg_ref(k, stv);
+  let qb: u64 = ir.arg_int(k, 0);
+  let cmp2: u64 = ir.emit(k, codes.INST_NE(), cond2, u64t);
+  let rr: u64 = ir.region_begin(k);
+  let dr: u64 = emit_default_return(k);
+  let rre: u64 = ir.region_end(k);
+  let ci2: u64 = ir.emit_if(k, 0, cond2, rre, 0);
+  let rv3: Mut(ty.Val) = new_val(k);
+  cx.slot_get(k, slot, u64t, rv3);
+  let rt2: Mut(ty.Ty) = new_ty(k);
+  let rj2: u64 = ireg.project(k, info.ret_tid, rt2);
+  let c3: u64 = cx.coerce(k, rv3, u64t, rt2, out);
+  return 1;
+};
+
+pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(g);
+  let j: u64 = i + 1;
+  if j >= n or is_name(g, j) == 0 {
+    st.st_fail(k, ax.e_ast());
+    return j;
+  }
+  let bodyg: u64 = 0;
+  let param_tid: u64 = 0;
+  let j2: u64 = 0;
+  if j + 1 < n and is_group(g, j + 1) == 1 and delim_of(g, j + 1) == dl_paren() {
+    let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+    let fj: u64 = ctfn.eval_factory_call(k, g, j, v);
+    if fj == 0 or st.st_ok(k) != 0 or ctf.v_kind(v) != 11 {
+      let m: Ref(u8) = "unknown effect";
+      let d: u64 = ir.diag(k, n_at(g, j), 1, m, 14);
+      st.st_fail(k, ax.e_unbound());
+      return j + 2;
+    }
+    bodyg = ctf.v_a(v);
+    param_tid = ctf.v_b(v);
+    j2 = fj;
+  } else {
+    let se: Mut(modules.SymEntry) = effect_symbol(k, n_sym(g, j));
+    if is_null(se) {
+      let m2: Ref(u8) = "unknown effect";
+      let d2: u64 = ir.diag(k, n_at(g, j), 1, m2, 14);
+      st.st_fail(k, ax.e_unbound());
+      return j + 1;
+    }
+    bodyg = modules.sym_shape(se);
+    param_tid = modules.sym_qual(se);
+    j2 = j + 1;
+  }
+  if j2 + 1 >= n { st.st_fail(k, ax.e_ast()); return j2; }
+  if is_group(g, j2) == 0 and n_sym(g, j2) == s.p_dot() {
+    if is_name(g, j2 + 1) == 0 { st.st_fail(k, ax.e_ast()); return j2 + 1; }
+    if j2 + 2 >= n or is_group(g, j2 + 2) == 0 { st.st_fail(k, ax.e_ast()); return j2 + 2; }
+    let opname: u64 = n_sym(g, j2 + 1);
+    let argsg: u64 = n_at(g, j2 + 2);
+    let info: Mut(OpInfo) = op_find(k, bodyg, opname);
+    if info.found == 0 {
+      let m3: Ref(u8) = "unknown effect op";
+      let d3: u64 = ir.diag(k, n_at(g, j2 + 1), 1, m3, 17);
+      st.st_fail(k, ax.e_unbound());
+      return j2 + 3;
+    }
+    if current_allows(k, bodyg, param_tid) == 0 {
+      let m4: Ref(u8) = "unhandled effect";
+      let d4: u64 = ir.diag(k, n_at(g, j), 1, m4, 16);
+      st.st_fail(k, ax.e_type());
+      return j2 + 3;
+    }
+    if param_tid != 0 { info.param_tid = param_tid; }
+    let payload: Mut(ty.Val) = payload_bits(k, argsg, info);
+    if st.st_ok(k) != 0 { return j2 + 3; }
+    let tag: u64 = runtime_tag(k, bodyg, param_tid, info.index);
+    if info.abortive == 0 {
+      let hr: Mut(HandlerRec) = inline_handler(k, bodyg, param_tid);
+      if is_null(hr) == 0 {
+        let ok: u64 = arm_inline(k, hr, bodyg, param_tid, payload, info, out);
+        if ok == 1 { return j2 + 3; }
+      }
+
+    }
+    let base: u64 = state_addr(k);
+    let tag2: u64 = tag;
+    let s0: u64 = store_lit(k, base, 0, tag);
+    let s1: u64 = store_val(k, base, 8, payload);
+    let s2: u64 = store_lit(k, base, 24, 0);
+    if in_handle(k) == 1 {
+      if info.abortive == 1 {
+        ty.val_none(out);
+      } else {
+        let rt: Mut(ty.Ty) = new_ty(k);
+        let rj: u64 = ireg.project(k, info.ret_tid, rt);
+        ty.val_lit(out, 0, rt);
+      }
+    } else {
+      if info.abortive == 1 {
+        let dr: u64 = emit_default_return(k);
+        let ma: u64 = mark_abort(k);
+        ty.val_none(out);
+      } else {
+        let rt2: Mut(ty.Ty) = new_ty(k);
+        let rj2: u64 = ireg.project(k, info.ret_tid, rt2);
+        ty.val_lit(out, 0, rt2);
+      }
+    }
+    return j2 + 3;
+  }
+  st.st_fail(k, ax.e_ast());
+  return j2;
+};
+
+// --- handle ---------------------------------------------------------------
+let find_with = func(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return n; }
+  if is_group(g, i) == 0 and n_sym(g, i) == s.k_with() { return i; }
+  return find_with(g, i + 1);
+};
+
+// 读取词节点文本的第 k 个字节；越界读由节点文本长度自行保证。
+let tok_byte = func(ag: u64, i: u64, k: u64) -> u64 {
+  let h: u64 = n_at(ag, i);
+  let p: Ref(u8) = ax.lit_addr(h);
+  let b: u8 = deref(p + k);
+  return b as u64;
+};
+
+// => 在两种 AST 里长得不一样：前端 reader 给出单个两字节词，内核 meta 解析器
+// 给出相邻的 = 与 > 两个词。两种形态都要接受。
+let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
+  let n: u64 = n_count(ag);
+  if i >= n { st.st_fail(k, ax.e_ast()); return i + 1; }
+  if is_group(ag, i) == 0 {
+    let h: u64 = n_at(ag, i);
+    if h != 0 and ax.lit_len(h) == 2 {
+      if tok_byte(ag, i, 0) == 61 and tok_byte(ag, i, 1) == 62 { return i + 1; }
+    }
+  }
+  if i + 1 < n and is_group(ag, i + 1) == 0 {
+    if n_sym(ag, i) == s.p_eq() and n_sym(ag, i + 1) == s.o_gt() { return i + 2; }
+  }
+  st.st_fail(k, ax.e_ast());
+  return i + 1;
+};
+
+let arm_end = func(ag: u64, i: u64) -> u64 {
+  let n: u64 = n_count(ag);
+  if i >= n { return i; }
+  if is_group(ag, i) == 1 { return i + 1; }
+  if is_comma(ag, i) == 1 or is_semi(ag, i) == 1 { return i; }
+  return arm_end(ag, i + 1);
+};
+
+let arm_first = func(pg: u64) -> u64 {
+  if n_count(pg) == 0 { return 0; }
+  if is_name(pg, 0) == 0 { return 0; }
+  return n_sym(pg, 0);
+};
+
+let scan_resume = func(ag: u64, i: u64, end: u64) -> u64 {
+  if i >= end { return 0; }
+  if is_group(ag, i) == 1 {
+    let sub: u64 = n_at(ag, i);
+    if scan_resume(sub, 0, n_count(sub)) == 1 { return 1; }
+  } else {
+    if n_sym(ag, i) == s.k_resume() { return 1; }
+  }
+  return scan_resume(ag, i + 1, end);
+};
+
+// 在给定效应行里按 op 名找定义；命中第一条就够。
+let resolve_op_row = func(k: Mut(st.State), r: Mut(EffRow), opname: u64) -> Mut(OpInfo) {
+  if is_null(r) == 0 {
+    let i: u64 = 0;
+    let found: Mut(OpInfo) = null_ref(Mut(OpInfo));
+    let done: u64 = loop it(i: u64 = 0) while i < r.n {
+      let p: Mut(u64) = item_at(r, i);
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if tag == 0 {
+        let info: Mut(OpInfo) = op_find(k, deref(pa), opname);
+        if info.found == 1 {
+          if deref(pb) != 0 { info.param_tid = deref(pb); }
+          else { let ptid: u64 = op_param_tid(k, info); }
+          found = info;
+          break it(i + 1);
+        }
+      }
+      i = i + 1;
+    };
+    if is_null(found) == 0 { return found; }
+  }
+  return null_ref(Mut(OpInfo));
+};
+
+let resolve_op_any = func(k: Mut(st.State), opname: u64) -> Mut(OpInfo) {
+  let cnt: u64 = modules.sym_count(k);
+  let res: Mut(OpInfo) = null_ref(Mut(OpInfo));
+  let done: u64 = loop sc(i: u64 = 0) while i < cnt {
+    let se: Mut(modules.SymEntry) = modules.sym_at(k, i);
+    if modules.sym_kind(se) == kind_effect() {
+      let info: Mut(OpInfo) = op_find(k, modules.sym_shape(se), opname);
+      if info.found == 1 {
+        if modules.sym_qual(se) != 0 { info.param_tid = modules.sym_qual(se); }
+        else { let ptid: u64 = op_param_tid(k, info); }
+        res = info;
+        break sc(i + 1);
+      }
+    }
+    i = i + 1;
+  };
+  return res;
+};
+
+let arm_new = func(k: Mut(st.State), ag: u64, cnt: u64) -> Mut(HandlerRec) {
+  let hr: Mut(HandlerRec) = ptr_cast(Mut(HandlerRec), st.st_alloc(k, 48));
+  hr.ag = ag;
+  hr.row = row_empty(k) as u64;
+  hr.arms = ptr_cast(Mut(HArm), st.st_alloc(k, (cnt + 1) * 88));
+  hr.n = 0;
+  hr.has_return = 0;
+  hr.has_resumable = 0;
+  return hr;
+};
+
+let arm_at = func(hr: Mut(HandlerRec), i: u64) -> Mut(HArm) {
+  return ptr_cast(Mut(HArm), ptr_cast(Mut(u8), hr.arms) + i * 88);
+};
+
+// 解析 handle 分支，返回 HandlerRec。cand 是候选效应行。
+let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(EffRow), cnt: u64) -> Mut(HandlerRec) {
+  let hr: Mut(HandlerRec) = arm_new(k, ag, cnt);
+  let n: u64 = n_count(ag);
+  let row: Mut(EffRow) = row_empty(k);
+  let i: u64 = 0;
+  let done: u64 = loop it(i: u64 = 0) while i < n {
+    let j: u64 = skip_seps(ag, i);
+    if j >= n { break it(j); }
+    if is_name(ag, j) == 0 { break it(j + 1); }
+    let nm: u64 = n_sym(ag, j);
+    let a: Mut(HArm) = arm_at(hr, hr.n);
+    a.kind = 0;
+    a.tag = 0;
+    a.bodyg = 0;
+    a.param_tid = 0;
+    a.ret_tid = 0;
+    a.bind = 0;
+    a.resume_bind = 0;
+    a.body = 0;
+    a.blk = 0;
+    a.has_resume = 0;
+    a.abortive = 0;
+    if nm == s.k_return() {
+      if j + 1 >= n or is_group(ag, j + 1) == 0 { break it(j + 1); }
+      let pg: u64 = n_at(ag, j + 1);
+      a.kind = 0;
+      a.bind = arm_first(pg);
+      let b: u64 = arrow_at(k, ag, j + 2);
+      a.body = b;
+      if b < n and is_group(ag, b) == 1 and delim_of(ag, b) == dl_brace() { a.blk = 1; }
+      hr.has_return = 1;
+      hr.n = hr.n + 1;
+      i = arm_end(ag, b);
+    } else {
+      a.kind = 1;
+      let info: Mut(OpInfo) = resolve_op_row(k, cand, nm);
+      if is_null(info) { info = resolve_op_any(k, nm); }
+      if is_null(info) {
+        let m: Ref(u8) = "unknown effect op";
+        let d: u64 = ir.diag(k, n_at(ag, j), 1, m, 17);
+        st.st_fail(k, ax.e_unbound());
+        break it(n);
+      }
+      a.bodyg = 0;
+      let bidx: u64 = 0;
+      let bj: u64 = j + 1;
+      if bj < n and is_group(ag, bj) == 1 and delim_of(ag, bj) == dl_paren() {
+        a.bind = arm_first(n_at(ag, bj));
+        bj = bj + 1;
+      }
+      if bj + 2 < n and is_group(ag, bj) == 0 and n_sym(ag, bj) == s.k_with() {
+        if n_sym(ag, bj + 1) == s.k_resume() {
+          if is_group(ag, bj + 2) == 1 and delim_of(ag, bj + 2) == dl_paren() {
+            a.resume_bind = arm_first(n_at(ag, bj + 2));
+            a.has_resume = 1;
+            bj = bj + 3;
+          }
+        }
+      }
+      let b2: u64 = arrow_at(k, ag, bj);
+      a.body = b2;
+      if b2 < n and is_group(ag, b2) == 1 and delim_of(ag, b2) == dl_brace() { a.blk = 1; }
+      a.param_tid = op_param_tid(k, info);
+      a.ret_tid = info.ret_tid;
+      a.abortive = info.abortive;
+      let aend: u64 = arm_end(ag, b2);
+      if a.abortive == 0 and a.has_resume == 0 {
+        if scan_resume(ag, a.body, aend) == 1 { a.has_resume = 1; }
+      }
+      if a.abortive == 1 and a.has_resume == 1 {
+        let m2: Ref(u8) = "cannot resume abortive effect";
+        let d2: u64 = ir.diag(k, n_at(ag, j), 1, m2, 29);
+        st.st_fail(k, ax.e_type());
+        break it(n);
+      }
+      // 每个臂的候选效应来自 cand；找到定义后给出运行期 tag。
+      let owner: u64 = owner_effect(k, cand, nm, info);
+      a.bodyg = owner;
+      a.tag = runtime_tag(k, owner, a.param_tid, info.index);
+      let pp: u64 = row_push(k, row, 0, owner, a.param_tid);
+      if a.has_resume == 1 and a.abortive == 0 { hr.has_resumable = 1; }
+      hr.n = hr.n + 1;
+      i = aend;
+    }
+  };
+  hr.row = row as u64;
+  return hr;
+};
+
+// 找出 op 属于哪个具体效应：候选行里第一个定义了这个 op 的效应。
+let owner_effect = func(k: Mut(st.State), cand: Mut(EffRow), opname: u64, info: Mut(OpInfo)) -> u64 {
+  if is_null(cand) == 0 {
+    let i: u64 = 0;
+    let done: u64 = loop it(i: u64 = 0) while i < cand.n {
+      let p: Mut(u64) = item_at(cand, i);
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      if tag == 0 {
+        let oi: Mut(OpInfo) = op_find(k, deref(pa), opname);
+        if oi.found == 1 { break it(deref(pa)); }
+      }
+      i = i + 1;
+    };
+    if done != 0 and done != cand.n { return done; }
+  }
+  let cnt: u64 = modules.sym_count(k);
+  let res: u64 = loop sc(i: u64 = 0) while i < cnt {
+    let se: Mut(modules.SymEntry) = modules.sym_at(k, i);
+    if modules.sym_kind(se) == kind_effect() {
+      let oi: Mut(OpInfo) = op_find(k, modules.sym_shape(se), opname);
+      if oi.found == 1 { break sc(modules.sym_shape(se)); }
+    }
+    i = i + 1;
+  };
+  return res;
+};
+
+// 当前允许的效应并集：用于没有直接调用目标的 handle。
+let frames_row = func(k: Mut(st.State)) -> Mut(EffRow) {
+  let c: Mut(EffCtx) = ctx(k);
+  let r: Mut(EffRow) = row_empty(k);
+  let i: u64 = 0;
+  let done: u64 = loop f(i: u64 = 0) while i < c.fn {
+    let fr: Mut(EffRow) = frame_at(c, i);
+    let u: Mut(EffRow) = row_union(k, r, fr);
+    r = u;
+    i = i + 1;
+  };
+  return r;
+};
+
+let push_handler = func(k: Mut(st.State), hr: Mut(HandlerRec)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.hn >= c.hcap { return st.st_fail(k, ax.e_frame()); }
+  let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.handlers) + c.hn * 8);
+  deref(p) = hr as u64;
+  c.hn = c.hn + 1;
+  return 1;
+};
+
+let pop_handler = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.hn == 0 { return 0; }
+  c.hn = c.hn - 1;
+  return 1;
+};
+
+let disp_at = func(c: Mut(EffCtx), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.disp) + i * 48);
+};
+
+// 为一个 handle 登记可恢复处理器。名字先给出，过程体等到外层过程收尾后再编。
+let enqueue_disp = func(k: Mut(st.State), hr: Mut(HandlerRec)) -> u64 {
+  if hr.has_resumable == 0 { return 0; }
+  let c: Mut(EffCtx) = ctx(k);
+  if c.dn >= c.dcap { return st.st_fail(k, ax.e_frame()); }
+  let seq: u64 = st.st_next_tmp(k);
+  let pf: u64 = s.intern("_effh", 5);
+  let nm: u64 = modules.qual_num(k, st.st_src(k), pf, seq);
+  let p: Mut(u64) = disp_at(c, c.dn);
+  deref(p) = nm;
+  let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+  let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+  let pc: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 24);
+  let pd: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 32);
+  let pe: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 40);
+  deref(pa) = hr.ag;
+  deref(pb) = hr.arms as u64;
+  deref(pc) = hr.n;
+  deref(pd) = st.st_src(k);
+  deref(pe) = st.st_vmod(k);
+  c.dn = c.dn + 1;
+  return nm;
+};
+
+pub let handler_pending = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.dn == 0 { return 0; }
+  return 1;
+};
+
+let disp_arm_region = func(k: Mut(st.State), ag: u64, ar: Mut(HArm), pay: Mut(ty.Val)) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  let mark: u64 = env.env_mark(k);
+  let term: Mut(u64) = box(k);
+  if ar.bind != 0 {
+    let sl: u64 = st.st_next_slot(k);
+    let pt: Mut(ty.Ty) = new_ty(k);
+    let pj: u64 = ireg.project(k, ar.param_tid, pt);
+    let cv: Mut(ty.Val) = new_val(k);
+    let rc: u64 = cx.coerce(k, pay, ty.vty(pay), pt, cv);
+    cx.slot_put(k, sl, cv, pt);
+    env.env_push(k, ar.bind, sl, pt);
+  }
+  let rt: Mut(ty.Ty) = new_ty(k);
+  let rj: u64 = ireg.project(k, ar.ret_tid, rt);
+  let pr: u64 = push_resume(k, 0, ar.ret_tid, st.st_loopdepth(k));
+  let slot: u64 = if ty.ty_known(rt) == 1 { alloc_dyn_slot(k) } else { no_slot() };
+  if ar.blk == 1 {
+    let bg: u64 = n_at(ag, ar.body);
+    let bj: u64 = effects_block(k, bg, 0, term, slot, rt);
+  } else {
+    let v: Mut(ty.Val) = new_val(k);
+    let ej: u64 = core_expr(k, ag, ar.body, 0, rt, v);
+    if st.st_ok(k) == 0 and slot != no_slot() and ty.val_known(v) == 1 {
+      cx.slot_put(k, slot, v, ty.vty(v));
+    }
+  }
+  let pp: u64 = pop_resume(k);
+  env.env_release(k, mark);
+  if box_get(term) == 1 or take_aborts(k) == 1 { return ir.region_end(k); }
+  let u64t: Mut(ty.Ty) = t64(k);
+  let rv: Mut(ty.Val) = new_val(k);
+  if slot != no_slot() { cx.slot_get(k, slot, rt, rv); } else { ty.val_lit(rv, 0, u64t); }
+  let cv2: Mut(ty.Val) = new_val(k);
+  let rc2: u64 = cx.coerce(k, rv, ty.vty(rv), u64t, cv2);
+  ir.args_reset(k);
+  let rr: u64 = ir.region_result(k, u64t);
+  let cn: u64 = cx.val_force(k, cv2, u64t);
+  let an: u64 = ir.arg_ref(k, cn);
+  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  return ir.region_end(k);
+};
+
+// 每个 handle 生成一个 (tag, payload) -> u64 的处理器过程。
+pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  if c.dn == 0 { return 0; }
+  let idx: u64 = c.dn - 1;
+  c.dn = idx;
+  let p: Mut(u64) = disp_at(c, idx);
+  let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+  let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+  let pc: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 24);
+  let pd: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 32);
+  let pe: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 40);
+  let nm: u64 = deref(p);
+  let ag: u64 = deref(pa);
+  let arms: Mut(HArm) = ptr_cast(Mut(HArm), deref(pb));
+  let cnt: u64 = deref(pc);
+  let src: u64 = deref(pd);
+  let modv: u64 = deref(pe);
+  let saved_src: u64 = st.st_src(k);
+  let saved_vmod: u64 = st.st_vmod(k);
+  let saved_ip: u64 = st.st_in_proc(k);
+  let sv: u64 = st.st_set_src(k, src);
+  let mv: u64 = if modv >= 1000 { modv } else { 0 };
+  let sm: u64 = st.st_set_vmod(k, mv);
+  st.st_set_slotj(k, 0);
+  st.st_set_loopdepth(k, 0);
+  env.env_release(k, 0);
+  let u64t: Mut(ty.Ty) = t64(k);
+  st.st_set_retk(k, ty.tk(u64t));
+  st.st_set_retw(k, ty.tw(u64t));
+  st.st_set_retsg(k, ty.tsg(u64t));
+  st.st_set_retsh(k, 0);
+  let nip: u64 = st.st_set_in_proc(k, saved_ip + 1);
+  let bp: u64 = ir.proc_begin(k, nm);
+  let tag: u64 = ir.fresh_t(k);
+  let pay: u64 = ir.fresh_t(k);
+  ir.proc_param(k, tag, u64t);
+  ir.proc_param(k, pay, u64t);
+  ir.proc_result(k, u64t);
+  ir.region_begin(k);
+  let sl: u64 = emit_slots(k, 0, 8 + cnt + cx.count_tree(ag, 0));
+  let payv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(payv, pay, u64t);
+  let tagv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(tagv, tag, u64t);
+  let resname: u64 = ir.fresh_t(k);
+  let i: u64 = 0;
+  let added: u64 = loop dc(i: u64 = 0) while i < cnt {
+    let ar: Mut(HArm) = ptr_cast(Mut(HArm), ptr_cast(Mut(u8), arms) + i * 88);
+    let cr: u64 = disp_arm_region(k, ag, ar, payv);
+    let ca: u64 = ir.case_add(k, ar.tag, cr);
+    i = i + 1;
+  };
+  let dr: u64 = ir.region_begin(k);
+  let base: u64 = state_addr(k);
+  let stg: u64 = store_val(k, base, 0, tagv);
+  ir.args_reset(k);
+  let rr: u64 = ir.region_result(k, u64t);
+  let z2: Mut(ty.Val) = new_val(k);
+  ty.val_lit(z2, 0, u64t);
+  let zn: u64 = cx.val_force(k, z2, u64t);
+  let za: u64 = ir.arg_ref(k, zn);
+  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  let dre: u64 = ir.region_end(k);
+  let sw: u64 = ir.emit_switch(k, resname, tag, u64t, dre);
+  ir.args_reset(k);
+  let sv2: Mut(ty.Val) = new_val(k);
+  ty.val_ref(sv2, resname, u64t);
+  push_val(k, sv2);
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  ir.proc_end(k);
+  let rip: u64 = st.st_set_in_proc(k, saved_ip);
+  st.st_set_vmod(k, saved_vmod);
+  st.st_set_src(k, saved_src);
+  return 1;
+};
+
+let arm_region = func(k: Mut(st.State), hr: Mut(HandlerRec), ar: Mut(HArm), resj: u64, want: Mut(ty.Ty), obj: u64) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  let mark: u64 = env.env_mark(k);
+  let term: Mut(u64) = box(k);
+  if ar.bind != 0 {
+    let sl: u64 = st.st_next_slot(k);
+    let pt: Mut(ty.Ty) = new_ty(k);
+    let pj: u64 = ireg.project(k, ar.param_tid, pt);
+    let base: u64 = state_addr(k);
+    let pv: u64 = load_u64(k, base, 8);
+    let v: Mut(ty.Val) = new_val(k);
+    ty.val_ref(v, pv, t64(k));
+    let cv: Mut(ty.Val) = new_val(k);
+    let rc: u64 = cx.coerce(k, v, ty.vty(v), pt, cv);
+    cx.slot_put(k, sl, cv, pt);
+    env.env_push(k, ar.bind, sl, pt);
+  }
+  let pr: u64 = if ar.kind == 1 and ar.has_resume == 1 { push_resume(k, 1, ar.ret_tid, st.st_loopdepth(k)) } else { 0 };
+  if ar.blk == 1 {
+    let bg: u64 = n_at(hr.ag, ar.body);
+    let bj: u64 = effects_block(k, bg, 0, term, resj, want);
+  } else {
+    let v: Mut(ty.Val) = new_val(k);
+    let ej: u64 = core_expr(k, hr.ag, ar.body, 0, want, v);
+    if st.st_ok(k) == 0 and resj != no_slot() and ty.val_known(v) == 1 {
+      cx.slot_put(k, resj, v, ty.vty(v));
+    }
+  }
+  let pp: u64 = if ar.kind == 1 and ar.has_resume == 1 { pop_resume(k) } else { 0 };
+  env.env_release(k, mark);
+  return ir.region_end(k);
+};
+
+let row_no_abortive = func(k: Mut(st.State), row: Mut(EffRow)) -> u64 {
+  if row_is_empty(row) == 1 { return 0; }
+  let i: u64 = 0;
+  let ok: u64 = loop it(i: u64 = 0) while i < row.n {
+    let p: Mut(u64) = item_at(row, i);
+    let tag: u64 = deref(p);
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    if tag == 1 { return 0; }
+    let cnt: u64 = n_count(deref(pa));
+    let j: u64 = 0;
+    let ok2: u64 = loop op(j: u64 = 0) while j < cnt {
+      if n_sym(deref(pa), j) == s.k_op() {
+        let rt: Mut(ty.Ty) = new_ty(k);
+        let b: u64 = parse_type(k, deref(pa), j + 4, rt);
+        if ireg.tid_of(k, rt) == tb.never_tid(k) { return 0; }
+        j = b;
+      } else { j = j + 1; }
+    };
+    i = i + 1;
+  };
+  return 1;
+};
+
+let can_inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> u64 {
+  if is_null(se) { return 0; }
+  if modules.sym_kind(se) != modules.sym_kind_func() { return 0; }
+  let src: u64 = modules.sym_src(se);
+  let root: u64 = hr.source_root(src);
+  let d: u64 = modules.sym_decl(se);
+  let pg: u64 = if is_group(root, d + 1) == 1 { d + 1 } else { d + 2 };
+  if n_count(n_at(root, pg)) != 0 { return 0; }
+  let row: Mut(EffRow) = callee_row(k, se);
+  return row_no_abortive(k, row);
+};
+
+// 把无参过程体直接编进当前位置：return 变成跳出内联循环。
+let inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let src: u64 = modules.sym_src(se);
+  let root: u64 = hr.source_root(src);
+  let d: u64 = modules.sym_decl(se);
+  let pg: u64 = if is_group(root, d + 1) == 1 { d + 1 } else { d + 2 };
+  let l: Mut(FnLayout) = fn_layout(k, root, pg);
+  let rt: Mut(ty.Ty) = new_ty(k);
+  ty.ty_none(rt);
+  if l.ret_i != 0 { let rj: u64 = parse_type(k, root, l.ret_i, rt); }
+  let bodyg: u64 = n_at(root, l.body_i);
+  let saved_src: u64 = st.st_src(k);
+  let saved_vmod: u64 = st.st_vmod(k);
+  let sv: u64 = st.st_set_src(k, src);
+  let mv: u64 = if modules.sym_mod(se) >= 1000 { modules.sym_mod(se) } else { 0 };
+  let sm: u64 = st.st_set_vmod(k, mv);
+  let label: u64 = ir.fresh_l(k);
+  let slot: u64 = alloc_dyn_slot(k);
+  let seq: u64 = st.st_next_tmp(k);
+  let base: u64 = 200000 + seq * 1024;
+  let sj: u64 = st.st_set_slotj(k, base);
+  let nslots: u64 = 8 + cx.count_tree(bodyg, 0);
+  let es: u64 = emit_slots(k, base, base + nslots);
+  let r: u64 = ir.region_begin(k);
+  let term: Mut(u64) = box(k);
+  let pr: u64 = push_inline(k, label, slot, rt as u64);
+  let bj: u64 = effects_block(k, bodyg, 0, term, no_slot(), tnone(k));
+  let pp: u64 = pop_inline(k);
+  let re: u64 = ir.region_end(k);
+  let lp: u64 = ir.emit_loop(k, 0, label, re);
+  if ty.ty_known(rt) == 1 { cx.slot_get(k, slot, rt, out); } else { ty.val_none(out); }
+  st.st_set_vmod(k, saved_vmod);
+  st.st_set_src(k, saved_src);
+  return 1;
+};
+
+pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(g);
+  let wi: u64 = find_with(g, i + 1);
+  if wi >= n { st.st_fail(k, ax.e_ast()); return n; }
+  if wi + 1 >= n or is_group(g, wi + 1) == 0 or delim_of(g, wi + 1) != dl_brace() {
+    st.st_fail(k, ax.e_ast());
+    return wi + 1;
+  }
+  let ag: u64 = n_at(g, wi + 1);
+  // 直接调用目标：handle f(x) with { ... }。
+  let direct: u64 = 0;
+  if wi == i + 3 and is_name(g, i + 1) == 1 and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == dl_paren() {
+    direct = 1;
+  }
+  let cand: Mut(EffRow) = row_empty(k);
+  let callee: Mut(modules.SymEntry) = null_ref(Mut(modules.SymEntry));
+  if direct == 1 {
+    let se: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i + 1));
+    if is_null(se) == 0 {
+      let kd: u64 = modules.sym_kind(se);
+      if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() {
+        callee = se;
+        cand = callee_row(k, se);
+      } else if kd == modules.sym_kind_generic() {
+        callee = se;
+      }
+    } else {
+      direct = 0;
+    }
+  }
+  if direct == 0 { cand = frames_row(k); }
+  let hr: Mut(HandlerRec) = parse_arms(k, ag, cand, n_count(ag));
+  if st.st_ok(k) != 0 { return wi + 2; }
+  let dname: u64 = 0;
+  let hs: u64 = if dname != 0 { save_handler(k) } else { no_slot() };
+  if dname != 0 { let ih: u64 = install_handler(k, dname); }
+  let gen_first: u64 = if is_null(callee) == 0 and modules.sym_kind(callee) == modules.sym_kind_generic() {
+    1
+  } else if direct == 0 and i + 1 < n and is_name(g, i + 1) == 1 {
+    let ge2: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i + 1));
+    if is_null(ge2) == 0 and modules.sym_kind(ge2) == modules.sym_kind_generic() { 1 } else { 0 }
+  } else { 0 };
+  let exv: Mut(ty.Val) = new_val(k);
+  if gen_first == 1 { let gj: u64 = core_expr(k, g, i + 1, 0, want, exv); }
+  if gen_first == 1 and hr.n == 1 and hr.has_return == 1 and hr.has_resumable == 0 {
+    let a0: Mut(HArm) = arm_at(hr, 0);
+    let mark: u64 = env.env_mark(k);
+    if a0.kind == 0 and a0.bind != 0 {
+      let sl: u64 = st.st_next_slot(k);
+      let bv: Mut(ty.Val) = new_val(k);
+      if ty.val_known(exv) == 1 {
+        cx.slot_put(k, sl, exv, ty.vty(exv));
+        env.env_push(k, a0.bind, sl, ty.vty(exv));
+      }
+    }
+    let term: Mut(u64) = box(k);
+    if a0.blk == 1 {
+      let bg: u64 = n_at(ag, a0.body);
+      let bj: u64 = effects_block(k, bg, 0, term, no_slot(), want);
+      ty.val_none(out);
+    } else {
+      let v: Mut(ty.Val) = new_val(k);
+      let ej: u64 = core_expr(k, ag, a0.body, 0, want, v);
+      ty.val_at(out, v);
+    }
+    env.env_release(k, mark);
+    return wi + 2;
+  }
+  let caught: Mut(EffRow) = ptr_cast(Mut(EffRow), hr.row);
+  let cw: u64 = if gen_first == 1 { 0 } else { push_frame(k, caught) };
+  let ph: u64 = if gen_first == 1 { 0 } else { push_handler(k, hr) };
+  let prev: u64 = in_handle(k);
+  let sh: u64 = set_in_handle(k, 1);
+  let saved_ab: u64 = take_aborts(k);
+  let nx: u64 = if gen_first == 1 {
+    wi
+  } else if direct == 1 {
+    if is_null(callee) == 0 and modules.sym_kind(callee) == modules.sym_kind_generic() {
+      let j4: u64 = core_expr(k, g, i + 1, 0, want, exv);
+      wi
+    } else {
+      if can_inline_call(k, callee) == 1 {
+        let j3: u64 = inline_call(k, callee, want, exv);
+        wi
+      } else {
+        let j: u64 = cl.call_expr(k, g, i + 1, want, exv);
+        wi
+      }
+    }
+  } else {
+    let j2: u64 = core_expr(k, g, i + 1, 0, want, exv);
+    wi
+  };
+  if st.st_ok(k) != 0 {
+    let rs: u64 = set_in_handle(k, prev);
+    if gen_first == 0 { let pq: u64 = pop_handler(k); let pf: u64 = pop_frame(k); }
+    return nx;
+  }
+  if dname != 0 { let rh: u64 = restore_handler(k, hs); }
+  let rs2: u64 = set_in_handle(k, prev);
+  if gen_first == 0 { let pq2: u64 = pop_handler(k); let pf2: u64 = pop_frame(k); };
+  let rwant: Mut(ty.Ty) = new_ty(k);
+  if ty.ty_known(want) == 1 { ty.ty_at(rwant, want); } else { ty.ty_at(rwant, ty.vty(exv)); }
+  let has_res: u64 = ty.ty_known(rwant);
+  let resj: u64 = if has_res == 1 { alloc_dyn_slot(k) } else { no_slot() };
+  let base: u64 = state_addr(k);
+  let sel: u64 = load_u64(k, base, 0);
+  let sel_ty: Mut(ty.Ty) = t64(k);
+  let resname: u64 = ir.fresh_t(k);
+  // case 0：正常完成或 return 分支。
+  let r0: u64 = ir.region_begin(k);
+  let m0: u64 = env.env_mark(k);
+  let term0: Mut(u64) = box(k);
+  let a0: Mut(HArm) = null_ref(Mut(HArm));
+  let has_ret: u64 = hr.has_return;
+  if has_ret == 1 {
+    let fi: u64 = loop fr(i: u64 = 0) while i < hr.n {
+      let ar: Mut(HArm) = arm_at(hr, i);
+      if ar.kind == 0 { a0 = ar; break fr(i + 1); }
+      i = i + 1;
+    };
+    if is_null(a0) == 0 {
+      if a0.bind != 0 {
+        let sl: u64 = st.st_next_slot(k);
+        let bv: Mut(ty.Val) = new_val(k);
+        if ty.val_known(exv) == 1 {
+          cx.slot_put(k, sl, exv, ty.vty(exv));
+          env.env_push(k, a0.bind, sl, ty.vty(exv));
+        } else {
+          let tv: Mut(ty.Ty) = tnone(k);
+          env.env_push(k, a0.bind, sl, tv);
+        }
+      }
+      if a0.blk == 1 {
+        let bg0: u64 = n_at(ag, a0.body);
+        let bj0: u64 = effects_block(k, bg0, 0, term0, resj, rwant);
+      } else {
+        let v0: Mut(ty.Val) = new_val(k);
+        let ej0: u64 = core_expr(k, ag, a0.body, 0, rwant, v0);
+        if st.st_ok(k) == 0 and resj != no_slot() and ty.val_known(v0) == 1 {
+          cx.slot_put(k, resj, v0, ty.vty(v0));
+        }
+      }
+    }
+  } else {
+    if resj != no_slot() and ty.val_known(exv) == 1 {
+      cx.slot_put(k, resj, exv, ty.vty(exv));
+    }
+  }
+  env.env_release(k, m0);
+  let cr0: u64 = ir.region_end(k);
+  ir.case_add(k, 0, cr0);
+  // 各 op 分支。
+  let ci: u64 = 0;
+  let added: u64 = loop ac(i: u64 = 0) while i < hr.n {
+    let ar: Mut(HArm) = arm_at(hr, i);
+    if ar.kind == 1 {
+      let srst: u64 = store_lit(k, base, 0, 0);
+      let cr: u64 = arm_region(k, hr, ar, resj, rwant, 0);
+      let ca: u64 = ir.case_add(k, ar.tag, cr);
+    }
+    i = i + 1;
+  };
+  // 没被本处理器拦截的效应继续外传。
+  let dr: u64 = ir.region_begin(k);
+  if prev != 1 {
+    let d: u64 = emit_default_return(k);
+  }
+  let dre: u64 = ir.region_end(k);
+  let sw: u64 = ir.emit_switch(k, 0, sel, sel_ty, dre);
+  if has_res == 1 {
+    cx.slot_get(k, resj, rwant, out);
+  } else {
+    ty.val_none(out);
+  }
+  return wi + 2;
+};
+
+// --- 调用点纯度检查 -------------------------------------------------------
+// 返回 1 表示调用点带了 !，0 表示不带。缺 ! 或效应未被允许时就地报错。
+pub let call_guard = func(k: Mut(st.State), se: Mut(modules.SymEntry), g: u64, nxt: u64) -> u64 {
+  let row: Mut(EffRow) = callee_row(k, se);
+  if row_is_empty(row) == 1 { return 0; }
+  let n: u64 = n_count(g);
+  let bang: u64 = 0;
+  if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
+  if bang == 0 {
+    let m: Ref(u8) = "missing ! on effectful call";
+    let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
+    st.st_fail(k, ax.e_type());
+    return 0;
+  }
+  let i: u64 = 0;
+  let ok: u64 = loop it(i: u64 = 0) while i < row.n {
+    let p: Mut(u64) = item_at(row, i);
+    let tag: u64 = deref(p);
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+    if tag == 0 {
+      if current_allows(k, deref(pa), deref(pb)) == 0 {
+        let m2: Ref(u8) = "unhandled effect";
+        let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+        st.st_fail(k, ax.e_type());
+        return 0;
+      }
+    }
+    i = i + 1;
+  };
+  return 1;
+};
+
+pub let call_guard_row = func(k: Mut(st.State), row: Mut(EffRow), g: u64, nxt: u64) -> u64 {
+  if row_is_empty(row) == 1 { return 0; }
+  let n: u64 = n_count(g);
+  let bang: u64 = 0;
+  if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
+  if bang == 0 {
+    let m: Ref(u8) = "missing ! on effectful call";
+    let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
+    st.st_fail(k, ax.e_type());
+    return 0;
+  }
+  let i: u64 = 0;
+  let ok: u64 = loop it(i: u64 = 0) while i < row.n {
+    let p: Mut(u64) = item_at(row, i);
+    let tag: u64 = deref(p);
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+    if tag == 0 {
+      if current_allows(k, deref(pa), deref(pb)) == 0 {
+        let m2: Ref(u8) = "unhandled effect";
+        let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+        st.st_fail(k, ax.e_type());
+        return 0;
+      }
+    }
+    i = i + 1;
+  };
+  return 1;
+};
