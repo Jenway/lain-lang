@@ -288,7 +288,13 @@ static uint64_t lain_os_exec(void *cmd_ptr, uint64_t cmd_len) {
   cmd[cmd_len] = '\0';
   rc = system(cmd);
   free(cmd);
-  return (uint64_t)(rc < 0 ? 127 : rc);
+  if (rc < 0) return 127;
+#if defined(_WIN32)
+  return (uint64_t)rc;
+#else
+  if ((rc & 0x7f) == 0) return (uint64_t)((rc >> 8) & 0xff);
+  return (uint64_t)(128 + (rc & 0x7f));
+#endif
 }
 
 static uint64_t lain_os_file_exists(void *path_ptr, uint64_t path_len) {
@@ -9863,7 +9869,7 @@ static const uint8_t v28980[22] = {
 static const uint8_t v29016[3] = {
   0x7d,0x0a,0x0a
 };
-static const uint8_t v29084[2697] = {
+static const uint8_t v29084[2745] = {
   0x2f,0x2a,0x20,0x47,0x65,0x6e,0x65,0x72,0x61,0x74,0x65,0x64,0x20,0x62,0x79,0x20,
   0x74,0x68,0x65,0x20,0x70,0x75,0x72,0x65,0x2d,0x4c,0x61,0x69,0x6e,0x20,0x43,0x39,
   0x39,0x20,0x62,0x61,0x63,0x6b,0x65,0x6e,0x64,0x2e,0x20,0x2a,0x2f,0x0a,0x23,0x69,
@@ -9901,9 +9907,12 @@ static const uint8_t v29084[2697] = {
   0x34,0x5f,0x74,0x20,0x62,0x3b,0x20,0x7d,0x20,0x4c,0x61,0x69,0x6e,0x50,0x61,0x69,
   0x72,0x3b,0x0a,0x74,0x79,0x70,0x65,0x64,0x65,0x66,0x20,0x73,0x74,0x72,0x75,0x63,
   0x74,0x20,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,
-  0x20,0x7b,0x20,0x73,0x74,0x72,0x75,0x63,0x74,0x20,0x4c,0x61,0x69,0x6e,0x41,0x6c,
-  0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x6e,0x65,0x78,0x74,0x3b,0x20,
-  0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x61,0x6c,0x69,0x67,0x6e,0x3b,0x20,
+  0x20,0x7b,0x0a,0x20,0x20,0x73,0x74,0x72,0x75,0x63,0x74,0x20,0x4c,0x61,0x69,0x6e,
+  0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x6e,0x65,0x78,0x74,
+  0x3b,0x0a,0x20,0x20,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x61,0x6c,0x69,
+  0x67,0x6e,0x3b,0x0a,0x23,0x69,0x66,0x20,0x21,0x64,0x65,0x66,0x69,0x6e,0x65,0x64,
+  0x28,0x4e,0x44,0x45,0x42,0x55,0x47,0x29,0x0a,0x20,0x20,0x73,0x69,0x7a,0x65,0x5f,
+  0x74,0x20,0x62,0x79,0x74,0x65,0x73,0x3b,0x0a,0x23,0x65,0x6e,0x64,0x69,0x66,0x0a,
   0x7d,0x20,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,
   0x3b,0x0a,0x0a,0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x76,0x6f,0x69,0x64,0x20,0x6c,
   0x61,0x69,0x6e,0x5f,0x74,0x72,0x61,0x70,0x28,0x63,0x6f,0x6e,0x73,0x74,0x20,0x63,
@@ -10034,7 +10043,7 @@ static const uint8_t v29084[2697] = {
   0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,0x73,0x61,0x20,0x3e,0x3e,0x20,0x73,0x68,
   0x29,0x20,0x26,0x20,0x6d,0x3b,0x0a,0x7d,0x0a
 };
-static const uint8_t v29096[1863] = {
+static const uint8_t v29096[2164] = {
   0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x69,0x6e,0x6c,0x69,0x6e,0x65,0x20,0x75,0x69,
   0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x6c,0x6f,0x61,0x64,
   0x5f,0x62,0x69,0x74,0x73,0x28,0x63,0x6f,0x6e,0x73,0x74,0x20,0x76,0x6f,0x69,0x64,
@@ -10120,38 +10129,57 @@ static const uint8_t v29096[1863] = {
   0x64,0x29,0x20,0x7b,0x20,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x76,0x20,
   0x3d,0x20,0x30,0x3b,0x20,0x6d,0x65,0x6d,0x63,0x70,0x79,0x28,0x26,0x76,0x2c,0x20,
   0x26,0x64,0x2c,0x20,0x73,0x69,0x7a,0x65,0x6f,0x66,0x28,0x76,0x29,0x29,0x3b,0x20,
-  0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x76,0x3b,0x20,0x7d,0x0a,0x0a,0x73,0x74,0x61,
-  0x74,0x69,0x63,0x20,0x69,0x6e,0x6c,0x69,0x6e,0x65,0x20,0x76,0x6f,0x69,0x64,0x20,
-  0x2a,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x70,0x75,0x73,
-  0x68,0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,
-  0x20,0x2a,0x2a,0x68,0x65,0x61,0x64,0x2c,0x20,0x73,0x69,0x7a,0x65,0x5f,0x74,0x20,
-  0x6e,0x29,0x20,0x7b,0x0a,0x20,0x20,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,
-  0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x6e,0x6f,0x64,0x65,0x20,0x3d,0x20,0x28,0x4c,
-  0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x29,
-  0x63,0x61,0x6c,0x6c,0x6f,0x63,0x28,0x31,0x2c,0x20,0x73,0x69,0x7a,0x65,0x6f,0x66,
-  0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x29,
-  0x20,0x2b,0x20,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x21,0x6e,0x6f,
-  0x64,0x65,0x29,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x74,0x72,0x61,0x70,0x28,0x22,0x61,
-  0x6c,0x6c,0x6f,0x63,0x61,0x20,0x6f,0x75,0x74,0x20,0x6f,0x66,0x20,0x6d,0x65,0x6d,
-  0x6f,0x72,0x79,0x22,0x29,0x3b,0x0a,0x20,0x20,0x6e,0x6f,0x64,0x65,0x2d,0x3e,0x6e,
-  0x65,0x78,0x74,0x20,0x3d,0x20,0x2a,0x68,0x65,0x61,0x64,0x3b,0x0a,0x20,0x20,0x6e,
-  0x6f,0x64,0x65,0x2d,0x3e,0x61,0x6c,0x69,0x67,0x6e,0x20,0x3d,0x20,0x30,0x3b,0x0a,
-  0x20,0x20,0x2a,0x68,0x65,0x61,0x64,0x20,0x3d,0x20,0x6e,0x6f,0x64,0x65,0x3b,0x0a,
-  0x20,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x28,0x76,0x6f,0x69,0x64,0x20,0x2a,
-  0x29,0x28,0x6e,0x6f,0x64,0x65,0x20,0x2b,0x20,0x31,0x29,0x3b,0x0a,0x7d,0x0a,0x0a,
-  0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x69,0x6e,0x6c,0x69,0x6e,0x65,0x20,0x76,0x6f,
-  0x69,0x64,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x66,
-  0x72,0x65,0x65,0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,
-  0x64,0x65,0x20,0x2a,0x2a,0x68,0x65,0x61,0x64,0x29,0x20,0x7b,0x0a,0x20,0x20,0x4c,
-  0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x63,
-  0x75,0x72,0x20,0x3d,0x20,0x2a,0x68,0x65,0x61,0x64,0x3b,0x0a,0x20,0x20,0x77,0x68,
-  0x69,0x6c,0x65,0x20,0x28,0x63,0x75,0x72,0x29,0x20,0x7b,0x0a,0x20,0x20,0x20,0x20,
+  0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x76,0x3b,0x20,0x7d,0x0a,0x0a,0x23,0x69,0x66,
+  0x20,0x21,0x64,0x65,0x66,0x69,0x6e,0x65,0x64,0x28,0x4e,0x44,0x45,0x42,0x55,0x47,
+  0x29,0x0a,0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x73,0x69,0x7a,0x65,0x5f,0x74,0x20,
+  0x5f,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x6c,0x69,0x76,
+  0x65,0x20,0x3d,0x20,0x30,0x3b,0x0a,0x23,0x65,0x6e,0x64,0x69,0x66,0x0a,0x0a,0x73,
+  0x74,0x61,0x74,0x69,0x63,0x20,0x69,0x6e,0x6c,0x69,0x6e,0x65,0x20,0x76,0x6f,0x69,
+  0x64,0x20,0x2a,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x70,
+  0x75,0x73,0x68,0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,
+  0x64,0x65,0x20,0x2a,0x2a,0x68,0x65,0x61,0x64,0x2c,0x20,0x73,0x69,0x7a,0x65,0x5f,
+  0x74,0x20,0x6e,0x29,0x20,0x7b,0x0a,0x20,0x20,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,
+  0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x6e,0x6f,0x64,0x65,0x20,0x3d,0x20,
+  0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,
+  0x2a,0x29,0x63,0x61,0x6c,0x6c,0x6f,0x63,0x28,0x31,0x2c,0x20,0x73,0x69,0x7a,0x65,
+  0x6f,0x66,0x28,0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,
+  0x65,0x29,0x20,0x2b,0x20,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x21,
+  0x6e,0x6f,0x64,0x65,0x29,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x74,0x72,0x61,0x70,0x28,
+  0x22,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x20,0x6f,0x75,0x74,0x20,0x6f,0x66,0x20,0x6d,
+  0x65,0x6d,0x6f,0x72,0x79,0x22,0x29,0x3b,0x0a,0x23,0x69,0x66,0x20,0x21,0x64,0x65,
+  0x66,0x69,0x6e,0x65,0x64,0x28,0x4e,0x44,0x45,0x42,0x55,0x47,0x29,0x0a,0x20,0x20,
+  0x6e,0x6f,0x64,0x65,0x2d,0x3e,0x62,0x79,0x74,0x65,0x73,0x20,0x3d,0x20,0x6e,0x3b,
+  0x0a,0x20,0x20,0x5f,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,
+  0x6c,0x69,0x76,0x65,0x20,0x2b,0x3d,0x20,0x6e,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,
+  0x28,0x5f,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x6c,0x69,
+  0x76,0x65,0x20,0x3e,0x20,0x28,0x32,0x35,0x36,0x75,0x20,0x2a,0x20,0x31,0x30,0x32,
+  0x34,0x75,0x20,0x2a,0x20,0x31,0x30,0x32,0x34,0x75,0x29,0x29,0x20,0x6c,0x61,0x69,
+  0x6e,0x5f,0x74,0x72,0x61,0x70,0x28,0x22,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x20,0x62,
+  0x75,0x64,0x67,0x65,0x74,0x20,0x65,0x78,0x63,0x65,0x65,0x64,0x65,0x64,0x20,0x28,
+  0x32,0x35,0x36,0x20,0x4d,0x69,0x42,0x29,0x22,0x29,0x3b,0x0a,0x23,0x65,0x6e,0x64,
+  0x69,0x66,0x0a,0x20,0x20,0x6e,0x6f,0x64,0x65,0x2d,0x3e,0x6e,0x65,0x78,0x74,0x20,
+  0x3d,0x20,0x2a,0x68,0x65,0x61,0x64,0x3b,0x0a,0x20,0x20,0x6e,0x6f,0x64,0x65,0x2d,
+  0x3e,0x61,0x6c,0x69,0x67,0x6e,0x20,0x3d,0x20,0x30,0x3b,0x0a,0x20,0x20,0x2a,0x68,
+  0x65,0x61,0x64,0x20,0x3d,0x20,0x6e,0x6f,0x64,0x65,0x3b,0x0a,0x20,0x20,0x72,0x65,
+  0x74,0x75,0x72,0x6e,0x20,0x28,0x76,0x6f,0x69,0x64,0x20,0x2a,0x29,0x28,0x6e,0x6f,
+  0x64,0x65,0x20,0x2b,0x20,0x31,0x29,0x3b,0x0a,0x7d,0x0a,0x0a,0x73,0x74,0x61,0x74,
+  0x69,0x63,0x20,0x69,0x6e,0x6c,0x69,0x6e,0x65,0x20,0x76,0x6f,0x69,0x64,0x20,0x6c,
+  0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,0x6f,0x63,0x61,0x5f,0x66,0x72,0x65,0x65,0x28,
   0x4c,0x61,0x69,0x6e,0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,
-  0x6e,0x65,0x78,0x74,0x20,0x3d,0x20,0x63,0x75,0x72,0x2d,0x3e,0x6e,0x65,0x78,0x74,
-  0x3b,0x0a,0x20,0x20,0x20,0x20,0x66,0x72,0x65,0x65,0x28,0x63,0x75,0x72,0x29,0x3b,
-  0x0a,0x20,0x20,0x20,0x20,0x63,0x75,0x72,0x20,0x3d,0x20,0x6e,0x65,0x78,0x74,0x3b,
-  0x0a,0x20,0x20,0x7d,0x0a,0x20,0x20,0x2a,0x68,0x65,0x61,0x64,0x20,0x3d,0x20,0x4e,
-  0x55,0x4c,0x4c,0x3b,0x0a,0x7d,0x0a
+  0x2a,0x68,0x65,0x61,0x64,0x29,0x20,0x7b,0x0a,0x20,0x20,0x4c,0x61,0x69,0x6e,0x41,
+  0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x63,0x75,0x72,0x20,0x3d,
+  0x20,0x2a,0x68,0x65,0x61,0x64,0x3b,0x0a,0x20,0x20,0x77,0x68,0x69,0x6c,0x65,0x20,
+  0x28,0x63,0x75,0x72,0x29,0x20,0x7b,0x0a,0x20,0x20,0x20,0x20,0x4c,0x61,0x69,0x6e,
+  0x41,0x6c,0x6c,0x6f,0x63,0x61,0x4e,0x6f,0x64,0x65,0x20,0x2a,0x6e,0x65,0x78,0x74,
+  0x20,0x3d,0x20,0x63,0x75,0x72,0x2d,0x3e,0x6e,0x65,0x78,0x74,0x3b,0x0a,0x23,0x69,
+  0x66,0x20,0x21,0x64,0x65,0x66,0x69,0x6e,0x65,0x64,0x28,0x4e,0x44,0x45,0x42,0x55,
+  0x47,0x29,0x0a,0x20,0x20,0x20,0x20,0x5f,0x6c,0x61,0x69,0x6e,0x5f,0x61,0x6c,0x6c,
+  0x6f,0x63,0x61,0x5f,0x6c,0x69,0x76,0x65,0x20,0x2d,0x3d,0x20,0x63,0x75,0x72,0x2d,
+  0x3e,0x62,0x79,0x74,0x65,0x73,0x3b,0x0a,0x23,0x65,0x6e,0x64,0x69,0x66,0x0a,0x20,
+  0x20,0x20,0x20,0x66,0x72,0x65,0x65,0x28,0x63,0x75,0x72,0x29,0x3b,0x0a,0x20,0x20,
+  0x20,0x20,0x63,0x75,0x72,0x20,0x3d,0x20,0x6e,0x65,0x78,0x74,0x3b,0x0a,0x20,0x20,
+  0x7d,0x0a,0x20,0x20,0x2a,0x68,0x65,0x61,0x64,0x20,0x3d,0x20,0x4e,0x55,0x4c,0x4c,
+  0x3b,0x0a,0x7d,0x0a
 };
 static const uint8_t v29108[1466] = {
   0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,
@@ -10247,7 +10275,7 @@ static const uint8_t v29108[1466] = {
   0x36,0x34,0x5f,0x74,0x29,0x74,0x73,0x2e,0x74,0x76,0x5f,0x6e,0x73,0x65,0x63,0x3b,
   0x0a,0x23,0x65,0x6e,0x64,0x69,0x66,0x0a,0x7d,0x0a
 };
-static const uint8_t v29120[3569] = {
+static const uint8_t v29120[3712] = {
   0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x69,0x6e,0x74,0x20,0x67,0x5f,0x6c,0x61,0x69,
   0x6e,0x5f,0x61,0x72,0x67,0x63,0x20,0x3d,0x20,0x30,0x3b,0x0a,0x73,0x74,0x61,0x74,
   0x69,0x63,0x20,0x63,0x68,0x61,0x72,0x20,0x2a,0x2a,0x67,0x5f,0x6c,0x61,0x69,0x6e,
@@ -10424,54 +10452,62 @@ static const uint8_t v29120[3569] = {
   0x65,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x63,0x6d,0x64,0x5b,0x63,0x6d,0x64,0x5f,0x6c,
   0x65,0x6e,0x5d,0x20,0x3d,0x20,0x27,0x5c,0x30,0x27,0x3b,0x0a,0x20,0x20,0x72,0x63,
   0x20,0x3d,0x20,0x73,0x79,0x73,0x74,0x65,0x6d,0x28,0x63,0x6d,0x64,0x29,0x3b,0x0a,
-  0x20,0x20,0x66,0x72,0x65,0x65,0x28,0x63,0x6d,0x64,0x29,0x3b,0x0a,0x20,0x20,0x72,
-  0x65,0x74,0x75,0x72,0x6e,0x20,0x28,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,
-  0x28,0x72,0x63,0x20,0x3c,0x20,0x30,0x20,0x3f,0x20,0x31,0x32,0x37,0x20,0x3a,0x20,
-  0x72,0x63,0x29,0x3b,0x0a,0x7d,0x0a,0x0a,0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x75,
-  0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x6f,0x73,0x5f,
-  0x66,0x69,0x6c,0x65,0x5f,0x65,0x78,0x69,0x73,0x74,0x73,0x28,0x76,0x6f,0x69,0x64,
-  0x20,0x2a,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x75,0x69,0x6e,0x74,
-  0x36,0x34,0x5f,0x74,0x20,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x20,0x7b,
-  0x0a,0x20,0x20,0x63,0x68,0x61,0x72,0x20,0x2a,0x70,0x61,0x74,0x68,0x3b,0x0a,0x20,
-  0x20,0x46,0x49,0x4c,0x45,0x20,0x2a,0x66,0x3b,0x0a,0x20,0x20,0x70,0x61,0x74,0x68,
-  0x20,0x3d,0x20,0x28,0x63,0x68,0x61,0x72,0x20,0x2a,0x29,0x6d,0x61,0x6c,0x6c,0x6f,
-  0x63,0x28,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,0x70,0x61,0x74,0x68,0x5f,0x6c,
-  0x65,0x6e,0x20,0x2b,0x20,0x31,0x75,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,
-  0x21,0x70,0x61,0x74,0x68,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x30,0x3b,
-  0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x20,
-  0x3e,0x20,0x30,0x20,0x26,0x26,0x20,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x29,
-  0x20,0x6d,0x65,0x6d,0x63,0x70,0x79,0x28,0x70,0x61,0x74,0x68,0x2c,0x20,0x70,0x61,
-  0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,
-  0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x70,0x61,0x74,
-  0x68,0x5b,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x5d,0x20,0x3d,0x20,0x27,0x5c,
-  0x30,0x27,0x3b,0x0a,0x20,0x20,0x66,0x20,0x3d,0x20,0x66,0x6f,0x70,0x65,0x6e,0x28,
-  0x70,0x61,0x74,0x68,0x2c,0x20,0x22,0x72,0x62,0x22,0x29,0x3b,0x0a,0x20,0x20,0x66,
-  0x72,0x65,0x65,0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,
-  0x28,0x21,0x66,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x30,0x3b,0x0a,0x20,
-  0x20,0x66,0x63,0x6c,0x6f,0x73,0x65,0x28,0x66,0x29,0x3b,0x0a,0x20,0x20,0x72,0x65,
-  0x74,0x75,0x72,0x6e,0x20,0x31,0x3b,0x0a,0x7d,0x0a,0x0a,0x73,0x74,0x61,0x74,0x69,
-  0x63,0x20,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x6c,0x61,0x69,0x6e,0x5f,
-  0x6f,0x73,0x5f,0x72,0x65,0x6d,0x6f,0x76,0x65,0x5f,0x66,0x69,0x6c,0x65,0x28,0x76,
-  0x6f,0x69,0x64,0x20,0x2a,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x75,
-  0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,
-  0x29,0x20,0x7b,0x0a,0x20,0x20,0x63,0x68,0x61,0x72,0x20,0x2a,0x70,0x61,0x74,0x68,
-  0x3b,0x0a,0x20,0x20,0x69,0x6e,0x74,0x20,0x72,0x63,0x3b,0x0a,0x20,0x20,0x70,0x61,
-  0x74,0x68,0x20,0x3d,0x20,0x28,0x63,0x68,0x61,0x72,0x20,0x2a,0x29,0x6d,0x61,0x6c,
-  0x6c,0x6f,0x63,0x28,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,0x70,0x61,0x74,0x68,
-  0x5f,0x6c,0x65,0x6e,0x20,0x2b,0x20,0x31,0x75,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,
-  0x20,0x28,0x21,0x70,0x61,0x74,0x68,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,
-  0x31,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,
-  0x6e,0x20,0x3e,0x20,0x30,0x20,0x26,0x26,0x20,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,
-  0x72,0x29,0x20,0x6d,0x65,0x6d,0x63,0x70,0x79,0x28,0x70,0x61,0x74,0x68,0x2c,0x20,
-  0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x28,0x73,0x69,0x7a,0x65,0x5f,
-  0x74,0x29,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x70,
-  0x61,0x74,0x68,0x5b,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x5d,0x20,0x3d,0x20,
-  0x27,0x5c,0x30,0x27,0x3b,0x0a,0x20,0x20,0x72,0x63,0x20,0x3d,0x20,0x72,0x65,0x6d,
-  0x6f,0x76,0x65,0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x66,0x72,0x65,
-  0x65,0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x72,0x65,0x74,0x75,0x72,
-  0x6e,0x20,0x28,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,0x28,0x72,0x63,0x20,
-  0x3d,0x3d,0x20,0x30,0x20,0x3f,0x20,0x30,0x20,0x3a,0x20,0x31,0x29,0x3b,0x0a,0x7d,
-  0x0a
+  0x20,0x20,0x66,0x72,0x65,0x65,0x28,0x63,0x6d,0x64,0x29,0x3b,0x0a,0x20,0x20,0x69,
+  0x66,0x20,0x28,0x72,0x63,0x20,0x3c,0x20,0x30,0x29,0x20,0x72,0x65,0x74,0x75,0x72,
+  0x6e,0x20,0x31,0x32,0x37,0x3b,0x0a,0x23,0x69,0x66,0x20,0x64,0x65,0x66,0x69,0x6e,
+  0x65,0x64,0x28,0x5f,0x57,0x49,0x4e,0x33,0x32,0x29,0x0a,0x20,0x20,0x72,0x65,0x74,
+  0x75,0x72,0x6e,0x20,0x28,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,0x72,0x63,
+  0x3b,0x0a,0x23,0x65,0x6c,0x73,0x65,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x28,0x72,
+  0x63,0x20,0x26,0x20,0x30,0x78,0x37,0x66,0x29,0x20,0x3d,0x3d,0x20,0x30,0x29,0x20,
+  0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x28,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,
+  0x29,0x28,0x28,0x72,0x63,0x20,0x3e,0x3e,0x20,0x38,0x29,0x20,0x26,0x20,0x30,0x78,
+  0x66,0x66,0x29,0x3b,0x0a,0x20,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x28,0x75,
+  0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,0x28,0x31,0x32,0x38,0x20,0x2b,0x20,0x28,
+  0x72,0x63,0x20,0x26,0x20,0x30,0x78,0x37,0x66,0x29,0x29,0x3b,0x0a,0x23,0x65,0x6e,
+  0x64,0x69,0x66,0x0a,0x7d,0x0a,0x0a,0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x75,0x69,
+  0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x6f,0x73,0x5f,0x66,
+  0x69,0x6c,0x65,0x5f,0x65,0x78,0x69,0x73,0x74,0x73,0x28,0x76,0x6f,0x69,0x64,0x20,
+  0x2a,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x75,0x69,0x6e,0x74,0x36,
+  0x34,0x5f,0x74,0x20,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x20,0x7b,0x0a,
+  0x20,0x20,0x63,0x68,0x61,0x72,0x20,0x2a,0x70,0x61,0x74,0x68,0x3b,0x0a,0x20,0x20,
+  0x46,0x49,0x4c,0x45,0x20,0x2a,0x66,0x3b,0x0a,0x20,0x20,0x70,0x61,0x74,0x68,0x20,
+  0x3d,0x20,0x28,0x63,0x68,0x61,0x72,0x20,0x2a,0x29,0x6d,0x61,0x6c,0x6c,0x6f,0x63,
+  0x28,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,
+  0x6e,0x20,0x2b,0x20,0x31,0x75,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x21,
+  0x70,0x61,0x74,0x68,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x30,0x3b,0x0a,
+  0x20,0x20,0x69,0x66,0x20,0x28,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x20,0x3e,
+  0x20,0x30,0x20,0x26,0x26,0x20,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x29,0x20,
+  0x6d,0x65,0x6d,0x63,0x70,0x79,0x28,0x70,0x61,0x74,0x68,0x2c,0x20,0x70,0x61,0x74,
+  0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,0x70,
+  0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x70,0x61,0x74,0x68,
+  0x5b,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x5d,0x20,0x3d,0x20,0x27,0x5c,0x30,
+  0x27,0x3b,0x0a,0x20,0x20,0x66,0x20,0x3d,0x20,0x66,0x6f,0x70,0x65,0x6e,0x28,0x70,
+  0x61,0x74,0x68,0x2c,0x20,0x22,0x72,0x62,0x22,0x29,0x3b,0x0a,0x20,0x20,0x66,0x72,
+  0x65,0x65,0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,
+  0x21,0x66,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x30,0x3b,0x0a,0x20,0x20,
+  0x66,0x63,0x6c,0x6f,0x73,0x65,0x28,0x66,0x29,0x3b,0x0a,0x20,0x20,0x72,0x65,0x74,
+  0x75,0x72,0x6e,0x20,0x31,0x3b,0x0a,0x7d,0x0a,0x0a,0x73,0x74,0x61,0x74,0x69,0x63,
+  0x20,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x6c,0x61,0x69,0x6e,0x5f,0x6f,
+  0x73,0x5f,0x72,0x65,0x6d,0x6f,0x76,0x65,0x5f,0x66,0x69,0x6c,0x65,0x28,0x76,0x6f,
+  0x69,0x64,0x20,0x2a,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x75,0x69,
+  0x6e,0x74,0x36,0x34,0x5f,0x74,0x20,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,
+  0x20,0x7b,0x0a,0x20,0x20,0x63,0x68,0x61,0x72,0x20,0x2a,0x70,0x61,0x74,0x68,0x3b,
+  0x0a,0x20,0x20,0x69,0x6e,0x74,0x20,0x72,0x63,0x3b,0x0a,0x20,0x20,0x70,0x61,0x74,
+  0x68,0x20,0x3d,0x20,0x28,0x63,0x68,0x61,0x72,0x20,0x2a,0x29,0x6d,0x61,0x6c,0x6c,
+  0x6f,0x63,0x28,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,0x29,0x70,0x61,0x74,0x68,0x5f,
+  0x6c,0x65,0x6e,0x20,0x2b,0x20,0x31,0x75,0x29,0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,
+  0x28,0x21,0x70,0x61,0x74,0x68,0x29,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,0x20,0x31,
+  0x3b,0x0a,0x20,0x20,0x69,0x66,0x20,0x28,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,
+  0x20,0x3e,0x20,0x30,0x20,0x26,0x26,0x20,0x70,0x61,0x74,0x68,0x5f,0x70,0x74,0x72,
+  0x29,0x20,0x6d,0x65,0x6d,0x63,0x70,0x79,0x28,0x70,0x61,0x74,0x68,0x2c,0x20,0x70,
+  0x61,0x74,0x68,0x5f,0x70,0x74,0x72,0x2c,0x20,0x28,0x73,0x69,0x7a,0x65,0x5f,0x74,
+  0x29,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x29,0x3b,0x0a,0x20,0x20,0x70,0x61,
+  0x74,0x68,0x5b,0x70,0x61,0x74,0x68,0x5f,0x6c,0x65,0x6e,0x5d,0x20,0x3d,0x20,0x27,
+  0x5c,0x30,0x27,0x3b,0x0a,0x20,0x20,0x72,0x63,0x20,0x3d,0x20,0x72,0x65,0x6d,0x6f,
+  0x76,0x65,0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x66,0x72,0x65,0x65,
+  0x28,0x70,0x61,0x74,0x68,0x29,0x3b,0x0a,0x20,0x20,0x72,0x65,0x74,0x75,0x72,0x6e,
+  0x20,0x28,0x75,0x69,0x6e,0x74,0x36,0x34,0x5f,0x74,0x29,0x28,0x72,0x63,0x20,0x3d,
+  0x3d,0x20,0x30,0x20,0x3f,0x20,0x30,0x20,0x3a,0x20,0x31,0x29,0x3b,0x0a,0x7d,0x0a
 };
 static const uint8_t v29132[295] = {
   0x73,0x74,0x61,0x74,0x69,0x63,0x20,0x69,0x6e,0x74,0x20,0x28,0x2a,0x6c,0x61,0x69,
@@ -12614,17 +12650,7 @@ static const uint8_t v120097[18] = {
   0x66,0x75,0x6e,0x63,0x74,0x6f,0x72,0x20,0x71,0x75,0x65,0x75,0x65,0x20,0x66,0x75,
   0x6c,0x6c
 };
-static uint8_t v120218[128] = {
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-};
-static const uint8_t v120439[115] = {
+static const uint8_t v120368[115] = {
   0x75,0x73,0x61,0x67,0x65,0x3a,0x20,0x6c,0x61,0x69,0x6e,0x63,0x20,0x3c,0x73,0x6f,
   0x75,0x72,0x63,0x65,0x2e,0x6c,0x61,0x69,0x6e,0x3e,0x20,0x5b,0x2d,0x2d,0x6f,0x75,
   0x74,0x20,0x3c,0x6f,0x75,0x74,0x2e,0x6c,0x31,0x7c,0x6f,0x75,0x74,0x2e,0x63,0x3e,
@@ -12634,72 +12660,80 @@ static const uint8_t v120439[115] = {
   0x5d,0x20,0x5b,0x2d,0x2d,0x70,0x72,0x69,0x6e,0x74,0x2d,0x72,0x65,0x73,0x75,0x6c,
   0x74,0x5d,0x0a
 };
-static const uint8_t v120467[5] = {
+static const uint8_t v120393[5] = {
   0x2d,0x2d,0x6f,0x75,0x74
 };
-static const uint8_t v120496[7] = {
+static const uint8_t v120432[7] = {
   0x2d,0x2d,0x65,0x6e,0x74,0x72,0x79
 };
-static const uint8_t v120525[7] = {
+static const uint8_t v120471[7] = {
   0x2d,0x2d,0x74,0x72,0x61,0x63,0x65
 };
-static const uint8_t v120554[5] = {
+static const uint8_t v120510[5] = {
   0x2d,0x2d,0x63,0x39,0x39
 };
-static const uint8_t v120572[14] = {
+static const uint8_t v120528[14] = {
   0x2d,0x2d,0x70,0x72,0x69,0x6e,0x74,0x2d,0x72,0x65,0x73,0x75,0x6c,0x74
 };
-static const uint8_t v120590[5] = {
+static const uint8_t v120547[5] = {
   0x2d,0x2d,0x6f,0x75,0x74
 };
-static const uint8_t v120598[7] = {
+static const uint8_t v120555[7] = {
   0x2d,0x2d,0x65,0x6e,0x74,0x72,0x79
 };
-static const uint8_t v120607[7] = {
+static const uint8_t v120564[7] = {
   0x2d,0x2d,0x74,0x72,0x61,0x63,0x65
 };
-static const uint8_t v120655[8] = {
+static const uint8_t v120620[8] = {
   0x73,0x30,0x5f,0x5f,0x6d,0x61,0x69,0x6e
 };
-static const uint8_t v120771[25] = {
+static const uint8_t v120737[25] = {
   0x73,0x6f,0x75,0x72,0x63,0x65,0x20,0x63,0x6f,0x6d,0x70,0x69,0x6c,0x61,0x74,0x69,
   0x6f,0x6e,0x20,0x66,0x61,0x69,0x6c,0x65,0x64
 };
-static const uint8_t v120821[11] = {
+static const uint8_t v120787[11] = {
   0x6c,0x61,0x69,0x6e,0x63,0x5f,0x62,0x75,0x69,0x6c,0x64
 };
-static const uint8_t v120825[5] = {
+static const uint8_t v120791[5] = {
   0x6c,0x61,0x69,0x6e,0x63
 };
-static const uint8_t v120836[9] = {
+static const uint8_t v120802[9] = {
   0x69,0x72,0x5f,0x76,0x65,0x72,0x69,0x66,0x79
 };
-static const uint8_t v120840[5] = {
+static const uint8_t v120806[5] = {
   0x6c,0x61,0x69,0x6e,0x63
 };
-static const uint8_t v120854[26] = {
+static const uint8_t v120820[26] = {
   0x4c,0x41,0x49,0x4e,0x49,0x52,0x20,0x76,0x65,0x72,0x69,0x66,0x69,0x63,0x61,0x74,
   0x69,0x6f,0x6e,0x20,0x66,0x61,0x69,0x6c,0x65,0x64
 };
-static const uint8_t v120866[7] = {
+static const uint8_t v120832[7] = {
   0x69,0x72,0x5f,0x65,0x6d,0x69,0x74
 };
-static const uint8_t v120870[5] = {
+static const uint8_t v120836[5] = {
   0x6c,0x61,0x69,0x6e,0x63
 };
-static const uint8_t v120951[23] = {
+static const uint8_t v120875[1] = {0
+};
+static const uint8_t v120881[1] = {0
+};
+static const uint8_t v120887[1] = {0
+};
+static const uint8_t v120893[1] = {0
+};
+static const uint8_t v120940[23] = {
   0x63,0x61,0x6e,0x6e,0x6f,0x74,0x20,0x72,0x65,0x61,0x64,0x20,0x73,0x6f,0x75,0x72,
   0x63,0x65,0x20,0x66,0x69,0x6c,0x65
 };
-static const uint8_t v120984[26] = {
+static const uint8_t v120973[26] = {
   0x4c,0x41,0x49,0x4e,0x49,0x52,0x20,0x76,0x65,0x72,0x69,0x66,0x69,0x63,0x61,0x74,
   0x69,0x6f,0x6e,0x20,0x66,0x61,0x69,0x6c,0x65,0x64
 };
-static const uint8_t v121039[26] = {
+static const uint8_t v121022[26] = {
   0x66,0x61,0x69,0x6c,0x65,0x64,0x20,0x74,0x6f,0x20,0x77,0x72,0x69,0x74,0x65,0x20,
   0x43,0x39,0x39,0x20,0x6f,0x75,0x74,0x70,0x75,0x74
 };
-static const uint8_t v121058[34] = {
+static const uint8_t v121041[34] = {
   0x66,0x61,0x69,0x6c,0x65,0x64,0x20,0x74,0x6f,0x20,0x77,0x72,0x69,0x74,0x65,0x20,
   0x4c,0x41,0x49,0x4e,0x49,0x52,0x20,0x74,0x65,0x78,0x74,0x20,0x6f,0x75,0x74,0x70,
   0x75,0x74
@@ -15774,23 +15808,19 @@ static uint64_t lain_fn_98958(void * v119995, uint64_t v119996);
 static uint64_t lain_fn_98960(void * v120004, uint64_t v120005);
 static uint64_t lain_fn_78675(void * v120013, uint64_t v120014, uint64_t v120015, uint64_t v120016, uint64_t v120017);
 static uint64_t lain_fn_112382(void * v120166, uint64_t v120167, uint64_t v120168, uint64_t v120169, void * v120170, uint64_t v120171);
-static void * lain_fn_120217(void);
-static void lain_fn_120220(void * v120249);
-static uint64_t lain_fn_120222(void * v120260, void * v120261, uint64_t v120262);
-static uint64_t lain_fn_120223(void * v120295, void * v120296);
-static uint64_t lain_fn_120225(void * v120313);
-static void lain_fn_120226(void * v120347, uint64_t v120348);
-static uint64_t lain_fn_120228(void * v120378, uint64_t v120379, uint64_t v120380, void * v120381);
-static void lain_fn_120231(void * v120407, void * v120408, uint64_t v120409, uint64_t v120410);
+static uint64_t lain_fn_120227(void * v120249, void * v120250, uint64_t v120251);
+static uint64_t lain_fn_120228(void * v120284, void * v120285);
+static uint64_t lain_fn_120230(void * v120302);
+static void lain_fn_120231(void * v120336, uint64_t v120337);
 static uint64_t lain_fn_120233(void);
-static uint64_t lain_fn_120234(uint64_t v120447, uint64_t v120448);
-static void lain_fn_120235(void * v120643);
-static uint64_t lain_fn_120237(uint64_t v120674);
-static void lain_fn_120238(void * v120696, uint64_t v120697);
-static uint64_t lain_fn_120240(void * v120732);
-static uint64_t lain_fn_120242(void * v120744, uint64_t v120745, uint64_t v120746);
-static uint64_t lain_fn_120244(uint64_t v120789);
-static uint64_t lain_fn_120245(uint64_t v120881);
+static uint64_t lain_fn_120234(void * v120376, uint64_t v120377, uint64_t v120378);
+static void lain_fn_120235(void * v120611, void * v120612);
+static uint64_t lain_fn_120237(uint64_t v120640);
+static void lain_fn_120238(void * v120662, uint64_t v120663);
+static uint64_t lain_fn_120240(void * v120698);
+static uint64_t lain_fn_120242(void * v120710, uint64_t v120711, uint64_t v120712);
+static uint64_t lain_fn_120244(uint64_t v120755);
+static uint64_t lain_fn_120245(uint64_t v120847);
 static uint64_t lain_fn_120247(void);
 static uint64_t lain_fn_120248(void);
 
@@ -60931,7 +60961,7 @@ static void lain_fn_20134(void * v29082) {
   void *v29086 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29085) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   lain_store_addr((void *)(uintptr_t)v29086, (void *)(uintptr_t)v29084);
   void *v29087 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29085) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v29087, (uint64_t)(UINT64_C(2697)), 64);
+  lain_store_bits((void *)(uintptr_t)v29087, (uint64_t)(UINT64_C(2745)), 64);
   void *v29088 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29085) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   uint64_t v29089 = (uint64_t)lain_load_bits((void *)(uintptr_t)v29088, 64);
   void *v29090 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29082) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
@@ -60952,7 +60982,7 @@ static void lain_fn_20136(void * v29094) {
   void *v29098 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29097) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   lain_store_addr((void *)(uintptr_t)v29098, (void *)(uintptr_t)v29096);
   void *v29099 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29097) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v29099, (uint64_t)(UINT64_C(1863)), 64);
+  lain_store_bits((void *)(uintptr_t)v29099, (uint64_t)(UINT64_C(2164)), 64);
   void *v29100 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29097) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   uint64_t v29101 = (uint64_t)lain_load_bits((void *)(uintptr_t)v29100, 64);
   void *v29102 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29094) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
@@ -60994,7 +61024,7 @@ static void lain_fn_20140(void * v29118) {
   void *v29122 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29121) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   lain_store_addr((void *)(uintptr_t)v29122, (void *)(uintptr_t)v29120);
   void *v29123 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29121) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v29123, (uint64_t)(UINT64_C(3569)), 64);
+  lain_store_bits((void *)(uintptr_t)v29123, (uint64_t)(UINT64_C(3712)), 64);
   void *v29124 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29121) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   uint64_t v29125 = (uint64_t)lain_load_bits((void *)(uintptr_t)v29124, 64);
   void *v29126 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v29118) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
@@ -203620,35 +203650,7 @@ static uint64_t lain_fn_112382(void * v120166, uint64_t v120167, uint64_t v12016
   { uint64_t _ret_val = (uint64_t)(v120215); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static void * lain_fn_120217(void) {
-  LainAllocaNode *_alloca_head = NULL;
-  (void)_alloca_head;
-  { void * _ret_val = (void *)((void *)(uintptr_t)v120218); lain_alloca_free(&_alloca_head); return _ret_val; }
-}
-
-static void lain_fn_120220(void * v120249) {
-  LainAllocaNode *_alloca_head = NULL;
-  (void)_alloca_head;
-  void * v120250 = lain_fn_120217();
-  uint64_t _a120251[2] = {0};
-  void *v120251 = (void *)_a120251;
-  void *v120252 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120251) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120252, (void *)(uintptr_t)v120250);
-  void *v120253 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120251) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120253, (uint64_t)(UINT64_C(16)), 64);
-  void *v120254 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120251) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120255 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120254, 64);
-  void *v120256 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120249) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120256, (uint64_t)((uint64_t)(v120255)), 64);
-  void *v120257 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120251) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120258 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120257, 64);
-  void *v120259 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120249) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120259, (uint64_t)((uint64_t)(v120258)), 64);
-  lain_alloca_free(&_alloca_head);
-  return;
-}
-
-static uint64_t lain_fn_120222(void * v120260, void * v120261, uint64_t v120262) {
+static uint64_t lain_fn_120227(void * v120249, void * v120250, uint64_t v120251) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -203657,132 +203659,132 @@ static uint64_t lain_fn_120222(void * v120260, void * v120261, uint64_t v120262)
   void *v116 = (void *)_a116;
   uint64_t _a117[1] = {0};
   void *v117 = (void *)_a117;
-  uint64_t v120263 = (uint64_t)((uint64_t)((uint64_t)(v120260)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120263)), 64);
-  uint64_t v120264 = (uint64_t)((uint64_t)((uint64_t)(v120261)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120264)), 64);
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120262)), 64);
-  uint64_t v120265 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  uint64_t v120266 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120267 = (void *)(uintptr_t)(v120266);
-  void *v120268 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120267) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120269 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120268, 64);
-  uint8_t v120270 = (uint8_t)((((uint64_t)((uint64_t)(v120265)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120269)) & lain_mask(64))));
-  if (((v120270) & 1u) != 0) {
+  uint64_t v120252 = (uint64_t)((uint64_t)((uint64_t)(v120249)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120252)), 64);
+  uint64_t v120253 = (uint64_t)((uint64_t)((uint64_t)(v120250)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120253)), 64);
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120251)), 64);
+  uint64_t v120254 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120255 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120256 = (void *)(uintptr_t)(v120255);
+  void *v120257 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120256) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120258 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120257, 64);
+  uint8_t v120259 = (uint8_t)((((uint64_t)((uint64_t)(v120254)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120258)) & lain_mask(64))));
+  if (((v120259) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120271 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120272 = (void *)(uintptr_t)(v120271);
-  void *v120273 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120272) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120274 = lain_load_addr((void *)(uintptr_t)v120273);
-  uint64_t v120275 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void *v120276 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120274) + ((uint64_t)((uint64_t)(v120275))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v120277 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120276) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint8_t v120278 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120277, 8);
-  uint64_t v120279 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120280 = (void *)(uintptr_t)(v120279);
-  void *v120281 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120280) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120282 = lain_load_addr((void *)(uintptr_t)v120281);
-  uint64_t v120283 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void *v120284 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120282) + ((uint64_t)((uint64_t)(v120283))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v120285 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120284) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint8_t v120286 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120285, 8);
-  uint8_t v120287 = (uint8_t)((((uint64_t)((uint64_t)(v120278)) & lain_mask(8)) != ((uint64_t)((uint64_t)(v120286)) & lain_mask(8))));
-  if (((v120287) & 1u) != 0) {
+  uint64_t v120260 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120261 = (void *)(uintptr_t)(v120260);
+  void *v120262 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120261) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void * v120263 = lain_load_addr((void *)(uintptr_t)v120262);
+  uint64_t v120264 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  void *v120265 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120263) + ((uint64_t)((uint64_t)(v120264))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120266 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120265) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint8_t v120267 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120266, 8);
+  uint64_t v120268 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120269 = (void *)(uintptr_t)(v120268);
+  void *v120270 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120269) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void * v120271 = lain_load_addr((void *)(uintptr_t)v120270);
+  uint64_t v120272 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  void *v120273 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120271) + ((uint64_t)((uint64_t)(v120272))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120274 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120273) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint8_t v120275 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120274, 8);
+  uint8_t v120276 = (uint8_t)((((uint64_t)((uint64_t)(v120267)) & lain_mask(8)) != ((uint64_t)((uint64_t)(v120275)) & lain_mask(8))));
+  if (((v120276) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120288 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120289 = (void *)(uintptr_t)(v120288);
-  uint64_t v120290 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120291 = (void *)(uintptr_t)(v120290);
-  uint64_t v120292 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  uint64_t v120293 = (uint64_t)(((uint64_t)((uint64_t)(v120292))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  uint64_t v120294 = lain_fn_120222((void *)(uintptr_t)v120289, (void *)(uintptr_t)v120291, v120293);
-  { uint64_t _ret_val = (uint64_t)(v120294); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120277 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120278 = (void *)(uintptr_t)(v120277);
+  uint64_t v120279 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120280 = (void *)(uintptr_t)(v120279);
+  uint64_t v120281 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120282 = (uint64_t)(((uint64_t)((uint64_t)(v120281))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  uint64_t v120283 = lain_fn_120227((void *)(uintptr_t)v120278, (void *)(uintptr_t)v120280, v120282);
+  { uint64_t _ret_val = (uint64_t)(v120283); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120223(void * v120295, void * v120296) {
+static uint64_t lain_fn_120228(void * v120284, void * v120285) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
   uint64_t _a116[1] = {0};
   void *v116 = (void *)_a116;
-  uint64_t v120297 = (uint64_t)((uint64_t)((uint64_t)(v120295)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120297)), 64);
-  uint64_t v120298 = (uint64_t)((uint64_t)((uint64_t)(v120296)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120298)), 64);
-  uint64_t v120299 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120300 = (void *)(uintptr_t)(v120299);
-  void *v120301 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120300) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120302 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120301, 64);
-  uint64_t v120303 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120304 = (void *)(uintptr_t)(v120303);
-  void *v120305 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120304) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120306 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120305, 64);
-  uint8_t v120307 = (uint8_t)((((uint64_t)((uint64_t)(v120302)) & lain_mask(64)) != ((uint64_t)((uint64_t)(v120306)) & lain_mask(64))));
-  if (((v120307) & 1u) != 0) {
+  uint64_t v120286 = (uint64_t)((uint64_t)((uint64_t)(v120284)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120286)), 64);
+  uint64_t v120287 = (uint64_t)((uint64_t)((uint64_t)(v120285)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120287)), 64);
+  uint64_t v120288 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120289 = (void *)(uintptr_t)(v120288);
+  void *v120290 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120289) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120291 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120290, 64);
+  uint64_t v120292 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120293 = (void *)(uintptr_t)(v120292);
+  void *v120294 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120293) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120295 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120294, 64);
+  uint8_t v120296 = (uint8_t)((((uint64_t)((uint64_t)(v120291)) & lain_mask(64)) != ((uint64_t)((uint64_t)(v120295)) & lain_mask(64))));
+  if (((v120296) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120308 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120309 = (void *)(uintptr_t)(v120308);
-  uint64_t v120310 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120311 = (void *)(uintptr_t)(v120310);
-  uint64_t v120312 = lain_fn_120222((void *)(uintptr_t)v120309, (void *)(uintptr_t)v120311, (uint64_t)UINT64_C(0));
-  { uint64_t _ret_val = (uint64_t)(v120312); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120297 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120298 = (void *)(uintptr_t)(v120297);
+  uint64_t v120299 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120300 = (void *)(uintptr_t)(v120299);
+  uint64_t v120301 = lain_fn_120227((void *)(uintptr_t)v120298, (void *)(uintptr_t)v120300, (uint64_t)UINT64_C(0));
+  { uint64_t _ret_val = (uint64_t)(v120301); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120225(void * v120313) {
+static uint64_t lain_fn_120230(void * v120302) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
-  uint64_t v120315 = (uint64_t)((uint64_t)((uint64_t)(v120313)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120315)), 64);
-  uint64_t v120316 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120317 = (void *)(uintptr_t)(v120316);
-  void *v120318 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120317) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120319 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120318, 64);
-  uint8_t v120320 = (uint8_t)((((uint64_t)((uint64_t)(v120319)) & lain_mask(64)) < ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
-  if (((v120320) & 1u) != 0) {
+  uint64_t v120304 = (uint64_t)((uint64_t)((uint64_t)(v120302)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120304)), 64);
+  uint64_t v120305 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120306 = (void *)(uintptr_t)(v120305);
+  void *v120307 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120306) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120308 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120307, 64);
+  uint8_t v120309 = (uint8_t)((((uint64_t)((uint64_t)(v120308)) & lain_mask(64)) < ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
+  if (((v120309) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120321 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120322 = (void *)(uintptr_t)(v120321);
-  void *v120323 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120322) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120324 = lain_load_addr((void *)(uintptr_t)v120323);
-  uint64_t v120325 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120326 = (void *)(uintptr_t)(v120325);
-  void *v120327 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120326) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120328 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120327, 64);
-  uint64_t v120329 = (uint64_t)(((uint64_t)((uint64_t)(v120328))) - ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
-  void *v120330 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120324) + ((uint64_t)((uint64_t)(v120329))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v120331 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120330) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint8_t v120332 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120331, 8);
-  uint8_t v120333 = (uint8_t)((((uint64_t)((uint64_t)(v120332)) & lain_mask(8)) != ((uint64_t)(UINT64_C(46)) & lain_mask(8))));
-  if (((v120333) & 1u) != 0) {
+  uint64_t v120310 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120311 = (void *)(uintptr_t)(v120310);
+  void *v120312 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120311) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void * v120313 = lain_load_addr((void *)(uintptr_t)v120312);
+  uint64_t v120314 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120315 = (void *)(uintptr_t)(v120314);
+  void *v120316 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120315) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120317 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120316, 64);
+  uint64_t v120318 = (uint64_t)(((uint64_t)((uint64_t)(v120317))) - ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
+  void *v120319 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120313) + ((uint64_t)((uint64_t)(v120318))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120320 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120319) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint8_t v120321 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120320, 8);
+  uint8_t v120322 = (uint8_t)((((uint64_t)((uint64_t)(v120321)) & lain_mask(8)) != ((uint64_t)(UINT64_C(46)) & lain_mask(8))));
+  if (((v120322) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120334 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120335 = (void *)(uintptr_t)(v120334);
-  void *v120336 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120335) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120337 = lain_load_addr((void *)(uintptr_t)v120336);
-  uint64_t v120338 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120339 = (void *)(uintptr_t)(v120338);
-  void *v120340 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120339) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120341 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120340, 64);
-  uint64_t v120342 = (uint64_t)(((uint64_t)((uint64_t)(v120341))) - ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  void *v120343 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120337) + ((uint64_t)((uint64_t)(v120342))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v120344 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120343) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint8_t v120345 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120344, 8);
-  uint8_t v120346 = (uint8_t)((((uint64_t)((uint64_t)(v120345)) & lain_mask(8)) != ((uint64_t)(UINT64_C(99)) & lain_mask(8))));
-  if (((v120346) & 1u) != 0) {
+  uint64_t v120323 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120324 = (void *)(uintptr_t)(v120323);
+  void *v120325 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120324) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void * v120326 = lain_load_addr((void *)(uintptr_t)v120325);
+  uint64_t v120327 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120328 = (void *)(uintptr_t)(v120327);
+  void *v120329 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120328) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120330 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120329, 64);
+  uint64_t v120331 = (uint64_t)(((uint64_t)((uint64_t)(v120330))) - ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  void *v120332 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120326) + ((uint64_t)((uint64_t)(v120331))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120333 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120332) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint8_t v120334 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120333, 8);
+  uint8_t v120335 = (uint8_t)((((uint64_t)((uint64_t)(v120334)) & lain_mask(8)) != ((uint64_t)(UINT64_C(99)) & lain_mask(8))));
+  if (((v120335) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
   { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static void lain_fn_120226(void * v120347, uint64_t v120348) {
+static void lain_fn_120231(void * v120336, uint64_t v120337) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -203797,142 +203799,49 @@ static void lain_fn_120226(void * v120347, uint64_t v120348) {
   void *v178 = (void *)_a178;
   uint64_t _a183[1] = {0};
   void *v183 = (void *)_a183;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120348)), 64);
-  uint64_t v120349 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120350 = lain_fn_80(v120349);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120350)), 64);
-  uint64_t v120351 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t v120352 = (uint64_t)(((uint64_t)((uint64_t)(v120351))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120352)), 64);
-  uint64_t v120353 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  uint64_t v120354 = lain_fn_85(v120353);
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120354)), 64);
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120337)), 64);
+  uint64_t v120338 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint64_t v120339 = lain_fn_80(v120338);
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120339)), 64);
+  uint64_t v120340 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120341 = (uint64_t)(((uint64_t)((uint64_t)(v120340))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120341)), 64);
+  uint64_t v120342 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120343 = lain_fn_85(v120342);
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120343)), 64);
+  uint64_t v120344 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120345 = (void *)(uintptr_t)(v120344);
+  uint64_t v120346 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t _a120347[2] = {0};
+  void *v120347 = (void *)_a120347;
+  void *v120348 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120347) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120348, (void *)(uintptr_t)v120345);
+  void *v120349 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120347) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120349, (uint64_t)((uint64_t)(v120346)), 64);
+  uint64_t v120350 = (uint64_t)((uint64_t)((uint64_t)(v120347)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120350)), 64);
+  uint64_t v120351 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint64_t v120352 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  void * v120353 = (void *)(uintptr_t)(v120352);
+  uint64_t v120354 = lain_fn_82(v120351, (void *)(uintptr_t)v120353);
+  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120354)), 64);
   uint64_t v120355 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
   void * v120356 = (void *)(uintptr_t)(v120355);
-  uint64_t v120357 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120357 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
   uint64_t _a120358[2] = {0};
   void *v120358 = (void *)_a120358;
   void *v120359 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120358) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   lain_store_addr((void *)(uintptr_t)v120359, (void *)(uintptr_t)v120356);
   void *v120360 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120358) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
   lain_store_bits((void *)(uintptr_t)v120360, (uint64_t)((uint64_t)(v120357)), 64);
-  uint64_t v120361 = (uint64_t)((uint64_t)((uint64_t)(v120358)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120361)), 64);
-  uint64_t v120362 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120363 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  void * v120364 = (void *)(uintptr_t)(v120363);
-  uint64_t v120365 = lain_fn_82(v120362, (void *)(uintptr_t)v120364);
-  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120365)), 64);
-  uint64_t v120366 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120367 = (void *)(uintptr_t)(v120366);
-  uint64_t v120368 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-  uint64_t _a120369[2] = {0};
-  void *v120369 = (void *)_a120369;
-  void *v120370 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120370, (void *)(uintptr_t)v120367);
-  void *v120371 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120371, (uint64_t)((uint64_t)(v120368)), 64);
-  void *v120372 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120373 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120372, 64);
-  void *v120374 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120347) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120374, (uint64_t)((uint64_t)(v120373)), 64);
-  void *v120375 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120376 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120375, 64);
-  void *v120377 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120347) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120377, (uint64_t)((uint64_t)(v120376)), 64);
-  lain_alloca_free(&_alloca_head);
-  return;
-}
-
-static uint64_t lain_fn_120228(void * v120378, uint64_t v120379, uint64_t v120380, void * v120381) {
-  LainAllocaNode *_alloca_head = NULL;
-  (void)_alloca_head;
-  uint64_t _a115[1] = {0};
-  void *v115 = (void *)_a115;
-  uint64_t _a116[1] = {0};
-  void *v116 = (void *)_a116;
-  uint64_t _a117[1] = {0};
-  void *v117 = (void *)_a117;
-  uint64_t _a118[1] = {0};
-  void *v118 = (void *)_a118;
-  uint64_t v120382 = (uint64_t)((uint64_t)((uint64_t)(v120378)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120382)), 64);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120379)), 64);
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120380)), 64);
-  uint64_t v120383 = (uint64_t)((uint64_t)((uint64_t)(v120381)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120383)), 64);
-  void *v120384 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120385 = lain_load_addr((void *)(uintptr_t)v120384);
-  uint64_t v120386 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void *v120387 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120385) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120388 = lain_load_addr((void *)(uintptr_t)v120387);
-  void *v120389 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120388) + ((uint64_t)((uint64_t)(v120386))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120390 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120391 = (void *)(uintptr_t)(v120390);
-  void *v120392 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120391) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120393 = lain_load_addr((void *)(uintptr_t)v120392);
-  uint64_t v120394 = (uint64_t)((uint64_t)((uint64_t)(v120393)) & lain_mask(64));
-  void *v120395 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120389) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120395, (uint64_t)((uint64_t)(v120394)), 64);
-  void *v120396 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120397 = lain_load_addr((void *)(uintptr_t)v120396);
-  uint64_t v120398 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void *v120399 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120397) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120400 = lain_load_addr((void *)(uintptr_t)v120399);
-  void *v120401 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120400) + ((uint64_t)((uint64_t)(v120398))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120402 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120403 = (void *)(uintptr_t)(v120402);
-  void *v120404 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120403) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120405 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120404, 64);
-  void *v120406 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120401) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120406, (uint64_t)((uint64_t)(v120405)), 64);
-  { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
-}
-
-static void lain_fn_120231(void * v120407, void * v120408, uint64_t v120409, uint64_t v120410) {
-  LainAllocaNode *_alloca_head = NULL;
-  (void)_alloca_head;
-  uint64_t _a115[1] = {0};
-  void *v115 = (void *)_a115;
-  uint64_t _a116[1] = {0};
-  void *v116 = (void *)_a116;
-  uint64_t _a117[1] = {0};
-  void *v117 = (void *)_a117;
-  uint64_t v120411 = (uint64_t)((uint64_t)((uint64_t)(v120408)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120411)), 64);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120409)), 64);
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120410)), 64);
-  uint64_t v120412 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120413 = (void *)(uintptr_t)(v120412);
-  void *v120414 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120413) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120415 = lain_load_addr((void *)(uintptr_t)v120414);
-  uint64_t v120416 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void *v120417 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120415) + ((uint64_t)((uint64_t)(v120416))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120418 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120417) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120419 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120418, 64);
-  void * v120420 = (void *)(uintptr_t)(v120419);
-  uint64_t v120421 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120422 = (void *)(uintptr_t)(v120421);
-  void *v120423 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120422) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120424 = lain_load_addr((void *)(uintptr_t)v120423);
-  uint64_t v120425 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void *v120426 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120424) + ((uint64_t)((uint64_t)(v120425))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120427 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120426) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120428 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120427, 64);
-  uint64_t _a120429[2] = {0};
-  void *v120429 = (void *)_a120429;
-  void *v120430 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120429) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120430, (void *)(uintptr_t)v120420);
-  void *v120431 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120429) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120431, (uint64_t)((uint64_t)(v120428)), 64);
-  void *v120432 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120429) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120433 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120432, 64);
-  void *v120434 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120407) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120434, (uint64_t)((uint64_t)(v120433)), 64);
-  void *v120435 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120429) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120436 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120435, 64);
-  void *v120437 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120407) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120437, (uint64_t)((uint64_t)(v120436)), 64);
+  void *v120361 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120358) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120362 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120361, 64);
+  void *v120363 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120336) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120363, (uint64_t)((uint64_t)(v120362)), 64);
+  void *v120364 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120358) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120365 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120364, 64);
+  void *v120366 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120336) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120366, (uint64_t)((uint64_t)(v120365)), 64);
   lain_alloca_free(&_alloca_head);
   return;
 }
@@ -203942,21 +203851,21 @@ static uint64_t lain_fn_120233(void) {
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
-  uint64_t _a120440[2] = {0};
-  void *v120440 = (void *)_a120440;
-  void *v120441 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120440) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120441, (void *)(uintptr_t)v120439);
-  void *v120442 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120440) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120442, (uint64_t)(UINT64_C(115)), 64);
-  uint64_t v120443 = (uint64_t)((uint64_t)((uint64_t)(v120440)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120443)), 64);
-  uint64_t v120444 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120445 = (void *)(uintptr_t)(v120444);
-  uint64_t v120446 = lain_fn_96((void *)(uintptr_t)v120445);
-  { uint64_t _ret_val = (uint64_t)(v120446); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t _a120369[2] = {0};
+  void *v120369 = (void *)_a120369;
+  void *v120370 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120370, (void *)(uintptr_t)v120368);
+  void *v120371 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120369) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120371, (uint64_t)(UINT64_C(115)), 64);
+  uint64_t v120372 = (uint64_t)((uint64_t)((uint64_t)(v120369)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120372)), 64);
+  uint64_t v120373 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120374 = (void *)(uintptr_t)(v120373);
+  uint64_t v120375 = lain_fn_96((void *)(uintptr_t)v120374);
+  { uint64_t _ret_val = (uint64_t)(v120375); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120234(uint64_t v120447, uint64_t v120448) {
+static uint64_t lain_fn_120234(void * v120376, uint64_t v120377, uint64_t v120378) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -203967,318 +203876,347 @@ static uint64_t lain_fn_120234(uint64_t v120447, uint64_t v120448) {
   void *v117 = (void *)_a117;
   uint64_t _a118[1] = {0};
   void *v118 = (void *)_a118;
-  uint64_t _a178[1] = {0};
-  void *v178 = (void *)_a178;
-  uint64_t _a183[1] = {0};
-  void *v183 = (void *)_a183;
-  uint64_t _a204[1] = {0};
-  void *v204 = (void *)_a204;
-  uint64_t _a495[1] = {0};
-  void *v495 = (void *)_a495;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120447)), 64);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120448)), 64);
-  uint64_t _a120457[2] = {0};
-  void *v120457 = (void *)_a120457;
-  lain_fn_120220((void *)(uintptr_t)v120457);
-  uint64_t v120458 = (uint64_t)((uint64_t)((uint64_t)(v120457)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120458)), 64);
-  uint64_t v120459 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120460 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120461 = (uint8_t)((((uint64_t)((uint64_t)(v120459)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120460)) & lain_mask(64))));
-  if (((v120461) & 1u) != 0) {
+  uint64_t v120384 = (uint64_t)((uint64_t)((uint64_t)(v120376)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120384)), 64);
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120377)), 64);
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120378)), 64);
+  uint64_t v120385 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120386 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120387 = (uint8_t)((((uint64_t)((uint64_t)(v120385)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120386)) & lain_mask(64))));
+  if (((v120387) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120462 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t _a120463[2] = {0};
-  void *v120463 = (void *)_a120463;
-  lain_fn_120226((void *)(uintptr_t)v120463, v120462);
-  uint64_t v120464 = (uint64_t)((uint64_t)((uint64_t)(v120463)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120464)), 64);
-  uint64_t v120465 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120466 = (void *)(uintptr_t)(v120465);
-  uint64_t _a120468[2] = {0};
-  void *v120468 = (void *)_a120468;
-  void *v120469 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120468) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120469, (void *)(uintptr_t)v120467);
-  void *v120470 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120468) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120470, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120471 = lain_fn_120223((void *)(uintptr_t)v120466, (void *)(uintptr_t)v120468);
-  uint8_t v120472 = (uint8_t)((((uint64_t)((uint64_t)(v120471)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint64_t v120473 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120474 = (uint64_t)(((uint64_t)((uint64_t)(v120473))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  uint64_t v120475 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120476 = (uint8_t)((((uint64_t)((uint64_t)(v120474)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120475)) & lain_mask(64))));
-  uint8_t v120477 = (uint8_t)(((uint64_t)((uint64_t)(v120472))) & ((uint64_t)((uint64_t)(v120476)))) & lain_mask(1);
-  if (((v120477) & 1u) != 0) {
-    void *v120478 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120479 = lain_load_addr((void *)(uintptr_t)v120478);
-    void *v120480 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120479) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120481 = lain_load_addr((void *)(uintptr_t)v120480);
-    void *v120482 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120481) + ((uint64_t)(UINT64_C(2))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120388 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t _a120389[2] = {0};
+  void *v120389 = (void *)_a120389;
+  lain_fn_120231((void *)(uintptr_t)v120389, v120388);
+  uint64_t v120390 = (uint64_t)((uint64_t)((uint64_t)(v120389)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120390)), 64);
+  uint64_t v120391 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120392 = (void *)(uintptr_t)(v120391);
+  uint64_t _a120394[2] = {0};
+  void *v120394 = (void *)_a120394;
+  void *v120395 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120394) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120395, (void *)(uintptr_t)v120393);
+  void *v120396 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120394) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120396, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120397 = lain_fn_120228((void *)(uintptr_t)v120392, (void *)(uintptr_t)v120394);
+  uint8_t v120398 = (uint8_t)((((uint64_t)((uint64_t)(v120397)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint64_t v120399 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120400 = (uint64_t)(((uint64_t)((uint64_t)(v120399))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  uint64_t v120401 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120402 = (uint8_t)((((uint64_t)((uint64_t)(v120400)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120401)) & lain_mask(64))));
+  uint8_t v120403 = (uint8_t)(((uint64_t)((uint64_t)(v120398))) & ((uint64_t)((uint64_t)(v120402)))) & lain_mask(1);
+  if (((v120403) & 1u) != 0) {
+    void *v120404 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120405 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120404) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120406 = lain_load_addr((void *)(uintptr_t)v120405);
+    void *v120407 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120406) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(16))));
+    void *v120408 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120407) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120408, (uint64_t)(UINT64_C(1)), 64);
+    void *v120409 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120410 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120409) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120411 = lain_load_addr((void *)(uintptr_t)v120410);
+    void *v120412 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120411) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(24))));
+    void *v120413 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120412) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120414 = lain_load_addr((void *)(uintptr_t)v120413);
+    uint64_t v120415 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120416 = (uint64_t)(((uint64_t)((uint64_t)(v120415))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    void *v120417 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    lain_fn_120231((void *)(uintptr_t)v120417, v120416);
+    void *v120418 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120417) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120419 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120418, 64);
+    void *v120420 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120414) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120420, (uint64_t)((uint64_t)(v120419)), 64);
+    void *v120421 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120417) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120422 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120421, 64);
+    void *v120423 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120414) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120423, (uint64_t)((uint64_t)(v120422)), 64);
+    uint64_t v120424 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120425 = (void *)(uintptr_t)(v120424);
+    uint64_t v120426 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120427 = (uint64_t)(((uint64_t)((uint64_t)(v120426))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
+    uint64_t v120428 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120429 = lain_fn_120234((void *)(uintptr_t)v120425, v120427, v120428);
+    { uint64_t _ret_val = (uint64_t)(v120429); lain_alloca_free(&_alloca_head); return _ret_val; }
+  }
+  uint64_t v120430 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120431 = (void *)(uintptr_t)(v120430);
+  uint64_t _a120433[2] = {0};
+  void *v120433 = (void *)_a120433;
+  void *v120434 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120433) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120434, (void *)(uintptr_t)v120432);
+  void *v120435 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120433) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120435, (uint64_t)(UINT64_C(7)), 64);
+  uint64_t v120436 = lain_fn_120228((void *)(uintptr_t)v120431, (void *)(uintptr_t)v120433);
+  uint8_t v120437 = (uint8_t)((((uint64_t)((uint64_t)(v120436)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint64_t v120438 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120439 = (uint64_t)(((uint64_t)((uint64_t)(v120438))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  uint64_t v120440 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120441 = (uint8_t)((((uint64_t)((uint64_t)(v120439)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120440)) & lain_mask(64))));
+  uint8_t v120442 = (uint8_t)(((uint64_t)((uint64_t)(v120437))) & ((uint64_t)((uint64_t)(v120441)))) & lain_mask(1);
+  if (((v120442) & 1u) != 0) {
+    void *v120443 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120444 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120443) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120445 = lain_load_addr((void *)(uintptr_t)v120444);
+    void *v120446 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120445) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(64))));
+    void *v120447 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120446) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120447, (uint64_t)(UINT64_C(1)), 64);
+    void *v120448 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120449 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120448) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120450 = lain_load_addr((void *)(uintptr_t)v120449);
+    void *v120451 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120450) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(72))));
+    void *v120452 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120451) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120453 = lain_load_addr((void *)(uintptr_t)v120452);
+    uint64_t v120454 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120455 = (uint64_t)(((uint64_t)((uint64_t)(v120454))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    void *v120456 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    lain_fn_120231((void *)(uintptr_t)v120456, v120455);
+    void *v120457 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120456) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120458 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120457, 64);
+    void *v120459 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120453) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120459, (uint64_t)((uint64_t)(v120458)), 64);
+    void *v120460 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120456) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120461 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120460, 64);
+    void *v120462 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120453) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120462, (uint64_t)((uint64_t)(v120461)), 64);
+    uint64_t v120463 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120464 = (void *)(uintptr_t)(v120463);
+    uint64_t v120465 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120466 = (uint64_t)(((uint64_t)((uint64_t)(v120465))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
+    uint64_t v120467 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120468 = lain_fn_120234((void *)(uintptr_t)v120464, v120466, v120467);
+    { uint64_t _ret_val = (uint64_t)(v120468); lain_alloca_free(&_alloca_head); return _ret_val; }
+  }
+  uint64_t v120469 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120470 = (void *)(uintptr_t)(v120469);
+  uint64_t _a120472[2] = {0};
+  void *v120472 = (void *)_a120472;
+  void *v120473 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120472) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120473, (void *)(uintptr_t)v120471);
+  void *v120474 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120472) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120474, (uint64_t)(UINT64_C(7)), 64);
+  uint64_t v120475 = lain_fn_120228((void *)(uintptr_t)v120470, (void *)(uintptr_t)v120472);
+  uint8_t v120476 = (uint8_t)((((uint64_t)((uint64_t)(v120475)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint64_t v120477 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120478 = (uint64_t)(((uint64_t)((uint64_t)(v120477))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  uint64_t v120479 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120480 = (uint8_t)((((uint64_t)((uint64_t)(v120478)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120479)) & lain_mask(64))));
+  uint8_t v120481 = (uint8_t)(((uint64_t)((uint64_t)(v120476))) & ((uint64_t)((uint64_t)(v120480)))) & lain_mask(1);
+  if (((v120481) & 1u) != 0) {
+    void *v120482 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
     void *v120483 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120482) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120483, (uint64_t)(UINT64_C(1)), 64);
-    uint64_t v120484 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-    void * v120485 = (void *)(uintptr_t)(v120484);
-    uint64_t v120486 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120487 = (uint64_t)(((uint64_t)((uint64_t)(v120486))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    void *v120488 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    lain_fn_120226((void *)(uintptr_t)v120488, v120487);
-    uint64_t v120489 = lain_fn_120228((void *)(uintptr_t)v120485, (uint64_t)UINT64_C(3), (uint64_t)UINT64_C(4), (void *)(uintptr_t)v120488);
-    lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120489)), 64);
-    uint64_t v120490 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120491 = (uint64_t)(((uint64_t)((uint64_t)(v120490))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
-    uint64_t v120492 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120493 = lain_fn_120234(v120491, v120492);
-    { uint64_t _ret_val = (uint64_t)(v120493); lain_alloca_free(&_alloca_head); return _ret_val; }
+    void * v120484 = lain_load_addr((void *)(uintptr_t)v120483);
+    void *v120485 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120484) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(40))));
+    void *v120486 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120485) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120486, (uint64_t)(UINT64_C(1)), 64);
+    void *v120487 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120488 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120487) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120489 = lain_load_addr((void *)(uintptr_t)v120488);
+    void *v120490 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120489) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(48))));
+    void *v120491 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120490) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120492 = lain_load_addr((void *)(uintptr_t)v120491);
+    uint64_t v120493 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120494 = (uint64_t)(((uint64_t)((uint64_t)(v120493))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    void *v120495 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    lain_fn_120231((void *)(uintptr_t)v120495, v120494);
+    void *v120496 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120495) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120497 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120496, 64);
+    void *v120498 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120492) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120498, (uint64_t)((uint64_t)(v120497)), 64);
+    void *v120499 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120495) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120500 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120499, 64);
+    void *v120501 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120492) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120501, (uint64_t)((uint64_t)(v120500)), 64);
+    uint64_t v120502 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120503 = (void *)(uintptr_t)(v120502);
+    uint64_t v120504 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120505 = (uint64_t)(((uint64_t)((uint64_t)(v120504))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
+    uint64_t v120506 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120507 = lain_fn_120234((void *)(uintptr_t)v120503, v120505, v120506);
+    { uint64_t _ret_val = (uint64_t)(v120507); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120494 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120495 = (void *)(uintptr_t)(v120494);
-  uint64_t _a120497[2] = {0};
-  void *v120497 = (void *)_a120497;
-  void *v120498 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120497) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120498, (void *)(uintptr_t)v120496);
-  void *v120499 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120497) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120499, (uint64_t)(UINT64_C(7)), 64);
-  uint64_t v120500 = lain_fn_120223((void *)(uintptr_t)v120495, (void *)(uintptr_t)v120497);
-  uint8_t v120501 = (uint8_t)((((uint64_t)((uint64_t)(v120500)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint64_t v120502 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120503 = (uint64_t)(((uint64_t)((uint64_t)(v120502))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  uint64_t v120504 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120505 = (uint8_t)((((uint64_t)((uint64_t)(v120503)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120504)) & lain_mask(64))));
-  uint8_t v120506 = (uint8_t)(((uint64_t)((uint64_t)(v120501))) & ((uint64_t)((uint64_t)(v120505)))) & lain_mask(1);
-  if (((v120506) & 1u) != 0) {
-    void *v120507 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120508 = lain_load_addr((void *)(uintptr_t)v120507);
-    void *v120509 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120508) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120510 = lain_load_addr((void *)(uintptr_t)v120509);
-    void *v120511 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120510) + ((uint64_t)(UINT64_C(8))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v120512 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120511) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120512, (uint64_t)(UINT64_C(1)), 64);
-    uint64_t v120513 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-    void * v120514 = (void *)(uintptr_t)(v120513);
-    uint64_t v120515 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120516 = (uint64_t)(((uint64_t)((uint64_t)(v120515))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    void *v120517 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    lain_fn_120226((void *)(uintptr_t)v120517, v120516);
-    uint64_t v120518 = lain_fn_120228((void *)(uintptr_t)v120514, (uint64_t)UINT64_C(9), (uint64_t)UINT64_C(10), (void *)(uintptr_t)v120517);
-    lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120518)), 64);
-    uint64_t v120519 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120520 = (uint64_t)(((uint64_t)((uint64_t)(v120519))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
-    uint64_t v120521 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120522 = lain_fn_120234(v120520, v120521);
-    { uint64_t _ret_val = (uint64_t)(v120522); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120508 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120509 = (void *)(uintptr_t)(v120508);
+  uint64_t _a120511[2] = {0};
+  void *v120511 = (void *)_a120511;
+  void *v120512 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120511) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120512, (void *)(uintptr_t)v120510);
+  void *v120513 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120511) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120513, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120514 = lain_fn_120228((void *)(uintptr_t)v120509, (void *)(uintptr_t)v120511);
+  uint8_t v120515 = (uint8_t)((((uint64_t)((uint64_t)(v120514)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  if (((v120515) & 1u) != 0) {
+    void *v120516 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120517 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120516) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120518 = lain_load_addr((void *)(uintptr_t)v120517);
+    void *v120519 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120518) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120519, (uint64_t)(UINT64_C(1)), 64);
+    uint64_t v120520 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120521 = (void *)(uintptr_t)(v120520);
+    uint64_t v120522 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120523 = (uint64_t)(((uint64_t)((uint64_t)(v120522))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    uint64_t v120524 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120525 = lain_fn_120234((void *)(uintptr_t)v120521, v120523, v120524);
+    { uint64_t _ret_val = (uint64_t)(v120525); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120523 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120524 = (void *)(uintptr_t)(v120523);
-  uint64_t _a120526[2] = {0};
-  void *v120526 = (void *)_a120526;
-  void *v120527 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120526) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120527, (void *)(uintptr_t)v120525);
-  void *v120528 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120526) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120528, (uint64_t)(UINT64_C(7)), 64);
-  uint64_t v120529 = lain_fn_120223((void *)(uintptr_t)v120524, (void *)(uintptr_t)v120526);
-  uint8_t v120530 = (uint8_t)((((uint64_t)((uint64_t)(v120529)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint64_t v120531 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120532 = (uint64_t)(((uint64_t)((uint64_t)(v120531))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  uint64_t v120533 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120534 = (uint8_t)((((uint64_t)((uint64_t)(v120532)) & lain_mask(64)) < ((uint64_t)((uint64_t)(v120533)) & lain_mask(64))));
-  uint8_t v120535 = (uint8_t)(((uint64_t)((uint64_t)(v120530))) & ((uint64_t)((uint64_t)(v120534)))) & lain_mask(1);
-  if (((v120535) & 1u) != 0) {
-    void *v120536 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120537 = lain_load_addr((void *)(uintptr_t)v120536);
+  uint64_t v120526 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120527 = (void *)(uintptr_t)(v120526);
+  uint64_t _a120529[2] = {0};
+  void *v120529 = (void *)_a120529;
+  void *v120530 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120529) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120530, (void *)(uintptr_t)v120528);
+  void *v120531 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120529) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120531, (uint64_t)(UINT64_C(14)), 64);
+  uint64_t v120532 = lain_fn_120228((void *)(uintptr_t)v120527, (void *)(uintptr_t)v120529);
+  uint8_t v120533 = (uint8_t)((((uint64_t)((uint64_t)(v120532)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  if (((v120533) & 1u) != 0) {
+    void *v120534 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120535 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120534) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120536 = lain_load_addr((void *)(uintptr_t)v120535);
+    void *v120537 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120536) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
     void *v120538 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120537) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120539 = lain_load_addr((void *)(uintptr_t)v120538);
-    void *v120540 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120539) + ((uint64_t)(UINT64_C(5))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v120541 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120540) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120541, (uint64_t)(UINT64_C(1)), 64);
-    uint64_t v120542 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-    void * v120543 = (void *)(uintptr_t)(v120542);
-    uint64_t v120544 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120545 = (uint64_t)(((uint64_t)((uint64_t)(v120544))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    void *v120546 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    lain_fn_120226((void *)(uintptr_t)v120546, v120545);
-    uint64_t v120547 = lain_fn_120228((void *)(uintptr_t)v120543, (uint64_t)UINT64_C(6), (uint64_t)UINT64_C(7), (void *)(uintptr_t)v120546);
-    lain_store_bits((void *)(uintptr_t)v204, (uint64_t)((uint64_t)(v120547)), 64);
-    uint64_t v120548 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120549 = (uint64_t)(((uint64_t)((uint64_t)(v120548))) + ((uint64_t)(UINT64_C(2)))) & lain_mask(64);
-    uint64_t v120550 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120551 = lain_fn_120234(v120549, v120550);
-    { uint64_t _ret_val = (uint64_t)(v120551); lain_alloca_free(&_alloca_head); return _ret_val; }
+    lain_store_bits((void *)(uintptr_t)v120538, (uint64_t)(UINT64_C(1)), 64);
+    uint64_t v120539 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120540 = (void *)(uintptr_t)(v120539);
+    uint64_t v120541 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120542 = (uint64_t)(((uint64_t)((uint64_t)(v120541))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    uint64_t v120543 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120544 = lain_fn_120234((void *)(uintptr_t)v120540, v120542, v120543);
+    { uint64_t _ret_val = (uint64_t)(v120544); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120552 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120553 = (void *)(uintptr_t)(v120552);
-  uint64_t _a120555[2] = {0};
-  void *v120555 = (void *)_a120555;
-  void *v120556 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120555) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120556, (void *)(uintptr_t)v120554);
-  void *v120557 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120555) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120557, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120558 = lain_fn_120223((void *)(uintptr_t)v120553, (void *)(uintptr_t)v120555);
-  uint8_t v120559 = (uint8_t)((((uint64_t)((uint64_t)(v120558)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  if (((v120559) & 1u) != 0) {
-    void *v120560 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120561 = lain_load_addr((void *)(uintptr_t)v120560);
-    void *v120562 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120561) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120563 = lain_load_addr((void *)(uintptr_t)v120562);
-    void *v120564 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120563) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v120565 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120564) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120565, (uint64_t)(UINT64_C(1)), 64);
-    uint64_t v120566 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120567 = (uint64_t)(((uint64_t)((uint64_t)(v120566))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    uint64_t v120568 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120569 = lain_fn_120234(v120567, v120568);
-    { uint64_t _ret_val = (uint64_t)(v120569); lain_alloca_free(&_alloca_head); return _ret_val; }
-  }
-  uint64_t v120570 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120571 = (void *)(uintptr_t)(v120570);
-  uint64_t _a120573[2] = {0};
-  void *v120573 = (void *)_a120573;
-  void *v120574 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120573) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120574, (void *)(uintptr_t)v120572);
-  void *v120575 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120573) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120575, (uint64_t)(UINT64_C(14)), 64);
-  uint64_t v120576 = lain_fn_120223((void *)(uintptr_t)v120571, (void *)(uintptr_t)v120573);
-  uint8_t v120577 = (uint8_t)((((uint64_t)((uint64_t)(v120576)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  if (((v120577) & 1u) != 0) {
-    void *v120578 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120579 = lain_load_addr((void *)(uintptr_t)v120578);
-    void *v120580 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120579) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120581 = lain_load_addr((void *)(uintptr_t)v120580);
-    void *v120582 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120581) + ((uint64_t)(UINT64_C(1))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v120583 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120582) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120583, (uint64_t)(UINT64_C(1)), 64);
-    uint64_t v120584 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120585 = (uint64_t)(((uint64_t)((uint64_t)(v120584))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    uint64_t v120586 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120587 = lain_fn_120234(v120585, v120586);
-    { uint64_t _ret_val = (uint64_t)(v120587); lain_alloca_free(&_alloca_head); return _ret_val; }
-  }
-  uint64_t v120588 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120589 = (void *)(uintptr_t)(v120588);
-  uint64_t _a120591[2] = {0};
-  void *v120591 = (void *)_a120591;
-  void *v120592 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120591) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120592, (void *)(uintptr_t)v120590);
-  void *v120593 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120591) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120593, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120594 = lain_fn_120223((void *)(uintptr_t)v120589, (void *)(uintptr_t)v120591);
-  uint8_t v120595 = (uint8_t)((((uint64_t)((uint64_t)(v120594)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint64_t v120596 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120597 = (void *)(uintptr_t)(v120596);
-  uint64_t _a120599[2] = {0};
-  void *v120599 = (void *)_a120599;
-  void *v120600 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120599) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120600, (void *)(uintptr_t)v120598);
-  void *v120601 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120599) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120601, (uint64_t)(UINT64_C(7)), 64);
-  uint64_t v120602 = lain_fn_120223((void *)(uintptr_t)v120597, (void *)(uintptr_t)v120599);
-  uint8_t v120603 = (uint8_t)((((uint64_t)((uint64_t)(v120602)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint8_t v120604 = (uint8_t)(((uint64_t)((uint64_t)(v120595))) | ((uint64_t)((uint64_t)(v120603)))) & lain_mask(1);
-  uint64_t v120605 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120606 = (void *)(uintptr_t)(v120605);
-  uint64_t _a120608[2] = {0};
-  void *v120608 = (void *)_a120608;
-  void *v120609 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120608) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120609, (void *)(uintptr_t)v120607);
-  void *v120610 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120608) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120610, (uint64_t)(UINT64_C(7)), 64);
-  uint64_t v120611 = lain_fn_120223((void *)(uintptr_t)v120606, (void *)(uintptr_t)v120608);
-  uint8_t v120612 = (uint8_t)((((uint64_t)((uint64_t)(v120611)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  uint8_t v120613 = (uint8_t)(((uint64_t)((uint64_t)(v120604))) | ((uint64_t)((uint64_t)(v120612)))) & lain_mask(1);
-  if (((v120613) & 1u) != 0) {
-    void *v120614 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120615 = lain_load_addr((void *)(uintptr_t)v120614);
-    void *v120616 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120615) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v120617 = lain_load_addr((void *)(uintptr_t)v120616);
-    void *v120618 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120617) + ((uint64_t)(UINT64_C(13))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v120619 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120618) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120619, (uint64_t)(UINT64_C(1)), 64);
+  uint64_t v120545 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120546 = (void *)(uintptr_t)(v120545);
+  uint64_t _a120548[2] = {0};
+  void *v120548 = (void *)_a120548;
+  void *v120549 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120548) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120549, (void *)(uintptr_t)v120547);
+  void *v120550 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120548) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120550, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120551 = lain_fn_120228((void *)(uintptr_t)v120546, (void *)(uintptr_t)v120548);
+  uint8_t v120552 = (uint8_t)((((uint64_t)((uint64_t)(v120551)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint64_t v120553 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120554 = (void *)(uintptr_t)(v120553);
+  uint64_t _a120556[2] = {0};
+  void *v120556 = (void *)_a120556;
+  void *v120557 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120556) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120557, (void *)(uintptr_t)v120555);
+  void *v120558 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120556) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120558, (uint64_t)(UINT64_C(7)), 64);
+  uint64_t v120559 = lain_fn_120228((void *)(uintptr_t)v120554, (void *)(uintptr_t)v120556);
+  uint8_t v120560 = (uint8_t)((((uint64_t)((uint64_t)(v120559)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint8_t v120561 = (uint8_t)(((uint64_t)((uint64_t)(v120552))) | ((uint64_t)((uint64_t)(v120560)))) & lain_mask(1);
+  uint64_t v120562 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120563 = (void *)(uintptr_t)(v120562);
+  uint64_t _a120565[2] = {0};
+  void *v120565 = (void *)_a120565;
+  void *v120566 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120565) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120566, (void *)(uintptr_t)v120564);
+  void *v120567 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120565) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120567, (uint64_t)(UINT64_C(7)), 64);
+  uint64_t v120568 = lain_fn_120228((void *)(uintptr_t)v120563, (void *)(uintptr_t)v120565);
+  uint8_t v120569 = (uint8_t)((((uint64_t)((uint64_t)(v120568)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  uint8_t v120570 = (uint8_t)(((uint64_t)((uint64_t)(v120561))) | ((uint64_t)((uint64_t)(v120569)))) & lain_mask(1);
+  if (((v120570) & 1u) != 0) {
+    void *v120571 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120572 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120571) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120573 = lain_load_addr((void *)(uintptr_t)v120572);
+    void *v120574 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120573) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(112))));
+    void *v120575 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120574) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120575, (uint64_t)(UINT64_C(1)), 64);
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120620 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void * v120621 = (void *)(uintptr_t)(v120620);
-  void *v120622 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120621) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120623 = lain_load_addr((void *)(uintptr_t)v120622);
-  void *v120624 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120623) + ((uint64_t)(UINT64_C(11))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120625 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120624) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120626 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120625, 64);
-  uint8_t v120627 = (uint8_t)((((uint64_t)((uint64_t)(v120626)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120627) & 1u) != 0) {
-    uint64_t v120628 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-    void * v120629 = (void *)(uintptr_t)(v120628);
-    uint64_t v120630 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-    void * v120631 = (void *)(uintptr_t)(v120630);
-    uint64_t v120632 = lain_fn_120228((void *)(uintptr_t)v120629, (uint64_t)UINT64_C(11), (uint64_t)UINT64_C(12), (void *)(uintptr_t)v120631);
-    lain_store_bits((void *)(uintptr_t)v495, (uint64_t)((uint64_t)(v120632)), 64);
-    uint64_t v120633 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    uint64_t v120634 = (uint64_t)(((uint64_t)((uint64_t)(v120633))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-    uint64_t v120635 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    uint64_t v120636 = lain_fn_120234(v120634, v120635);
-    { uint64_t _ret_val = (uint64_t)(v120636); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120576 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120577 = (void *)(uintptr_t)(v120576);
+  void *v120578 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120577) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(88))));
+  uint64_t v120579 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120578, 64);
+  uint8_t v120580 = (uint8_t)((((uint64_t)((uint64_t)(v120579)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120580) & 1u) != 0) {
+    void *v120581 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120582 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120581) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120583 = lain_load_addr((void *)(uintptr_t)v120582);
+    void *v120584 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120583) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(88))));
+    void *v120585 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120584) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120585, (uint64_t)(UINT64_C(1)), 64);
+    void *v120586 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120587 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120586) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120588 = lain_load_addr((void *)(uintptr_t)v120587);
+    void *v120589 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120588) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(96))));
+    void *v120590 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120589) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void * v120591 = lain_load_addr((void *)(uintptr_t)v120590);
+    uint64_t v120592 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+    void * v120593 = (void *)(uintptr_t)(v120592);
+    void *v120594 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120593) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120595 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120594, 64);
+    void *v120596 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120591) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120596, (uint64_t)((uint64_t)(v120595)), 64);
+    void *v120597 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120593) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120598 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120597, 64);
+    void *v120599 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120591) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120599, (uint64_t)((uint64_t)(v120598)), 64);
+    uint64_t v120600 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120601 = (void *)(uintptr_t)(v120600);
+    uint64_t v120602 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    uint64_t v120603 = (uint64_t)(((uint64_t)((uint64_t)(v120602))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+    uint64_t v120604 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    uint64_t v120605 = lain_fn_120234((void *)(uintptr_t)v120601, v120603, v120604);
+    { uint64_t _ret_val = (uint64_t)(v120605); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  void *v120637 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v117) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120638 = lain_load_addr((void *)(uintptr_t)v120637);
-  void *v120639 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120638) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120640 = lain_load_addr((void *)(uintptr_t)v120639);
-  void *v120641 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120640) + ((uint64_t)(UINT64_C(13))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120642 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120641) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120642, (uint64_t)(UINT64_C(1)), 64);
+  void *v120606 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v115) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120607 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120606) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void * v120608 = lain_load_addr((void *)(uintptr_t)v120607);
+  void *v120609 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120608) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(112))));
+  void *v120610 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120609) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120610, (uint64_t)(UINT64_C(1)), 64);
   { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static void lain_fn_120235(void * v120643) {
+static void lain_fn_120235(void * v120611, void * v120612) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
-  uint64_t _a120645[2] = {0};
-  void *v120645 = (void *)_a120645;
-  lain_fn_120220((void *)(uintptr_t)v120645);
-  uint64_t v120646 = (uint64_t)((uint64_t)((uint64_t)(v120645)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120646)), 64);
-  uint64_t v120647 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120648 = (void *)(uintptr_t)(v120647);
-  void *v120649 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120648) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120650 = lain_load_addr((void *)(uintptr_t)v120649);
-  void *v120651 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120650) + ((uint64_t)(UINT64_C(8))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120652 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120651) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120653 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120652, 64);
-  uint8_t v120654 = (uint8_t)((((uint64_t)((uint64_t)(v120653)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120654) & 1u) != 0) {
-    void *v120656 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    void *v120657 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120656) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_addr((void *)(uintptr_t)v120657, (void *)(uintptr_t)v120655);
-    void *v120658 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120656) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120658, (uint64_t)(UINT64_C(8)), 64);
-    void *v120659 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120656) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v120660 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120659, 64);
-    void *v120661 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120643) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120661, (uint64_t)((uint64_t)(v120660)), 64);
-    void *v120662 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120656) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    uint64_t v120663 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120662, 64);
-    void *v120664 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120643) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120664, (uint64_t)((uint64_t)(v120663)), 64);
+  uint64_t v120614 = (uint64_t)((uint64_t)((uint64_t)(v120612)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120614)), 64);
+  uint64_t v120615 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120616 = (void *)(uintptr_t)(v120615);
+  void *v120617 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120616) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(64))));
+  uint64_t v120618 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120617, 64);
+  uint8_t v120619 = (uint8_t)((((uint64_t)((uint64_t)(v120618)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120619) & 1u) != 0) {
+    void *v120621 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    void *v120622 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120621) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_addr((void *)(uintptr_t)v120622, (void *)(uintptr_t)v120620);
+    void *v120623 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120621) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120623, (uint64_t)(UINT64_C(8)), 64);
+    void *v120624 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120621) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120625 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120624, 64);
+    void *v120626 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120611) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120626, (uint64_t)((uint64_t)(v120625)), 64);
+    void *v120627 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120621) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120628 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120627, 64);
+    void *v120629 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120611) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120629, (uint64_t)((uint64_t)(v120628)), 64);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t v120665 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120666 = (void *)(uintptr_t)(v120665);
-  uint64_t _a120667[2] = {0};
-  void *v120667 = (void *)_a120667;
-  lain_fn_120231((void *)(uintptr_t)v120667, (void *)(uintptr_t)v120666, (uint64_t)UINT64_C(9), (uint64_t)UINT64_C(10));
-  void *v120668 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120667) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120669 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120668, 64);
-  void *v120670 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120643) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120670, (uint64_t)((uint64_t)(v120669)), 64);
-  void *v120671 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120667) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120672 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120671, 64);
-  void *v120673 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120643) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120673, (uint64_t)((uint64_t)(v120672)), 64);
+  uint64_t v120630 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120631 = (void *)(uintptr_t)(v120630);
+  void *v120632 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120631) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(72))));
+  void * v120633 = lain_load_addr((void *)(uintptr_t)v120632);
+  void *v120634 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120633) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120635 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120634, 64);
+  void *v120636 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120611) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120636, (uint64_t)((uint64_t)(v120635)), 64);
+  void *v120637 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120633) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120638 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120637, 64);
+  void *v120639 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120611) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120639, (uint64_t)((uint64_t)(v120638)), 64);
   lain_alloca_free(&_alloca_head);
   return;
 }
 
-static uint64_t lain_fn_120237(uint64_t v120674) {
+static uint64_t lain_fn_120237(uint64_t v120640) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -204291,145 +204229,145 @@ static uint64_t lain_fn_120237(uint64_t v120674) {
   void *v118 = (void *)_a118;
   uint64_t _a178[1] = {0};
   void *v178 = (void *)_a178;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120674)), 64);
-  uint64_t v120675 = lain_fn_965();
-  uint8_t v120676 = (uint8_t)((((uint64_t)((uint64_t)(v120675)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120676) & 1u) != 0) {
-    uint64_t v120677 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    { uint64_t _ret_val = (uint64_t)(v120677); lain_alloca_free(&_alloca_head); return _ret_val; }
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120640)), 64);
+  uint64_t v120641 = lain_fn_965();
+  uint8_t v120642 = (uint8_t)((((uint64_t)((uint64_t)(v120641)) & lain_mask(64)) == ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120642) & 1u) != 0) {
+    uint64_t v120643 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    { uint64_t _ret_val = (uint64_t)(v120643); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
   lain_store_bits((void *)(uintptr_t)v116, (uint64_t)(UINT64_C(4194304)), 64);
-  uint64_t v120678 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120679 = lain_fn_59964(v120678, (uint64_t)UINT64_C(8));
-  uint64_t v120680 = (uint64_t)((uint64_t)((uint64_t)(v120679)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120680)), 64);
-  uint64_t v120681 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void * v120682 = (void *)(uintptr_t)(v120681);
-  uint64_t v120683 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t _a120684[2] = {0};
-  void *v120684 = (void *)_a120684;
-  void *v120685 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120684) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120685, (void *)(uintptr_t)v120682);
-  void *v120686 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120684) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120686, (uint64_t)((uint64_t)(v120683)), 64);
-  uint64_t v120687 = (uint64_t)((uint64_t)((uint64_t)(v120684)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120687)), 64);
-  uint64_t v120688 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-  void * v120689 = (void *)(uintptr_t)(v120688);
-  uint64_t v120690 = lain_fn_1034((void *)(uintptr_t)v120689);
-  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120690)), 64);
-  uint64_t v120691 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void * v120692 = (void *)(uintptr_t)(v120691);
-  uint64_t v120693 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  uint64_t v120694 = lain_fn_60091((void *)(uintptr_t)v120692, v120693);
-  uint64_t v120695 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  { uint64_t _ret_val = (uint64_t)(v120695); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120644 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120645 = lain_fn_59964(v120644, (uint64_t)UINT64_C(8));
+  uint64_t v120646 = (uint64_t)((uint64_t)((uint64_t)(v120645)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120646)), 64);
+  uint64_t v120647 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  void * v120648 = (void *)(uintptr_t)(v120647);
+  uint64_t v120649 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t _a120650[2] = {0};
+  void *v120650 = (void *)_a120650;
+  void *v120651 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120650) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120651, (void *)(uintptr_t)v120648);
+  void *v120652 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120650) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120652, (uint64_t)((uint64_t)(v120649)), 64);
+  uint64_t v120653 = (uint64_t)((uint64_t)((uint64_t)(v120650)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120653)), 64);
+  uint64_t v120654 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120655 = (void *)(uintptr_t)(v120654);
+  uint64_t v120656 = lain_fn_1034((void *)(uintptr_t)v120655);
+  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120656)), 64);
+  uint64_t v120657 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  void * v120658 = (void *)(uintptr_t)(v120657);
+  uint64_t v120659 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  uint64_t v120660 = lain_fn_60091((void *)(uintptr_t)v120658, v120659);
+  uint64_t v120661 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  { uint64_t _ret_val = (uint64_t)(v120661); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static void lain_fn_120238(void * v120696, uint64_t v120697) {
+static void lain_fn_120238(void * v120662, uint64_t v120663) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120697)), 64);
-  uint64_t v120698 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint8_t v120699 = (uint8_t)((((uint64_t)((uint64_t)(v120698)) & lain_mask(64)) == ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
-  if (((v120699) & 1u) != 0) {
-    void *v120700 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120700, (uint64_t)(UINT64_C(7)), 8);
-    void *v120701 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120700) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint8_t v120702 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120701, 8);
-    void *v120703 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120703, (uint64_t)((uint64_t)(v120702)), 8);
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120663)), 64);
+  uint64_t v120664 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint8_t v120665 = (uint8_t)((((uint64_t)((uint64_t)(v120664)) & lain_mask(64)) == ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
+  if (((v120665) & 1u) != 0) {
+    void *v120666 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120666, (uint64_t)(UINT64_C(7)), 8);
+    void *v120667 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120666) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint8_t v120668 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120667, 8);
+    void *v120669 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120669, (uint64_t)((uint64_t)(v120668)), 8);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t v120704 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint8_t v120705 = (uint8_t)((((uint64_t)((uint64_t)(v120704)) & lain_mask(64)) == ((uint64_t)(UINT64_C(21)) & lain_mask(64))));
-  if (((v120705) & 1u) != 0) {
-    void *v120706 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120706, (uint64_t)(UINT64_C(7)), 8);
-    void *v120707 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120706) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint8_t v120708 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120707, 8);
-    void *v120709 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120709, (uint64_t)((uint64_t)(v120708)), 8);
+  uint64_t v120670 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint8_t v120671 = (uint8_t)((((uint64_t)((uint64_t)(v120670)) & lain_mask(64)) == ((uint64_t)(UINT64_C(21)) & lain_mask(64))));
+  if (((v120671) & 1u) != 0) {
+    void *v120672 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120672, (uint64_t)(UINT64_C(7)), 8);
+    void *v120673 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120672) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint8_t v120674 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120673, 8);
+    void *v120675 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120675, (uint64_t)((uint64_t)(v120674)), 8);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t v120710 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint8_t v120711 = (uint8_t)((((uint64_t)((uint64_t)(v120710)) & lain_mask(64)) == ((uint64_t)(UINT64_C(22)) & lain_mask(64))));
-  if (((v120711) & 1u) != 0) {
-    void *v120712 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120712, (uint64_t)(UINT64_C(7)), 8);
-    void *v120713 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120712) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint8_t v120714 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120713, 8);
-    void *v120715 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120715, (uint64_t)((uint64_t)(v120714)), 8);
+  uint64_t v120676 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint8_t v120677 = (uint8_t)((((uint64_t)((uint64_t)(v120676)) & lain_mask(64)) == ((uint64_t)(UINT64_C(22)) & lain_mask(64))));
+  if (((v120677) & 1u) != 0) {
+    void *v120678 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120678, (uint64_t)(UINT64_C(7)), 8);
+    void *v120679 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120678) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint8_t v120680 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120679, 8);
+    void *v120681 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120681, (uint64_t)((uint64_t)(v120680)), 8);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t v120716 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint8_t v120717 = (uint8_t)((((uint64_t)((uint64_t)(v120716)) & lain_mask(64)) == ((uint64_t)(UINT64_C(3)) & lain_mask(64))));
-  if (((v120717) & 1u) != 0) {
-    void *v120718 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120718, (uint64_t)(UINT64_C(6)), 8);
-    void *v120719 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120718) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint8_t v120720 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120719, 8);
-    void *v120721 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120721, (uint64_t)((uint64_t)(v120720)), 8);
+  uint64_t v120682 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint8_t v120683 = (uint8_t)((((uint64_t)((uint64_t)(v120682)) & lain_mask(64)) == ((uint64_t)(UINT64_C(3)) & lain_mask(64))));
+  if (((v120683) & 1u) != 0) {
+    void *v120684 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120684, (uint64_t)(UINT64_C(6)), 8);
+    void *v120685 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120684) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint8_t v120686 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120685, 8);
+    void *v120687 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120687, (uint64_t)((uint64_t)(v120686)), 8);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t v120722 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint8_t v120723 = (uint8_t)((((uint64_t)((uint64_t)(v120722)) & lain_mask(64)) == ((uint64_t)(UINT64_C(4)) & lain_mask(64))));
-  if (((v120723) & 1u) != 0) {
-    void *v120724 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120724, (uint64_t)(UINT64_C(6)), 8);
-    void *v120725 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120724) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint8_t v120726 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120725, 8);
-    void *v120727 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_bits((void *)(uintptr_t)v120727, (uint64_t)((uint64_t)(v120726)), 8);
+  uint64_t v120688 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint8_t v120689 = (uint8_t)((((uint64_t)((uint64_t)(v120688)) & lain_mask(64)) == ((uint64_t)(UINT64_C(4)) & lain_mask(64))));
+  if (((v120689) & 1u) != 0) {
+    void *v120690 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120690, (uint64_t)(UINT64_C(6)), 8);
+    void *v120691 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120690) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint8_t v120692 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120691, 8);
+    void *v120693 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_bits((void *)(uintptr_t)v120693, (uint64_t)((uint64_t)(v120692)), 8);
     lain_alloca_free(&_alloca_head);
     return;
   }
-  uint64_t _a120728[1] = {0};
-  void *v120728 = (void *)_a120728;
-  lain_store_bits((void *)(uintptr_t)v120728, (uint64_t)(UINT64_C(5)), 8);
-  void *v120729 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120728) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint8_t v120730 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120729, 8);
-  void *v120731 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120696) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120731, (uint64_t)((uint64_t)(v120730)), 8);
+  uint64_t _a120694[1] = {0};
+  void *v120694 = (void *)_a120694;
+  lain_store_bits((void *)(uintptr_t)v120694, (uint64_t)(UINT64_C(5)), 8);
+  void *v120695 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120694) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint8_t v120696 = (uint8_t)lain_load_bits((void *)(uintptr_t)v120695, 8);
+  void *v120697 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120662) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120697, (uint64_t)((uint64_t)(v120696)), 8);
   lain_alloca_free(&_alloca_head);
   return;
 }
 
-static uint64_t lain_fn_120240(void * v120732) {
+static uint64_t lain_fn_120240(void * v120698) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
   void *v115 = (void *)_a115;
   uint64_t _a116[1] = {0};
   void *v116 = (void *)_a116;
-  uint64_t v120733 = (uint64_t)((uint64_t)((uint64_t)(v120732)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120733)), 64);
-  uint64_t v120734 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120735 = (void *)(uintptr_t)(v120734);
-  uint64_t v120736 = lain_fn_60099((void *)(uintptr_t)v120735);
-  uint64_t v120737 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120738 = (void *)(uintptr_t)(v120737);
-  void *v120739 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120738) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  uint64_t v120740 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120739, 64);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120740)), 64);
-  uint64_t v120741 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120742 = (uint8_t)((((uint64_t)((uint64_t)(v120741)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120742) & 1u) != 0) {
-    uint64_t v120743 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    { uint64_t _ret_val = (uint64_t)(v120743); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120699 = (uint64_t)((uint64_t)((uint64_t)(v120698)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120699)), 64);
+  uint64_t v120700 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120701 = (void *)(uintptr_t)(v120700);
+  uint64_t v120702 = lain_fn_60099((void *)(uintptr_t)v120701);
+  uint64_t v120703 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120704 = (void *)(uintptr_t)(v120703);
+  void *v120705 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120704) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  uint64_t v120706 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120705, 64);
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120706)), 64);
+  uint64_t v120707 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint8_t v120708 = (uint8_t)((((uint64_t)((uint64_t)(v120707)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120708) & 1u) != 0) {
+    uint64_t v120709 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    { uint64_t _ret_val = (uint64_t)(v120709); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
   { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(1)); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120242(void * v120744, uint64_t v120745, uint64_t v120746) {
+static uint64_t lain_fn_120242(void * v120710, uint64_t v120711, uint64_t v120712) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -204444,71 +204382,71 @@ static uint64_t lain_fn_120242(void * v120744, uint64_t v120745, uint64_t v12074
   void *v178 = (void *)_a178;
   uint64_t _a183[1] = {0};
   void *v183 = (void *)_a183;
-  uint64_t v120748 = (uint64_t)((uint64_t)((uint64_t)(v120744)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120748)), 64);
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120745)), 64);
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120746)), 64);
-  uint64_t v120749 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t v120750 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  uint8_t v120751 = (uint8_t)((((uint64_t)((uint64_t)(v120749)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120750)) & lain_mask(64))));
-  if (((v120751) & 1u) != 0) {
-    uint64_t v120752 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    void * v120753 = (void *)(uintptr_t)(v120752);
-    uint64_t v120754 = lain_fn_63836((void *)(uintptr_t)v120753);
-    { uint64_t _ret_val = (uint64_t)(v120754); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120714 = (uint64_t)((uint64_t)((uint64_t)(v120710)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120714)), 64);
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120711)), 64);
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120712)), 64);
+  uint64_t v120715 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120716 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120717 = (uint8_t)((((uint64_t)((uint64_t)(v120715)) & lain_mask(64)) >= ((uint64_t)((uint64_t)(v120716)) & lain_mask(64))));
+  if (((v120717) & 1u) != 0) {
+    uint64_t v120718 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    void * v120719 = (void *)(uintptr_t)(v120718);
+    uint64_t v120720 = lain_fn_63836((void *)(uintptr_t)v120719);
+    { uint64_t _ret_val = (uint64_t)(v120720); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120755 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120756 = (void *)(uintptr_t)(v120755);
-  uint64_t v120757 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t v120758 = lain_fn_115715((void *)(uintptr_t)v120756, v120757);
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120758)), 64);
-  uint64_t v120759 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120760 = (void *)(uintptr_t)(v120759);
-  uint64_t v120761 = lain_fn_63836((void *)(uintptr_t)v120760);
-  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120761)), 64);
-  uint64_t v120762 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  uint8_t v120763 = (uint8_t)((((uint64_t)((uint64_t)(v120762)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120763) & 1u) != 0) {
-    uint64_t v120764 = lain_fn_60097();
-    uint64_t v120765 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-    uint64_t v120766 = lain_fn_120237(v120765);
-    uint64_t v120767 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-    void *v120768 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_fn_120238((void *)(uintptr_t)v120768, v120767);
-    uint64_t v120769 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-    uint64_t v120770 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    void *v120772 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    void *v120773 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120772) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_addr((void *)(uintptr_t)v120773, (void *)(uintptr_t)v120771);
-    void *v120774 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120772) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120774, (uint64_t)(UINT64_C(25)), 64);
-    uint64_t v120775 = lain_fn_2413((void *)(uintptr_t)v120768, v120769, v120770, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120772);
-    void *v120776 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v120777 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120776, 64);
-    uint8_t v120778 = (uint8_t)((((uint64_t)((uint64_t)(v120777)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-    if (((v120778) & 1u) != 0) {
+  uint64_t v120721 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120722 = (void *)(uintptr_t)(v120721);
+  uint64_t v120723 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120724 = lain_fn_115715((void *)(uintptr_t)v120722, v120723);
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120724)), 64);
+  uint64_t v120725 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120726 = (void *)(uintptr_t)(v120725);
+  uint64_t v120727 = lain_fn_63836((void *)(uintptr_t)v120726);
+  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120727)), 64);
+  uint64_t v120728 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  uint8_t v120729 = (uint8_t)((((uint64_t)((uint64_t)(v120728)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120729) & 1u) != 0) {
+    uint64_t v120730 = lain_fn_60097();
+    uint64_t v120731 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+    uint64_t v120732 = lain_fn_120237(v120731);
+    uint64_t v120733 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+    void *v120734 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_fn_120238((void *)(uintptr_t)v120734, v120733);
+    uint64_t v120735 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+    uint64_t v120736 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    void *v120738 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    void *v120739 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120738) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_addr((void *)(uintptr_t)v120739, (void *)(uintptr_t)v120737);
+    void *v120740 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120738) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120740, (uint64_t)(UINT64_C(25)), 64);
+    uint64_t v120741 = lain_fn_2413((void *)(uintptr_t)v120734, v120735, v120736, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120738);
+    void *v120742 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120743 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120742, 64);
+    uint8_t v120744 = (uint8_t)((((uint64_t)((uint64_t)(v120743)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+    if (((v120744) & 1u) != 0) {
       { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
     }
-    { uint64_t _ret_val = (uint64_t)(v120775); lain_alloca_free(&_alloca_head); return _ret_val; }
+    { uint64_t _ret_val = (uint64_t)(v120741); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120779 = lain_fn_59993();
-  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120779)), 64);
-  uint64_t v120780 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120781 = (void *)(uintptr_t)(v120780);
-  uint64_t v120782 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t v120783 = (uint64_t)(((uint64_t)((uint64_t)(v120782))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
-  uint64_t v120784 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-  uint64_t v120785 = lain_fn_120242((void *)(uintptr_t)v120781, v120783, v120784);
-  void *v120786 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120787 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120786, 64);
-  uint8_t v120788 = (uint8_t)((((uint64_t)((uint64_t)(v120787)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120788) & 1u) != 0) {
+  uint64_t v120745 = lain_fn_59993();
+  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120745)), 64);
+  uint64_t v120746 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120747 = (void *)(uintptr_t)(v120746);
+  uint64_t v120748 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  uint64_t v120749 = (uint64_t)(((uint64_t)((uint64_t)(v120748))) + ((uint64_t)(UINT64_C(1)))) & lain_mask(64);
+  uint64_t v120750 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+  uint64_t v120751 = lain_fn_120242((void *)(uintptr_t)v120747, v120749, v120750);
+  void *v120752 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120753 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120752, 64);
+  uint8_t v120754 = (uint8_t)((((uint64_t)((uint64_t)(v120753)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120754) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  { uint64_t _ret_val = (uint64_t)(v120785); lain_alloca_free(&_alloca_head); return _ret_val; }
+  { uint64_t _ret_val = (uint64_t)(v120751); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120244(uint64_t v120789) {
+static uint64_t lain_fn_120244(uint64_t v120755) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -204537,127 +204475,127 @@ static uint64_t lain_fn_120244(uint64_t v120789) {
   void *v1186 = (void *)_a1186;
   uint64_t _a1187[1] = {0};
   void *v1187 = (void *)_a1187;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120789)), 64);
-  uint64_t v120802 = lain_fn_59961();
-  uint64_t v120803 = lain_fn_60087();
-  uint8_t v120804 = (uint8_t)((((uint64_t)((uint64_t)(v120803)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-  if (((v120804) & 1u) != 0) {
-    uint64_t v120805 = lain_fn_962((uint64_t)UINT64_C(1));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120755)), 64);
+  uint64_t v120768 = lain_fn_59961();
+  uint64_t v120769 = lain_fn_60087();
+  uint8_t v120770 = (uint8_t)((((uint64_t)((uint64_t)(v120769)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+  if (((v120770) & 1u) != 0) {
+    uint64_t v120771 = lain_fn_962((uint64_t)UINT64_C(1));
   }
-  void * v120806 = lain_fn_63570((uint64_t)UINT64_C(65536));
-  uint64_t v120807 = (uint64_t)((uint64_t)((uint64_t)(v120806)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120807)), 64);
-  uint64_t v120808 = lain_fn_59994((uint64_t)UINT64_C(0));
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120808)), 64);
-  uint64_t v120809 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120810 = (void *)(uintptr_t)(v120809);
-  uint64_t v120811 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  uint64_t v120812 = lain_fn_67093((void *)(uintptr_t)v120810, v120811);
-  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120812)), 64);
-  uint64_t v120813 = lain_fn_969();
-  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120813)), 64);
-  uint64_t v120814 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120815 = (void *)(uintptr_t)(v120814);
-  uint64_t v120816 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120817 = lain_fn_120242((void *)(uintptr_t)v120815, (uint64_t)UINT64_C(0), v120816);
-  void *v120818 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120819 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120818, 64);
-  uint8_t v120820 = (uint8_t)((((uint64_t)((uint64_t)(v120819)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120820) & 1u) != 0) {
+  void * v120772 = lain_fn_63570((uint64_t)UINT64_C(65536));
+  uint64_t v120773 = (uint64_t)((uint64_t)((uint64_t)(v120772)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120773)), 64);
+  uint64_t v120774 = lain_fn_59994((uint64_t)UINT64_C(0));
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120774)), 64);
+  uint64_t v120775 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120776 = (void *)(uintptr_t)(v120775);
+  uint64_t v120777 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120778 = lain_fn_67093((void *)(uintptr_t)v120776, v120777);
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120778)), 64);
+  uint64_t v120779 = lain_fn_969();
+  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120779)), 64);
+  uint64_t v120780 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120781 = (void *)(uintptr_t)(v120780);
+  uint64_t v120782 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint64_t v120783 = lain_fn_120242((void *)(uintptr_t)v120781, (uint64_t)UINT64_C(0), v120782);
+  void *v120784 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120785 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120784, 64);
+  uint8_t v120786 = (uint8_t)((((uint64_t)((uint64_t)(v120785)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120786) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120817)), 64);
-  uint64_t _a120822[2] = {0};
-  void *v120822 = (void *)_a120822;
-  void *v120823 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120822) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120823, (void *)(uintptr_t)v120821);
-  void *v120824 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120822) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120824, (uint64_t)(UINT64_C(11)), 64);
-  uint64_t _a120826[2] = {0};
-  void *v120826 = (void *)_a120826;
-  void *v120827 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120826) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120827, (void *)(uintptr_t)v120825);
-  void *v120828 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120826) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120828, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120829 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  uint64_t v120830 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120831 = lain_fn_985((void *)(uintptr_t)v120822, (void *)(uintptr_t)v120826, v120829, v120830);
-  lain_store_bits((void *)(uintptr_t)v204, (uint64_t)((uint64_t)(v120831)), 64);
-  uint64_t v120832 = lain_fn_969();
-  lain_store_bits((void *)(uintptr_t)v495, (uint64_t)((uint64_t)(v120832)), 64);
-  uint64_t v120833 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120834 = (void *)(uintptr_t)(v120833);
-  uint64_t v120835 = lain_fn_67147((void *)(uintptr_t)v120834);
-  lain_store_bits((void *)(uintptr_t)v496, (uint64_t)((uint64_t)(v120835)), 64);
+  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120783)), 64);
+  uint64_t _a120788[2] = {0};
+  void *v120788 = (void *)_a120788;
+  void *v120789 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120788) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120789, (void *)(uintptr_t)v120787);
+  void *v120790 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120788) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120790, (uint64_t)(UINT64_C(11)), 64);
+  uint64_t _a120792[2] = {0};
+  void *v120792 = (void *)_a120792;
+  void *v120793 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120792) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120793, (void *)(uintptr_t)v120791);
+  void *v120794 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120792) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120794, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120795 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  uint64_t v120796 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint64_t v120797 = lain_fn_985((void *)(uintptr_t)v120788, (void *)(uintptr_t)v120792, v120795, v120796);
+  lain_store_bits((void *)(uintptr_t)v204, (uint64_t)((uint64_t)(v120797)), 64);
+  uint64_t v120798 = lain_fn_969();
+  lain_store_bits((void *)(uintptr_t)v495, (uint64_t)((uint64_t)(v120798)), 64);
+  uint64_t v120799 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120800 = (void *)(uintptr_t)(v120799);
+  uint64_t v120801 = lain_fn_67147((void *)(uintptr_t)v120800);
+  lain_store_bits((void *)(uintptr_t)v496, (uint64_t)((uint64_t)(v120801)), 64);
+  uint64_t _a120803[2] = {0};
+  void *v120803 = (void *)_a120803;
+  void *v120804 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120803) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120804, (void *)(uintptr_t)v120802);
+  void *v120805 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120803) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120805, (uint64_t)(UINT64_C(9)), 64);
+  uint64_t _a120807[2] = {0};
+  void *v120807 = (void *)_a120807;
+  void *v120808 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120807) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120808, (void *)(uintptr_t)v120806);
+  void *v120809 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120807) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120809, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120810 = (uint64_t)lain_load_bits((void *)(uintptr_t)v495, 64);
+  uint64_t v120811 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
+  uint64_t v120812 = lain_fn_985((void *)(uintptr_t)v120803, (void *)(uintptr_t)v120807, v120810, v120811);
+  lain_store_bits((void *)(uintptr_t)v673, (uint64_t)((uint64_t)(v120812)), 64);
+  uint64_t v120813 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
+  uint8_t v120814 = (uint8_t)((((uint64_t)((uint64_t)(v120813)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120814) & 1u) != 0) {
+    uint64_t v120815 = lain_fn_60097();
+    uint64_t v120816 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
+    uint64_t v120817 = lain_fn_120237(v120816);
+    void *v120818 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120818, (uint64_t)(UINT64_C(8)), 8);
+    uint64_t v120819 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
+    void *v120821 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    void *v120822 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120821) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_addr((void *)(uintptr_t)v120822, (void *)(uintptr_t)v120820);
+    void *v120823 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120821) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120823, (uint64_t)(UINT64_C(26)), 64);
+    uint64_t v120824 = lain_fn_2413((void *)(uintptr_t)v120818, v120819, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120821);
+    void *v120825 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120826 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120825, 64);
+    uint8_t v120827 = (uint8_t)((((uint64_t)((uint64_t)(v120826)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+    if (((v120827) & 1u) != 0) {
+      { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
+    }
+    { uint64_t _ret_val = (uint64_t)(v120824); lain_alloca_free(&_alloca_head); return _ret_val; }
+  }
+  uint64_t v120828 = lain_fn_969();
+  lain_store_bits((void *)(uintptr_t)v1185, (uint64_t)((uint64_t)(v120828)), 64);
+  uint64_t v120829 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120830 = (void *)(uintptr_t)(v120829);
+  uint64_t v120831 = lain_fn_67149((void *)(uintptr_t)v120830);
+  lain_store_bits((void *)(uintptr_t)v1186, (uint64_t)((uint64_t)(v120831)), 64);
+  uint64_t _a120833[2] = {0};
+  void *v120833 = (void *)_a120833;
+  void *v120834 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120833) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120834, (void *)(uintptr_t)v120832);
+  void *v120835 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120833) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120835, (uint64_t)(UINT64_C(7)), 64);
   uint64_t _a120837[2] = {0};
   void *v120837 = (void *)_a120837;
   void *v120838 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120837) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
   lain_store_addr((void *)(uintptr_t)v120838, (void *)(uintptr_t)v120836);
   void *v120839 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120837) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120839, (uint64_t)(UINT64_C(9)), 64);
-  uint64_t _a120841[2] = {0};
-  void *v120841 = (void *)_a120841;
-  void *v120842 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120841) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120842, (void *)(uintptr_t)v120840);
-  void *v120843 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120841) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120843, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120844 = (uint64_t)lain_load_bits((void *)(uintptr_t)v495, 64);
-  uint64_t v120845 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
-  uint64_t v120846 = lain_fn_985((void *)(uintptr_t)v120837, (void *)(uintptr_t)v120841, v120844, v120845);
-  lain_store_bits((void *)(uintptr_t)v673, (uint64_t)((uint64_t)(v120846)), 64);
-  uint64_t v120847 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
-  uint8_t v120848 = (uint8_t)((((uint64_t)((uint64_t)(v120847)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120848) & 1u) != 0) {
-    uint64_t v120849 = lain_fn_60097();
-    uint64_t v120850 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
-    uint64_t v120851 = lain_fn_120237(v120850);
-    void *v120852 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120852, (uint64_t)(UINT64_C(8)), 8);
-    uint64_t v120853 = (uint64_t)lain_load_bits((void *)(uintptr_t)v496, 64);
-    void *v120855 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    void *v120856 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120855) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_addr((void *)(uintptr_t)v120856, (void *)(uintptr_t)v120854);
-    void *v120857 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120855) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120857, (uint64_t)(UINT64_C(26)), 64);
-    uint64_t v120858 = lain_fn_2413((void *)(uintptr_t)v120852, v120853, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120855);
-    void *v120859 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v120860 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120859, 64);
-    uint8_t v120861 = (uint8_t)((((uint64_t)((uint64_t)(v120860)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-    if (((v120861) & 1u) != 0) {
-      { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
-    }
-    { uint64_t _ret_val = (uint64_t)(v120858); lain_alloca_free(&_alloca_head); return _ret_val; }
-  }
-  uint64_t v120862 = lain_fn_969();
-  lain_store_bits((void *)(uintptr_t)v1185, (uint64_t)((uint64_t)(v120862)), 64);
-  uint64_t v120863 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120864 = (void *)(uintptr_t)(v120863);
-  uint64_t v120865 = lain_fn_67149((void *)(uintptr_t)v120864);
-  lain_store_bits((void *)(uintptr_t)v1186, (uint64_t)((uint64_t)(v120865)), 64);
-  uint64_t _a120867[2] = {0};
-  void *v120867 = (void *)_a120867;
-  void *v120868 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120867) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120868, (void *)(uintptr_t)v120866);
-  void *v120869 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120867) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120869, (uint64_t)(UINT64_C(7)), 64);
-  uint64_t _a120871[2] = {0};
-  void *v120871 = (void *)_a120871;
-  void *v120872 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_addr((void *)(uintptr_t)v120872, (void *)(uintptr_t)v120870);
-  void *v120873 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-  lain_store_bits((void *)(uintptr_t)v120873, (uint64_t)(UINT64_C(5)), 64);
-  uint64_t v120874 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
-  uint64_t v120875 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1186, 64);
-  uint64_t v120876 = lain_fn_985((void *)(uintptr_t)v120867, (void *)(uintptr_t)v120871, v120874, v120875);
-  lain_store_bits((void *)(uintptr_t)v1187, (uint64_t)((uint64_t)(v120876)), 64);
-  uint64_t v120877 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  void * v120878 = (void *)(uintptr_t)(v120877);
-  uint64_t v120879 = lain_fn_63836((void *)(uintptr_t)v120878);
-  uint64_t v120880 = lain_fn_120237(v120879);
-  { uint64_t _ret_val = (uint64_t)(v120880); lain_alloca_free(&_alloca_head); return _ret_val; }
+  lain_store_bits((void *)(uintptr_t)v120839, (uint64_t)(UINT64_C(5)), 64);
+  uint64_t v120840 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
+  uint64_t v120841 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1186, 64);
+  uint64_t v120842 = lain_fn_985((void *)(uintptr_t)v120833, (void *)(uintptr_t)v120837, v120840, v120841);
+  lain_store_bits((void *)(uintptr_t)v1187, (uint64_t)((uint64_t)(v120842)), 64);
+  uint64_t v120843 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120844 = (void *)(uintptr_t)(v120843);
+  uint64_t v120845 = lain_fn_63836((void *)(uintptr_t)v120844);
+  uint64_t v120846 = lain_fn_120237(v120845);
+  { uint64_t _ret_val = (uint64_t)(v120846); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
-static uint64_t lain_fn_120245(uint64_t v120881) {
+static uint64_t lain_fn_120245(uint64_t v120847) {
   LainAllocaNode *_alloca_head = NULL;
   (void)_alloca_head;
   uint64_t _a115[1] = {0};
@@ -204666,35 +204604,35 @@ static uint64_t lain_fn_120245(uint64_t v120881) {
   void *v116 = (void *)_a116;
   uint64_t _a117[1] = {0};
   void *v117 = (void *)_a117;
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120881)), 64);
-  uint64_t v120883 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  uint64_t v120884 = lain_fn_120244(v120883);
-  uint64_t _a120885[1] = {0};
-  void *v120885 = (void *)_a120885;
-  lain_store_bits((void *)(uintptr_t)v120885, (uint64_t)(UINT64_C(0)), 64);
-  void *v120886 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v120887 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120886) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120888 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120887, 64);
-  void *v120891 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120886) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v120891, (uint64_t)(UINT64_C(0)), 64);
-  switch ((uint64_t)(v120888)) {
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120847)), 64);
+  uint64_t v120849 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  uint64_t v120850 = lain_fn_120244(v120849);
+  uint64_t _a120851[1] = {0};
+  void *v120851 = (void *)_a120851;
+  lain_store_bits((void *)(uintptr_t)v120851, (uint64_t)(UINT64_C(0)), 64);
+  void *v120852 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v120853 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120852) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120854 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120853, 64);
+  void *v120857 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120852) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120857, (uint64_t)(UINT64_C(0)), 64);
+  switch ((uint64_t)(v120854)) {
   case UINT64_C(0): {
-    lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120884)), 64);
-    uint64_t v120890 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    lain_store_bits((void *)(uintptr_t)v120885, (uint64_t)((uint64_t)(v120890)), 64);
+    lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120850)), 64);
+    uint64_t v120856 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    lain_store_bits((void *)(uintptr_t)v120851, (uint64_t)((uint64_t)(v120856)), 64);
     break;
   }
   case UINT64_C(257): {
-    void *v120892 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void *v120893 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120892) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    uint64_t v120894 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120893, 64);
-    void * v120895 = (void *)(uintptr_t)(v120894);
-    uint64_t v120896 = (uint64_t)((uint64_t)((uint64_t)(v120895)) & lain_mask(64));
-    lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120896)), 64);
-    uint64_t v120897 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-    void * v120898 = (void *)(uintptr_t)(v120897);
-    uint64_t v120899 = lain_fn_120240((void *)(uintptr_t)v120898);
-    lain_store_bits((void *)(uintptr_t)v120885, (uint64_t)((uint64_t)(v120899)), 64);
+    void *v120858 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v120859 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120858) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v120860 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120859, 64);
+    void * v120861 = (void *)(uintptr_t)(v120860);
+    uint64_t v120862 = (uint64_t)((uint64_t)((uint64_t)(v120861)) & lain_mask(64));
+    lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120862)), 64);
+    uint64_t v120863 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+    void * v120864 = (void *)(uintptr_t)(v120863);
+    uint64_t v120865 = lain_fn_120240((void *)(uintptr_t)v120864);
+    lain_store_bits((void *)(uintptr_t)v120851, (uint64_t)((uint64_t)(v120865)), 64);
     break;
   }
   default: {
@@ -204702,8 +204640,8 @@ static uint64_t lain_fn_120245(uint64_t v120881) {
     break;
   }
   }
-  uint64_t v120900 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120885, 64);
-  { uint64_t _ret_val = (uint64_t)(v120900); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v120866 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120851, 64);
+  { uint64_t _ret_val = (uint64_t)(v120866); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
 static uint64_t lain_fn_120247(void) {
@@ -204737,237 +204675,270 @@ static uint64_t lain_fn_120247(void) {
   void *v1187 = (void *)_a1187;
   uint64_t _a1188[1] = {0};
   void *v1188 = (void *)_a1188;
-  uint64_t v120906 = lain_fn_59961();
-  uint64_t _a120907[2] = {0};
-  void *v120907 = (void *)_a120907;
-  lain_fn_120220((void *)(uintptr_t)v120907);
-  uint64_t v120908 = (uint64_t)((uint64_t)((uint64_t)(v120907)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120908)), 64);
-  uint64_t v120909 = lain_fn_76();
-  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120909)), 64);
-  uint64_t v120910 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint8_t v120911 = (uint8_t)((((uint64_t)((uint64_t)(v120910)) & lain_mask(64)) < ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
-  if (((v120911) & 1u) != 0) {
-    uint64_t v120912 = lain_fn_120233();
+  uint64_t v120870 = lain_fn_59961();
+  uint64_t _a120871[15] = {0};
+  void *v120871 = (void *)_a120871;
+  void *v120872 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v120872, (uint64_t)(UINT64_C(0)), 64);
+  void *v120873 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120873, (uint64_t)(UINT64_C(0)), 64);
+  void *v120874 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(16))));
+  lain_store_bits((void *)(uintptr_t)v120874, (uint64_t)(UINT64_C(0)), 64);
+  uint64_t _a120876[2] = {0};
+  void *v120876 = (void *)_a120876;
+  void *v120877 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120876) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120877, (void *)(uintptr_t)v120875);
+  void *v120878 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120876) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120878, (uint64_t)(UINT64_C(0)), 64);
+  void *v120879 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(24))));
+  lain_store_addr((void *)(uintptr_t)v120879, (void *)(uintptr_t)v120876);
+  void *v120880 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(40))));
+  lain_store_bits((void *)(uintptr_t)v120880, (uint64_t)(UINT64_C(0)), 64);
+  uint64_t _a120882[2] = {0};
+  void *v120882 = (void *)_a120882;
+  void *v120883 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120882) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120883, (void *)(uintptr_t)v120881);
+  void *v120884 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120882) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120884, (uint64_t)(UINT64_C(0)), 64);
+  void *v120885 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(48))));
+  lain_store_addr((void *)(uintptr_t)v120885, (void *)(uintptr_t)v120882);
+  void *v120886 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(64))));
+  lain_store_bits((void *)(uintptr_t)v120886, (uint64_t)(UINT64_C(0)), 64);
+  uint64_t _a120888[2] = {0};
+  void *v120888 = (void *)_a120888;
+  void *v120889 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120888) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120889, (void *)(uintptr_t)v120887);
+  void *v120890 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120888) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120890, (uint64_t)(UINT64_C(0)), 64);
+  void *v120891 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(72))));
+  lain_store_addr((void *)(uintptr_t)v120891, (void *)(uintptr_t)v120888);
+  void *v120892 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(88))));
+  lain_store_bits((void *)(uintptr_t)v120892, (uint64_t)(UINT64_C(0)), 64);
+  uint64_t _a120894[2] = {0};
+  void *v120894 = (void *)_a120894;
+  void *v120895 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120894) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_addr((void *)(uintptr_t)v120895, (void *)(uintptr_t)v120893);
+  void *v120896 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120894) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+  lain_store_bits((void *)(uintptr_t)v120896, (uint64_t)(UINT64_C(0)), 64);
+  void *v120897 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(96))));
+  lain_store_addr((void *)(uintptr_t)v120897, (void *)(uintptr_t)v120894);
+  void *v120898 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120871) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(112))));
+  lain_store_bits((void *)(uintptr_t)v120898, (uint64_t)(UINT64_C(0)), 64);
+  uint64_t v120899 = (uint64_t)((uint64_t)((uint64_t)(v120871)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v120899)), 64);
+  uint64_t v120900 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+  void * v120901 = (void *)(uintptr_t)(v120900);
+  uint64_t v120902 = (uint64_t)((uint64_t)((uint64_t)(v120901)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v120902)), 64);
+  uint64_t v120903 = lain_fn_76();
+  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120903)), 64);
+  uint64_t v120904 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint8_t v120905 = (uint8_t)((((uint64_t)((uint64_t)(v120904)) & lain_mask(64)) < ((uint64_t)(UINT64_C(2)) & lain_mask(64))));
+  if (((v120905) & 1u) != 0) {
+    uint64_t v120906 = lain_fn_120233();
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(2)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120913 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-  uint64_t v120914 = lain_fn_120234((uint64_t)UINT64_C(1), v120913);
-  uint64_t v120915 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120916 = (void *)(uintptr_t)(v120915);
-  void *v120917 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120916) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120918 = lain_load_addr((void *)(uintptr_t)v120917);
-  void *v120919 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120918) + ((uint64_t)(UINT64_C(13))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120920 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120919) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120921 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120920, 64);
-  uint8_t v120922 = (uint8_t)((((uint64_t)((uint64_t)(v120921)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120922) & 1u) != 0) {
-    uint64_t v120923 = lain_fn_120233();
+  uint64_t v120907 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120908 = (void *)(uintptr_t)(v120907);
+  uint64_t v120909 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
+  uint64_t v120910 = lain_fn_120234((void *)(uintptr_t)v120908, (uint64_t)UINT64_C(1), v120909);
+  uint64_t v120911 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120912 = (void *)(uintptr_t)(v120911);
+  void *v120913 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120912) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(112))));
+  uint64_t v120914 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120913, 64);
+  uint8_t v120915 = (uint8_t)((((uint64_t)((uint64_t)(v120914)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120915) & 1u) != 0) {
+    uint64_t v120916 = lain_fn_120233();
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(2)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120924 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120925 = (void *)(uintptr_t)(v120924);
-  uint64_t _a120926[2] = {0};
-  void *v120926 = (void *)_a120926;
-  lain_fn_120231((void *)(uintptr_t)v120926, (void *)(uintptr_t)v120925, (uint64_t)UINT64_C(11), (uint64_t)UINT64_C(12));
-  uint64_t v120927 = (uint64_t)((uint64_t)((uint64_t)(v120926)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v117, (uint64_t)((uint64_t)(v120927)), 64);
-  uint64_t v120928 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120929 = (void *)(uintptr_t)(v120928);
-  void *v120930 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120929) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120931 = lain_load_addr((void *)(uintptr_t)v120930);
-  void *v120932 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120931) + ((uint64_t)(UINT64_C(5))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120933 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120932) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120934 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120933, 64);
-  uint8_t v120935 = (uint8_t)((((uint64_t)((uint64_t)(v120934)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120935) & 1u) != 0) {
-    uint64_t v120936 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    void * v120937 = (void *)(uintptr_t)(v120936);
-    void *v120938 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    lain_fn_120231((void *)(uintptr_t)v120938, (void *)(uintptr_t)v120937, (uint64_t)UINT64_C(6), (uint64_t)UINT64_C(7));
-    uint64_t v120939 = (uint64_t)((uint64_t)((uint64_t)(v120938)) & lain_mask(64));
-    lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120939)), 64);
-    uint64_t v120940 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
-    void * v120941 = (void *)(uintptr_t)(v120940);
-    uint64_t v120942 = lain_fn_60089((void *)(uintptr_t)v120941);
-    uint64_t v120943 = lain_fn_962((uint64_t)UINT64_C(1));
+  uint64_t v120917 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120918 = (void *)(uintptr_t)(v120917);
+  void *v120919 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120918) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(96))));
+  void * v120920 = lain_load_addr((void *)(uintptr_t)v120919);
+  uint64_t v120921 = (uint64_t)((uint64_t)((uint64_t)(v120920)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v118, (uint64_t)((uint64_t)(v120921)), 64);
+  uint64_t v120922 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120923 = (void *)(uintptr_t)(v120922);
+  void *v120924 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120923) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(40))));
+  uint64_t v120925 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120924, 64);
+  uint8_t v120926 = (uint8_t)((((uint64_t)((uint64_t)(v120925)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120926) & 1u) != 0) {
+    uint64_t v120927 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    void * v120928 = (void *)(uintptr_t)(v120927);
+    void *v120929 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120928) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(48))));
+    void * v120930 = lain_load_addr((void *)(uintptr_t)v120929);
+    uint64_t v120931 = lain_fn_60089((void *)(uintptr_t)v120930);
+    uint64_t v120932 = lain_fn_962((uint64_t)UINT64_C(1));
   }
-  uint64_t v120944 = (uint64_t)lain_load_bits((void *)(uintptr_t)v117, 64);
-  void * v120945 = (void *)(uintptr_t)(v120944);
-  uint64_t v120946 = lain_fn_59999((void *)(uintptr_t)v120945);
-  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120946)), 64);
-  uint64_t v120947 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  uint64_t v120948 = lain_fn_59934();
-  uint8_t v120949 = (uint8_t)((((uint64_t)((uint64_t)(v120947)) & lain_mask(64)) == ((uint64_t)((uint64_t)(v120948)) & lain_mask(64))));
-  if (((v120949) & 1u) != 0) {
-    void *v120950 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120950, (uint64_t)(UINT64_C(1)), 8);
-    void *v120952 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    void *v120953 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120952) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_addr((void *)(uintptr_t)v120953, (void *)(uintptr_t)v120951);
-    void *v120954 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120952) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120954, (uint64_t)(UINT64_C(23)), 64);
-    uint64_t v120955 = lain_fn_2413((void *)(uintptr_t)v120950, (uint64_t)UINT64_C(1), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120952);
-    void *v120956 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v120957 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120956, 64);
-    uint8_t v120958 = (uint8_t)((((uint64_t)((uint64_t)(v120957)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-    if (((v120958) & 1u) != 0) {
+  uint64_t v120933 = (uint64_t)lain_load_bits((void *)(uintptr_t)v118, 64);
+  void * v120934 = (void *)(uintptr_t)(v120933);
+  uint64_t v120935 = lain_fn_59999((void *)(uintptr_t)v120934);
+  lain_store_bits((void *)(uintptr_t)v178, (uint64_t)((uint64_t)(v120935)), 64);
+  uint64_t v120936 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  uint64_t v120937 = lain_fn_59934();
+  uint8_t v120938 = (uint8_t)((((uint64_t)((uint64_t)(v120936)) & lain_mask(64)) == ((uint64_t)((uint64_t)(v120937)) & lain_mask(64))));
+  if (((v120938) & 1u) != 0) {
+    void *v120939 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120939, (uint64_t)(UINT64_C(1)), 8);
+    void *v120941 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    void *v120942 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120941) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_addr((void *)(uintptr_t)v120942, (void *)(uintptr_t)v120940);
+    void *v120943 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120941) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120943, (uint64_t)(UINT64_C(23)), 64);
+    uint64_t v120944 = lain_fn_2413((void *)(uintptr_t)v120939, (uint64_t)UINT64_C(1), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120941);
+    void *v120945 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120946 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120945, 64);
+    uint8_t v120947 = (uint8_t)((((uint64_t)((uint64_t)(v120946)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+    if (((v120947) & 1u) != 0) {
       { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
     }
-    { uint64_t _ret_val = (uint64_t)(v120955); lain_alloca_free(&_alloca_head); return _ret_val; }
+    { uint64_t _ret_val = (uint64_t)(v120944); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  void * v120959 = lain_fn_63570((uint64_t)UINT64_C(65536));
-  uint64_t v120960 = (uint64_t)((uint64_t)((uint64_t)(v120959)) & lain_mask(64));
-  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120960)), 64);
-  uint64_t v120961 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-  uint64_t v120962 = lain_fn_59994(v120961);
-  lain_store_bits((void *)(uintptr_t)v204, (uint64_t)((uint64_t)(v120962)), 64);
-  uint64_t v120963 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-  void * v120964 = (void *)(uintptr_t)(v120963);
-  uint64_t v120965 = (uint64_t)lain_load_bits((void *)(uintptr_t)v204, 64);
-  uint64_t v120966 = lain_fn_67093((void *)(uintptr_t)v120964, v120965);
-  lain_store_bits((void *)(uintptr_t)v495, (uint64_t)((uint64_t)(v120966)), 64);
-  uint64_t v120967 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-  void * v120968 = (void *)(uintptr_t)(v120967);
-  uint64_t v120969 = lain_fn_120242((void *)(uintptr_t)v120968, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(1));
-  void *v120970 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120971 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120970, 64);
-  uint8_t v120972 = (uint8_t)((((uint64_t)((uint64_t)(v120971)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120972) & 1u) != 0) {
+  void * v120948 = lain_fn_63570((uint64_t)UINT64_C(65536));
+  uint64_t v120949 = (uint64_t)((uint64_t)((uint64_t)(v120948)) & lain_mask(64));
+  lain_store_bits((void *)(uintptr_t)v183, (uint64_t)((uint64_t)(v120949)), 64);
+  uint64_t v120950 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+  uint64_t v120951 = lain_fn_59994(v120950);
+  lain_store_bits((void *)(uintptr_t)v204, (uint64_t)((uint64_t)(v120951)), 64);
+  uint64_t v120952 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+  void * v120953 = (void *)(uintptr_t)(v120952);
+  uint64_t v120954 = (uint64_t)lain_load_bits((void *)(uintptr_t)v204, 64);
+  uint64_t v120955 = lain_fn_67093((void *)(uintptr_t)v120953, v120954);
+  lain_store_bits((void *)(uintptr_t)v495, (uint64_t)((uint64_t)(v120955)), 64);
+  uint64_t v120956 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+  void * v120957 = (void *)(uintptr_t)(v120956);
+  uint64_t v120958 = lain_fn_120242((void *)(uintptr_t)v120957, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(1));
+  void *v120959 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v120960 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120959, 64);
+  uint8_t v120961 = (uint8_t)((((uint64_t)((uint64_t)(v120960)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120961) & 1u) != 0) {
     { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  lain_store_bits((void *)(uintptr_t)v496, (uint64_t)((uint64_t)(v120969)), 64);
-  uint64_t v120973 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-  void * v120974 = (void *)(uintptr_t)(v120973);
-  uint64_t v120975 = lain_fn_67147((void *)(uintptr_t)v120974);
-  lain_store_bits((void *)(uintptr_t)v673, (uint64_t)((uint64_t)(v120975)), 64);
-  uint64_t v120976 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
-  uint8_t v120977 = (uint8_t)((((uint64_t)((uint64_t)(v120976)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120977) & 1u) != 0) {
-    uint64_t v120978 = lain_fn_60097();
-    uint64_t v120979 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
-    uint64_t v120980 = lain_fn_120237(v120979);
-    void *v120981 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-    lain_store_bits((void *)(uintptr_t)v120981, (uint64_t)(UINT64_C(8)), 8);
-    uint64_t v120982 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
-    uint64_t v120983 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-    void *v120985 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    void *v120986 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120985) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    lain_store_addr((void *)(uintptr_t)v120986, (void *)(uintptr_t)v120984);
-    void *v120987 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120985) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    lain_store_bits((void *)(uintptr_t)v120987, (uint64_t)(UINT64_C(26)), 64);
-    uint64_t v120988 = lain_fn_2413((void *)(uintptr_t)v120981, v120982, v120983, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120985);
-    void *v120989 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v120990 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120989, 64);
-    uint8_t v120991 = (uint8_t)((((uint64_t)((uint64_t)(v120990)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-    if (((v120991) & 1u) != 0) {
+  lain_store_bits((void *)(uintptr_t)v496, (uint64_t)((uint64_t)(v120958)), 64);
+  uint64_t v120962 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+  void * v120963 = (void *)(uintptr_t)(v120962);
+  uint64_t v120964 = lain_fn_67147((void *)(uintptr_t)v120963);
+  lain_store_bits((void *)(uintptr_t)v673, (uint64_t)((uint64_t)(v120964)), 64);
+  uint64_t v120965 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
+  uint8_t v120966 = (uint8_t)((((uint64_t)((uint64_t)(v120965)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120966) & 1u) != 0) {
+    uint64_t v120967 = lain_fn_60097();
+    uint64_t v120968 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
+    uint64_t v120969 = lain_fn_120237(v120968);
+    void *v120970 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+    lain_store_bits((void *)(uintptr_t)v120970, (uint64_t)(UINT64_C(8)), 8);
+    uint64_t v120971 = (uint64_t)lain_load_bits((void *)(uintptr_t)v673, 64);
+    uint64_t v120972 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+    void *v120974 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+    void *v120975 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120974) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    lain_store_addr((void *)(uintptr_t)v120975, (void *)(uintptr_t)v120973);
+    void *v120976 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120974) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    lain_store_bits((void *)(uintptr_t)v120976, (uint64_t)(UINT64_C(26)), 64);
+    uint64_t v120977 = lain_fn_2413((void *)(uintptr_t)v120970, v120971, v120972, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v120974);
+    void *v120978 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120979 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120978, 64);
+    uint8_t v120980 = (uint8_t)((((uint64_t)((uint64_t)(v120979)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+    if (((v120980) & 1u) != 0) {
       { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
     }
-    { uint64_t _ret_val = (uint64_t)(v120988); lain_alloca_free(&_alloca_head); return _ret_val; }
+    { uint64_t _ret_val = (uint64_t)(v120977); lain_alloca_free(&_alloca_head); return _ret_val; }
   }
-  uint64_t v120992 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-  void * v120993 = (void *)(uintptr_t)(v120992);
-  void *v120994 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120993) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void * v120995 = lain_load_addr((void *)(uintptr_t)v120994);
-  void *v120996 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120995) + ((uint64_t)(UINT64_C(2))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-  void *v120997 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120996) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v120998 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120997, 64);
-  uint8_t v120999 = (uint8_t)((((uint64_t)((uint64_t)(v120998)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-  if (((v120999) & 1u) != 0) {
-    uint64_t v121000 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    void * v121001 = (void *)(uintptr_t)(v121000);
-    void *v121002 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-    lain_fn_120231((void *)(uintptr_t)v121002, (void *)(uintptr_t)v121001, (uint64_t)UINT64_C(3), (uint64_t)UINT64_C(4));
-    uint64_t v121003 = (uint64_t)((uint64_t)((uint64_t)(v121002)) & lain_mask(64));
-    lain_store_bits((void *)(uintptr_t)v1185, (uint64_t)((uint64_t)(v121003)), 64);
-    uint64_t v121004 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    void * v121005 = (void *)(uintptr_t)(v121004);
-    void *v121006 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121005) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void * v121007 = lain_load_addr((void *)(uintptr_t)v121006);
-    void *v121008 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121007) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-    void *v121009 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121008) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    uint64_t v121010 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121009, 64);
-    uint8_t v121011 = (uint8_t)((((uint64_t)((uint64_t)(v121010)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-    uint64_t v121012 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
-    void * v121013 = (void *)(uintptr_t)(v121012);
-    uint64_t v121014 = lain_fn_120225((void *)(uintptr_t)v121013);
-    uint8_t v121015 = (uint8_t)((((uint64_t)((uint64_t)(v121014)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
-    uint8_t v121016 = (uint8_t)(((uint64_t)((uint64_t)(v121011))) | ((uint64_t)((uint64_t)(v121015)))) & lain_mask(1);
-    if (((v121016) & 1u) != 0) {
-      void *v121017 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-      lain_fn_120235((void *)(uintptr_t)v121017);
-      uint64_t v121018 = (uint64_t)((uint64_t)((uint64_t)(v121017)) & lain_mask(64));
-      lain_store_bits((void *)(uintptr_t)v1186, (uint64_t)((uint64_t)(v121018)), 64);
-      uint64_t v121019 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-      void * v121020 = (void *)(uintptr_t)(v121019);
-      uint64_t v121021 = lain_fn_63584((void *)(uintptr_t)v121020);
-      uint64_t v121022 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
-      void * v121023 = (void *)(uintptr_t)(v121022);
-      uint64_t v121024 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1186, 64);
-      void * v121025 = (void *)(uintptr_t)(v121024);
-      uint64_t v121026 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-      void * v121027 = (void *)(uintptr_t)(v121026);
-      void *v121028 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121027) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-      void * v121029 = lain_load_addr((void *)(uintptr_t)v121028);
-      void *v121030 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121029) + ((uint64_t)(UINT64_C(1))) * ((uint64_t)(UINT64_C(8))) + ((uint64_t)(UINT64_C(0))));
-      void *v121031 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121030) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-      uint64_t v121032 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121031, 64);
-      uint64_t v121033 = lain_fn_60073(v121021, (void *)(uintptr_t)v121023, (void *)(uintptr_t)v121025, v121032);
-      lain_store_bits((void *)(uintptr_t)v1187, (uint64_t)((uint64_t)(v121033)), 64);
-      uint64_t v121034 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1187, 64);
-      uint8_t v121035 = (uint8_t)((((uint64_t)((uint64_t)(v121034)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-      if (((v121035) & 1u) != 0) {
-        void *v121036 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-        lain_store_bits((void *)(uintptr_t)v121036, (uint64_t)(UINT64_C(0)), 8);
-        uint64_t v121037 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1187, 64);
-        uint64_t v121038 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-        void *v121040 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-        void *v121041 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121040) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-        lain_store_addr((void *)(uintptr_t)v121041, (void *)(uintptr_t)v121039);
-        void *v121042 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121040) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-        lain_store_bits((void *)(uintptr_t)v121042, (uint64_t)(UINT64_C(26)), 64);
-        uint64_t v121043 = lain_fn_2413((void *)(uintptr_t)v121036, v121037, v121038, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v121040);
-        void *v121044 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-        uint64_t v121045 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121044, 64);
-        uint8_t v121046 = (uint8_t)((((uint64_t)((uint64_t)(v121045)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-        if (((v121046) & 1u) != 0) {
+  uint64_t v120981 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+  void * v120982 = (void *)(uintptr_t)(v120981);
+  void *v120983 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120982) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(16))));
+  uint64_t v120984 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120983, 64);
+  uint8_t v120985 = (uint8_t)((((uint64_t)((uint64_t)(v120984)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+  if (((v120985) & 1u) != 0) {
+    uint64_t v120986 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    void * v120987 = (void *)(uintptr_t)(v120986);
+    void *v120988 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120987) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(24))));
+    void * v120989 = lain_load_addr((void *)(uintptr_t)v120988);
+    uint64_t v120990 = (uint64_t)((uint64_t)((uint64_t)(v120989)) & lain_mask(64));
+    lain_store_bits((void *)(uintptr_t)v1185, (uint64_t)((uint64_t)(v120990)), 64);
+    uint64_t v120991 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    void * v120992 = (void *)(uintptr_t)(v120991);
+    void *v120993 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v120992) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    uint64_t v120994 = (uint64_t)lain_load_bits((void *)(uintptr_t)v120993, 64);
+    uint8_t v120995 = (uint8_t)((((uint64_t)((uint64_t)(v120994)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+    uint64_t v120996 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
+    void * v120997 = (void *)(uintptr_t)(v120996);
+    uint64_t v120998 = lain_fn_120230((void *)(uintptr_t)v120997);
+    uint8_t v120999 = (uint8_t)((((uint64_t)((uint64_t)(v120998)) & lain_mask(64)) == ((uint64_t)(UINT64_C(1)) & lain_mask(64))));
+    uint8_t v121000 = (uint8_t)(((uint64_t)((uint64_t)(v120995))) | ((uint64_t)((uint64_t)(v120999)))) & lain_mask(1);
+    if (((v121000) & 1u) != 0) {
+      uint64_t v121001 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+      void * v121002 = (void *)(uintptr_t)(v121001);
+      void *v121003 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+      lain_fn_120235((void *)(uintptr_t)v121003, (void *)(uintptr_t)v121002);
+      uint64_t v121004 = (uint64_t)((uint64_t)((uint64_t)(v121003)) & lain_mask(64));
+      lain_store_bits((void *)(uintptr_t)v1186, (uint64_t)((uint64_t)(v121004)), 64);
+      uint64_t v121005 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+      void * v121006 = (void *)(uintptr_t)(v121005);
+      uint64_t v121007 = lain_fn_63584((void *)(uintptr_t)v121006);
+      uint64_t v121008 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
+      void * v121009 = (void *)(uintptr_t)(v121008);
+      uint64_t v121010 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1186, 64);
+      void * v121011 = (void *)(uintptr_t)(v121010);
+      uint64_t v121012 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+      void * v121013 = (void *)(uintptr_t)(v121012);
+      void *v121014 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121013) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+      uint64_t v121015 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121014, 64);
+      uint64_t v121016 = lain_fn_60073(v121007, (void *)(uintptr_t)v121009, (void *)(uintptr_t)v121011, v121015);
+      lain_store_bits((void *)(uintptr_t)v1187, (uint64_t)((uint64_t)(v121016)), 64);
+      uint64_t v121017 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1187, 64);
+      uint8_t v121018 = (uint8_t)((((uint64_t)((uint64_t)(v121017)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+      if (((v121018) & 1u) != 0) {
+        void *v121019 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+        lain_store_bits((void *)(uintptr_t)v121019, (uint64_t)(UINT64_C(0)), 8);
+        uint64_t v121020 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1187, 64);
+        uint64_t v121021 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+        void *v121023 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+        void *v121024 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121023) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+        lain_store_addr((void *)(uintptr_t)v121024, (void *)(uintptr_t)v121022);
+        void *v121025 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121023) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+        lain_store_bits((void *)(uintptr_t)v121025, (uint64_t)(UINT64_C(26)), 64);
+        uint64_t v121026 = lain_fn_2413((void *)(uintptr_t)v121019, v121020, v121021, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v121023);
+        void *v121027 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+        uint64_t v121028 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121027, 64);
+        uint8_t v121029 = (uint8_t)((((uint64_t)((uint64_t)(v121028)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+        if (((v121029) & 1u) != 0) {
           { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
         }
-        { uint64_t _ret_val = (uint64_t)(v121043); lain_alloca_free(&_alloca_head); return _ret_val; }
+        { uint64_t _ret_val = (uint64_t)(v121026); lain_alloca_free(&_alloca_head); return _ret_val; }
       }
     } else {
-      uint64_t v121047 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
-      void * v121048 = (void *)(uintptr_t)(v121047);
-      uint64_t v121049 = lain_fn_63584((void *)(uintptr_t)v121048);
-      uint64_t v121050 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
-      void * v121051 = (void *)(uintptr_t)(v121050);
-      uint64_t v121052 = lain_fn_60071(v121049, (void *)(uintptr_t)v121051);
-      lain_store_bits((void *)(uintptr_t)v1188, (uint64_t)((uint64_t)(v121052)), 64);
-      uint64_t v121053 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1188, 64);
-      uint8_t v121054 = (uint8_t)((((uint64_t)((uint64_t)(v121053)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-      if (((v121054) & 1u) != 0) {
-        void *v121055 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
-        lain_store_bits((void *)(uintptr_t)v121055, (uint64_t)(UINT64_C(0)), 8);
-        uint64_t v121056 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1188, 64);
-        uint64_t v121057 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
-        void *v121059 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
-        void *v121060 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121059) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-        lain_store_addr((void *)(uintptr_t)v121060, (void *)(uintptr_t)v121058);
-        void *v121061 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121059) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-        lain_store_bits((void *)(uintptr_t)v121061, (uint64_t)(UINT64_C(34)), 64);
-        uint64_t v121062 = lain_fn_2413((void *)(uintptr_t)v121055, v121056, v121057, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v121059);
-        void *v121063 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-        uint64_t v121064 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121063, 64);
-        uint8_t v121065 = (uint8_t)((((uint64_t)((uint64_t)(v121064)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
-        if (((v121065) & 1u) != 0) {
+      uint64_t v121030 = (uint64_t)lain_load_bits((void *)(uintptr_t)v183, 64);
+      void * v121031 = (void *)(uintptr_t)(v121030);
+      uint64_t v121032 = lain_fn_63584((void *)(uintptr_t)v121031);
+      uint64_t v121033 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1185, 64);
+      void * v121034 = (void *)(uintptr_t)(v121033);
+      uint64_t v121035 = lain_fn_60071(v121032, (void *)(uintptr_t)v121034);
+      lain_store_bits((void *)(uintptr_t)v1188, (uint64_t)((uint64_t)(v121035)), 64);
+      uint64_t v121036 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1188, 64);
+      uint8_t v121037 = (uint8_t)((((uint64_t)((uint64_t)(v121036)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+      if (((v121037) & 1u) != 0) {
+        void *v121038 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(1)));
+        lain_store_bits((void *)(uintptr_t)v121038, (uint64_t)(UINT64_C(0)), 8);
+        uint64_t v121039 = (uint64_t)lain_load_bits((void *)(uintptr_t)v1188, 64);
+        uint64_t v121040 = (uint64_t)lain_load_bits((void *)(uintptr_t)v178, 64);
+        void *v121042 = lain_alloca_push(&_alloca_head, (size_t)1 * (size_t)(UINT64_C(16)));
+        void *v121043 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121042) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+        lain_store_addr((void *)(uintptr_t)v121043, (void *)(uintptr_t)v121041);
+        void *v121044 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121042) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+        lain_store_bits((void *)(uintptr_t)v121044, (uint64_t)(UINT64_C(34)), 64);
+        uint64_t v121045 = lain_fn_2413((void *)(uintptr_t)v121038, v121039, v121040, (uint64_t)UINT64_C(0), (uint64_t)UINT64_C(0), (void *)(uintptr_t)v121042);
+        void *v121046 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+        uint64_t v121047 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121046, 64);
+        uint8_t v121048 = (uint8_t)((((uint64_t)((uint64_t)(v121047)) & lain_mask(64)) != ((uint64_t)(UINT64_C(0)) & lain_mask(64))));
+        if (((v121048) & 1u) != 0) {
           { uint64_t _ret_val = (uint64_t)((uint64_t)UINT64_C(0)); lain_alloca_free(&_alloca_head); return _ret_val; }
         }
-        { uint64_t _ret_val = (uint64_t)(v121062); lain_alloca_free(&_alloca_head); return _ret_val; }
+        { uint64_t _ret_val = (uint64_t)(v121045); lain_alloca_free(&_alloca_head); return _ret_val; }
       }
     }
   }
-  uint64_t v121066 = lain_fn_120237((uint64_t)UINT64_C(0));
-  { uint64_t _ret_val = (uint64_t)(v121066); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v121049 = lain_fn_120237((uint64_t)UINT64_C(0));
+  { uint64_t _ret_val = (uint64_t)(v121049); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
 static uint64_t lain_fn_120248(void) {
@@ -204977,33 +204948,33 @@ static uint64_t lain_fn_120248(void) {
   void *v115 = (void *)_a115;
   uint64_t _a116[1] = {0};
   void *v116 = (void *)_a116;
-  uint64_t v121067 = lain_fn_120247();
-  uint64_t _a121068[1] = {0};
-  void *v121068 = (void *)_a121068;
-  lain_store_bits((void *)(uintptr_t)v121068, (uint64_t)(UINT64_C(0)), 64);
-  void *v121069 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  void *v121070 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121069) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  uint64_t v121071 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121070, 64);
-  void *v121074 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121069) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-  lain_store_bits((void *)(uintptr_t)v121074, (uint64_t)(UINT64_C(0)), 64);
-  switch ((uint64_t)(v121071)) {
+  uint64_t v121050 = lain_fn_120247();
+  uint64_t _a121051[1] = {0};
+  void *v121051 = (void *)_a121051;
+  lain_store_bits((void *)(uintptr_t)v121051, (uint64_t)(UINT64_C(0)), 64);
+  void *v121052 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  void *v121053 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121052) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  uint64_t v121054 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121053, 64);
+  void *v121057 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121052) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+  lain_store_bits((void *)(uintptr_t)v121057, (uint64_t)(UINT64_C(0)), 64);
+  switch ((uint64_t)(v121054)) {
   case UINT64_C(0): {
-    lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v121067)), 64);
-    uint64_t v121073 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
-    lain_store_bits((void *)(uintptr_t)v121068, (uint64_t)((uint64_t)(v121073)), 64);
+    lain_store_bits((void *)(uintptr_t)v115, (uint64_t)((uint64_t)(v121050)), 64);
+    uint64_t v121056 = (uint64_t)lain_load_bits((void *)(uintptr_t)v115, 64);
+    lain_store_bits((void *)(uintptr_t)v121051, (uint64_t)((uint64_t)(v121056)), 64);
     break;
   }
   case UINT64_C(257): {
-    void *v121075 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
-    void *v121076 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121075) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
-    uint64_t v121077 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121076, 64);
-    void * v121078 = (void *)(uintptr_t)(v121077);
-    uint64_t v121079 = (uint64_t)((uint64_t)((uint64_t)(v121078)) & lain_mask(64));
-    lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v121079)), 64);
-    uint64_t v121080 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
-    void * v121081 = (void *)(uintptr_t)(v121080);
-    uint64_t v121082 = lain_fn_120240((void *)(uintptr_t)v121081);
-    lain_store_bits((void *)(uintptr_t)v121068, (uint64_t)((uint64_t)(v121082)), 64);
+    void *v121058 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v2610) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(0))));
+    void *v121059 = (void *)(uintptr_t)((uint64_t)(uintptr_t)((void *)(uintptr_t)v121058) + ((uint64_t)(UINT64_C(0))) * ((uint64_t)(UINT64_C(1))) + ((uint64_t)(UINT64_C(8))));
+    uint64_t v121060 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121059, 64);
+    void * v121061 = (void *)(uintptr_t)(v121060);
+    uint64_t v121062 = (uint64_t)((uint64_t)((uint64_t)(v121061)) & lain_mask(64));
+    lain_store_bits((void *)(uintptr_t)v116, (uint64_t)((uint64_t)(v121062)), 64);
+    uint64_t v121063 = (uint64_t)lain_load_bits((void *)(uintptr_t)v116, 64);
+    void * v121064 = (void *)(uintptr_t)(v121063);
+    uint64_t v121065 = lain_fn_120240((void *)(uintptr_t)v121064);
+    lain_store_bits((void *)(uintptr_t)v121051, (uint64_t)((uint64_t)(v121065)), 64);
     break;
   }
   default: {
@@ -205011,8 +204982,8 @@ static uint64_t lain_fn_120248(void) {
     break;
   }
   }
-  uint64_t v121083 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121068, 64);
-  { uint64_t _ret_val = (uint64_t)(v121083); lain_alloca_free(&_alloca_head); return _ret_val; }
+  uint64_t v121066 = (uint64_t)lain_load_bits((void *)(uintptr_t)v121051, 64);
+  { uint64_t _ret_val = (uint64_t)(v121066); lain_alloca_free(&_alloca_head); return _ret_val; }
 }
 
 int main(int argc, char **argv) {
