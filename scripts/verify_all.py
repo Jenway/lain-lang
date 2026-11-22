@@ -403,6 +403,11 @@ META_CASES = [
     # C99 文本必须含 switch / lain_load_bits / return 且非空。
     {"file": "phase6_ir_c99.lain", "entry": "s0__main", "value": 61,
      "folds": [], "procs": [], "absent": []},
+    # Phase 6.2：纯 Lain 的 Reader 与 AstOut。多行源码切出的 RawAst 节点数、孩子表、
+    # 记号文本与 1 基行列号必须对得上；括号错配与未闭合字符串必须给出确定错误码；
+    # AstOut 回滚复位水位，第二次事务提交 sum(1, 2) 子树后结构完整。
+    {"file": "phase6_reader_astout.lain", "entry": "s0__main", "value": 62,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},

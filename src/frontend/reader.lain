@@ -1,0 +1,606 @@
+// reader.lain —— 零关键字 Reader：把源码字节切片切成零语义的形式树。
+//
+// 文法只有 Form，没有保留字：
+//   Form  ::= Token | Group
+//   Group ::= '(' Form* ')' | '[' Form* ']' | '{' Form* '}'
+//   Token ::= Ident | Number | String | Punct
+// let / func / if / struct 这一层全是 Ident，语义解释权归 Meta。
+//
+// 输出是一块平坦 Arena，依次是：
+//   RawNode 记录（每个 5 个字，步长 size_of(RawNode)）、
+//   组的孩子 NodeId 列表（u32）、
+//   每个节点的 Span（line / col / offset / len）。
+// 组与孩子之间只靠下标引用，没有一处裸地址；span_id 就是节点下标。
+//
+// 两遍扫描：第一遍数节点、孩子引用与暂存深度并检查词法，第二遍按准确尺寸填。
+// 两遍走同一份 parse_group / token 代码，模式由 Builder.fill 选择，计数与填空
+// 不可能分家。第二遍把每个未闭合组的孩子先攒在 Arena 尾部的暂存区，组收尾时
+// 整段搬到孩子区的当前位置，于是每个组的孩子在最终布局里严格连续。
+//
+// 词法约定：空白与 `//` 行尾注释跳过；标识符以字母、下划线或非 ASCII 字节开头，
+// 后续可以带数字；数字支持十六进制 `0x`、小数与指数；字符串里的反斜杠连同它
+// 后面那个字节整对跳过，`"` `\\` `\n` `\t` 因此不会提前收尾。字面量一律保留原文，
+// 反转义与数值解析都是 Meta 的事。双字节标点是 `->` `=>` `==` `!=` `<=` `>=`
+// `<<` `>>` `..` `::`，其余标点逐个字节成词。
+//
+// 诊断位置：未闭合组报开括号，括号不配对报撞上的闭括号，字符串未终止报开引号，
+// 嵌套过深报当前扫描位置。行列按字节计，行与列都从 1 起。
+
+// --- 节点类别 -------------------------------------------------------------
+pub let RAW_TOKEN_IDENT = func() -> u64 { return 0; };
+pub let RAW_TOKEN_NUMBER = func() -> u64 { return 1; };
+pub let RAW_TOKEN_STRING = func() -> u64 { return 2; };
+pub let RAW_TOKEN_PUNCT = func() -> u64 { return 3; };
+pub let RAW_GROUP_PAREN = func() -> u64 { return 4; };
+pub let RAW_GROUP_BRACKET = func() -> u64 { return 5; };
+pub let RAW_GROUP_BRACE = func() -> u64 { return 6; };
+pub let RAW_ROOT = func() -> u64 { return 7; };
+
+// flags 目前只标记根节点；其余位保留且恒为 0。
+pub let FLAG_ROOT = func() -> u64 { return 1; };
+
+// --- 结果类别 -------------------------------------------------------------
+pub let RD_OK = func() -> u64 { return 0; };
+pub let RD_ERR_UNCLOSED = func() -> u64 { return 1; };
+pub let RD_ERR_MISMATCH = func() -> u64 { return 2; };
+pub let RD_ERR_STRING = func() -> u64 { return 3; };
+pub let RD_ERR_CAPACITY = func() -> u64 { return 4; };
+pub let RD_ERR_INTERNAL = func() -> u64 { return 5; };
+pub let RD_ERR_DEPTH = func() -> u64 { return 6; };
+
+pub let MAX_DEPTH = func() -> u64 { return 256; };
+
+// --- 布局 -----------------------------------------------------------------
+// payload：Token 是文本在源码里的字节偏移（字符串指向开引号，引号在文本之内）；
+// Group 是它那段连续孩子在孩子区里的起始下标，第 k 个孩子的 NodeId 是
+// children[payload + k]。span_id 就是节点下标，所以 Span 的条数等于 node_count。
+pub let RawNode = struct {
+  kind: u64,
+  flags: u64,
+  payload: u64,
+  child_count: u64,
+  span_id: u64,
+};
+
+pub let Span = struct {
+  line: u64,
+  col: u64,
+  offset: u64,
+  len: u64,
+};
+
+pub let RawAst = struct {
+  nodes: Ref(RawNode),
+  node_count: u64,
+  children: Ref(u32),
+  child_count: u64,
+  spans: Ref(Span),
+  root: u64,
+  kind: u64,
+  err_line: u64,
+  err_col: u64,
+  err_offset: u64,
+  needed: u64,
+  bytes: u64,
+};
+
+// --- 节点访问 -------------------------------------------------------------
+pub let node_at = func(base: Ref(RawNode), i: u64) -> Ref(RawNode) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Ref(RawNode), raw + i * size_of(RawNode));
+};
+
+pub let node_get = func(base: Ref(RawNode), i: u64) -> RawNode {
+  return deref(node_at(base, i));
+};
+
+pub let span_at = func(base: Ref(Span), i: u64) -> Span {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  let p: Ref(Span) = ptr_cast(Ref(Span), raw + i * size_of(Span));
+  return deref(p);
+};
+
+pub let node_span = func(ast: RawAst, id: u64) -> Span {
+  let n: RawNode = node_get(ast.nodes, id);
+  return span_at(ast.spans, n.span_id);
+};
+
+pub let child_id = func(ast: RawAst, group: u64, k: u64) -> u64 {
+  let g: RawNode = node_get(ast.nodes, group);
+  let raw: Mut(u8) = ptr_cast(Mut(u8), ast.children);
+  let p: Ref(u32) = ptr_cast(Ref(u32), raw + (g.payload + k) * 4);
+  return deref(p) as u64;
+};
+
+pub let node_text = func(source: Slice(u8), ast: RawAst, id: u64) -> Slice(u8) {
+  let n: RawNode = node_get(ast.nodes, id);
+  let sp: Span = span_at(ast.spans, n.span_id);
+  let base: Ref(u8) = source.ptr;
+  return make_slice(Slice(u8), base + sp.offset, sp.len);
+};
+
+// --- 扫描状态 -------------------------------------------------------------
+// fill = 0 只数，fill = 1 填。两遍共用同一个结构体与同一份递归代码。
+let Builder = struct {
+  source: Slice(u8),
+  nodes: Mut(RawNode),
+  children: Mut(u32),
+  spans: Mut(Span),
+  scratch: Mut(u32),
+  fill: u64,
+  at: u64,
+  line: u64,
+  col: u64,
+  node_count: u64,
+  child_count: u64,
+  scratch_used: u64,
+  scratch_max: u64,
+  kind: u64,
+  err_line: u64,
+  err_col: u64,
+  err_offset: u64,
+};
+
+let builder_count = func(source: Slice(u8)) -> Builder {
+  return Builder {
+    source: source,
+    nodes: null_ref(Mut(RawNode)),
+    children: null_ref(Mut(u32)),
+    spans: null_ref(Mut(Span)),
+    scratch: null_ref(Mut(u32)),
+    fill: 0,
+    at: 0,
+    line: 1,
+    col: 1,
+    node_count: 0,
+    child_count: 0,
+    scratch_used: 0,
+    scratch_max: 0,
+    kind: RD_OK(),
+    err_line: 0,
+    err_col: 0,
+    err_offset: 0,
+  };
+};
+
+let builder_fill = func(source: Slice(u8), base: Mut(u8), nodes_bytes: u64,
+                        children_bytes: u64, spans_bytes: u64) -> Builder {
+  let children_at: Mut(u8) = base + nodes_bytes;
+  let spans_at: Mut(u8) = children_at + children_bytes;
+  let scratch_at: Mut(u8) = spans_at + spans_bytes;
+  return Builder {
+    source: source,
+    nodes: ptr_cast(Mut(RawNode), base),
+    children: ptr_cast(Mut(u32), children_at),
+    spans: ptr_cast(Mut(Span), spans_at),
+    scratch: ptr_cast(Mut(u32), scratch_at),
+    fill: 1,
+    at: 0,
+    line: 1,
+    col: 1,
+    node_count: 0,
+    child_count: 0,
+    scratch_used: 0,
+    scratch_max: 0,
+    kind: RD_OK(),
+    err_line: 0,
+    err_col: 0,
+    err_offset: 0,
+  };
+};
+
+let failed = func(b: Mut(Builder)) -> bool {
+  return b.kind != RD_OK();
+};
+
+let fail_at = func(b: Mut(Builder), kind: u64, line: u64, col: u64,
+                   offset: u64) {
+  if failed(b) { return; }
+  b.kind = kind;
+  b.err_line = line;
+  b.err_col = col;
+  b.err_offset = offset;
+};
+
+let fail_here = func(b: Mut(Builder), kind: u64) {
+  fail_at(b, kind, b.line, b.col, b.at);
+};
+
+// --- 字节与字符类 ---------------------------------------------------------
+let peek = func(b: Mut(Builder), ahead: u64) -> u64 {
+  let i: u64 = b.at + ahead;
+  if i >= b.source.len { return 0; }
+  return b.source[i] as u64;
+};
+
+let bump = func(b: Mut(Builder)) {
+  if b.at >= b.source.len { return; }
+  let c: u64 = b.source[b.at] as u64;
+  b.at = b.at + 1;
+  if c == 10 {
+    b.line = b.line + 1;
+    b.col = 1;
+  } else {
+    b.col = b.col + 1;
+  }
+};
+
+let advance_to = func(b: Mut(Builder), end: u64) {
+  loop adv(go: u64 = 1) while go == 1 {
+    if b.at >= end { go = 0; } else { bump(b); }
+  };
+};
+
+// 读一个字节，越界给 0。所有字符类扫描都只经由它读源，`and` / `or` 在
+// LAINIR 里是两个操作数都求值的位运算，不能靠短路来保护下标。
+let at_byte = func(b: Mut(Builder), i: u64) -> u64 {
+  if i >= b.source.len { return 0; }
+  return b.source[i] as u64;
+};
+
+let is_digit = func(c: u64) -> u64 {
+  if (c >= 48) and (c <= 57) { return 1; }
+  return 0;
+};
+
+let is_hex_digit = func(c: u64) -> u64 {
+  if (c >= 48) and (c <= 57) { return 1; }
+  if (c >= 97) and (c <= 102) { return 1; }
+  if (c >= 65) and (c <= 70) { return 1; }
+  return 0;
+};
+
+let is_word = func(c: u64) -> u64 {
+  if (c >= 97) and (c <= 122) { return 1; }
+  if (c >= 65) and (c <= 90) { return 1; }
+  if (c >= 48) and (c <= 57) { return 1; }
+  if c == 95 { return 1; }
+  if c >= 128 { return 1; }
+  return 0;
+};
+
+let is_word_start = func(c: u64) -> u64 {
+  if (c >= 97) and (c <= 122) { return 1; }
+  if (c >= 65) and (c <= 90) { return 1; }
+  if c == 95 { return 1; }
+  if c >= 128 { return 1; }
+  return 0;
+};
+
+let is_open = func(c: u64) -> u64 {
+  if (c == 40) or (c == 91) or (c == 123) { return 1; }
+  return 0;
+};
+
+let closing_of = func(open: u64) -> u64 {
+  if open == 40 { return 41; }
+  if open == 91 { return 93; }
+  if open == 123 { return 125; }
+  return 0;
+};
+
+let group_kind_of = func(open: u64) -> u64 {
+  if open == 40 { return RAW_GROUP_PAREN(); }
+  if open == 91 { return RAW_GROUP_BRACKET(); }
+  if open == 123 { return RAW_GROUP_BRACE(); }
+  return RAW_ROOT();
+};
+
+// 双字节算子：-> => == != <= >= << >> .. ::
+let is_pair = func(c: u64, n: u64) -> u64 {
+  if (c == 45) and (n == 62) { return 1; }
+  if (c == 61) and (n == 62) { return 1; }
+  if (c == 61) and (n == 61) { return 1; }
+  if (c == 33) and (n == 61) { return 1; }
+  if (c == 60) and (n == 61) { return 1; }
+  if (c == 62) and (n == 61) { return 1; }
+  if (c == 60) and (n == 60) { return 1; }
+  if (c == 62) and (n == 62) { return 1; }
+  if (c == 46) and (n == 46) { return 1; }
+  if (c == 58) and (n == 58) { return 1; }
+  return 0;
+};
+
+// --- 空白与注释 -----------------------------------------------------------
+let skip_trivia = func(b: Mut(Builder)) {
+  loop sk(go: u64 = 1) while go == 1 {
+    if b.at >= b.source.len {
+      go = 0;
+    } else {
+      let c: u64 = b.source[b.at] as u64;
+      if c <= 32 {
+        bump(b);
+      } else if (c == 47) and (peek(b, 1) == 47) {
+        bump(b);
+        bump(b);
+        loop ln(stop: u64 = 0) while stop == 0 {
+          if b.at >= b.source.len {
+            stop = 1;
+          } else {
+            let cc: u64 = b.source[b.at] as u64;
+            if cc == 10 {
+              stop = 1;
+            } else {
+              bump(b);
+            }
+          }
+        };
+      } else {
+        go = 0;
+      }
+    }
+  };
+};
+
+// --- 词 -------------------------------------------------------------------
+let scan_ident_end = func(b: Mut(Builder)) -> u64 {
+  let s: u64 = b.at;
+  let i: u64 = loop w(i: u64 = s) while is_word(at_byte(b, i)) == 1 {
+    i = i + 1;
+  };
+  return i;
+};
+
+let scan_number_end = func(b: Mut(Builder)) -> u64 {
+  let s: u64 = b.at;
+  let hex: u64 = 0;
+  if at_byte(b, s) == 48 {
+    let x: u64 = at_byte(b, s + 1);
+    if (x == 120) or (x == 88) { hex = 1; }
+  }
+  if hex == 1 {
+    let i: u64 = loop hx(k: u64 = s + 2) while is_hex_digit(at_byte(b, k)) == 1 {
+      k = k + 1;
+    };
+    return i;
+  }
+  let i: u64 = loop dg(k: u64 = s) while is_digit(at_byte(b, k)) == 1 {
+    k = k + 1;
+  };
+  let frac: u64 = 0;
+  if at_byte(b, i) == 46 {
+    if is_digit(at_byte(b, i + 1)) == 1 { frac = 1; }
+  }
+  let j: u64 = i;
+  if frac == 1 {
+    j = loop fd(k: u64 = i + 2) while is_digit(at_byte(b, k)) == 1 {
+      k = k + 1;
+    };
+  }
+  let e: u64 = at_byte(b, j);
+  if (e == 101) or (e == 69) {
+    let sg: u64 = at_byte(b, j + 1);
+    let sign: u64 = if (sg == 43) or (sg == 45) { 1 } else { 0 };
+    let digits: u64 = j + 1 + sign;
+    if is_digit(at_byte(b, digits)) == 1 {
+      j = loop ed(k: u64 = digits) while is_digit(at_byte(b, k)) == 1 {
+        k = k + 1;
+      };
+    }
+  }
+  return j;
+};
+
+// 字符串：开引号之后一路吃字节，反斜杠连同它后面的那一个字节整对跳过。
+// 未终止返回 0。
+let scan_string_end = func(b: Mut(Builder)) -> u64 {
+  let q: u64 = b.at;
+  let end: u64 = 0;
+  let stop: u64 = loop sc(i: u64 = q + 1, stop: u64 = 0) while stop == 0 {
+    if i >= b.source.len {
+      stop = 1;
+    } else {
+      let c: u64 = b.source[i] as u64;
+      if c == 92 {
+        if (i + 1) < b.source.len { i = i + 2; } else { i = b.source.len; }
+      } else if c == 34 {
+        end = i + 1;
+        stop = 1;
+      } else {
+        i = i + 1;
+      }
+    }
+  };
+  return end;
+};
+
+let scan_punct_end = func(b: Mut(Builder)) -> u64 {
+  let c: u64 = b.source[b.at] as u64;
+  if is_pair(c, peek(b, 1)) == 1 { return b.at + 2; }
+  return b.at + 1;
+};
+
+let token_kind = func(c: u64) -> u64 {
+  if c == 34 { return RAW_TOKEN_STRING(); }
+  if is_digit(c) == 1 { return RAW_TOKEN_NUMBER(); }
+  if is_word_start(c) == 1 { return RAW_TOKEN_IDENT(); }
+  return RAW_TOKEN_PUNCT();
+};
+
+let token_end = func(b: Mut(Builder), c: u64) -> u64 {
+  if c == 34 { return scan_string_end(b); }
+  if is_digit(c) == 1 { return scan_number_end(b); }
+  if is_word_start(c) == 1 { return scan_ident_end(b); }
+  return scan_punct_end(b);
+};
+
+// --- Arena 写入 -----------------------------------------------------------
+let emit_node = func(b: Mut(Builder), kind: u64, flags: u64, payload: u64,
+                     count: u64, offset: u64, length: u64, line: u64,
+                     col: u64) -> u64 {
+  let id: u64 = b.node_count;
+  if b.fill == 1 {
+    let np: Mut(RawNode) = ptr_cast(Mut(RawNode), ptr_cast(Mut(u8), b.nodes) + id * size_of(RawNode));
+    deref(np) = RawNode {
+      kind: kind,
+      flags: flags,
+      payload: payload,
+      child_count: count,
+      span_id: id,
+    };
+    let sp: Mut(Span) = ptr_cast(Mut(Span), ptr_cast(Mut(u8), b.spans) + id * size_of(Span));
+    deref(sp) = Span { line: line, col: col, offset: offset, len: length };
+  }
+  b.node_count = id + 1;
+  return id;
+};
+
+let push_child = func(b: Mut(Builder), base: u64, index: u64, child: u64) {
+  let at: u64 = base + index;
+  if b.fill == 1 {
+    let p: Mut(u32) = ptr_cast(Mut(u32), ptr_cast(Mut(u8), b.scratch) + at * 4);
+    deref(p) = child as u32;
+  }
+  b.scratch_used = at + 1;
+  if at + 1 > b.scratch_max { b.scratch_max = at + 1; }
+};
+
+let copy_children = func(b: Mut(Builder), src_base: u64, dst_base: u64,
+                         count: u64) {
+  if b.fill == 0 { return; }
+  loop cp(k: u64 = 0) while k < count {
+    let sp: Mut(u32) = ptr_cast(Mut(u32), ptr_cast(Mut(u8), b.scratch) + (src_base + k) * 4);
+    let dp: Mut(u32) = ptr_cast(Mut(u32), ptr_cast(Mut(u8), b.children) + (dst_base + k) * 4);
+    deref(dp) = deref(sp);
+    k = k + 1;
+  };
+};
+
+// --- 组 -------------------------------------------------------------------
+// 返回组的 NodeId（后序：孩子先发布，组自己最后发布）。失败时 b.kind != RD_OK。
+let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
+  if depth > MAX_DEPTH() {
+    fail_here(b, RD_ERR_DEPTH());
+    return 0;
+  }
+  let start_off: u64 = b.at;
+  let start_line: u64 = b.line;
+  let start_col: u64 = b.col;
+  let scratch_start: u64 = b.scratch_used;
+  let count: u64 = 0;
+  if open != 0 { bump(b); }
+  loop body(go: u64 = 1) while go == 1 {
+    skip_trivia(b);
+    if b.at >= b.source.len {
+      if open == 0 {
+        go = 0;
+      } else {
+        fail_at(b, RD_ERR_UNCLOSED(), start_line, start_col, start_off);
+        go = 0;
+      }
+    } else {
+      let c: u64 = b.source[b.at] as u64;
+      if (c == 41) or (c == 93) or (c == 125) {
+        if (open == 0) or (c != closing_of(open)) {
+          fail_here(b, RD_ERR_MISMATCH());
+          go = 0;
+        } else {
+          bump(b);
+          go = 0;
+        }
+      } else if is_open(c) == 1 {
+        let child: u64 = parse_group(b, c, depth + 1);
+        if failed(b) {
+          go = 0;
+        } else {
+          push_child(b, scratch_start, count, child);
+          count = count + 1;
+        }
+      } else {
+        let start: u64 = b.at;
+        let line: u64 = b.line;
+        let col: u64 = b.col;
+        let kind: u64 = token_kind(c);
+        let end: u64 = token_end(b, c);
+        if end == 0 {
+          fail_at(b, RD_ERR_STRING(), line, col, start);
+          go = 0;
+        } else {
+          advance_to(b, end);
+          let id: u64 = emit_node(b, kind, 0, start, 0, start, end - start, line, col);
+          push_child(b, scratch_start, count, id);
+          count = count + 1;
+        }
+      }
+    }
+  };
+  if failed(b) { return 0; }
+  let payload: u64 = b.child_count;
+  copy_children(b, scratch_start, payload, count);
+  b.child_count = payload + count;
+  b.scratch_used = scratch_start;
+  let gkind: u64 = if open == 0 { RAW_ROOT() } else { group_kind_of(open) };
+  let gflags: u64 = if open == 0 { FLAG_ROOT() } else { 0 };
+  let span_off: u64 = if open == 0 { 0 } else { start_off };
+  let span_line: u64 = if open == 0 { 1 } else { start_line };
+  let span_col: u64 = if open == 0 { 1 } else { start_col };
+  let span_len: u64 = if open == 0 { b.source.len } else { b.at - start_off };
+  return emit_node(b, gkind, gflags, payload, count, span_off, span_len, span_line, span_col);
+};
+
+// --- 入口 -----------------------------------------------------------------
+let raw_ast_fail = func(kind: u64, line: u64, col: u64, offset: u64,
+                        needed: u64) -> RawAst {
+  return RawAst {
+    nodes: null_ref(Ref(RawNode)),
+    node_count: 0,
+    children: null_ref(Ref(u32)),
+    child_count: 0,
+    spans: null_ref(Ref(Span)),
+    root: 0,
+    kind: kind,
+    err_line: line,
+    err_col: col,
+    err_offset: offset,
+    needed: needed,
+    bytes: 0,
+  };
+};
+
+// 解析整份源码。Arena 由调用方提供：尾部要留出暂存区，所需字节数在容量不足时
+// 从 RawAst.needed 交回，调用方按它重新给一块就能成功。
+pub let parse = func(source: Slice(u8), arena: MutSlice(u8)) -> RawAst {
+  let scan0: Builder = builder_count(source);
+  let sb: Mut(Builder) = mut_of(scan0);
+  let counted: u64 = parse_group(sb, 0, 0);
+  if failed(sb) {
+    return raw_ast_fail(sb.kind, sb.err_line, sb.err_col, sb.err_offset, 0);
+  }
+  let nodes_bytes: u64 = sb.node_count * size_of(RawNode);
+  let children_bytes: u64 = sb.child_count * 4;
+  let spans_bytes: u64 = sb.node_count * size_of(Span);
+  let scratch_bytes: u64 = sb.scratch_max * 4;
+  let need: u64 = (((nodes_bytes + children_bytes) + spans_bytes) + scratch_bytes);
+  if need > arena.len {
+    return raw_ast_fail(RD_ERR_CAPACITY(), 0, 0, 0, need);
+  }
+  let base: Mut(u8) = arena.ptr;
+  let fill0: Builder = builder_fill(source, base, nodes_bytes, children_bytes, spans_bytes);
+  let fb: Mut(Builder) = mut_of(fill0);
+  let root: u64 = parse_group(fb, 0, 0);
+  if failed(fb) {
+    return raw_ast_fail(fb.kind, fb.err_line, fb.err_col, fb.err_offset, need);
+  }
+  let drift: u64 = 0;
+  if fb.node_count != sb.node_count { drift = 1; }
+  if fb.child_count != sb.child_count { drift = 1; }
+  if counted != root { drift = 1; }
+  if drift == 1 {
+    return raw_ast_fail(RD_ERR_INTERNAL(), 0, 0, 0, need);
+  }
+  let published: u64 = (nodes_bytes + children_bytes) + spans_bytes;
+  return RawAst {
+    nodes: ptr_cast(Ref(RawNode), base),
+    node_count: fb.node_count,
+    children: ptr_cast(Ref(u32), base + nodes_bytes),
+    child_count: fb.child_count,
+    spans: ptr_cast(Ref(Span), base + nodes_bytes + children_bytes),
+    root: root,
+    kind: RD_OK(),
+    err_line: 0,
+    err_col: 0,
+    err_offset: 0,
+    needed: 0,
+    bytes: published,
+  };
+};

@@ -1,0 +1,593 @@
+// src/meta/ast_out.lain —— 纯 Lain 的语法树输出 Arena（AstOut）。
+//
+// 展开阶段的宏在试探性推导时向 AstOut 顺序追加合成节点。三张表（节点表、
+// 孩子表、词文本池）各自只有一个追加水位，事务回滚就是把水位写回检查点：
+// 不遍历、不清零、不释放任何单条记录。提交则原样保留新增内容。
+//
+// 全部存储由调用方一次性交给 ast_out_init：在一块原始字节区里按固定容量
+// 切出节点表、紧排的 32 位孩子表、词文本池、驻留桶头、驻留链与事务检查点。
+// 构造过程中没有额外分配，节点生命周期完全由水位决定。
+
+// --- 节点类别与分隔符 -------------------------------------------------------
+pub let KIND_TOKEN = func() -> u64 { return 1; };
+pub let KIND_GROUP = func() -> u64 { return 2; };
+
+pub let DL_NONE = func() -> u64 { return 0; };
+pub let DL_PAREN = func() -> u64 { return 40; };
+pub let DL_BRACKET = func() -> u64 { return 91; };
+pub let DL_BRACE = func() -> u64 { return 123; };
+
+// 没有节点。节点下标从 0 起，节点表容量不允许达到这个值。
+pub let NO_NODE = func() -> u64 { return 4294967295; };
+
+// --- 违例终止 ---------------------------------------------------------------
+// 容量不足、下标越界、事务状态不符一律就地终止。参数只用来让除数在运行期
+// 求成零，编译器无法把这条除法折叠成常数。
+let Halt = struct { zero: u64 };
+let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
+let halt = func(cause: u64) -> u64 {
+  let h: Halt = Halt { zero: cause - cause };
+  return halt_at(h);
+};
+
+// --- 记录 -------------------------------------------------------------------
+// 一个合成节点。词的空孩子区段为 0/0，组的空文本区段为 0/0。
+pub let RawNode = struct {
+  kind: u64,
+  delim: u64,
+  sym: u64,
+  span_id: u64,
+  origin: u64,
+  child_off: u64,
+  child_count: u64,
+  text_off: u64,
+  text_len: u64,
+};
+
+// 事务检查点：开事务瞬间的全部水位与当时的根节点。
+pub let Mark = struct {
+  tx: u64,
+  node_used: u64,
+  kid_used: u64,
+  pool_used: u64,
+  root: u64,
+};
+
+pub let AstOut = struct {
+  nodes: Mut(RawNode),
+  node_cap: u64,
+  node_used: u64,
+  kids: Mut(u32),
+  kid_cap: u64,
+  kid_used: u64,
+  chain: Mut(u32),
+  heads: Mut(u32),
+  head_cap: u64,
+  pool: Mut(u8),
+  pool_cap: u64,
+  pool_used: u64,
+  marks: Mut(Mark),
+  mark_cap: u64,
+  depth: u64,
+  tx_seq: u64,
+  root: u64,
+};
+
+// --- 记录地址 ---------------------------------------------------------------
+// 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
+let node_slot = func(a: Mut(AstOut), id: u64) -> Mut(RawNode) {
+  return a.nodes + id * size_of(RawNode);
+};
+
+let kid_slot = func(a: Mut(AstOut), i: u64) -> Mut(u32) {
+  return a.kids + i * 4;
+};
+
+let chain_slot = func(a: Mut(AstOut), id: u64) -> Mut(u32) {
+  return a.chain + id * 4;
+};
+
+let head_slot = func(a: Mut(AstOut), h: u64) -> Mut(u32) {
+  return a.heads + h * 4;
+};
+
+let mark_slot = func(a: Mut(AstOut), d: u64) -> Mut(Mark) {
+  return a.marks + d * size_of(Mark);
+};
+
+// --- 容量与布局 -------------------------------------------------------------
+let align8 = func(n: u64) -> u64 { return (n + 7) / 8 * 8; };
+
+// 驻留桶的数量：不小于节点容量的 2 的幂，最小 16。
+pub let hash_cap_of = func(node_cap: u64) -> u64 {
+  return loop g(c: u64 = 16) while c < node_cap { c = c * 2; };
+};
+
+let node_bytes = func(node_cap: u64) -> u64 { return align8(node_cap * size_of(RawNode)); };
+let kid_bytes = func(kid_cap: u64) -> u64 { return align8(kid_cap * 4); };
+let chain_bytes = func(node_cap: u64) -> u64 { return align8(node_cap * 4); };
+let head_bytes = func(node_cap: u64) -> u64 { return align8(hash_cap_of(node_cap) * 4); };
+let pool_bytes = func(pool_cap: u64) -> u64 { return align8(pool_cap); };
+let mark_bytes = func(mark_cap: u64) -> u64 { return align8(mark_cap * size_of(Mark)); };
+
+// 调用方要准备的字节数。各区段依次是：节点表、孩子表、驻留链、驻留桶头、
+// 文本池、事务检查点。
+pub let ast_out_bytes = func(node_cap: u64, kid_cap: u64, pool_cap: u64, mark_cap: u64) -> u64 {
+  return node_bytes(node_cap) + kid_bytes(kid_cap) + chain_bytes(node_cap) +
+         head_bytes(node_cap) + pool_bytes(pool_cap) + mark_bytes(mark_cap);
+};
+
+// 节点下标必须能塞进 32 位孩子表，且不能撞上 NO_NODE。
+let check_node_cap = func(node_cap: u64) -> u64 {
+  if node_cap > NO_NODE() { return halt(node_cap); }
+  return node_cap;
+};
+
+pub let ast_out_init = func(arena: Mut(u8), node_cap: u64, kid_cap: u64, pool_cap: u64,
+                            mark_cap: u64) -> AstOut {
+  let nc: u64 = check_node_cap(node_cap);
+  let hcap: u64 = hash_cap_of(nc);
+  let kids_at: Mut(u8) = arena + node_bytes(nc);
+  let chain_at: Mut(u8) = kids_at + kid_bytes(kid_cap);
+  let heads_at: Mut(u8) = chain_at + chain_bytes(nc);
+  let pool_at: Mut(u8) = heads_at + head_bytes(nc);
+  let marks_at: Mut(u8) = pool_at + pool_bytes(pool_cap);
+  let head_ptr: Mut(u32) = ptr_cast(Mut(u32), heads_at);
+  let z: u64 = loop c(i: u64 = 0) while i < hcap {
+    let q: Mut(u32) = head_ptr + i * 4;
+    deref(q) = 0;
+    i = i + 1;
+  };
+  return AstOut {
+    nodes: ptr_cast(Mut(RawNode), arena),
+    node_cap: nc,
+    node_used: 0,
+    kids: ptr_cast(Mut(u32), kids_at),
+    kid_cap: kid_cap,
+    kid_used: 0,
+    chain: ptr_cast(Mut(u32), chain_at),
+    heads: head_ptr,
+    head_cap: hcap,
+    pool: pool_at,
+    pool_cap: pool_cap,
+    pool_used: 0,
+    marks: ptr_cast(Mut(Mark), marks_at),
+    mark_cap: mark_cap,
+    depth: 0,
+    tx_seq: 0,
+    root: NO_NODE(),
+  };
+};
+
+// 整块缓冲区的最小容量：至少能切出 16 个节点、32 个孩子与 8 层检查点。
+let check_arena = func(total: u64) -> u64 {
+  if total < 2048 { return halt(total); }
+  return total;
+};
+
+let check_spare = func(total: u64, fixed: u64) -> u64 {
+  if fixed >= total { return halt(fixed); }
+  return total - fixed;
+};
+
+// 把一整块缓冲区交给 AstOut：每 128 字节预算给一个节点，孩子表是节点的
+// 两倍，检查点固定 8 层，剩下的字节全部归文本池。
+pub let new = func(buf: MutSlice(u8)) -> AstOut {
+  let total: u64 = check_arena(buf.len);
+  let node_cap: u64 = total / 128;
+  let kid_cap: u64 = node_cap * 2;
+  let mark_cap: u64 = 8;
+  let fixed: u64 = node_bytes(node_cap) + kid_bytes(kid_cap) + chain_bytes(node_cap) +
+                    head_bytes(node_cap) + mark_bytes(mark_cap);
+  let pool_cap: u64 = check_spare(total, fixed);
+  let base: Mut(u8) = buf.ptr;
+  return ast_out_init(base, node_cap, kid_cap, pool_cap, mark_cap);
+};
+
+// --- 水位查询 ---------------------------------------------------------------
+pub let node_count = func(a: Mut(AstOut)) -> u64 { return a.node_used; };
+pub let child_total = func(a: Mut(AstOut)) -> u64 { return a.kid_used; };
+pub let pool_total = func(a: Mut(AstOut)) -> u64 { return a.pool_used; };
+pub let node_capacity = func(a: Mut(AstOut)) -> u64 { return a.node_cap; };
+pub let child_capacity = func(a: Mut(AstOut)) -> u64 { return a.kid_cap; };
+pub let pool_capacity = func(a: Mut(AstOut)) -> u64 { return a.pool_cap; };
+pub let tx_depth = func(a: Mut(AstOut)) -> u64 { return a.depth; };
+pub let root_of = func(a: Mut(AstOut)) -> u64 { return a.root; };
+
+// 丢弃全部节点。驻留桶里残留的下标会在下一次插入时被跳过并重新指向活节点。
+pub let ast_out_clear = func(a: Mut(AstOut)) -> u64 {
+  a.node_used = 0;
+  a.kid_used = 0;
+  a.pool_used = 0;
+  a.depth = 0;
+  a.root = NO_NODE();
+  return 0;
+};
+
+// --- 事务 -------------------------------------------------------------------
+let trap_mark = func(a: Mut(AstOut), cause: u64) -> Mut(Mark) {
+  let dead: u64 = halt(cause);
+  return a.marks;
+};
+
+let top_mark = func(a: Mut(AstOut), tx: u64) -> Mut(Mark) {
+  if a.depth == 0 { return trap_mark(a, tx); }
+  let m: Mut(Mark) = mark_slot(a, a.depth - 1);
+  if m.tx != tx { return trap_mark(a, tx); }
+  return m;
+};
+
+// 开一次事务，返回事务号。检查点记下三个水位与当前根节点。
+pub let tx_begin = func(a: Mut(AstOut)) -> u64 {
+  if a.depth >= a.mark_cap { return halt(a.depth); }
+  let d: u64 = a.depth;
+  let tx: u64 = a.tx_seq + 1;
+  let m: Mut(Mark) = mark_slot(a, d);
+  m.tx = tx;
+  m.node_used = a.node_used;
+  m.kid_used = a.kid_used;
+  m.pool_used = a.pool_used;
+  m.root = a.root;
+  a.depth = d + 1;
+  a.tx_seq = tx;
+  return tx;
+};
+
+// 提交：只弹检查点并登记新根，新增节点全部保留。
+pub let tx_commit = func(a: Mut(AstOut), tx: u64, root: u64) -> u64 {
+  let m: Mut(Mark) = top_mark(a, tx);
+  if root != NO_NODE() {
+    if root >= a.node_used { return halt(root); }
+  }
+  a.depth = a.depth - 1;
+  a.root = root;
+  return root;
+};
+
+// 回滚：三个水位写回检查点，根节点恢复到开事务时的值。检查点之后追加的
+// 节点、孩子与字节物理上仍留在区段里，但水位已经越过它们，不再可见。
+pub let tx_rollback = func(a: Mut(AstOut), tx: u64) -> u64 {
+  let m: Mut(Mark) = top_mark(a, tx);
+  let saved: u64 = m.root;
+  a.node_used = m.node_used;
+  a.kid_used = m.kid_used;
+  a.pool_used = m.pool_used;
+  a.root = saved;
+  a.depth = a.depth - 1;
+  return saved;
+};
+
+// --- 只读查询 ---------------------------------------------------------------
+let trap_node = func(a: Mut(AstOut), cause: u64) -> RawNode {
+  let dead: u64 = halt(cause);
+  return RawNode {
+    kind: 0,
+    delim: 0,
+    sym: 0,
+    span_id: 0,
+    origin: 0,
+    child_off: 0,
+    child_count: 0,
+    text_off: 0,
+    text_len: 0,
+  };
+};
+
+pub let node_live = func(a: Mut(AstOut), id: u64) -> u64 {
+  if id < a.node_used { return 1; }
+  return 0;
+};
+
+pub let node_at = func(a: Mut(AstOut), id: u64) -> RawNode {
+  if id >= a.node_used { return trap_node(a, id); }
+  let slot: Mut(RawNode) = node_slot(a, id);
+  return deref(slot);
+};
+
+pub let node_kind = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.kind;
+};
+
+pub let node_delim = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.delim;
+};
+
+pub let node_sym = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.sym;
+};
+
+pub let node_span = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.span_id;
+};
+
+pub let node_origin = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.origin;
+};
+
+pub let child_count = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  return n.child_count;
+};
+
+pub let child_at = func(a: Mut(AstOut), id: u64, i: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  if n.kind != KIND_GROUP() { return halt(id); }
+  if i >= n.child_count { return halt(i); }
+  let p: Mut(u32) = kid_slot(a, n.child_off + i);
+  let v: u32 = deref(p);
+  return v as u64;
+};
+
+pub let trap_slice = func(a: Mut(AstOut), cause: u64) -> Slice(u8) {
+  let dead: u64 = halt(cause);
+  return make_slice(Slice(u8), a.pool, 0);
+};
+
+// 词文本的只读视图，指向文本池里被驻留的那一段。
+pub let text_of = func(a: Mut(AstOut), id: u64) -> Slice(u8) {
+  let n: RawNode = node_at(a, id);
+  if n.kind != KIND_TOKEN() { return trap_slice(a, id); }
+  let p: Mut(u8) = a.pool + n.text_off;
+  return make_slice(Slice(u8), p, n.text_len);
+};
+
+// --- 词驻留 ---------------------------------------------------------------
+// 词按 (符号句柄, 来源节点, 跨度, 文本字节) 驻留：全部字段相同的词共用同一个
+// 节点下标，重复合成标点与关键字不再占用节点。
+let hash_basis = func() -> u64 { return 0xcbf29ce484222325; };
+let hash_prime = func() -> u64 { return 0x100000001b3; };
+
+let hash_step = func(h: u64, v: u64) -> u64 { return (h ^ v) * hash_prime(); };
+
+let tok_hash = func(sym: u64, origin: u64, span: u64, text: Slice(u8)) -> u64 {
+  let h0: u64 = hash_step(hash_step(hash_step(hash_basis(), sym), origin), span);
+  let n: u64 = text.len;
+  return loop c(i: u64 = 0, h: u64 = h0) while i < n {
+    let b: u8 = text[i];
+    h = hash_step(h, b as u64);
+    i = i + 1;
+  };
+};
+
+let tok_eq = func(a: Mut(AstOut), id: u64, sym: u64, origin: u64, span: u64, text: Slice(u8)) -> u64 {
+  let n: RawNode = node_at(a, id);
+  if n.kind != KIND_TOKEN() { return 0; }
+  if n.sym != sym { return 0; }
+  if n.origin != origin { return 0; }
+  if n.span_id != span { return 0; }
+  if n.text_len != text.len { return 0; }
+  let same: u64 = loop c(i: u64 = 0, ok: u64 = 1) while i < n.text_len {
+    let p: Mut(u8) = a.pool + (n.text_off + i);
+    let b: u8 = deref(p);
+    let t: u8 = text[i];
+    if b != t { ok = 0; }
+    i = i + 1;
+  };
+  return same;
+};
+
+// 桶头里存的是「下标 + 1」，0 表示空桶。链上的连接只指向更早的节点，
+// 因此活节点的后继必然也是活节点，回滚只会让桶头指向已废弃的下标。
+let chain_at = func(a: Mut(AstOut), id: u64) -> u64 {
+  let p: Mut(u32) = chain_slot(a, id);
+  let v: u32 = deref(p);
+  return v as u64;
+};
+
+let chain_put = func(a: Mut(AstOut), id: u64, link: u64) -> u64 {
+  let p: Mut(u32) = chain_slot(a, id);
+  deref(p) = link as u32;
+  return link;
+};
+
+let head_put = func(a: Mut(AstOut), h: u64, link: u64) -> u64 {
+  let p: Mut(u32) = head_slot(a, h);
+  deref(p) = link as u32;
+  return link;
+};
+
+// 找出这个桶里第一个活节点对应的链接值，并把桶头直接改指它。
+let head_live = func(a: Mut(AstOut), h: u64) -> u64 {
+  let p: Mut(u32) = head_slot(a, h);
+  let head: u32 = deref(p);
+  let res: u64 = loop f(c: u64 = head as u64) while c != 0 {
+    if c - 1 >= a.node_used {
+      c = chain_at(a, c - 1);
+    } else {
+      break f(c);
+    }
+  };
+  head_put(a, h, res);
+  return res;
+};
+
+let scan_bucket = func(a: Mut(AstOut), link: u64, sym: u64, origin: u64, span: u64,
+                       text: Slice(u8)) -> u64 {
+  if link == 0 { return NO_NODE(); }
+  let id: u64 = link - 1;
+  if id < a.node_used {
+    if tok_eq(a, id, sym, origin, span, text) == 1 { return id; }
+  }
+  return scan_bucket(a, chain_at(a, id), sym, origin, span, text);
+};
+
+let intern_find = func(a: Mut(AstOut), sym: u64, origin: u64, span: u64, text: Slice(u8)) -> u64 {
+  let h: u64 = tok_hash(sym, origin, span, text) % a.head_cap;
+  let p: Mut(u32) = head_slot(a, h);
+  let head: u32 = deref(p);
+  return scan_bucket(a, head as u64, sym, origin, span, text);
+};
+
+// --- 容量检查 ---------------------------------------------------------------
+let room_node = func(a: Mut(AstOut), cause: u64) -> u64 {
+  if a.node_used >= a.node_cap { return halt(cause); }
+  return a.node_used;
+};
+
+let room_kids = func(a: Mut(AstOut), n: u64) -> u64 {
+  if n > a.kid_cap - a.kid_used { return halt(n); }
+  return a.kid_used;
+};
+
+let room_pool = func(a: Mut(AstOut), n: u64) -> u64 {
+  if n > a.pool_cap - a.pool_used { return halt(n); }
+  return a.pool_used;
+};
+
+// 组的分隔符只能是 0、 (、 [、 {。
+let check_delim = func(delim: u64) -> u64 {
+  if delim == DL_NONE() { return delim; }
+  if delim == DL_PAREN() { return delim; }
+  if delim == DL_BRACKET() { return delim; }
+  if delim == DL_BRACE() { return delim; }
+  return halt(delim);
+};
+
+// 孩子只能指向已经完整构造好的活节点，正常构造因此天然无环。
+let check_kid = func(a: Mut(AstOut), v: u32) -> u64 {
+  let w: u64 = v as u64;
+  if w >= a.node_used { return halt(w); }
+  return w;
+};
+
+let copy_kids = func(a: Mut(AstOut), base: u64, kids: Slice(u32)) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < kids.len {
+    let v: u32 = kids[i];
+    let w: u64 = check_kid(a, v);
+    let p: Mut(u32) = kid_slot(a, base + i);
+    deref(p) = v;
+    i = i + 1;
+  };
+  return i;
+};
+
+let copy_text = func(a: Mut(AstOut), off: u64, text: Slice(u8)) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < text.len {
+    let p: Mut(u8) = a.pool + (off + i);
+    deref(p) = text[i];
+    i = i + 1;
+  };
+  return i;
+};
+
+let put_node = func(a: Mut(AstOut), kind: u64, delim: u64, sym: u64, span: u64, origin: u64,
+                    child_off: u64, child_count: u64, text_off: u64, text_len: u64) -> u64 {
+  let id: u64 = room_node(a, span);
+  let slot: Mut(RawNode) = node_slot(a, id);
+  slot.kind = kind;
+  slot.delim = delim;
+  slot.sym = sym;
+  slot.span_id = span;
+  slot.origin = origin;
+  slot.child_off = child_off;
+  slot.child_count = child_count;
+  slot.text_off = text_off;
+  slot.text_len = text_len;
+  a.node_used = id + 1;
+  return id;
+};
+
+// --- 构造 -------------------------------------------------------------------
+// 词：sym 是符号句柄（0 表示没有符号），origin 是被拷贝的源节点下标
+// （0 表示凭空构造），span 是诊断用的源码跨度句柄，text 是原始字节。
+// 完全相同的词已经在池里时直接交回它原来的下标。
+pub let mk_token = func(a: Mut(AstOut), sym: u64, origin: u64, span: u64,
+                        text: Slice(u8)) -> u64 {
+  let have: u64 = intern_find(a, sym, origin, span, text);
+  if have != NO_NODE() { return have; }
+  let n: u64 = text.len;
+  let off: u64 = room_pool(a, n);
+  let copied: u64 = copy_text(a, off, text);
+  let id: u64 = put_node(a, KIND_TOKEN(), DL_NONE(), sym, span, origin, 0, 0, off, n);
+  let h: u64 = tok_hash(sym, origin, span, text) % a.head_cap;
+  let head: u64 = head_live(a, h);
+  let link: u64 = chain_put(a, id, head);
+  head_put(a, h, id + 1);
+  a.pool_used = off + n;
+  return id;
+};
+
+// 组：delim 是分隔符的 ASCII 码，span 是诊断用的源码跨度句柄，kids 是紧排的
+// 32 位孩子下标。孩子按给定次序追加到孩子表尾部。
+pub let mk_group = func(a: Mut(AstOut), delim: u64, span: u64, kids: Slice(u32)) -> u64 {
+  let dl: u64 = check_delim(delim);
+  let n: u64 = kids.len;
+  let base: u64 = room_kids(a, n);
+  let copied: u64 = copy_kids(a, base, kids);
+  let id: u64 = put_node(a, KIND_GROUP(), dl, 0, span, 0, base, n, 0, 0);
+  a.kid_used = base + n;
+  return id;
+};
+
+pub let mk_group_empty = func(a: Mut(AstOut), delim: u64, span: u64) -> u64 {
+  let dl: u64 = check_delim(delim);
+  let base: u64 = a.kid_used;
+  return put_node(a, KIND_GROUP(), dl, 0, span, 0, base, 0, 0, 0);
+};
+
+// 只有本次事务内构造的组才允许改写：已提交的组一旦被回滚就会指到废弃的
+// 孩子区段上，因此在检查点之前构造的组直接拒绝。
+let check_rewrite = func(a: Mut(AstOut), id: u64) -> u64 {
+  let n: RawNode = node_at(a, id);
+  if n.kind != KIND_GROUP() { return halt(id); }
+  if a.depth != 0 {
+    let m: Mut(Mark) = mark_slot(a, a.depth - 1);
+    if id < m.node_used { return halt(id); }
+  }
+  return id;
+};
+
+// 改写：把已有的组换成新的分隔符与新的孩子表，节点只就地更新三个字段。
+pub let rewrite_group = func(a: Mut(AstOut), id: u64, delim: u64, kids: Slice(u32)) -> u64 {
+  let keep: u64 = check_rewrite(a, id);
+  let dl: u64 = check_delim(delim);
+  let cnt: u64 = kids.len;
+  let base: u64 = room_kids(a, cnt);
+  let copied: u64 = copy_kids(a, base, kids);
+  let slot: Mut(RawNode) = node_slot(a, id);
+  slot.delim = dl;
+  slot.child_off = base;
+  slot.child_count = cnt;
+  a.kid_used = base + cnt;
+  return id;
+};
+
+pub let rewrite_group_empty = func(a: Mut(AstOut), id: u64, delim: u64) -> u64 {
+  let keep: u64 = check_rewrite(a, id);
+  let dl: u64 = check_delim(delim);
+  let slot: Mut(RawNode) = node_slot(a, id);
+  slot.delim = dl;
+  slot.child_off = a.kid_used;
+  slot.child_count = 0;
+  return id;
+};
+
+// --- 短名接口 ---------------------------------------------------------------
+// Reader、展开遍次与宏构造点用这组紧凑命名：mark 是节点水位，begin / commit /
+// rollback 是事务三件套，token / group 是无来源节点的构造快捷方式。
+pub let K_TOKEN = func() -> u64 { return KIND_TOKEN(); };
+pub let K_GROUP = func() -> u64 { return KIND_GROUP(); };
+
+pub let mark = func(a: Mut(AstOut)) -> u64 { return a.node_used; };
+pub let begin = func(a: Mut(AstOut)) -> u64 { return tx_begin(a); };
+pub let commit = func(a: Mut(AstOut), tx: u64, root: u64) -> u64 { return tx_commit(a, tx, root); };
+pub let rollback = func(a: Mut(AstOut), tx: u64) -> u64 { return tx_rollback(a, tx); };
+
+pub let token = func(a: Mut(AstOut), text: Slice(u8), span: u64) -> u64 {
+  return mk_token(a, 0, 0, span, text);
+};
+
+pub let group = func(a: Mut(AstOut), delim: u64, kids: Ref(u32), count: u64) -> u64 {
+  let view: Slice(u32) = make_slice(Slice(u32), kids, count);
+  return mk_group(a, delim, 0, view);
+};
+
+pub let kind = func(a: Mut(AstOut), id: u64) -> u64 { return node_kind(a, id); };
+pub let delimiter = func(a: Mut(AstOut), id: u64) -> u64 { return node_delim(a, id); };
+pub let child = func(a: Mut(AstOut), id: u64, i: u64) -> u64 { return child_at(a, id, i); };
+pub let text = func(a: Mut(AstOut), id: u64) -> Slice(u8) { return text_of(a, id); };
