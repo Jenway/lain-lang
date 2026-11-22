@@ -19,6 +19,7 @@ let tb = import("tbuild");
 let gv = import("given");
 let modules = import("modules");
 let ctfn = import("ctfn");
+let ef = import("effects");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern stmt_p1_group(k: Mut(st.State), g: u64) -> u64 = lainc_eval_phase1_group;
@@ -186,11 +187,14 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     return j;
   }
   let e: u64 = expect_sym(k, g, j, s.p_eq());
+  let efj: u64 = ef.effect_rhs(k, g, e, name, 0);
+  if efj != 0 { return skip_semi(g, efj); }
   let mb: u64 = ct_module_rhs(k, g, e, name);
   if mb != 0 { return mb; }
   let v: Mut(ty.Val) = new_val(k);
   let nj: u64 = core_expr(k, g, e, 0, t, v);
   if st.st_ok(k) != 0 { return nj; }
+  if ef.take_aborts(k) == 1 { return skip_semi(g, nj); }
   let vt: Mut(ty.Ty) = new_ty(k);
   if ty.ty_known(t) == 1 {
     ty.ty_at(vt, t);
@@ -253,6 +257,7 @@ let stmt_assign = func(k: Mut(st.State), g: u64, i: u64, eqj: u64) -> u64 {
   let v: Mut(ty.Val) = new_val(k);
   let j: u64 = core_expr(k, g, eqj + 1, 0, t, v);
   if st.st_ok(k) != 0 { return j; }
+  if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
   let c: Mut(ty.Val) = new_val(k);
   let c1: u64 = coerce(k, v, ty.vty(v), t, c);
   if st.st_ok(k) != 0 { return j; }
@@ -274,6 +279,25 @@ let ret_value = func(k: Mut(st.State), g: u64, j0: u64, rt: Mut(ty.Ty)) -> u64 {
 
 let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   box_put(term, 1);
+  let ins: Mut(ef.InlineState) = ef.inline_top(k);
+  if is_null(ins) == 0 {
+    let ct: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), ins.tp);
+    let j0: u64 = i + 1;
+    let has: u64 = if j0 < n_count(g) and is_semi(g, j0) == 0 { 1 } else { 0 };
+    let jj: u64 = if has == 1 {
+      let v: Mut(ty.Val) = new_val(k);
+      let ej: u64 = core_expr(k, g, j0, 0, ct, v);
+      if st.st_ok(k) == 0 and ty.val_known(v) == 1 {
+        let c: Mut(ty.Val) = new_val(k);
+        coerce(k, v, ty.vty(v), ct, c);
+        if st.st_ok(k) == 0 { slot_put(k, ins.slot, c, ct); }
+      }
+      ej
+    } else { j0 };
+    ir.args_reset(k);
+    ir.emit_jump(k, codes.INST_BREAK(), ins.label);
+    return skip_semi(g, jj);
+  }
   let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_save(rt, st.st_retk(k), st.st_retw(k), st.st_retsg(k));
   let sh: u64 = ty.ty_set_sh(rt, st.st_retsh(k));
@@ -285,6 +309,7 @@ let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 
     let v: Mut(ty.Val) = new_val(k);
     let j: u64 = core_expr(k, g, j0, 0, rt, v);
     if st.st_ok(k) != 0 { return j; }
+    if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
     let c: Mut(ty.Val) = new_val(k);
     let c1: u64 = coerce(k, v, ty.vty(v), rt, c);
     if st.st_ok(k) != 0 { return j; }
@@ -296,6 +321,7 @@ let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 
   }
   ir.args_reset(k);
   let j: u64 = if has == 1 { ret_value(k, g, j0, rt) } else { j0 };
+  if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
   ir.emit_jump(k, codes.INST_RETURN(), 0);
   return skip_semi(g, j);
 };
@@ -459,6 +485,10 @@ let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
   let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
   let j: u64 = core_expr(k, g, i, 0, hint, v);
   if st.st_ok(k) != 0 { return j; }
+  if ef.take_aborts(k) == 1 {
+    box_put(term, 1);
+    return skip_semi(g, j);
+  }
   if slot != no_slot() and ty.val_known(v) == 1 {
     slot_put(k, slot, v, ty.vty(v));
   }

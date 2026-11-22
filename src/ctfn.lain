@@ -19,6 +19,23 @@ let ct_val_at = func(ab: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
   return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), ab) + idx * 24);
 };
 
+// 编译期绑定栈的槽位：[名字@0, 种类@8, 值一@16, 值二@24]。
+let CtStackSlot = struct {
+  name: u64,
+  kind: u64,
+  a: u64,
+  b: u64
+};
+
+// 当前编译期调用帧里最近绑定的类型（种类 1）：参数化效应靠它记住自己的类型实参。
+let frame_type_scan = func(k: Mut(st.State), used: u64) -> u64 {
+  if used == 0 { return 0; }
+  let back: u64 = used - 32;
+  let b: Mut(CtStackSlot) = ptr_cast(Mut(CtStackSlot), st.st_ctbase(k) + back);
+  if b.kind == 1 { return b.a; }
+  return frame_type_scan(k, back);
+};
+
 let word_at = func(tbl: Mut(u64), idx: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + idx * 8);
 };
@@ -85,6 +102,14 @@ let ct_call = func(k: Mut(st.State), name: u64, ag: u64, out: Mut(ctf.CtVal)) ->
   return 1;
 };
 
+let ct_meta_tid = func(k: Mut(st.State), name: u64) -> u64 {
+  if name == s.t_type() { return tb.type_tid(k); }
+  if name == s.t_effect() { return tb.effect_tid(k); }
+  if name == s.t_effect_row() { return tb.effect_row_tid(k); }
+  if name == s.t_never() { return tb.never_tid(k); }
+  return ctf.tid_of_name(k, name);
+};
+
 let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { ctf.fail_msg(k, "empty comptime expr", 19, ax.e_ast()); return i; }
@@ -123,6 +148,12 @@ let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
     eval_mod_expr(k, ax.n_at(g, i + 1), out);
     return i + 2;
   }
+  // effect { op ... }：值一记下操作声明所在的括号组，值二记下当前帧的类型实参。
+  if name == s.k_effect() and ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 {
+    let ptid: u64 = frame_type_scan(k, st.st_ctused(k));
+    ctf.v_set(out, 11, ax.n_at(g, i + 1), ptid);
+    return i + 2;
+  }
   if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
     let m: u64 = modules.mod_lookup(k, name);
     if m != 0 {
@@ -157,7 +188,7 @@ let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
     ctf.v_set(out, ctf.v_kind(bv), ctf.v_a(bv), ctf.v_b(bv));
     return i + 1;
   }
-  let tid: u64 = if name == s.t_type() { tb.type_tid(k) } else { ctf.tid_of_name(k, name) };
+  let tid: u64 = ct_meta_tid(k, name);
   if tid != 0 { ctf.v_set(out, 1, tid, 0); return i + 1; }
   ctf.fail_msg(k, "unknown comptime name", 21, ax.e_unbound());
   return i + 1;
@@ -375,12 +406,16 @@ let run_at = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
 };
 
 // --- 对外入口：顶层 let 绑定与类型位置调用 -------------------------------
+// 只有返回 Type / Module / Effect 的函数算类型工厂：这三种值都只在编译期存在。
 let factory_call_user = func(k: Mut(st.State), fn: Mut(modules.SymEntry), ag: u64, out: Mut(ctf.CtVal)) -> u64 {
   if is_null(fn) == 1 { return 0; }
   if modules.sym_kind(fn) != modules.sym_kind_func() { return 0; }
   if tb.sig_types(modules.sym_sig(fn)) == 0 { return 0; }
   call_user(k, fn, ag, out);
-  return 1;
+  if st.st_ok(k) != 0 { return 1; }
+  let fk: u64 = ctf.v_kind(out);
+  if (fk == 1) or (fk == 9) or (fk == 11) { return 1; }
+  return 0;
 };
 
 let path_call_at = func(k: Mut(st.State), g: u64, i: u64, owner: u64, seal: u64, out: Mut(ctf.CtVal)) -> u64 {

@@ -96,6 +96,56 @@ pub let module_tid = func(k: Mut(st.State)) -> u64 {
   return agg.shp_tid(sh);
 };
 
+// --- 效应的编译期元类型：Effect / EffectRow / Never -----------------------
+// Effect 与 EffectRow 与 Type / Module 同构：只有编译期的逻辑形状，运行期不物化。
+// 两者的形状种类都是 kind_type，所以 sig_types 会把带这类形参或返回值的函数
+// 一律当成编译期工厂（它们本来也只能在编译期求值）。
+let meta_scan = func(k: Mut(st.State), sh_kind: u64, name: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let id: u64 = i + 1;
+  let sh: u64 = ireg.ty_shape(k, id);
+  if sh != 0 {
+    if (agg.shp_kind(sh) == sh_kind) and (agg.shp_name(sh) == name) { return sh; }
+  }
+  return meta_scan(k, sh_kind, name, i + 1, n);
+};
+
+// 同一编译单元里同名的元类型形状只存在一份，编号也因此稳定。
+let meta_shape = func(k: Mut(st.State), sh_kind: u64, name: u64) -> u64 {
+  let got: u64 = meta_scan(k, sh_kind, name, 0, ireg.reg_count(k));
+  if got != 0 { return got; }
+  let sh: u64 = agg.shp_new(k, sh_kind, name, st.st_src(k));
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(sh_kind), 0, 0, sh);
+  agg.shp_set_tid(sh, id);
+  return sh;
+};
+
+pub let effect_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_type(), s.t_effect());
+};
+
+pub let effect_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(effect_shape(k));
+};
+
+pub let effect_row_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_type(), s.t_effect_row());
+};
+
+pub let effect_row_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(effect_row_shape(k));
+};
+
+// Never 是中止性操作的返回类型：形状是零成员的记录，投影成 0 字节。
+// 它不是 kind_type，所以返回 Never 的过程不会被当成编译期工厂。
+pub let never_shape = func(k: Mut(st.State)) -> u64 {
+  return meta_shape(k, agg.kind_struct(), s.t_never());
+};
+
+pub let never_tid = func(k: Mut(st.State)) -> u64 {
+  return agg.shp_tid(never_shape(k));
+};
+
 let scan_params = func(paramp: Mut(ty.Ty), i: u64, np: u64) -> u64 {
   if i >= np { return 0; }
   let pt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), paramp) + i * 32);

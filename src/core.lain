@@ -27,6 +27,7 @@ let ctf = import("ctfor");
 let ctfn = import("ctfn");
 let gv = import("given");
 let gn = import("generics");
+let ef = import("effects");
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
@@ -113,6 +114,10 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
           return rv.member_on_val(k, g, i, minp, want, out);
         }
       }
+    }
+    if n_sym(g, i) == s.p_bang() {
+      let pr: u64 = ef.propagate(k);
+      return expr_tail(k, g, i + 1, minp, want, out);
     }
   }
   let op: u64 = if is_group(g, i) == 0 { n_sym(g, i) } else { 0 };
@@ -306,6 +311,15 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     st.st_fail(k, e_unsup());
     return i + 1;
   }
+  if sym == s.k_perform() { return ef.perform_expr(k, g, i, want, out); }
+  if sym == s.k_handle() { return ef.handle_expr(k, g, i, want, out); }
+  if sym == s.k_resume() { return ef.resume_expr(k, g, i, want, out); }
+  if sym == s.k_effect() {
+    let m: Ref(u8) = "effect is compile-time only";
+    let d: u64 = ir.diag(k, 0, 1, m, 27);
+    st.st_fail(k, e_unsup());
+    return i + 1;
+  }
   if sym == s.k_if() {
     let t: Mut(u64) = box(k);
     return flow.if_compile(k, g, i, want, out, t);
@@ -347,6 +361,8 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
           return i + 3;
         }
       }
+      let bv: u64 = ef.bare_variant(k, g, i, want, out);
+      if bv != 0 { return bv; }
       return me.dotted(k, g, i, want, out);
     }
   }
@@ -419,7 +435,8 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   }
   if i + 1 < n and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() {
-      if bi.is_builtin(sym) == 1 { return me.builtin_call(k, g, i, want, out); }
+      let ue: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
+      if bi.is_builtin(sym) == 1 and is_null(ue) == 1 { return me.builtin_call(k, g, i, want, out); }
       // size_of / align_of / field_count：编译期折成 u64 常量。
       let qc: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
       let qh: u64 = ctf.query_fold(k, qc, g, i);
@@ -451,10 +468,14 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
         if modules.sym_kind(ge) == modules.sym_kind_generic() {
           let nb: Mut(u64) = box(k);
           gn.call_generic(k, ge, g, i, want, out, nb);
-          return box_get(nb);
+          let nxt: u64 = box_get(nb);
+          return nxt;
         }
       }
-      return cl.call_expr(k, g, i, want, out);
+      let cj: u64 = cl.call_expr(k, g, i, want, out);
+      let se2: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
+      let cg: u64 = ef.call_guard(k, se2, g, i + 2);
+      return cj;
     }
     if delim_of(g, i + 1) == dl_bracket() and sym == s.b_icall() {
       return cl.icall_call(k, g, i, want, out);

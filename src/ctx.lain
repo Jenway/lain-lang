@@ -340,6 +340,15 @@ let fill_sig = func(k: Mut(st.State), g: u64, i: u64, idx: u64, sig: Mut(u64)) -
   return fill_sig(k, g, nj, idx + 1, sig);
 };
 
+// Fn 签名的第三区 `!{ E }` 是效应行：编译期只跳过标记与花括号组。
+let fn_effect_tail = func(grp: u64, j: u64) -> u64 {
+  if j + 1 >= n_count(grp) { return j; }
+  if n_sym(grp, j) != s.p_bang() { return j; }
+  if is_group(grp, j + 1) == 0 { return j; }
+  if delim_of(grp, j + 1) != ax.dl_brace() { return j; }
+  return j + 2;
+};
+
 let factory_fn = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
   let grp: u64 = n_at(g, i + 1);
   if n_count(grp) < 3 { st.st_fail(k, e_type()); return i + 2; }
@@ -349,7 +358,8 @@ let factory_fn = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 
   let sig: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
   let got: u64 = fill_sig(k, pg, 0, 0, sig);
   let ret: Mut(ty.Ty) = new_ty(k);
-  let j: u64 = parse_type(k, grp, 2, ret);
+  let rj: u64 = parse_type(k, grp, 2, ret);
+  fn_effect_tail(grp, rj);
   let id: u64 = ct.fn_t(k, ireg.tid_of(k, ret), np, sig as u64);
   let a: u64 = ireg.project(k, id, out);
   return i + 2;
@@ -394,6 +404,23 @@ pub let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> 
   // Module 是编译期的一等模块类型：物理上同样不可物化，只携带逻辑形状。
   if sym == s.t_module() {
     let tid: u64 = tb.module_tid(k);
+    let a: u64 = ireg.project(k, tid, out);
+    return i + 1;
+  }
+  // Effect / EffectRow 同样是编译期专属类型，只带逻辑形状；
+  // Never 是中止性操作的返回类型，投影成零成员的空记录。
+  if sym == s.t_effect() {
+    ty.ty_addr(out);
+    ty.ty_set_sh(out, tb.effect_shape(k));
+    return i + 1;
+  }
+  if sym == s.t_effect_row() {
+    ty.ty_addr(out);
+    ty.ty_set_sh(out, tb.effect_row_shape(k));
+    return i + 1;
+  }
+  if sym == s.t_never() {
+    let tid: u64 = tb.never_tid(k);
     let a: u64 = ireg.project(k, tid, out);
     return i + 1;
   }

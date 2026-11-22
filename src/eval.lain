@@ -24,6 +24,7 @@ let ctfn = import("ctfn");
 let gv = import("given");
 let gn = import("generics");
 let ex = import("expand");
+let ef = import("effects");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
@@ -319,11 +320,9 @@ let find_brace = func(g: u64, i: u64, n: u64) -> u64 {
 
 let p1_generic = func(k: Mut(st.State), g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64, q: u64) -> u64 {
   let n: u64 = n_count(g);
-  let r0: u64 = qmark_i + 2;
-  let ret_i: u64 = if r0 < n and n_sym(g, r0) == s.p_arrow() { r0 + 1 } else { 0 };
-  let bi_idx: u64 = find_brace(g, r0, n);
-  gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, ret_i, bi_idx);
-  return bi_idx;
+  let l: Mut(ef.FnLayout) = ef.layout_from(k, g, qmark_i + 2);
+  gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, l.ret_i, l.eff_i, l.body_i);
+  return l.body_i;
 };
 
 // extern 名保持原样：宿主按它注册能力表里的符号。
@@ -627,6 +626,8 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
   }
   let e: u64 = expect_sym(k, g, j, s.p_eq());
   if e >= n { st.st_fail(k, e_ast()); return e; }
+  let efj: u64 = ef.effect_rhs(k, g, e, name, is_pub);
+  if efj != 0 { return skip_semi(g, efj); }
   if n_sym(g, e) == s.k_import() { return p1_import(k, g, e, name, is_pub); }
   let is_root: u64 = if i >= 2 and is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
   let q: u64 = if is_root == 1 { name } else { modules.qual(k, modules.cur(k), name) };
@@ -736,17 +737,18 @@ let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: 
   let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
   let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
+  let l: Mut(ef.FnLayout) = ef.fn_layout(k, g, e + 1);
   let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
-  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let a: u64 = if l.ret_i != 0 { parse_type(k, g, l.ret_i, rt) } else { l.ret_i };
   let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
-  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_func(), modules.cur(k), name, q, sg, 0);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_func(), modules.cur(k), name, q, sg, l.eff_i);
   let fp: u64 = modules.sym_set_pub(se, is_pub);
   let sd: u64 = modules.sym_set_decl(se, e);
   let ss: u64 = modules.sym_set_src(se, st.st_src(k));
   let fid: u64 = fn_type_id(k, sg);
   let sf: u64 = modules.sym_set_fnid(se, fid);
-  return skip_semi(g, a + 1);
+  return skip_semi(g, l.next_i);
 };
 
 let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
@@ -787,8 +789,9 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
   if is_null(se) { st.st_fail(k, e_ast()); return e; }
   let kd: u64 = modules.sym_kind(se);
-  // 封签与类型别名没有过程体。
+  // 封签、类型别名与效应声明没有过程体。
   if kd == modules.sym_kind_sig() or kd == modules.sym_kind_type_alias() { return skip_stmt(g, i + 1, n); }
+  if kd == ef.kind_effect() { return skip_stmt(g, i + 1, n); }
   // 具名结构体与枚举只有形状，没有过程体，不能落到 compile_data_ref。
   if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() { return skip_stmt(g, i + 1, n); }
   // 内联 module { ... }：体组记在 shape 上，保存虚拟模块号后编成员。

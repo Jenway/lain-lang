@@ -1,0 +1,45 @@
+// Phase 5.3：中止性效应（-> Never）的 Value-Error-Stopped 三通道完成模型。
+// load 自身带 Error(DbError) 效应，fetch 用 `!` 把它的未捕获效应并入自己的效应集，
+// 三条出口在 classify 的 handle 里汇成单一状态码分支。
+let DbError = enum {
+  Timeout
+  Corrupted
+};
+
+let Error = func(E: Type) -> Effect {
+  return effect { op raise(err: E) -> Never; };
+};
+
+let Cancel = effect {
+  op cancel() -> Never;
+};
+
+let load = func(id: i64) -> i64 !{ Error(DbError) } {
+  return id * 2;
+};
+
+let fetch = func(id: i64, mode: i64) -> i64 !{ Error(DbError), Cancel } {
+  if mode == 1 {
+    perform Error(DbError).raise(DbError.Corrupted);
+  }
+  if mode == 2 {
+    perform Cancel.cancel();
+  }
+  return load(id)!;
+};
+
+let classify = func(id: i64, mode: i64) -> i64 {
+  return handle fetch(id, mode) with {
+    return(v) => v,
+    raise(e) => 80,
+    cancel() => 20,
+  };
+};
+
+let main = func() -> i64 {
+  // 值通道 42（21*2）+ 错误通道 80 + 取消通道 20 = 142。
+  let ok: i64 = classify(21, 0);
+  let failed: i64 = classify(21, 1);
+  let stopped: i64 = classify(21, 2);
+  return ok + failed + stopped;
+};

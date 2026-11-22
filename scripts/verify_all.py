@@ -386,6 +386,18 @@ META_CASES = [
     # 42 = unwrap_plus_one(Some(41)) 的 42 + unwrap_plus_one(None) 的 0。
     {"file": "match_enum.lain", "entry": "s0__main", "value": 42,
      "folds": [], "procs": [], "absent": []},
+    # Phase 5.3：中止性效应的 Value-Error-Stopped 三通道模型。
+    # 142 = 值通道 load(21)! 的 42 + 错误通道的 80 + 取消通道的 20。
+    {"file": "effect_abortive.lain", "entry": "s0__main", "value": 142,
+     "folds": [], "procs": [], "absent": []},
+    # Phase 5.3：参数化可恢复效应两次挂起并用 resume 回送加工后的值。
+    # 60 = emit(10) 恢复出的 20 + emit(20) 恢复出的 40。
+    {"file": "effect_resumable.lain", "entry": "s0__main", "value": 60,
+     "folds": [], "procs": [], "absent": []},
+    # Phase 5.3：效应行多态让同一高阶过程接受纯回调与带 Cancel 的回调。
+    # 55 = 纯实例化 7*2+1 的 15 + 效应实例化 20*2 的 40。
+    {"file": "effect_row_poly.lain", "entry": "s0__main", "value": 55,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -425,6 +437,9 @@ META_NEGATIVE = [
     {"file": "sig_mismatch_err.lain", "why": "实现模块缺少签名要求的公开成员"},
     {"file": "ufcs_ambig_err.lain", "why": "两个活跃模块为同一类型导出同名 UFCS 方法，必须报歧义"},
     {"file": "match_nonexhaustive_err.lain", "why": "枚举变体未覆盖且没有通配分支，必须报穷尽缺失"},
+    {"file": "effect_unhandled_err.lain", "why": "纯过程发起未捕获的中止性效应，必须被纯度检查拒绝"},
+    {"file": "effect_missing_bang_err.lain", "why": "调用带效应的子过程漏掉尾随的 ! 传播操作符，必须报错"},
+    {"file": "effect_multishot_err.lain", "why": "处理器分支两次调用 resume，必须违反单次恢复契约"},
 ]
 
 

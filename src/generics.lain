@@ -15,6 +15,7 @@ let cx = import("ctx");
 let cl = import("calls");
 let gv = import("given");
 let gu = import("genunify");
+let ef = import("effects");
 
 extern lain2_source_root(idx: u64) -> u64 = lain2_source_root;
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
@@ -26,7 +27,8 @@ pub let GenHdr = struct {
   qg_i: u64,
   ret_i: u64,
   body_i: u64,
-  modv: u64
+  modv: u64,
+  eff_i: u64
 };
 
 pub let GenQRec = struct {
@@ -67,11 +69,11 @@ let paramty_at = func(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), ps) + i * 32);
 };
 
-// --- 模板头（56B）：[decl_i@0, src@8, pg_i@16, qg_i@24, ret_i@32, body_i@40, modv@48] ---
+// --- 模板头（64B）：[decl_i@0, src@8, pg_i@16, qg_i@24, ret_i@32, body_i@40, modv@48, eff_i@56] ---
 pub let gen_hdr_modv = func(hdr: Mut(GenHdr)) -> u64 { return hdr.modv; };
 
-pub let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_i: u64, qg_i: u64, ret_i: u64, body_i: u64) -> Mut(modules.SymEntry) {
-  let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), st.st_ralloc(k, 56));
+pub let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_i: u64, qg_i: u64, ret_i: u64, eff_i: u64, body_i: u64) -> Mut(modules.SymEntry) {
+  let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), st.st_ralloc(k, 64));
   hdr.decl_i = decl_i;
   hdr.src = st.st_src(k);
   hdr.pg_i = pg_i;
@@ -79,6 +81,7 @@ pub let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_
   hdr.ret_i = ret_i;
   hdr.body_i = body_i;
   hdr.modv = st.st_scope(k);
+  hdr.eff_i = eff_i;
   let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_generic(), st.st_src(k), name, q, ptr_cast(Mut(u8), hdr), 0);
   modules.sym_set_decl(se, decl_i);
   modules.sym_set_src(se, st.st_src(k));
@@ -323,6 +326,14 @@ let resolve_givens_rest = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtPara
   if i >= nct { return 1; }
   if deref(gu.word_at(bound, i)) == 0 {
     let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
+    if effect_row_param(k, qg, p) == 1 {
+      let rv: Mut(ctf.CtVal) = gu.val_at(vals, i);
+      rv.kind = 0;
+      rv.a = 0;
+      rv.b = 0;
+      deref(gu.word_at(bound, i)) = 1;
+      return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+    }
     let cm: u64 = ctf.mark(k);
     push_bound(k, ctp_tbl, nct, vals, bound, 0);
     let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
@@ -382,7 +393,22 @@ let alloc_mangled = func(k: Mut(st.State), e: Mut(modules.SymEntry), src: u64, n
 let ret_end = func(g: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return i; }
   if ctf.has_delim(g, i, ax.dl_brace()) == 1 { return i; }
+  if ax.is_group(g, i) == 0 and ax.n_sym(g, i) == s.p_bang() {
+    if ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 { return i; }
+  }
   return ret_end(g, i + 1);
+};
+
+pub let effect_row_of = func(k: Mut(st.State), e: Mut(modules.SymEntry)) -> Mut(ef.EffRow) {
+  let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), modules.sym_sig(e));
+  return ef.row_from_hdr(k, hdr.src, hdr.modv, hdr.eff_i);
+};
+
+let effect_row_param = func(k: Mut(st.State), qg: u64, p: Mut(gu.CtParamRec)) -> u64 {
+  if p.ty_end != p.ty_start + 1 { return 0; }
+  if ax.is_name(qg, p.ty_start) == 0 { return 0; }
+  if ax.n_sym(qg, p.ty_start) == s.t_effect_row() { return 1; }
+  return 0;
 };
 
 // --- 对外调用入口 ---------------------------------------------------------

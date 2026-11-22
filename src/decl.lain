@@ -19,6 +19,7 @@ let tb = import("tbuild");
 let ctf = import("ctfor");
 let gn = import("generics");
 let gv = import("given");
+let ef = import("effects");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern decl_compile_vmod_p2(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 = lainc_compile_functor_mod_p2;
@@ -126,7 +127,8 @@ let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
   if ret_i != 0 { parse_type(k, root, ret_i, rt); }
-  compile_body_with(k, pg, rt, bodyg, q);
+  let row: Mut(ef.EffRow) = ef.row_empty(k);
+  compile_body_with(k, pg, rt, bodyg, q, row);
   gv.release(k, gmark);
   ctf.release(k, cm);
   gn.set_gen_depth(k, saved_dp);
@@ -192,7 +194,8 @@ let flush_queue = func(k: Mut(st.State)) -> u64 {
     let avm: u64 = if am >= 1000 { am } else { 0 };
     st.st_set_src(k, src);
     st.st_set_vmod(k, avm);
-    let b: u64 = compile_body(k, g, node, q);
+    let row0: Mut(ef.EffRow) = ef.row_empty(k);
+    let b: u64 = compile_body(k, g, node, q, row0);
     if st.st_ok(k) != 0 {
       // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
       let m: Ref(u8) = "anonymous func cannot capture";
@@ -202,19 +205,25 @@ let flush_queue = func(k: Mut(st.State)) -> u64 {
     st.st_set_src(k, saved_src);
     return flush_queue(k);
   }
+  if ef.handler_pending(k) == 1 {
+    let hh: u64 = ef.flush_one_handler(k);
+    return flush_queue(k);
+  }
   let ge: Mut(gn.GenQRec) = gn.genq_pending(k);
   if is_null(ge) == 0 { return flush_gen_rec(k, ge); }
   if st.st_in_proc(k) != 0 { return 0; }
   return flush_fq(k);
 };
 
-let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u64, q: u64) -> u64 {
+let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u64, q: u64, row: Mut(ef.EffRow)) -> u64 {
   let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
   let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
   let sr: u64 = agg.sret_ty(rt);
   let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, rt);
+  let ab0: u64 = ef.clear_aborts(k);
+  let fr: u64 = ef.push_frame(k, row);
   let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
   let pnames: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let dummy: u64 = loop w(idx: u64 = 0) while idx < np {
@@ -248,20 +257,20 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   ir.region_end(k);
   ir.proc_end(k);
   let ipr: u64 = st.st_set_in_proc(k, ip0);
+  let pf: u64 = ef.pop_frame(k);
   return flush_queue(k);
 };
 
 // 过程体：i 指向形参组，返回体之后的位置。
-let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64) -> u64 {
-  let n: u64 = n_count(g);
+let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64, row: Mut(ef.EffRow)) -> u64 {
   let pg: u64 = n_at(g, i);
+  let l: Mut(ef.FnLayout) = ef.fn_layout(k, g, i);
   let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
-  let a0: u64 = i + 1;
-  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
-  let bodyg: u64 = n_at(g, a);
-  compile_body_with(k, pg, rt, bodyg, q);
-  return a + 1;
+  if l.ret_i != 0 { parse_type(k, g, l.ret_i, rt); }
+  let bodyg: u64 = n_at(g, l.body_i);
+  compile_body_with(k, pg, rt, bodyg, q, row);
+  return l.next_i;
 };
 
 // 跳到过程的体之后（花括号组结束），用于只由编译期求值器解释的过程。
@@ -281,7 +290,8 @@ pub let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   if (se as u64) != 0 {
     if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 2); }
   }
-  return compile_body(k, g, i + 2, q);
+  let row: Mut(ef.EffRow) = ef.callee_row(k, se);
+  return compile_body(k, g, i + 2, q, row);
 };
 
 // let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
@@ -291,7 +301,8 @@ pub let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) ->
   if (se as u64) != 0 {
     if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 1); }
   }
-  let b: u64 = compile_body(k, g, i + 1, q);
+  let row: Mut(ef.EffRow) = ef.callee_row(k, se);
+  let b: u64 = compile_body(k, g, i + 1, q, row);
   return skip_semi(g, b);
 };
 
