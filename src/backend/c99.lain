@@ -2,7 +2,26 @@
 // 输出放在调用方给的 MutSlice(u8) 里；写满时 writer 标记失败，后续写入不再推进。
 let codes = import("src::ir_codes");
 let vf = import("src::ir::verify");
-let mx = import("src::modules");
+let tab = import("src::host::symtab");
+
+// 符号表由调用方通过 set_syms 交进来，C99 后端只在这一个格子里保存它的堆地址。
+// 调用方没有交表时格子保持 0，名字退化成 "anon" 或句柄的十进制值。
+let g_syms: Array(u64, 1) = [0];
+
+let syms_cells = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(g_syms), 1);
+};
+
+pub let set_syms = func(s: Mut(tab.HostSymTab)) -> u64 {
+  let cells: MutSlice(u64) = syms_cells();
+  cells[0] = s as u64;
+  return 0;
+};
+
+let syms_get = func() -> Mut(tab.HostSymTab) {
+  let cells: MutSlice(u64) = syms_cells();
+  return ptr_cast(Mut(tab.HostSymTab), cells[0]);
+};
 
 // --- writer ---------------------------------------------------------------
 pub let C99Writer = struct {
@@ -63,17 +82,31 @@ let put_hex_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
 };
 
 pub let put_u64_dec = func(w: Mut(C99Writer), v: u64) -> u64 {
-  if v >= 10 {
-    let rc: u64 = put_u64_dec(w, v / 10);
-  }
-  return put_digit(w, v - v / 10 * 10);
+  let d: u64 = loop c(d: u64 = 1) while 1 {
+    if d > v / 10 { break c(d); }
+    d = d * 10;
+  };
+  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
+    let rc: u64 = put_digit(w, n / d);
+    n = n - n / d * d;
+    if d <= 1 { break c(1); }
+    d = d / 10;
+  };
+  return ok;
 };
 
 let put_u64_hex_digits = func(w: Mut(C99Writer), v: u64) -> u64 {
-  if v >= 16 {
-    let rc: u64 = put_u64_hex_digits(w, v / 16);
-  }
-  return put_hex_digit(w, v - v / 16 * 16);
+  let d: u64 = loop c(d: u64 = 1) while 1 {
+    if d > v / 16 { break c(d); }
+    d = d * 16;
+  };
+  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
+    let rc: u64 = put_hex_digit(w, n / d);
+    n = n - n / d * d;
+    if d <= 1 { break c(1); }
+    d = d / 16;
+  };
+  return ok;
 };
 
 pub let put_u64_hex = func(w: Mut(C99Writer), v: u64) -> u64 {
@@ -130,7 +163,9 @@ let type_byte_size = func(t: vf.IrType) -> u64 {
 
 // --- 符号名 ---------------------------------------------------------------
 let sym_byte = func(h: u64, i: u64) -> u64 {
-  let p: Ref(u8) = mx.sym_addr(h);
+  let s: Mut(tab.HostSymTab) = syms_get();
+  if is_null(s) { return 0; }
+  let p: Ref(u8) = tab.sym_addr(s, h);
   let b: u8 = deref(p + i);
   return b as u64;
 };
@@ -144,7 +179,11 @@ let is_ident_char = func(b: u64) -> u64 {
 };
 
 pub let put_sanitized = func(w: Mut(C99Writer), h: u64) -> u64 {
-  let n: u64 = mx.sym_len(h);
+  let s: Mut(tab.HostSymTab) = syms_get();
+  if is_null(s) {
+    return put_str(w, "anon");
+  }
+  let n: u64 = tab.sym_len(s, h);
   if n == 0 {
     return put_str(w, "anon");
   }
@@ -178,9 +217,11 @@ let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
   return put_u64_dec(w, p.name);
 };
 
+// 模块级数据符号与局部值共用同一个 C 名字空间：两者都是 v<句柄>，句柄在同一个
+// 符号表里唯一，所以 OP_VALUE 引用任何一个都落到同一个 C 标识符上。
 let emit_data_name = func(w: Mut(C99Writer), h: u64) -> u64 {
-  let rc: u64 = put_str(w, "lain_data_");
-  return put_sanitized(w, h);
+  let rc: u64 = put_str(w, "v");
+  return put_u64_dec(w, h);
 };
 
 let emit_value_name = func(w: Mut(C99Writer), h: u64) -> u64 {
@@ -198,10 +239,13 @@ let param_ty = func(p: vf.IrParam) -> vf.IrType {
 };
 
 let find_proc_at = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
-  if i >= m.proc_count { return vf.NO_REGION(); }
-  let p: vf.IrProc = vf.proc_at_ref(m.procs, i);
-  if p.name == name { return i; }
-  return find_proc_at(m, name, i + 1);
+  let found: u64 = loop c(at: u64 = i) while 1 {
+    if at >= m.proc_count { break c(vf.NO_REGION()); }
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.name == name { break c(at); }
+    at = at + 1;
+  };
+  return found;
 };
 
 pub let find_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
@@ -337,10 +381,26 @@ let next_temp = func(em: Mut(C99Emitter)) -> u64 {
   return v;
 };
 
+// OP_VALUE 的句柄可能是局部值，也可能是模块级名字：过程符号按取函数地址发射，
+// 数据符号与局部值一样直接写 v<句柄>。
+let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
+  let pi: u64 = find_proc(em.m, h);
+  if pi != vf.NO_REGION() {
+    let p: vf.IrProc = proc_at(em.m, pi);
+    let a: u64 = put_str(em.w, "(void *)&");
+    return emit_proc_name(em.w, p);
+  }
+  return emit_value_name(em.w, h);
+};
+
 // --- 操作数 ---------------------------------------------------------------
 let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) -> u64 {
   if op.kind == vf.OP_VALUE() {
-    return emit_value_name(em.w, op.name);
+    if want.kind == vf.TY_ADDR() {
+      let a: u64 = put_str(em.w, "(void *)(uintptr_t)");
+      return emit_value_ref(em, op.name);
+    }
+    return emit_value_ref(em, op.name);
   }
   if op.kind == vf.OP_FLOAT() {
     if want.kind == vf.TY_FLOAT() {
@@ -368,7 +428,7 @@ let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) 
 let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
   if op.kind == vf.OP_VALUE() {
     let a: u64 = put_str(em.w, "(uint64_t)(");
-    let b: u64 = emit_value_name(em.w, op.name);
+    let b: u64 = emit_value_ref(em, op.name);
     return put_byte(em.w, 41);
   }
   return put_u64_lit(em.w, op.bits);
@@ -413,11 +473,14 @@ let emit_assign_cast = func(em: Mut(C99Emitter), name: u64, t: vf.IrType, op: vf
 // --- 区域 -----------------------------------------------------------------
 let emit_region_insts = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64,
                              yield_inst: u64, yield_region: u64) -> u64 {
-  if i >= r.inst_count { return 1; }
-  let ii: u64 = region_inst(r, i);
-  let ok: u64 = emit_inst(em, ii, yield_inst, yield_region);
-  if ok == 0 { return 0; }
-  return emit_region_insts(em, r, i + 1, yield_inst, yield_region);
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.inst_count { break c(1); }
+    let ii: u64 = region_inst(r, at);
+    let rc: u64 = emit_inst(em, ii, yield_inst, yield_region);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
 };
 
 pub let emit_region = func(em: Mut(C99Emitter), ri: u64, yield_inst: u64, yield_region: u64) -> u64 {
@@ -430,8 +493,11 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
   if em.w.ok == 0 { return 0; }
   let it: vf.IrInst = inst_at(em.m, ii);
   let k: u64 = it.kind;
-  if (k >= codes.INST_ADD()) and (k <= codes.INST_XOR()) { return emit_int_arith(em, it, k); }
-  if (k >= codes.INST_SDIV()) and (k <= codes.INST_ASHR()) { return emit_int_div_shift(em, it, k); }
+  // 枚举顺序是加减乘、除法求余、位运算、移位四段，不能用一个连续区间判定。
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return emit_int_arith(em, it, k); }
+  if (k >= codes.INST_SDIV()) and (k <= codes.INST_UREM()) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return emit_int_arith(em, it, k); }
+  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return emit_int_div_shift(em, it, k); }
   if (k >= codes.INST_FADD()) and (k <= codes.INST_FNEG()) { return emit_float_arith(em, it, k); }
   if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_int_compare(em, it, k); }
   if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return emit_float_compare(em, it, k); }
@@ -482,7 +548,7 @@ let emit_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
   let n: u64 = put_str(em.w, "))) & lain_mask(");
   let o: u64 = put_u64_dec(em.w, w);
-  let p: u64 = put_str(em.w, ")));\n");
+  let p: u64 = put_str(em.w, ");\n");
   return 1;
 };
 
@@ -777,32 +843,41 @@ let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
 
 // 判断某个值是否在任何非 #alloca 指令的操作数或被调符号里出现。
 let ops_use_name = func(it: vf.IrInst, name: u64, i: u64) -> u64 {
-  if i >= it.operand_count { return 0; }
-  let op: vf.IrOperand = vf.inst_op(it, i);
-  if (op.kind == vf.OP_VALUE()) and (op.name == name) { return 1; }
-  return ops_use_name(it, name, i + 1);
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(0); }
+    let op: vf.IrOperand = vf.inst_op(it, at);
+    if (op.kind == vf.OP_VALUE()) and (op.name == name) { break c(1); }
+    at = at + 1;
+  };
+  return hit;
 };
 
 let cases_use_name = func(m: Ref(vf.IrModule), it: vf.IrInst, name: u64, i: u64) -> u64 {
-  if i >= it.case_count { return 0; }
-  let cs: vf.IrCase = case_at(m, it.cases_at + i);
-  if region_uses_name(m, cs.body, name) == 1 { return 1; }
-  return cases_use_name(m, it, name, i + 1);
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.case_count { break c(0); }
+    let cs: vf.IrCase = case_at(m, it.cases_at + at);
+    if region_uses_name(m, cs.body, name) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
 };
 
 let region_uses_from = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, i: u64) -> u64 {
-  if i >= r.inst_count { return 0; }
-  let ii: u64 = region_inst(r, i);
-  let it: vf.IrInst = inst_at(m, ii);
-  if it.kind != codes.INST_ALLOCA() {
-    if it.symbol == name { return 1; }
-    if ops_use_name(it, name, 0) == 1 { return 1; }
-  }
-  if region_uses_name(m, it.body, name) == 1 { return 1; }
-  if region_uses_name(m, it.else_body, name) == 1 { return 1; }
-  if region_uses_name(m, it.default_body, name) == 1 { return 1; }
-  if cases_use_name(m, it, name, 0) == 1 { return 1; }
-  return region_uses_from(m, r, name, i + 1);
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.inst_count { break c(0); }
+    let ii: u64 = region_inst(r, at);
+    let it: vf.IrInst = inst_at(m, ii);
+    if it.kind != codes.INST_ALLOCA() {
+      if it.symbol == name { break c(1); }
+      if ops_use_name(it, name, 0) == 1 { break c(1); }
+    }
+    if region_uses_name(m, it.body, name) == 1 { break c(1); }
+    if region_uses_name(m, it.else_body, name) == 1 { break c(1); }
+    if region_uses_name(m, it.default_body, name) == 1 { break c(1); }
+    if cases_use_name(m, it, name, 0) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
 };
 
 let region_uses_name = func(m: Ref(vf.IrModule), ri: u64, name: u64) -> u64 {
@@ -902,12 +977,15 @@ let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
 // --- 调用 -----------------------------------------------------------------
 let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
                           p: vf.IrProc, i: u64) -> u64 {
-  if i >= it.operand_count { return 1; }
-  if i > 0 { let sep: u64 = put_str(em.w, ", "); }
-  let want: vf.IrType = if i < p.param_count { param_ty(proc_param(p, i)) } else { vf.type_bits(64) };
-  let ok: u64 = emit_operand(em, vf.inst_op(it, i), want);
-  if ok == 0 { return 0; }
-  return emit_call_args(em, it, p, i + 1);
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(1); }
+    if at > 0 { let sep: u64 = put_str(em.w, ", "); }
+    let want: vf.IrType = if at < p.param_count { param_ty(proc_param(p, at)) } else { vf.type_bits(64) };
+    let rc: u64 = emit_operand(em, vf.inst_op(it, at), want);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
 };
 
 let emit_pair_expr = func(em: Mut(C99Emitter), t: vf.IrType, tmp: u64, which: u64) -> u64 {
@@ -983,12 +1061,15 @@ let emit_direct_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
 };
 
 let emit_indirect_args = func(em: Mut(C99Emitter), it: vf.IrInst, i: u64) -> u64 {
-  if i >= it.operand_count { return 1; }
-  if i > 1 { let sep: u64 = put_str(em.w, ", "); }
-  let a: u64 = put_str(em.w, "(uint64_t)(");
-  let b: u64 = emit_operand_u64(em, vf.inst_op(it, i));
-  let c: u64 = put_byte(em.w, 41);
-  return emit_indirect_args(em, it, i + 1);
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(1); }
+    if at > 1 { let sep: u64 = put_str(em.w, ", "); }
+    let a: u64 = put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_operand_u64(em, vf.inst_op(it, at));
+    let c: u64 = put_byte(em.w, 41);
+    at = at + 1;
+  };
+  return ok;
 };
 
 let emit_indirect_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
@@ -1057,17 +1138,20 @@ let emit_if = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
 };
 
 let emit_region_params = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64) -> u64 {
-  if i >= r.param_count { return 1; }
-  let p: vf.IrParam = region_param(r, i);
-  let pt: vf.IrType = param_ty(p);
-  let a: u64 = emit_indent(em, em.depth);
-  let b: u64 = emit_type(em.w, pt);
-  let c: u64 = put_str(em.w, " ");
-  let d: u64 = emit_value_name(em.w, p.name);
-  let e: u64 = put_str(em.w, " = ");
-  let f: u64 = emit_zero_value(em.w, pt);
-  let g: u64 = put_str(em.w, ";\n");
-  return emit_region_params(em, r, i + 1);
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.param_count { break c(1); }
+    let p: vf.IrParam = region_param(r, at);
+    let pt: vf.IrType = param_ty(p);
+    let a: u64 = emit_indent(em, em.depth);
+    let b: u64 = emit_type(em.w, pt);
+    let c: u64 = put_str(em.w, " ");
+    let d: u64 = emit_value_name(em.w, p.name);
+    let e: u64 = put_str(em.w, " = ");
+    let f: u64 = emit_zero_value(em.w, pt);
+    let g: u64 = put_str(em.w, ";\n");
+    at = at + 1;
+  };
+  return ok;
 };
 
 let emit_loop = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
@@ -1312,11 +1396,14 @@ pub let emit_proc_signature = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
 };
 
 let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
-  if i >= m.proc_count { return 1; }
-  let p: vf.IrProc = proc_at(m, i);
-  let a: u64 = emit_proc_signature(w, p);
-  let b: u64 = put_str(w, ";\n");
-  return emit_all_proc_decls(w, m, i + 1);
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= m.proc_count { break c(1); }
+    let p: vf.IrProc = proc_at(m, at);
+    let a: u64 = emit_proc_signature(w, p);
+    let b: u64 = put_str(w, ";\n");
+    at = at + 1;
+  };
+  return ok;
 };
 
 pub let emit_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
@@ -1378,27 +1465,112 @@ pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) ->
 
 // --- 前导文本 -------------------------------------------------------------
 let preamble_helpers = func() -> Slice(u8) {
-  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode { struct LainAllocaNode *next; uint64_t align; } LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
+  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#if defined(_WIN32)\n#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS\n#endif\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode { struct LainAllocaNode *next; uint64_t align; } LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
 };
 
 let preamble_memory = func() -> Slice(u8) {
-  return "static inline uint64_t lain_load_bits(const void *p, uint32_t w) {\n  uint64_t v = 0;\n  uint32_t n = (w + 7u) / 8u;\n  if (n > 0u) memcpy(&v, p, n);\n  return v & lain_mask(w);\n}\n\nstatic inline void lain_store_bits(void *p, uint64_t v, uint32_t w) {\n  uint32_t n = (w + 7u) / 8u;\n  uint64_t masked = v & lain_mask(w);\n  if (n > 0u) memcpy(p, &masked, n);\n}\n\nstatic inline void *lain_load_addr(const void *p) {\n  void *v = NULL;\n  memcpy(&v, p, sizeof(v));\n  return v;\n}\n\nstatic inline void lain_store_addr(void *p, void *v) {\n  memcpy(p, &v, sizeof(v));\n}\n\nstatic inline float lain_load_f32(const void *p) { float v = 0.0f; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline double lain_load_f64(const void *p) { double v = 0.0; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline void lain_store_f32(void *p, float v) { memcpy(p, &v, sizeof(v)); }\nstatic inline void lain_store_f64(void *p, double v) { memcpy(p, &v, sizeof(v)); }\nstatic inline float lain_bitcast_u32_f32(uint32_t v) { float f = 0.0f; memcpy(&f, &v, sizeof(f)); return f; }\nstatic inline uint32_t lain_bitcast_f32_u32(float f) { uint32_t v = 0; memcpy(&v, &f, sizeof(v)); return v; }\nstatic inline double lain_bitcast_u64_f64(uint64_t v) { double d = 0.0; memcpy(&d, &v, sizeof(d)); return d; }\nstatic inline uint64_t lain_bitcast_f64_u64(double d) { uint64_t v = 0; memcpy(&v, &d, sizeof(v)); return v; }\n\nstatic inline void *lain_alloca_push(LainAllocaNode **head, size_t n) {\n  LainAllocaNode *node = (LainAllocaNode *)malloc(sizeof(LainAllocaNode) + n);\n  if (!node) lain_trap(\"alloca out of memory\");\n  node->next = *head;\n  node->align = 0;\n  *head = node;\n  return (void *)(node + 1);\n}\n\nstatic inline void lain_alloca_free(LainAllocaNode **head) {\n  LainAllocaNode *cur = *head;\n  while (cur) {\n    LainAllocaNode *next = cur->next;\n    free(cur);\n    cur = next;\n  }\n  *head = NULL;\n}\n";
+  return "static inline uint64_t lain_load_bits(const void *p, uint32_t w) {\n  uint64_t v = 0;\n  uint32_t n = (w + 7u) / 8u;\n  if (n > 0u) memcpy(&v, p, n);\n  return v & lain_mask(w);\n}\n\nstatic inline void lain_store_bits(void *p, uint64_t v, uint32_t w) {\n  uint32_t n = (w + 7u) / 8u;\n  uint64_t masked = v & lain_mask(w);\n  if (n > 0u) memcpy(p, &masked, n);\n}\n\nstatic inline void *lain_load_addr(const void *p) {\n  void *v = NULL;\n  memcpy(&v, p, sizeof(v));\n  return v;\n}\n\nstatic inline void lain_store_addr(void *p, void *v) {\n  memcpy(p, &v, sizeof(v));\n}\n\nstatic inline float lain_load_f32(const void *p) { float v = 0.0f; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline double lain_load_f64(const void *p) { double v = 0.0; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline void lain_store_f32(void *p, float v) { memcpy(p, &v, sizeof(v)); }\nstatic inline void lain_store_f64(void *p, double v) { memcpy(p, &v, sizeof(v)); }\nstatic inline float lain_bitcast_u32_f32(uint32_t v) { float f = 0.0f; memcpy(&f, &v, sizeof(f)); return f; }\nstatic inline uint32_t lain_bitcast_f32_u32(float f) { uint32_t v = 0; memcpy(&v, &f, sizeof(v)); return v; }\nstatic inline double lain_bitcast_u64_f64(uint64_t v) { double d = 0.0; memcpy(&d, &v, sizeof(d)); return d; }\nstatic inline uint64_t lain_bitcast_f64_u64(double d) { uint64_t v = 0; memcpy(&v, &d, sizeof(v)); return v; }\n\nstatic inline void *lain_alloca_push(LainAllocaNode **head, size_t n) {\n  LainAllocaNode *node = (LainAllocaNode *)calloc(1, sizeof(LainAllocaNode) + n);\n  if (!node) lain_trap(\"alloca out of memory\");\n  node->next = *head;\n  node->align = 0;\n  *head = node;\n  return (void *)(node + 1);\n}\n\nstatic inline void lain_alloca_free(LainAllocaNode **head) {\n  LainAllocaNode *cur = *head;\n  while (cur) {\n    LainAllocaNode *next = cur->next;\n    free(cur);\n    cur = next;\n  }\n  *head = NULL;\n}\n";
 };
 
 let preamble_io = func() -> Slice(u8) {
   return "static uint64_t lain_io_write(void *p, uint64_t len) {\n  size_t wrote;\n  if (len == 0) return 0;\n  wrote = fwrite(p, 1, (size_t)len, stdout);\n  if (wrote != (size_t)len) lain_trap(\"io write failed\");\n  return len;\n}\n\nstatic uint64_t lain_io_print_i64(uint64_t v) {\n  int n = printf(\"%lld\", (long long)(int64_t)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_print_u64(uint64_t v) {\n  int n = printf(\"%llu\", (unsigned long long)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_newline(void) {\n  if (putchar('\\n') == EOF) lain_trap(\"io write failed\");\n  return 1;\n}\n\nstatic uint64_t lain_perf_steps(void) { return 0; }\n\nstatic uint64_t lain_perf_nanos(void) {\n#if defined(_WIN32)\n  static LARGE_INTEGER freq;\n  static int ready = 0;\n  LARGE_INTEGER now;\n  uint64_t sec, rem;\n  if (!ready) {\n    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) lain_trap(\"perf frequency failed\");\n    ready = 1;\n  }\n  if (!QueryPerformanceCounter(&now)) lain_trap(\"perf counter failed\");\n  sec = (uint64_t)(now.QuadPart / freq.QuadPart);\n  rem = (uint64_t)(now.QuadPart % freq.QuadPart);\n  return sec * UINT64_C(1000000000) + (rem * UINT64_C(1000000000)) / (uint64_t)freq.QuadPart;\n#else\n  struct timespec ts;\n  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) lain_trap(\"clock_gettime failed\");\n  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;\n#endif\n}\n";
 };
 
-let preamble_entry = func() -> Slice(u8) {
-  return "static int (*lain_entry_hook)(int, char **) = NULL;\n\nstatic int lain_entry_run(int argc, char **argv) {\n  if (lain_entry_hook) return lain_entry_hook(argc, argv);\n  return 0;\n}\n\nint main(int argc, char **argv) {\n  return lain_entry_run(argc, argv);\n}\n";
+let preamble_os = func() -> Slice(u8) {
+  return "static int g_lain_argc = 0;\nstatic char **g_lain_argv = NULL;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_alloc(uint64_t bytes) {\n  void *p = calloc(1, (size_t)(bytes ? bytes : 1));\n  return (uint64_t)(uintptr_t)p;\n}\n\nstatic uint64_t lain_os_free(uint64_t ptr) {\n  free((void *)(uintptr_t)ptr);\n  return 0;\n}\n\nstatic uint64_t lain_os_read_file(void *path_ptr, uint64_t path_len, void *out_ptr, void *out_len) {\n  uint64_t *op = (uint64_t *)out_ptr;\n  uint64_t *ol = (uint64_t *)out_len;\n  char *path;\n  FILE *f;\n  long sz;\n  void *buf;\n  size_t got;\n  if (op) *op = 0;\n  if (ol) *ol = 0;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"rb\");\n  free(path);\n  if (!f) return 1;\n  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }\n  sz = ftell(f);\n  if (sz < 0) { fclose(f); return 1; }\n  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }\n  buf = malloc((size_t)sz + 1u);\n  if (!buf) { fclose(f); return 1; }\n  got = fread(buf, 1, (size_t)sz, f);\n  fclose(f);\n  if (got != (size_t)sz) { free(buf); return 1; }\n  ((char *)buf)[got] = '\\0';\n  if (op) *op = (uint64_t)(uintptr_t)buf;\n  if (ol) *ol = (uint64_t)got;\n  return 0;\n}\n\nstatic uint64_t lain_os_write_file(void *path_ptr, uint64_t path_len, void *data_ptr, uint64_t data_len) {\n  char *path;\n  FILE *f;\n  size_t wrote;\n  path = (char *)malloc((size_t)path_len + 1u);\n  if (!path) return 1;\n  if (path_len > 0 && path_ptr) memcpy(path, path_ptr, (size_t)path_len);\n  path[path_len] = '\\0';\n  f = fopen(path, \"wb\");\n  free(path);\n  if (!f) return 1;\n  wrote = (data_len > 0 && data_ptr) ? fwrite(data_ptr, 1, (size_t)data_len, f) : 0;\n  if (fclose(f) != 0) return 1;\n  if (wrote != (size_t)data_len) return 1;\n  return 0;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n";
 };
 
-pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
+let preamble_entry = func() -> Slice(u8) {
+  return "static int (*lain_entry_hook)(int, char **) = NULL;\n\nstatic int lain_entry_run(int argc, char **argv) {\n  g_lain_argc = argc;\n  g_lain_argv = argv;\n  if (lain_entry_hook) return lain_entry_hook(argc, argv);\n  return 0;\n}\n\nint main(int argc, char **argv) {\n  return lain_entry_run(argc, argv);\n}\n";
+};
+
+let emit_preamble_no_main = func(w: Mut(C99Writer)) -> u64 {
   let start: u64 = w.len;
   let a: u64 = put_str(w, preamble_helpers());
   let b: u64 = put_str(w, preamble_memory());
   let c: u64 = put_str(w, preamble_io());
+  let os_p: u64 = put_str(w, preamble_os());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 库形态的前导文本：不含 int main，调用方自己发射入口。
+pub let emit_preamble_lib = func(w: Mut(C99Writer)) -> u64 {
+  return emit_preamble_no_main(w);
+};
+
+pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
+  let start: u64 = w.len;
+  let n: u64 = emit_preamble_no_main(w);
+  if n == 0 { return 0; }
   let d: u64 = put_str(w, preamble_entry());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// --- 入口包装 -------------------------------------------------------------
+let emit_entry_invoke = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  let a: u64 = put_str(w, "  ");
+  if p.result_count == 0 {
+    let b: u64 = emit_proc_name(w, p);
+    let c: u64 = put_str(w, "();\n");
+    return 1;
+  }
+  let d: u64 = emit_proc_return_type(w, p);
+  let e: u64 = put_str(w, " r = ");
+  let f: u64 = emit_proc_name(w, p);
+  let g: u64 = put_str(w, "();\n");
+  return 1;
+};
+
+let emit_entry_print_result = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_BITS() {
+    let a: u64 = put_str(w, "  printf(\"result=%lld (u64=%llu)\\n\", (long long)lain_sext((uint64_t)r, ");
+    let b: u64 = put_u64_dec(w, t.width);
+    let c: u64 = put_str(w, "), (unsigned long long)((uint64_t)r & lain_mask(");
+    let d: u64 = put_u64_dec(w, t.width);
+    let e: u64 = put_str(w, ")));\n");
+    return 1;
+  }
+  if t.kind == vf.TY_ADDR() {
+    return put_str(w, "  printf(\"result=%p\\n\", r);\n");
+  }
+  return put_str(w, "  printf(\"result=%g\\n\", (double)r);\n");
+};
+
+pub let emit_entry_main = func(w: Mut(C99Writer), m: Ref(vf.IrModule), entry_sym: u64, print_result: u64) -> u64 {
+  let pi: u64 = find_proc(m, entry_sym);
+  if pi == vf.NO_REGION() {
+    w.ok = 0;
+    return 0;
+  }
+  let p: vf.IrProc = proc_at(m, pi);
+  let start: u64 = w.len;
+  let a: u64 = put_str(w, "int main(int argc, char **argv) {\n  g_lain_argc = argc;\n  g_lain_argv = argv;\n");
+  let b: u64 = emit_entry_invoke(w, p);
+  if p.result_count == 0 {
+    if print_result != 0 {
+      let c: u64 = put_str(w, "  printf(\"result=void\\n\");\n");
+    }
+    let d: u64 = put_str(w, "  return 0;\n");
+  } else {
+    if print_result != 0 {
+      if p.result_count == 1 {
+        let t: vf.IrType = proc_type(p, 0);
+        let c: u64 = emit_entry_print_result(w, t);
+      } else {
+        let c: u64 = put_str(w, "  printf(\"result=%llu,%llu\\n\", (unsigned long long)r.a, (unsigned long long)r.b);\n");
+      }
+      let d: u64 = put_str(w, "  return 0;\n");
+    } else {
+      if p.result_count == 1 {
+        let e: u64 = put_str(w, "  return (int)r;\n");
+      } else {
+        let e: u64 = put_str(w, "  return (int)r.a;\n");
+      }
+    }
+  }
+  let z: u64 = put_str(w, "}\n");
   if w.ok == 0 { return 0; }
   return w.len - start;
 };

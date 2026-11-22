@@ -26,11 +26,7 @@ let gn = import("generics");
 let ex = import("expand");
 let ef = import("effects");
 let tr = import("std::trace");
-
-extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
-extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
-extern lain2_source_import(src: u64, path: u64) -> u64 = lain2_source_import;
-extern lain2_sym_intern(p: Ref(u8), n: u64) -> u64 = lain2_sym_intern;
+let hr = import("src::host_rt");
 
 let val_idx = func(ab: Mut(ty.Val), idx: u64) -> Mut(ty.Val) {
   return ptr_cast(Mut(ty.Val), ptr_cast(Mut(u8), ab) + idx * 56);
@@ -86,42 +82,11 @@ let storage_suffix = func(k: Mut(st.State)) -> u64 {
   ps[5] = 97;
   ps[6] = 103;
   ps[7] = 101;
-  return lain2_sym_intern(p, 8);
+  return hr.sym_intern(p, 8);
 };
 
 let storage_name = func(k: Mut(st.State), name: u64) -> u64 {
   return modules.qual_full(k, modules.cur(k), name, storage_suffix(k));
-};
-
-// "examples::modules_lib" → "examples/modules_lib.lain"
-let map_colons = func(p: Mut(u8), src: Ref(u8), i: u64, o: u64, n: u64) -> u64 {
-  if i >= n { return o; }
-  let b: u8 = deref(src + i);
-  let nx: u8 = if i + 1 < n { deref(src + i + 1) } else { 0 };
-  if b == 58 and nx == 58 {
-    let sl: u8 = 47;
-    let dp: Mut(u8) = p + o;
-    deref(dp) = sl;
-    return map_colons(p, src, i + 2, o + 1, n);
-  }
-  let dp2: Mut(u8) = p + o;
-  deref(dp2) = b;
-  return map_colons(p, src, i + 1, o + 1, n);
-};
-
-let import_path = func(k: Mut(st.State), h: u64) -> u64 {
-  let p: Mut(u8) = st.st_scratch(k) + 192;
-  let n: u64 = lit_len(h) - 2;
-  let src: Ref(u8) = lit_addr(h) + 1;
-  let used: u64 = map_colons(p, src, 0, 0, n);
-  // 末尾补 .lain（示例里的 import 一律省略扩展名）
-  let ext: MutSlice(u8) = make_slice(MutSlice(u8), p + used, 5);
-  ext[0] = 46;
-  ext[1] = 108;
-  ext[2] = 97;
-  ext[3] = 105;
-  ext[4] = 110;
-  return lain2_sym_intern(p, used + 5);
 };
 
 // 找到第一处 '='（类型标注与括号组都跳过）。
@@ -371,8 +336,10 @@ let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) 
   if h == 0 { st.st_fail(k, e_ast()); return i + 1; }
   let tok: u64 = if n_count(h) > 0 { n_at(h, 0) } else { 0 };
   if tok == 0 { st.st_fail(k, e_ast()); return i + 1; }
-  let path: u64 = import_path(k, tok);
-  let src2: u64 = lain2_source_import(cur, path);
+  let path_len: u64 = lit_len(tok);
+  if path_len < 2 { st.st_fail(k, e_ast()); return i + 1; }
+  let path_ptr: Ref(u8) = lit_addr(tok) + 1;
+  let src2: u64 = hr.source_import(cur, path_ptr, path_len - 2);
   if src2 >= 4000000000 {
     st.st_fail(k, e_type());
     return i + 1;
@@ -915,7 +882,7 @@ let restore_arena = func(k: Mut(st.State), am: u64, sp: u64, saved_ct: u64, save
 pub let compile_source = func(k: Mut(st.State), src: u64) -> u64 {
   if st.st_done(k, src) == 1 { return st.st_ok(k); }
   let m: u64 = st.st_mark_done(k, src);
-  let root: u64 = lain2_source_root(src);
+  let root: u64 = hr.source_root(src);
   let t_src: u64 = tr.span_begin();
   let rc: u64 = compile_as(k, src, root);
   let ev_src: u64 = tr.span_end("compile_source", "lainc", t_src, src);
@@ -980,7 +947,7 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     let dsrc: u64 = modules.sym_src(fn);
     let dnode: u64 = modules.sym_decl(fn);
     st.st_set_src(k, dsrc);
-    let droot: u64 = lain2_source_root(dsrc);
+    let droot: u64 = hr.source_root(dsrc);
     st.st_set_root(k, droot);
     let cf: u64 = if is_group(droot, dnode + 1) == 1 { dl.compile_func_expr(k, droot, dnode, fname) } else { dl.compile_func(k, droot, dnode) };
     let fs: u64 = modules.sym_set_flag(fn, 1);
@@ -1024,7 +991,7 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   if src2 == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
   if st.st_done(k, src2) == 1 { return skip_semi(g, i + 2); }
   let dm: u64 = st.st_mark_done(k, src2);
-  let root2: u64 = lain2_source_root(src2);
+  let root2: u64 = hr.source_root(src2);
   // 片段登记的名字要带注入点的源号，同源后续声明才找得到它们。
   let cc: u64 = compile_as(k, saved_src, root2);
   st.st_set_src(k, saved_src);

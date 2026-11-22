@@ -1,0 +1,816 @@
+// src/ir/emit_text.lain —— 把内存里的 LAINIR 模块确定性地写成可重新解析的 .l1 文本。
+//
+// 文本形状跟 seed/kernel/src/text/print.c 一致：顶层只有 data 与 #proc，
+// 过程体按区域缩进，算子名取自 seed/kernel/src/text/opname.c 的表。
+// 输出放在调用方给的 MutSlice(u8) 里；写满时 writer 标记失败，后续写入不再推进。
+//
+// 表示层缺失的字段在这里按下面的约定补：
+//   1. Lain 侧的 IrOperand 没有 is_global，值操作数一律写成 `%name`；
+//   2. IrRegion 不保存循环形参的初值，`#loop` 的初值写 0（C99 后端同样按零初始化）；
+//   3. IrInst 不保存 [tail] / volatile / 内存序，这三项不写；
+//   4. 浮点字面量按原始位模式写成十进制整数：解析器只核对宽度的声明，
+//      执行期读到的是同一份位模式。
+let codes = import("src::ir_codes");
+let vf = import("src::ir::verify");
+let tab = import("src::host::symtab");
+
+// --- 违例终止 ---------------------------------------------------------------
+// 模块表示不自洽（绑定缺失、类型越界）时就地终止。除数在运行期求成零，
+// 编译器无法把这条除法折叠成常数。
+let Halt = struct { zero: u64 };
+let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
+let halt = func(cause: u64) -> u64 {
+  let h: Halt = Halt { zero: cause - cause };
+  return halt_at(h);
+};
+
+// --- writer ---------------------------------------------------------------
+pub let TextWriter = struct {
+  buf: MutSlice(u8),
+  len: u64,
+  ok: u64,
+};
+
+pub let writer_new = func(buf: MutSlice(u8)) -> TextWriter {
+  return TextWriter { buf: buf, len: 0, ok: 1 };
+};
+
+pub let writer_len = func(w: Mut(TextWriter)) -> u64 {
+  return w.len;
+};
+
+pub let writer_ok = func(w: Mut(TextWriter)) -> u64 {
+  return w.ok;
+};
+
+pub let put_byte = func(w: Mut(TextWriter), b: u8) -> u64 {
+  if w.ok == 0 { return 0; }
+  if w.len >= w.buf.len {
+    w.ok = 0;
+    return 0;
+  }
+  w.buf[w.len] = b;
+  w.len = w.len + 1;
+  return 1;
+};
+
+pub let put_str = func(w: Mut(TextWriter), s: Slice(u8)) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < s.len {
+    let rc: u64 = put_byte(w, s[i]);
+    i = i + 1;
+  };
+  return 1;
+};
+
+pub let put_u64_dec = func(w: Mut(TextWriter), v: u64) -> u64 {
+  if v >= 10 {
+    let rc: u64 = put_u64_dec(w, v / 10);
+  }
+  let d: u8 = (48 + v - v / 10 * 10) as u8;
+  return put_byte(w, d);
+};
+
+// 符号句柄的原文逐字节写出。句柄来自 HostSymTab，文本已经是合法的符号拼写。
+pub let put_symbol = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), h: u64) -> u64 {
+  let n: u64 = tab.sym_len(syms, h);
+  let p: Ref(u8) = tab.sym_addr(syms, h);
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let b: u8 = deref(p + i);
+    let rc: u64 = put_byte(w, b);
+    i = i + 1;
+  };
+  return 1;
+};
+
+// --- 数据段 ---------------------------------------------------------------
+// 字段顺序与 src/host/ir_host.lain 的 DataRec 完全一致：调用方可以直接把
+// DataRec 数组按字节重解释成这个视图，不必引入 src::host::ir_host（那会让
+// 宿主与文本发射互相 import）。
+pub let IrDataView = struct {
+  symbol: u64,
+  bytes: Ref(u8),
+  size: u64,
+  is_writable: u64,
+};
+
+// --- 算子名 ---------------------------------------------------------------
+pub let opcode_name = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_ADD() { return "add"; }
+  if k == codes.INST_SUB() { return "sub"; }
+  if k == codes.INST_MUL() { return "mul"; }
+  if k == codes.INST_SDIV() { return "sdiv"; }
+  if k == codes.INST_UDIV() { return "udiv"; }
+  if k == codes.INST_SREM() { return "srem"; }
+  if k == codes.INST_UREM() { return "urem"; }
+  if k == codes.INST_AND() { return "and"; }
+  if k == codes.INST_OR() { return "or"; }
+  if k == codes.INST_XOR() { return "xor"; }
+  if k == codes.INST_SHL() { return "shl"; }
+  if k == codes.INST_LSHR() { return "lshr"; }
+  if k == codes.INST_ASHR() { return "ashr"; }
+  if k == codes.INST_FADD() { return "fadd"; }
+  if k == codes.INST_FSUB() { return "fsub"; }
+  if k == codes.INST_FMUL() { return "fmul"; }
+  if k == codes.INST_FDIV() { return "fdiv"; }
+  if k == codes.INST_FNEG() { return "fneg"; }
+  if k == codes.INST_EQ() { return "eq"; }
+  if k == codes.INST_NE() { return "ne"; }
+  if k == codes.INST_SLT() { return "slt"; }
+  if k == codes.INST_SLE() { return "sle"; }
+  if k == codes.INST_SGT() { return "sgt"; }
+  if k == codes.INST_SGE() { return "sge"; }
+  if k == codes.INST_ULT() { return "ult"; }
+  if k == codes.INST_ULE() { return "ule"; }
+  if k == codes.INST_UGT() { return "ugt"; }
+  if k == codes.INST_UGE() { return "uge"; }
+  if k == codes.INST_FOEQ() { return "foeq"; }
+  if k == codes.INST_FONE() { return "fone"; }
+  if k == codes.INST_FOLT() { return "folt"; }
+  if k == codes.INST_FOLE() { return "fole"; }
+  if k == codes.INST_FOGT() { return "fogt"; }
+  if k == codes.INST_FOGE() { return "foge"; }
+  if k == codes.INST_FUEQ() { return "fueq"; }
+  if k == codes.INST_FUNE() { return "fune"; }
+  if k == codes.INST_FULT() { return "fult"; }
+  if k == codes.INST_FULE() { return "fule"; }
+  if k == codes.INST_FUGT() { return "fugt"; }
+  if k == codes.INST_FUGE() { return "fuge"; }
+  if k == codes.INST_ZEXT() { return "zext"; }
+  if k == codes.INST_SEXT() { return "sext"; }
+  if k == codes.INST_TRUNC() { return "trunc"; }
+  if k == codes.INST_BITCAST() { return "bitcast"; }
+  if k == codes.INST_FPEXT() { return "fpext"; }
+  if k == codes.INST_FPTRUNC() { return "fptrunc"; }
+  if k == codes.INST_FPTOSI() { return "fptosi"; }
+  if k == codes.INST_FPTOUI() { return "fptoui"; }
+  if k == codes.INST_SITOFP() { return "sitofp"; }
+  if k == codes.INST_UITOFP() { return "uitofp"; }
+  if k == codes.INST_VADD() { return "vadd"; }
+  if k == codes.INST_VSUB() { return "vsub"; }
+  if k == codes.INST_VMUL() { return "vmul"; }
+  if k == codes.INST_VDIV() { return "vdiv"; }
+  if k == codes.INST_VAND() { return "vand"; }
+  if k == codes.INST_VOR() { return "vor"; }
+  if k == codes.INST_VXOR() { return "vxor"; }
+  if k == codes.INST_VSHL() { return "vshl"; }
+  if k == codes.INST_VSHUFFLE() { return "vshuffle"; }
+  if k == codes.INST_VBROADCAST() { return "vbroadcast"; }
+  if k == codes.INST_VEXTRACT() { return "vextract"; }
+  if k == codes.INST_VINSERT() { return "vinsert"; }
+  if k == codes.INST_VCMPEQ() { return "vcmpeq"; }
+  if k == codes.INST_VCMPNE() { return "vcmpne"; }
+  if k == codes.INST_VCMPLT() { return "vcmplt"; }
+  if k == codes.INST_VCMPGT() { return "vcmpgt"; }
+  if k == codes.INST_XCHG() { return "xchg"; }
+  if k == codes.INST_CMPXCHG() { return "cmpxchg"; }
+  if k == codes.INST_RMW_ADD() { return "rmw_add"; }
+  if k == codes.INST_RMW_SUB() { return "rmw_sub"; }
+  if k == codes.INST_RMW_AND() { return "rmw_and"; }
+  if k == codes.INST_RMW_OR() { return "rmw_or"; }
+  if k == codes.INST_RMW_XOR() { return "rmw_xor"; }
+  if k == codes.INST_LEA() { return "lea"; }
+  if k == codes.INST_LOAD() { return "load"; }
+  if k == codes.INST_STORE() { return "store"; }
+  if k == codes.INST_ALLOCA() { return "alloca"; }
+  if k == codes.INST_CALL() { return "call"; }
+  if k == codes.INST_IF() { return "if"; }
+  if k == codes.INST_LOOP() { return "loop"; }
+  if k == codes.INST_SWITCH() { return "switch"; }
+  if k == codes.INST_YIELD() { return "yield"; }
+  if k == codes.INST_BREAK() { return "break"; }
+  if k == codes.INST_CONTINUE() { return "continue"; }
+  if k == codes.INST_RETURN() { return "return"; }
+  if k == codes.INST_UNREACHABLE() { return "unreachable"; }
+  return halt(k);
+};
+
+// --- 物理类型 -------------------------------------------------------------
+// 拼写与 print.c 一致：浮点写 `#f<N>`，布尔写 `#bits<1>`。
+pub let emit_type = func(w: Mut(TextWriter), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() {
+    let n: u64 = put_str(w, "#ad");
+    return n + put_str(w, "dr");
+  }
+  if t.kind == vf.TY_BOOL() { return put_str(w, "#bits<1>"); }
+  if t.kind == vf.TY_BITS() {
+    let a: u64 = put_str(w, "#bits<");
+    let b: u64 = put_u64_dec(w, t.width);
+    return put_byte(w, 62);
+  }
+  if t.kind == vf.TY_FLOAT() {
+    let a: u64 = put_str(w, "#f<");
+    let b: u64 = put_u64_dec(w, t.width);
+    return put_byte(w, 62);
+  }
+  if t.kind == vf.TY_VEC() {
+    let a: u64 = put_str(w, "#vec<");
+    let b: u64 = put_u64_dec(w, t.width);
+    return put_byte(w, 62);
+  }
+  return halt(t.kind);
+};
+
+// --- 发射上下文 -----------------------------------------------------------
+// 绑定表复用模块自带的 scratch 区（与验证器同一套布局），只记录名字到物理
+// 类型的映射：间接 #call 的签名参数与结果类型都要从这里取。
+pub let TextEmitter = struct {
+  w: Mut(TextWriter),
+  syms: Mut(tab.HostSymTab),
+  m: Ref(vf.IrModule),
+  depth: u64,
+  count: u64,
+  names: Mut(u64),
+  kinds: Mut(u64),
+  widths: Mut(u64),
+};
+
+let word_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), base) + i * size_of(u64));
+};
+
+pub let emitter_new = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
+                          m: Ref(vf.IrModule)) -> TextEmitter {
+  let scratch: Mut(u64) = m.scratch;
+  return TextEmitter {
+    w: w,
+    syms: syms,
+    m: m,
+    depth: 0,
+    count: 0,
+    names: scratch,
+    kinds: word_slot(scratch, vf.MAX_BINDINGS()),
+    widths: word_slot(scratch, vf.MAX_BINDINGS() * 2),
+  };
+};
+
+let bind_one = func(em: Mut(TextEmitter), name: u64, kind: u64, width: u64) -> u64 {
+  if name == 0 { return halt(name); }
+  if em.count >= vf.MAX_BINDINGS() { return halt(em.count); }
+  let at: u64 = em.count;
+  deref(word_slot(em.names, at)) = name;
+  deref(word_slot(em.kinds, at)) = kind;
+  deref(word_slot(em.widths, at)) = width;
+  em.count = at + 1;
+  return 1;
+};
+
+let scan_binding = func(em: Mut(TextEmitter), name: u64, i: u64) -> u64 {
+  if i >= em.count { return 0; }
+  if deref(word_slot(em.names, i)) == name { return i + 1; }
+  return scan_binding(em, name, i + 1);
+};
+
+let find_binding = func(em: Mut(TextEmitter), name: u64) -> u64 {
+  if name == 0 { return 0; }
+  return scan_binding(em, name, 0);
+};
+
+let bind_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> u64 {
+  if i >= count { return 1; }
+  let p: vf.IrParam = vf.param_at_ref(base, i);
+  let rc: u64 = bind_one(em, p.name, p.ty_kind, p.ty_width);
+  return bind_params(em, base, count, i + 1);
+};
+
+// --- 模块记录 -------------------------------------------------------------
+let region_of = func(em: Mut(TextEmitter), ri: u64) -> vf.IrRegion {
+  if ri == vf.NO_REGION() { return halt(ri); }
+  if ri >= em.m.region_count { return halt(ri); }
+  return vf.region_at_ref(em.m.regions, ri);
+};
+
+let inst_of = func(em: Mut(TextEmitter), ii: u64) -> vf.IrInst {
+  if ii >= em.m.inst_count { return halt(ii); }
+  return vf.inst_at_ref(em.m.insts, ii);
+};
+
+let case_of = func(em: Mut(TextEmitter), ci: u64) -> vf.IrCase {
+  if ci >= em.m.case_count { return halt(ci); }
+  return vf.case_at_ref(em.m.cases, ci);
+};
+
+let region_inst = func(r: vf.IrRegion, i: u64) -> u64 {
+  let base: Ref(u8) = ptr_cast(Ref(u8), r.insts);
+  let p: Ref(u64) = ptr_cast(Ref(u64), base + i * size_of(u64));
+  return deref(p);
+};
+
+let scan_proc = func(em: Mut(TextEmitter), name: u64, i: u64) -> u64 {
+  if i >= em.m.proc_count { return 0; }
+  let p: vf.IrProc = vf.proc_at_ref(em.m.procs, i);
+  if p.name == name { return i + 1; }
+  return scan_proc(em, name, i + 1);
+};
+
+let find_proc = func(em: Mut(TextEmitter), name: u64) -> u64 {
+  if name == 0 { return 0; }
+  return scan_proc(em, name, 0);
+};
+
+// 与验证器 result_type 同一套规则：比较产出 1 位布尔，指针计算产出指针类型，
+// 区域指令的产出类型来自被发射区域的声明结果，直接调用来自被调过程。
+let result_type = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> vf.IrType {
+  let k: u64 = it.kind;
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return vf.type_bool(); }
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return vf.type_bool(); }
+  if k == codes.INST_LEA() { return vf.type_addr(); }
+  if k == codes.INST_ALLOCA() { return vf.type_addr(); }
+  if k == codes.INST_IF() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_of(em, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return vf.type_at_ref(r.results, i);
+  }
+  if k == codes.INST_LOOP() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_of(em, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return vf.type_at_ref(r.results, i);
+  }
+  if k == codes.INST_SWITCH() {
+    if it.default_body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_of(em, it.default_body);
+    if i >= r.result_count { return vf.type_void(); }
+    return vf.type_at_ref(r.results, i);
+  }
+  if (k == codes.INST_CALL()) and (it.symbol != 0) {
+    let pi: u64 = find_proc(em, it.symbol);
+    if pi == 0 { return vf.type_void(); }
+    let p: vf.IrProc = vf.proc_at_ref(em.m.procs, pi - 1);
+    if i >= p.result_count { return vf.type_void(); }
+    return vf.type_at_ref(p.results, i);
+  }
+  return vf.inst_ty(it);
+};
+
+let define_results = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
+  if i >= it.result_count { return 1; }
+  let name: u64 = vf.inst_result_name(it, i);
+  let t: vf.IrType = result_type(em, it, i);
+  let rc: u64 = bind_one(em, name, t.kind, t.width);
+  return define_results(em, it, i + 1);
+};
+
+// --- 缩进与操作数 ---------------------------------------------------------
+let emit_indent = func(em: Mut(TextEmitter), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let rc: u64 = put_str(em.w, "  ");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
+  if op.kind == vf.OP_VALUE() {
+    let a: u64 = put_byte(em.w, 37);
+    return put_symbol(em.w, em.syms, op.name);
+  }
+  return put_u64_dec(em.w, op.bits);
+};
+
+// 间接 #call 签名里的实参类型：值操作数取绑定表里的物理类型，字面量按
+// 地址宽度写；C 侧只核字面量的宽度声明与实参个数，执行期读的是位模式。
+let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
+  if op.kind != vf.OP_VALUE() { return put_str(em.w, "#bits<64>"); }
+  let p: u64 = find_binding(em, op.name);
+  if p == 0 { return halt(op.name); }
+  let t: vf.IrType = vf.IrType {
+    kind: deref(word_slot(em.kinds, p - 1)),
+    width: deref(word_slot(em.widths, p - 1)),
+  };
+  return emit_type(em.w, t);
+};
+
+let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
+  if i >= it.operand_count { return 1; }
+  if i > 0 {
+    let sep: u64 = put_str(em.w, ", ");
+  }
+  let op: vf.IrOperand = vf.inst_op(it, i);
+  let rc: u64 = emit_operand(em, op);
+  return emit_operands(em, it, i + 1);
+};
+
+// 值级对齐作为具名实参写在实参列表末尾：`(%ptr, align=N)`。解析器只把
+// align 当作 #load / #store 的具名实参，其余算子写了会被当成操作数拒绝，
+// 所以只在访存指令上写出来。
+let accepts_align = func(k: u64) -> u64 {
+  if k == codes.INST_LOAD() { return 1; }
+  if k == codes.INST_STORE() { return 1; }
+  return 0;
+};
+
+let emit_operand_list = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = put_byte(em.w, 40);
+  let b: u64 = emit_operands(em, it, 0);
+  if (it.align != 0) and (accepts_align(it.kind) == 1) {
+    if it.operand_count > 0 {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let c: u64 = put_str(em.w, "align=");
+    let d: u64 = put_u64_dec(em.w, it.align);
+  }
+  return put_byte(em.w, 41);
+};
+
+let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  if it.has_ty == 0 { return 1; }
+  let a: u64 = put_byte(em.w, 91);
+  let t: vf.IrType = vf.inst_ty(it);
+  let b: u64 = emit_type(em.w, t);
+  return put_byte(em.w, 93);
+};
+
+// 结果前缀：`%a, %b = `；没有结果就什么都不写。
+let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
+    if i > 0 {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let a: u64 = put_byte(em.w, 37);
+    let name: u64 = vf.inst_result_name(it, i);
+    let b: u64 = put_symbol(em.w, em.syms, name);
+    i = i + 1;
+  };
+  if it.result_count == 0 { return 1; }
+  return put_str(em.w, " = ");
+};
+
+// 区域声明的结果：` -> (T, T)`；没有就不写。
+let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
+  if r.result_count == 0 { return 1; }
+  let a: u64 = put_str(em.w, " -> (");
+  let i: u64 = loop c(i: u64 = 0) while i < r.result_count {
+    if i > 0 {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let t: vf.IrType = vf.type_at_ref(r.results, i);
+    let rc: u64 = emit_type(em.w, t);
+    i = i + 1;
+  };
+  return put_byte(em.w, 41);
+};
+
+// 过程签名的结果：单个不括号，多个括号。
+let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
+  if p.result_count == 0 { return 1; }
+  let a: u64 = put_str(em.w, " -> ");
+  if p.result_count == 1 {
+    let t: vf.IrType = vf.type_at_ref(p.results, 0);
+    return emit_type(em.w, t);
+  }
+  let b: u64 = put_byte(em.w, 40);
+  let i: u64 = loop c(i: u64 = 0) while i < p.result_count {
+    if i > 0 {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let t: vf.IrType = vf.type_at_ref(p.results, i);
+    let rc: u64 = emit_type(em.w, t);
+    i = i + 1;
+  };
+  return put_byte(em.w, 41);
+};
+
+let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> u64 {
+  if i >= count { return 1; }
+  if i > 0 {
+    let sep: u64 = put_str(em.w, ", ");
+  }
+  let p: vf.IrParam = vf.param_at_ref(base, i);
+  let a: u64 = put_byte(em.w, 37);
+  let b: u64 = put_symbol(em.w, em.syms, p.name);
+  let c: u64 = put_str(em.w, ": ");
+  let t: vf.IrType = vf.param_ty(p);
+  let d: u64 = emit_type(em.w, t);
+  return emit_params(em, base, count, i + 1);
+};
+
+// 循环形参带着初值：`%i: #bits<64> = 0`。初值在 Lain 的表示里没有对应字段，
+// 与 C99 后端一样按零初始化。
+let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
+  if i >= r.param_count { return 1; }
+  if i > 0 {
+    let sep: u64 = put_str(em.w, ", ");
+  }
+  let p: vf.IrParam = vf.param_at_ref(r.params, i);
+  let a: u64 = put_byte(em.w, 37);
+  let b: u64 = put_symbol(em.w, em.syms, p.name);
+  let c: u64 = put_str(em.w, ": ");
+  let t: vf.IrType = vf.param_ty(p);
+  let d: u64 = emit_type(em.w, t);
+  let e: u64 = put_str(em.w, " = 0");
+  return emit_loop_params(em, r, i + 1);
+};
+
+let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> u64 {
+  let a: u64 = put_byte(em.w, 35);
+  return put_str(em.w, opcode_name(k));
+};
+
+// --- 指令 -----------------------------------------------------------------
+let emit_insts = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
+  if i >= r.inst_count { return 1; }
+  let ii: u64 = region_inst(r, i);
+  let rc: u64 = emit_inst(em, ii);
+  return emit_insts(em, r, i + 1);
+};
+
+// 无自带形参的区域（#if / #switch 分支、过程体）。
+let emit_body = func(em: Mut(TextEmitter), ri: u64) -> u64 {
+  let saved: u64 = em.count;
+  let r: vf.IrRegion = region_of(em, ri);
+  let e: u64 = emit_insts(em, r, 0);
+  em.count = saved;
+  return e;
+};
+
+// 自带形参的区域（#loop 体）。
+let emit_block = func(em: Mut(TextEmitter), ri: u64) -> u64 {
+  let saved: u64 = em.count;
+  let r: vf.IrRegion = region_of(em, ri);
+  let b: u64 = bind_params(em, r.params, r.param_count, 0);
+  let e: u64 = emit_insts(em, r, 0);
+  em.count = saved;
+  return e;
+};
+
+let emit_if = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = put_str(em.w, "#if ");
+  let op: vf.IrOperand = vf.inst_op(it, 0);
+  let b: u64 = emit_operand(em, op);
+  if it.body != vf.NO_REGION() {
+    let r: vf.IrRegion = region_of(em, it.body);
+    let c: u64 = emit_region_results(em, r);
+  }
+  let d: u64 = put_str(em.w, " {\n");
+  em.depth = em.depth + 1;
+  let e: u64 = emit_body(em, it.body);
+  em.depth = em.depth - 1;
+  let f: u64 = emit_indent(em, em.depth);
+  if it.else_body == vf.NO_REGION() {
+    return put_str(em.w, "}\n");
+  }
+  let g: u64 = put_str(em.w, "} else {\n");
+  em.depth = em.depth + 1;
+  let h: u64 = emit_body(em, it.else_body);
+  em.depth = em.depth - 1;
+  let j: u64 = emit_indent(em, em.depth);
+  return put_str(em.w, "}\n");
+};
+
+let emit_loop = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = put_str(em.w, "#loop ");
+  let b: u64 = put_symbol(em.w, em.syms, it.label);
+  let c: u64 = put_byte(em.w, 40);
+  let r: vf.IrRegion = region_of(em, it.body);
+  let d: u64 = emit_loop_params(em, r, 0);
+  let e: u64 = put_byte(em.w, 41);
+  let f: u64 = emit_region_results(em, r);
+  let g: u64 = put_str(em.w, " {\n");
+  em.depth = em.depth + 1;
+  let h: u64 = emit_block(em, it.body);
+  em.depth = em.depth - 1;
+  let j: u64 = emit_indent(em, em.depth);
+  return put_str(em.w, "}\n");
+};
+
+let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
+  if i >= it.case_count { return 1; }
+  let cs: vf.IrCase = case_of(em, it.cases_at + i);
+  em.depth = em.depth + 1;
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "case ");
+  let c: u64 = put_u64_dec(em.w, cs.value);
+  let d: u64 = put_str(em.w, " {\n");
+  em.depth = em.depth + 1;
+  let e: u64 = emit_body(em, cs.body);
+  em.depth = em.depth - 1;
+  let f: u64 = emit_indent(em, em.depth);
+  let g: u64 = put_str(em.w, "}\n");
+  em.depth = em.depth - 1;
+  return emit_cases(em, it, i + 1);
+};
+
+let emit_default_case = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  if it.default_body == vf.NO_REGION() { return 1; }
+  em.depth = em.depth + 1;
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "default {\n");
+  em.depth = em.depth + 1;
+  let c: u64 = emit_body(em, it.default_body);
+  em.depth = em.depth - 1;
+  let d: u64 = emit_indent(em, em.depth);
+  let e: u64 = put_str(em.w, "}\n");
+  em.depth = em.depth - 1;
+  return 1;
+};
+
+let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = put_str(em.w, "#switch");
+  let b: u64 = emit_type_arg(em, it);
+  let c: u64 = put_byte(em.w, 32);
+  let op: vf.IrOperand = vf.inst_op(it, 0);
+  let d: u64 = emit_operand(em, op);
+  if it.default_body != vf.NO_REGION() {
+    let r: vf.IrRegion = region_of(em, it.default_body);
+    let e: u64 = emit_region_results(em, r);
+  }
+  let f: u64 = put_str(em.w, " {\n");
+  let g: u64 = emit_cases(em, it, 0);
+  let h: u64 = emit_default_case(em, it);
+  let j: u64 = emit_indent(em, em.depth);
+  return put_str(em.w, "}\n");
+};
+
+// #break / #continue：标签后面跟带括号的状态实参。
+let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_opcode(em, it.kind);
+  let b: u64 = put_byte(em.w, 32);
+  let c: u64 = put_symbol(em.w, em.syms, it.label);
+  if it.operand_count > 0 {
+    let d: u64 = put_byte(em.w, 40);
+    let e: u64 = emit_operands(em, it, 0);
+    let f: u64 = put_byte(em.w, 41);
+  }
+  return put_byte(em.w, 10);
+};
+
+// #yield / #return / #unreachable：操作数不带括号，靠行尾界定。
+let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_opcode(em, it.kind);
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i == 0 {
+      let sep: u64 = put_byte(em.w, 32);
+    } else {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let op: vf.IrOperand = vf.inst_op(it, i);
+    let rc: u64 = emit_operand(em, op);
+    i = i + 1;
+  };
+  return put_byte(em.w, 10);
+};
+
+// 间接调用：`#call [(T, T) -> R](%fn, %a, %b)`。被调方为寄存器值，
+// 签名就是这层文本做静态核对的唯一依据。
+let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = put_str(em.w, " [(");
+  let i: u64 = loop c(i: u64 = 1) while i < it.operand_count {
+    if i > 1 {
+      let sep: u64 = put_str(em.w, ", ");
+    }
+    let op: vf.IrOperand = vf.inst_op(it, i);
+    let rc: u64 = emit_operand_type(em, op);
+    i = i + 1;
+  };
+  let b: u64 = put_byte(em.w, 41);
+  if it.has_ty == 1 {
+    let c: u64 = put_str(em.w, " -> ");
+    let t: vf.IrType = vf.inst_ty(it);
+    let d: u64 = emit_type(em.w, t);
+  }
+  return put_byte(em.w, 93);
+};
+
+let emit_call_rest = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  if it.symbol != 0 {
+    let a: u64 = put_str(em.w, " @");
+    let b: u64 = put_symbol(em.w, em.syms, it.symbol);
+  } else {
+    let a: u64 = emit_call_signature(em, it);
+  }
+  let c: u64 = emit_operand_list(em, it);
+  return put_byte(em.w, 10);
+};
+
+let emit_generic = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_opcode(em, it.kind);
+  if it.kind == codes.INST_CALL() {
+    return emit_call_rest(em, it);
+  }
+  let b: u64 = emit_type_arg(em, it);
+  let c: u64 = emit_operand_list(em, it);
+  return put_byte(em.w, 10);
+};
+
+let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> u64 {
+  if em.w.ok == 0 { return 0; }
+  let it: vf.IrInst = inst_of(em, ii);
+  let k: u64 = it.kind;
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_results_prefix(em, it);
+  if k == codes.INST_IF() {
+    let rc: u64 = emit_if(em, it);
+    return define_results(em, it, 0);
+  }
+  if k == codes.INST_LOOP() {
+    let rc: u64 = emit_loop(em, it);
+    return define_results(em, it, 0);
+  }
+  if k == codes.INST_SWITCH() {
+    let rc: u64 = emit_switch(em, it);
+    return define_results(em, it, 0);
+  }
+  if (k == codes.INST_BREAK()) or (k == codes.INST_CONTINUE()) {
+    let rc: u64 = emit_jump(em, it);
+    return define_results(em, it, 0);
+  }
+  if (k == codes.INST_YIELD()) or (k == codes.INST_RETURN()) {
+    let rc: u64 = emit_terminator(em, it);
+    return define_results(em, it, 0);
+  }
+  if k == codes.INST_UNREACHABLE() {
+    let rc: u64 = put_str(em.w, "#unreachable\n");
+    return define_results(em, it, 0);
+  }
+  let rc: u64 = emit_generic(em, it);
+  return define_results(em, it, 0);
+};
+
+// --- 数据与过程 -----------------------------------------------------------
+let data_slot = func(base: Ref(IrDataView), i: u64) -> Ref(IrDataView) {
+  let raw: Ref(u8) = ptr_cast(Ref(u8), base);
+  return ptr_cast(Ref(IrDataView), raw + i * size_of(IrDataView));
+};
+
+let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> u64 {
+  let a: u64 = put_str(em.w, "data ");
+  let b: u64 = put_symbol(em.w, em.syms, d.symbol);
+  if d.is_writable == 1 {
+    let c: u64 = put_str(em.w, " rw");
+  } else {
+    let c: u64 = put_str(em.w, " ro");
+  }
+  let d1: u64 = put_str(em.w, " {");
+  let i: u64 = loop c(i: u64 = 0) while i < d.size {
+    let p: Ref(u8) = d.bytes + i;
+    let byte: u64 = deref(p) as u64;
+    let sep: u64 = put_byte(em.w, 32);
+    let rc: u64 = put_u64_dec(em.w, byte);
+    i = i + 1;
+  };
+  return put_str(em.w, " }\n");
+};
+
+let emit_data_all = func(em: Mut(TextEmitter), base: Ref(IrDataView), count: u64, i: u64) -> u64 {
+  if i >= count { return 1; }
+  let d: IrDataView = deref(data_slot(base, i));
+  let rc: u64 = emit_data(em, d);
+  return emit_data_all(em, base, count, i + 1);
+};
+
+let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
+  let a: u64 = put_str(em.w, "#proc ");
+  let b: u64 = put_symbol(em.w, em.syms, p.name);
+  let c: u64 = put_byte(em.w, 40);
+  let d: u64 = emit_params(em, p.params, p.param_count, 0);
+  let e: u64 = put_byte(em.w, 41);
+  let f: u64 = emit_proc_results(em, p);
+  if p.is_extern == 1 {
+    let g: u64 = put_str(em.w, " #extern \"");
+    if p.link_name != 0 {
+      let h: u64 = put_symbol(em.w, em.syms, p.link_name);
+    } else {
+      let h: u64 = put_symbol(em.w, em.syms, p.name);
+    }
+    return put_str(em.w, "\"\n");
+  }
+  let g: u64 = put_str(em.w, " {\n");
+  em.depth = 1;
+  em.count = 0;
+  let h: u64 = bind_params(em, p.params, p.param_count, 0);
+  let j: u64 = emit_body(em, p.body);
+  em.depth = 0;
+  return put_str(em.w, "}\n");
+};
+
+let emit_procs = func(em: Mut(TextEmitter), i: u64) -> u64 {
+  if i >= em.m.proc_count { return 1; }
+  if i > 0 {
+    let sep: u64 = put_byte(em.w, 10);
+  }
+  let p: vf.IrProc = vf.proc_at_ref(em.m.procs, i);
+  let rc: u64 = emit_proc(em, p);
+  return emit_procs(em, i + 1);
+};
+
+// --- 入口 -----------------------------------------------------------------
+// 把整个模块写成 .l1 文本，返回写入的字节数；缓冲区不够时返回 0 并把
+// w.ok 置为 0。data_count 为 0 时整段数据区省略。
+pub let emit_module_text = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
+                               m: Ref(vf.IrModule), data: Ref(IrDataView),
+                               data_count: u64) -> u64 {
+  if w.ok == 0 { return 0; }
+  let start: u64 = w.len;
+  let e0: TextEmitter = emitter_new(w, syms, m);
+  let em: Mut(TextEmitter) = mut_of(e0);
+  let a: u64 = emit_data_all(em, data, data_count, 0);
+  if data_count > 0 {
+    if m.proc_count > 0 {
+      let sep: u64 = put_byte(w, 10);
+    }
+  }
+  let b: u64 = emit_procs(em, 0);
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};

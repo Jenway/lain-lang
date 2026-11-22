@@ -45,7 +45,7 @@ let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
 
 // --- 上限 -----------------------------------------------------------------
-pub let MAX_OPERANDS = func() -> u64 { return 8; };
+pub let MAX_OPERANDS = func() -> u64 { return 16; };
 pub let MAX_RESULTS = func() -> u64 { return 2; };
 let STACK_ALIGN = func() -> u64 { return 16; };
 
@@ -126,6 +126,7 @@ let ST_FLOAT_UNSUPPORTED = func() -> u64 { return 1072; };
 let ST_VECTOR_UNSUPPORTED = func() -> u64 { return 1073; };
 let ST_ATOMIC_UNSUPPORTED = func() -> u64 { return 1074; };
 let ST_ALREADY_STARTED = func() -> u64 { return 1075; };
+let ST_ASSEMBLY_FAILED = func() -> u64 { return 1076; };
 
 // --- 配额 -----------------------------------------------------------------
 // 三个上界都是 0 = 不限额（与内核 quota 的约定一致：0 不表示「一个都不许」）。
@@ -674,7 +675,9 @@ let result_of = func(tcb: Mut(TCB)) -> VmResult {
 };
 
 // 引擎内部用来表达「装配失败」的结果：不涉及任何 TCB。
-pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
+// trap_status 必须非 0：宿主的标量通道把非 DONE 的 trap_status 当成错误码原样
+// 交回调用方，0 会被读成求值成功并交出零值。
+let vm_trap_result = func(trap_kind: u64, trap_status: u64) -> VmResult {
   return VmResult {
     status: SLICE_TRAPPED(),
     steps_used: 0,
@@ -682,8 +685,13 @@ pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
     result_bits: 0,
     result_val: trap_value_ptr(),
     trap_kind: trap_kind,
-    trap_status: 0,
+    trap_status: trap_status,
   };
+};
+
+// 只知故障类别时的装配失败结果。
+pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
+  return vm_trap_result(trap_kind, ST_ASSEMBLY_FAILED());
 };
 
 // --- 槽与操作数 -----------------------------------------------------------
@@ -727,14 +735,9 @@ let read_slot_ref = func(tcb: Mut(TCB), r: im.OperandRef, literal: u64,
 };
 
 let operand_bits_at = func(inst: vf.IrInst, i: u64) -> u64 {
-  if i == 0 { return inst.op0_bits; }
-  if i == 1 { return inst.op1_bits; }
-  if i == 2 { return inst.op2_bits; }
-  if i == 3 { return inst.op3_bits; }
-  if i == 4 { return inst.op4_bits; }
-  if i == 5 { return inst.op5_bits; }
-  if i == 6 { return inst.op6_bits; }
-  return inst.op7_bits;
+  if i >= MAX_OPERANDS() { return 0; }
+  let op: vf.IrOperand = vf.inst_op(inst, i);
+  return op.bits;
 };
 
 let op_read = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
@@ -1742,11 +1745,13 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                         entry: u64, args: Slice(u64),
                         arena: MutSlice(u8)) -> VmResult {
   let need: u64 = vm_tcb_bytes(image, quota);
-  if arena.len < need { return vm_result_trap(TRAP_STATE()); }
+  if arena.len < need { return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL()); }
   let lease: vs.StackLease = vs.vm_no_lease();
   if quota.max_stack_bytes > 0 {
     lease = vs.vm_alloc_stack(space, quota.max_stack_bytes, owner);
-    if vs.vm_lease_none(lease) != 0 { return vm_result_trap(TRAP_CAPACITY_EXCEEDED()); }
+    if vs.vm_lease_none(lease) != 0 {
+      return vm_trap_result(TRAP_CAPACITY_EXCEEDED(), ST_STACK_EXHAUSTED());
+    }
   }
   let tcb: TCB = vm_tcb_blank();
   let live: Mut(TCB) = mut_of(tcb);
@@ -1755,7 +1760,7 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
     if vs.vm_lease_none(lease) == 0 {
       let dropped: u64 = vs.vm_free_stack(space, lease);
     }
-    return vm_result_trap(TRAP_STATE());
+    return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL());
   }
   let started: u64 = vm_tcb_start(live, entry, args);
   let result: VmResult = if started != SLICE_RUNNABLE() { result_of(live) } else { run_to_end(live) };

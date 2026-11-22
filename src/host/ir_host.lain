@@ -850,17 +850,6 @@ pub let ir_region_begin = func(h: Mut(HostIr), modv: u64) -> u64 {
   f.param_count = 0;
   f.result_count = 0;
   f.inst_count = 0;
-  // 过程体区域的结果就是过程声明的结果：最外层区域开区时直接把过程结果表
-  // 当成本区域的结果，收区发布的区域结果因此与过程签名一致。
-  if m.depth == 0 {
-    f.result_count = p.result_count;
-    f.result_cap = p.result_count;
-    if p.result_count == 0 {
-      f.results = null_ref(Mut(vf.IrType));
-    } else {
-      f.results = p.results;
-    }
-  }
   m.depth = m.depth + 1;
   p.depth = m.depth;
   return m.depth;
@@ -919,13 +908,20 @@ pub let ir_region_end = func(h: Mut(HostIr), modv: u64) -> u64 {
   let f: Mut(Frame) = frame_slot(m.frames, depth - 1);
   let params: Ref(vf.IrParam) = publish_params(h, ptr_cast(Ref(vf.IrParam), f.params),
                                               f.param_count);
-  let results: Ref(vf.IrType) = publish_types(h, ptr_cast(Ref(vf.IrType), f.results),
-                                              f.result_count);
+  // 过程体区域的结果必须与过程签名一致，而过程结果可以在开区之后才声明，
+  // 所以这里按收区那一刻的过程结果表发布，不读开区时拍的快照。
+  let rsrc: Ref(vf.IrType) = if depth == 1 {
+    ptr_cast(Ref(vf.IrType), p.results)
+  } else {
+    ptr_cast(Ref(vf.IrType), f.results)
+  };
+  let rcount: u64 = if depth == 1 { p.result_count } else { f.result_count };
+  let results: Ref(vf.IrType) = publish_types(h, rsrc, rcount);
   let insts: Ref(u64) = publish_insts(h, ptr_cast(Ref(u64), f.insts), f.inst_count);
   if h.err != 0 { return 0; }
   let ri: u64 = m.region_count;
   let slot: Mut(vf.IrRegion) = region_slot(m.regions, ri);
-  deref(slot) = vf.region_new(params, f.param_count, results, f.result_count,
+  deref(slot) = vf.region_new(params, f.param_count, results, rcount,
                               insts, f.inst_count);
   m.region_count = ri + 1;
   m.depth = depth - 1;
@@ -1225,7 +1221,22 @@ pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
   let m: Mut(ModState) = mod_of_handle(h, modv);
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let modval: vf.IrModule = module_of(h, m);
-  let code: u64 = vf.verify_module(ref_of(modval));
+  let code: u64 = 0;
+  if m.data_count == 0 {
+    code = vf.verify_module(ref_of(modval));
+  } else {
+    let raw: Mut(u8) = arena_take(h, m.data_count * size_of(u64), 8);
+    if is_null(raw) { return fail(h, HOST_ERR_CAPACITY()); }
+    let syms: Mut(u64) = ptr_cast(Mut(u64), raw);
+    let i: u64 = loop c(i: u64 = 0) while i < m.data_count {
+      let d: Mut(DataRec) = data_slot(m.data, i);
+      let s: Mut(u64) = u64_slot(syms, i);
+      deref(s) = d.symbol;
+      i = i + 1;
+    };
+    code = vf.verify_module_with_data(ref_of(modval), ptr_cast(Ref(u64), syms),
+                                      m.data_count);
+  }
   h.last_verify = code;
   return code;
 };

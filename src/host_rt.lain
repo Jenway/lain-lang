@@ -1,0 +1,892 @@
+// src/host_rt.lain —— 单例宿主运行时（HostRt）。
+//
+// 编译需要的全部宿主状态只存在一份：符号表、语法树输出 Arena、源码管理器、
+// IR 宿主、虚拟机与两块工作区。g_rt 只有一个 u64，存的是 HostRt 的堆地址；
+// 首次调用 rt_init 时才按需构造，之后的调用直接复用同一份状态。
+//
+// 过程之间传递的句柄、索引与地址都由下层的两个宿主模块定义：
+//   src::host::source_host 统一 AST 句柄与源码管理；
+//   src::host::ir_host     IR 模块、区域、指令与诊断。
+// 这一层只做三件事：把单例取出来、把参数翻译成下层结构的切片、把结果交回去。
+//
+// 容量与句柄上的任何违例都在发生位置就地终止，绝不返回半成品。
+
+let os = import("std::os");
+let symtab = import("src::host::symtab");
+let ao = import("src::meta::ast_out");
+let sh = import("src::host::source_host");
+let irh = import("src::host::ir_host");
+let vmh = import("src::host::vm_host");
+let emit_text = import("src::ir::emit_text");
+let c99 = import("src::backend::c99");
+let vf = import("src::ir::verify");
+
+// --- 违例终止 ---------------------------------------------------------------
+// 参数只用来让除数在运行期求成零，编译器无法把这条除法折叠成常数。
+let Halt = struct { zero: u64 };
+let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
+let halt = func(cause: u64) -> u64 {
+  let h: Halt = Halt { zero: cause - cause };
+  return halt_at(h);
+};
+
+let trap_mut = func(cause: u64) -> Mut(u8) {
+  let dead: u64 = halt(cause);
+  return null_ref(Mut(u8));
+};
+
+// --- 容量 -------------------------------------------------------------------
+// 符号表的共享区段同时承载符号原文与每份源码的 Reader Arena，所以按整个编译
+// 单元的规模预留；mem_alloc 走另一块独立的递增区，编译器自己的状态表、类型
+// 与小对象都在那边，不会占用 Reader 的空间。两块区都按整个编译过程只增不减
+// 的气质给出余量：一份状态就要 85 MB 左右，递增区必须同时容得下多份状态。
+let sym_bytes = func() -> u64 { return 268435456; };
+let bump_bytes = func() -> u64 { return 536870912; };
+// IR 区要同时容纳模块、区域、过程、指令、数据与帧，指令按 size_of(IrInst) = 512
+// 字节计价；自编译 src/entry.lain 约产生 171704 条指令，仅指令就占 88 MB，而且
+// ir_host 扩容是整块重新分配（旧块留在原处），几何增长累计约两倍；单次扩容步长可达
+// 131072 -> 262144 条指令，即 128 MB，加上此前几何增长留下的 64+32+16 MB 等合计
+// 已超过 256 MB，所以按 512 MB 预留。
+let ir_bytes = func() -> u64 { return 536870912; };
+let vm_bytes = func() -> u64 { return 4194304; };
+let out_bytes = func() -> u64 { return 16777216; };
+
+let ast_node_cap = func() -> u64 { return 262144; };
+let ast_kid_cap = func() -> u64 { return 1048576; };
+let ast_pool_cap = func() -> u64 { return 4194304; };
+let ast_mark_cap = func() -> u64 { return 4096; };
+
+let source_cap = func() -> u64 { return 256; };
+let source_kids_cap = func() -> u64 { return 1048576; };
+
+// 导入的结构类型不能直接出现在 size_of 的实参里，用本地单元结构包一层。
+let SymTabCell = struct { v: symtab.HostSymTab };
+let AstOutCell = struct { v: ao.AstOut };
+let SourcesCell = struct { v: sh.HostSources };
+let MarkCell = struct { v: ao.Mark };
+let ModStateCell = struct { v: irh.ModState };
+let DataRecCell = struct { v: irh.DataRec };
+
+pub let NO_SOURCE = func() -> u64 { return 4294967295; };
+
+// --- 单例状态 ---------------------------------------------------------------
+let HostRt = struct {
+  syms: Mut(symtab.HostSymTab),
+  ast_out: Mut(ao.AstOut),
+  sources: Mut(sh.HostSources),
+  ir: Mut(irh.HostIr),
+  vm: Mut(vmh.VmHost),
+  bump_base: Mut(u8),
+  bump_cap: u64,
+  bump_used: u64,
+  trace_path_ptr: u64,
+  trace_path_len: u64,
+  trace_on: u64,
+  trace_flushed: u64,
+};
+
+let g_rt: Array(u64, 1) = [0];
+
+let rt_slot = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(g_rt), 1);
+};
+
+// --- 字节搬运 ---------------------------------------------------------------
+let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let d: Mut(u8) = dst + i;
+    let s: Ref(u8) = src + i;
+    deref(d) = deref(s);
+    i = i + 1;
+  };
+  return i;
+};
+
+let bytes_eq = func(a: Ref(u8), b: Ref(u8), n: u64) -> u64 {
+  return loop c(i: u64 = 0, ok: u64 = 1) while i < n {
+    let x: u8 = deref(a + i);
+    let y: u8 = deref(b + i);
+    if x != y { ok = 0; }
+    i = i + 1;
+  };
+};
+
+let put_text = func(dst: Mut(u8), at: u64, s: Slice(u8)) -> u64 {
+  return loop c(i: u64 = 0, o: u64 = at) while i < s.len {
+    let d: Mut(u8) = dst + o;
+    deref(d) = s[i];
+    o = o + 1;
+    i = i + 1;
+  };
+};
+
+let put_dec = func(dst: Mut(u8), at: u64, v: u64) -> u64 {
+  if v >= 10 {
+    let head: u64 = put_dec(dst, at, v / 10);
+    let d: Mut(u8) = dst + head;
+    deref(d) = (48 + (v % 10)) as u8;
+    return head + 1;
+  }
+  let one: Mut(u8) = dst + at;
+  deref(one) = (48 + v) as u8;
+  return at + 1;
+};
+
+// --- 递增区 -----------------------------------------------------------------
+let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
+  let a: u64 = if align == 0 { 16 } else { align };
+  if (a & (a - 1)) != 0 { return trap_mut(bytes); }
+  if a > 4096 { return trap_mut(align); }
+  let base: u64 = h.bump_base as u64;
+  let want: u64 = h.bump_used;
+  let miss: u64 = want % a;
+  let off: u64 = if miss == 0 { want } else { want + (a - miss) };
+  if (off + bytes) > h.bump_cap { return trap_mut(bytes); }
+  h.bump_used = off + bytes;
+  return ptr_cast(Mut(u8), base + off);
+};
+
+// --- 构造 -------------------------------------------------------------------
+let host_new = func() -> u64 {
+  let raw_ptr: u64 = os.alloc_bytes(size_of(HostRt));
+  if raw_ptr == 0 { return halt(raw_ptr); }
+  let stab: Mut(symtab.HostSymTab) =
+    ptr_cast(Mut(symtab.HostSymTab), os.alloc_bytes(size_of(SymTabCell)));
+  if is_null(stab) { return halt(0); }
+  let sbase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(sym_bytes()));
+  if is_null(sbase) { return halt(0); }
+  let sbuf: MutSlice(u8) = make_slice(MutSlice(u8), sbase, sym_bytes());
+  deref(stab) = symtab.symtab_new(sbuf);
+
+  let arena_bytes: u64 = ao.ast_out_bytes(ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
+                                          ast_mark_cap());
+  let abase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(arena_bytes));
+  if is_null(abase) { return halt(0); }
+  let ast_out: Mut(ao.AstOut) = ptr_cast(Mut(ao.AstOut), os.alloc_bytes(size_of(AstOutCell)));
+  if is_null(ast_out) { return halt(0); }
+  deref(ast_out) = ao.ast_out_init(abase, ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
+                                   ast_mark_cap());
+
+  let sources: Mut(sh.HostSources) =
+    ptr_cast(Mut(sh.HostSources), os.alloc_bytes(size_of(SourcesCell)));
+  if is_null(sources) { return halt(0); }
+  deref(sources) = sh.host_sources_new(stab, ast_out, source_cap(), source_kids_cap());
+
+  let ir_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(ir_bytes()));
+  if is_null(ir_base) { return halt(0); }
+  let ir: Mut(irh.HostIr) = irh.host_new(ir_base, ir_bytes());
+  if is_null(ir) { return halt(0); }
+
+  let vm_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(vm_bytes()));
+  if is_null(vm_base) { return halt(0); }
+  let vm: Mut(vmh.VmHost) =
+    vmh.host_new_with_config(vm_base, vm_bytes(), ir, vmh.default_large_config());
+  if is_null(vm) { return halt(0); }
+
+  let bump_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(bump_bytes()));
+  if is_null(bump_base) { return halt(0); }
+
+  let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
+  deref(h) = HostRt {
+    syms: stab,
+    ast_out: ast_out,
+    sources: sources,
+    ir: ir,
+    vm: vm,
+    bump_base: bump_base,
+    bump_cap: bump_bytes(),
+    bump_used: 0,
+    trace_path_ptr: 0,
+    trace_path_len: 0,
+    trace_on: 0,
+    trace_flushed: 0,
+  };
+  return raw_ptr;
+};
+
+pub let rt_init = func() -> u64 {
+  let s: MutSlice(u64) = rt_slot();
+  if s[0] != 0 { return s[0]; }
+  let raw_ptr: u64 = host_new();
+  s[0] = raw_ptr;
+  let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
+  let rc: u64 = c99.set_syms(h.syms);
+  if rc != 0 { return halt(rc); }
+  return raw_ptr;
+};
+
+let rt = func() -> Mut(HostRt) {
+  let raw_ptr: u64 = rt_init();
+  return ptr_cast(Mut(HostRt), raw_ptr);
+};
+
+// --- 工作区分配 -------------------------------------------------------------
+pub let mem_alloc = func(bytes: u64, align: u64) -> Mut(u8) {
+  return bump_take(rt(), bytes, align);
+};
+
+// --- 符号 -------------------------------------------------------------------
+pub let sym_intern = func(p: Ref(u8), n: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return symtab.sym_intern(h.syms, p, n);
+};
+
+pub let sym_find = func(p: Ref(u8), n: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return symtab.sym_find(h.syms, p, n);
+};
+
+pub let sym_same = func(a: u64, b: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return symtab.sym_same(h.syms, a, b);
+};
+
+pub let sym_addr = func(s: u64) -> Ref(u8) {
+  let h: Mut(HostRt) = rt();
+  return symtab.sym_addr(h.syms, s);
+};
+
+pub let sym_len = func(s: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return symtab.sym_len(h.syms, s);
+};
+
+// --- 路径 -------------------------------------------------------------------
+// 路径分隔符统一成 '/'，模块名里的 "::" 也翻成 '/'。
+let put_norm = func(dst: Mut(u8), at: u64, src: Ref(u8), n: u64) -> u64 {
+  return loop c(i: u64 = 0, o: u64 = at) while i < n {
+    let b: u64 = deref(src + i) as u64;
+    if b == 92 {
+      let d: Mut(u8) = dst + o;
+      deref(d) = 47 as u8;
+      o = o + 1;
+      i = i + 1;
+    } else {
+      let pair: u64 = if (i + 1) < n { deref(src + (i + 1)) as u64 } else { 0 };
+      if (b == 58) and (pair == 58) {
+        let d2: Mut(u8) = dst + o;
+        deref(d2) = 47 as u8;
+        o = o + 1;
+        i = i + 2;
+      } else {
+        let d3: Mut(u8) = dst + o;
+        deref(d3) = b as u8;
+        o = o + 1;
+        i = i + 1;
+      }
+    }
+  };
+};
+
+let has_lain_ext = func(dst: Mut(u8), at: u64) -> u64 {
+  if at < 5 { return 0; }
+  let p: Mut(u8) = dst + (at - 5);
+  let b0: u64 = deref(p) as u64;
+  let b1: u64 = deref(p + 1) as u64;
+  let b2: u64 = deref(p + 2) as u64;
+  let b3: u64 = deref(p + 3) as u64;
+  let b4: u64 = deref(p + 4) as u64;
+  if (b0 == 46) and (b1 == 108) and (b2 == 97) and (b3 == 105) and (b4 == 110) {
+    return 1;
+  }
+  return 0;
+};
+
+let put_ext = func(dst: Mut(u8), at: u64) -> u64 {
+  if has_lain_ext(dst, at) == 1 { return at; }
+  let base: Mut(u8) = dst + at;
+  deref(base) = 46 as u8;
+  let q1: Mut(u8) = base + 1;
+  deref(q1) = 108 as u8;
+  let q2: Mut(u8) = base + 2;
+  deref(q2) = 97 as u8;
+  let q3: Mut(u8) = base + 3;
+  deref(q3) = 105 as u8;
+  let q4: Mut(u8) = base + 4;
+  deref(q4) = 110 as u8;
+  return at + 5;
+};
+
+// 前缀 + 归一化后的模块名 + 省略时补上的 .lain。
+let build_cand = func(dst: Mut(u8), pre: Slice(u8), modv: Slice(u8)) -> u64 {
+  let a: u64 = copy_bytes(dst, pre.ptr, pre.len);
+  let b: u64 = put_norm(dst, a, modv.ptr, modv.len);
+  return put_ext(dst, b);
+};
+
+// 当前源码所在目录，含结尾的 '/'；没有目录时为空。
+let source_dir = func(hs: Mut(sh.HostSources), cur: u64) -> Slice(u8) {
+  if cur >= hs.source_count { return ""; }
+  let nm: u64 = sh.source_name(hs, cur);
+  if nm == 0 { return ""; }
+  let n: u64 = symtab.sym_len(hs.syms, nm);
+  let p: Ref(u8) = symtab.sym_addr(hs.syms, nm);
+  let cut: u64 = loop c(i: u64 = 0, last: u64 = 0) while i < n {
+    let b: u64 = deref(p + i) as u64;
+    if b == 47 { last = i + 1; }
+    i = i + 1;
+  };
+  return make_slice(Slice(u8), p, cut);
+};
+
+// --- 源码 -------------------------------------------------------------------
+let find_named = func(hs: Mut(sh.HostSources), p: Ref(u8), n: u64) -> u64 {
+  let idx: u64 = loop f(i: u64 = 0) while i < hs.source_count {
+    let nm: u64 = sh.source_name(hs, i);
+    if nm != 0 {
+      let sn: u64 = symtab.sym_len(hs.syms, nm);
+      if sn == n {
+        let sp: Ref(u8) = symtab.sym_addr(hs.syms, nm);
+        if bytes_eq(sp, p, n) == 1 { break f(i); }
+      }
+    }
+    i = i + 1;
+  };
+  return idx;
+};
+
+// 读文件并把正文复制进递增区：调用方拿到的字节一直有效到进程结束。
+let read_keep = func(h: Mut(HostRt), p: Ref(u8), n: u64, out_len: Mut(u64)) -> Mut(u8) {
+  let slots: Mut(u8) = bump_take(h, 16, 8);
+  let op: Mut(u64) = ptr_cast(Mut(u64), slots);
+  let ol: Mut(u64) = ptr_cast(Mut(u64), slots + 8);
+  deref(op) = 0;
+  deref(ol) = 0;
+  let path: Slice(u8) = make_slice(Slice(u8), p, n);
+  let rc: u64 = os.read_file(path, op, ol);
+  if rc != 0 { return null_ref(Mut(u8)); }
+  let raw: u64 = deref(op);
+  let len: u64 = deref(ol);
+  let keep: Mut(u8) = bump_take(h, len + 1, 8);
+  if is_null(keep) { return keep; }
+  let copied: u64 = copy_bytes(keep, ptr_cast(Ref(u8), raw), len);
+  let z: Mut(u8) = keep + len;
+  deref(z) = 0;
+  os.free_bytes(raw);
+  deref(out_len) = len;
+  return keep;
+};
+
+// 以给定名字读入文件并登记成一份源码；读不到时交回 NO_SOURCE。
+let load_source = func(h: Mut(HostRt), p: Mut(u8), n: u64) -> u64 {
+  let len: Mut(u64) = ptr_cast(Mut(u64), bump_take(h, 8, 8));
+  deref(len) = 0;
+  let text: Mut(u8) = read_keep(h, ptr_cast(Ref(u8), p), n, len);
+  if is_null(text) { return NO_SOURCE(); }
+  let name: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), p), n);
+  let body: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), text), deref(len));
+  return sh.source_add(h.sources, name, body);
+};
+
+pub let source_count = func() -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.source_count(h.sources);
+};
+
+pub let source_name = func(src: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.source_name(h.sources, src);
+};
+
+pub let source_root = func(src: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.source_root(h.sources, src);
+};
+
+// 以文件路径登记源码：路径分隔符归一化，重复登记直接交回已有的源码号。
+pub let source_add_file = func(path: Slice(u8)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let hs: Mut(sh.HostSources) = h.sources;
+  let dst: Mut(u8) = bump_take(h, path.len + 8, 8);
+  let n: u64 = put_norm(dst, 0, path.ptr, path.len);
+  let hit: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n);
+  if hit < hs.source_count { return hit; }
+  return load_source(h, dst, n);
+};
+
+// 解析模块名：先按原样解析（"std::foo::bar" 归一化成 "std/foo/bar.lain"），
+// 再相对当前源码所在目录解析；两种写法都先在已登记的源码里查重。
+// 候选路径最长是「目录前缀 + 归一化模块名 + .lain」：归一化只会把 "::" 收缩成
+// 一个 '/'，所以模块名那部分按 mod_len 计就是上界，缓冲按两者之和切。
+pub let source_import = func(cur_src: u64, mod_ptr: Ref(u8), mod_len: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let hs: Mut(sh.HostSources) = h.sources;
+  let modv: Slice(u8) = make_slice(Slice(u8), mod_ptr, mod_len);
+  let dir: Slice(u8) = source_dir(hs, cur_src);
+  let dst: Mut(u8) = bump_take(h, dir.len + mod_len + 8, 8);
+  let empty: Slice(u8) = "";
+  let n1: u64 = build_cand(dst, empty, modv);
+  let hit1: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n1);
+  if hit1 < hs.source_count { return hit1; }
+  let got1: u64 = load_source(h, dst, n1);
+  if got1 != NO_SOURCE() { return got1; }
+  if dir.len == 0 { return NO_SOURCE(); }
+  let n2: u64 = build_cand(dst, dir, modv);
+  let hit2: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n2);
+  if hit2 < hs.source_count { return hit2; }
+  return load_source(h, dst, n2);
+};
+
+pub let ast_parse_snippet = func(p: Ref(u8), n: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_parse_snippet(h.sources, make_slice(Slice(u8), p, n));
+};
+
+// --- 统一 AST 查询 ----------------------------------------------------------
+// 符号在宿主里存的是统一句柄（SYM 类），但 AST 层的调用方一律按符号表原生
+// 编号使用：n_sym 的结果直接与 sym_intern 交回的编号比较。两个方向的翻译都在
+// 这里一次做完，ast_sym 交回原生编号，ast_mk_token 接受原生编号。
+let CLASS_SHIFT = func() -> u64 { return 28; };
+let INDEX_MASK = func() -> u64 { return 0x0FFFFFFF; };
+let SYM_CLASS = func() -> u64 { return 3; };
+
+let sym_id_of = func(v: u64) -> u64 {
+  if v == 0 { return 0; }
+  if (v >> CLASS_SHIFT()) == SYM_CLASS() { return v & INDEX_MASK(); }
+  return v;
+};
+
+let sym_handle_of = func(v: u64) -> u64 {
+  if v == 0 { return 0; }
+  if (v >> CLASS_SHIFT()) == SYM_CLASS() { return v; }
+  if v > INDEX_MASK() { return halt(v); }
+  return (SYM_CLASS() << CLASS_SHIFT()) | v;
+};
+
+pub let ast_kind = func(hv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_kind(h.sources, hv);
+};
+
+pub let ast_delim = func(hv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_delim(h.sources, hv);
+};
+
+pub let ast_sym = func(hv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sym_id_of(sh.ast_sym(h.sources, hv));
+};
+
+pub let ast_child_count = func(hv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_child_count(h.sources, hv);
+};
+
+pub let ast_child = func(hv: u64, i: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_child(h.sources, hv, i);
+};
+
+pub let ast_literal_addr = func(hv: u64) -> Ref(u8) {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_literal_addr(h.sources, hv);
+};
+
+pub let ast_literal_len = func(hv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_literal_len(h.sources, hv);
+};
+
+// --- AstOut 事务 ------------------------------------------------------------
+// 事务号不进单例：AstOut 自己的检查点里就记着当前事务，最上面那一层的 tx
+// 就是正在开着的那个。
+pub let ast_tx_begin = func() -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_tx_begin(h.sources);
+};
+
+let current_tx = func(h: Mut(HostRt)) -> u64 {
+  let a: Mut(ao.AstOut) = h.ast_out;
+  let d: u64 = ao.tx_depth(a);
+  if d == 0 { return halt(d); }
+  let at: Mut(ao.Mark) = a.marks + (d - 1) * size_of(MarkCell);
+  let m: ao.Mark = deref(at);
+  return m.tx;
+};
+
+pub let ast_tx_commit = func(root: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_tx_commit(h.sources, current_tx(h), root);
+};
+
+pub let ast_tx_rollback = func() -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_tx_rollback(h.sources, current_tx(h));
+};
+
+// 造词与造组：sym 是符号表原生编号（0 表示没有符号），origin 是来源节点句柄
+// （0 表示凭空构造），kids 是紧排的 32 位统一句柄。
+pub let ast_mk_token = func(sym: u64, origin: u64, text: Ref(u8), len: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_mk_token(h.sources, sym_handle_of(sym), origin,
+                         make_slice(Slice(u8), text, len));
+};
+
+pub let ast_mk_group = func(delim: u64, count: u64, kids: Ref(u32)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return sh.ast_mk_group(h.sources, delim, make_slice(Slice(u32), kids, count));
+};
+
+// --- IR ---------------------------------------------------------------------
+pub let ir_mod_new = func(name: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_mod_new(h.ir, name);
+};
+
+pub let ir_data_add = func(modv: u64, name: u64, bytes: Ref(u8), size: u64,
+                           is_writable: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_data_add(h.ir, modv, name, bytes, size, is_writable);
+};
+
+pub let ir_data_find = func(modv: u64, name: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_data_find(h.ir, modv, name);
+};
+
+pub let ir_proc_begin = func(modv: u64, name: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_proc_begin(h.ir, modv, name);
+};
+
+pub let ir_proc_extern = func(modv: u64, name: u64, link: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_proc_extern(h.ir, modv, name, link);
+};
+
+pub let ir_proc_param = func(modv: u64, name: u64, k: u64, w: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_proc_param(h.ir, modv, name, k, w);
+};
+
+pub let ir_proc_result = func(modv: u64, k: u64, w: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_proc_result(h.ir, modv, k, w);
+};
+
+pub let ir_proc_end = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_proc_end(h.ir, modv);
+};
+
+pub let ir_region_begin = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_region_begin(h.ir, modv);
+};
+
+pub let ir_region_param = func(modv: u64, name: u64, k: u64, w: u64, ik: u64,
+                               ib: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_region_param(h.ir, modv, name, k, w, ik, ib);
+};
+
+pub let ir_region_result = func(modv: u64, k: u64, w: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_region_result(h.ir, modv, k, w);
+};
+
+pub let ir_region_end = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_region_end(h.ir, modv);
+};
+
+pub let ir_args_reset = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_args_reset(h.ir, modv);
+};
+
+pub let ir_arg_ref = func(modv: u64, name: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_arg_ref(h.ir, modv, name);
+};
+
+pub let ir_arg_int = func(modv: u64, bits: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_arg_int(h.ir, modv, bits);
+};
+
+pub let ir_inst = func(modv: u64, kind: u64, res: u64, k: u64, w: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst(h.ir, modv, kind, res, k, w);
+};
+
+pub let ir_inst_if = func(modv: u64, res: u64, cond: u64, then_r: u64,
+                          else_r: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_if(h.ir, modv, res, cond, then_r, else_r);
+};
+
+pub let ir_inst_loop = func(modv: u64, res: u64, label: u64, body: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_loop(h.ir, modv, res, label, body);
+};
+
+pub let ir_case_add = func(modv: u64, value: u64, body: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_case_add(h.ir, modv, value, body);
+};
+
+pub let ir_inst_switch = func(modv: u64, res: u64, selector: u64, k: u64, w: u64,
+                              def: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_switch(h.ir, modv, res, selector, k, w, def);
+};
+
+pub let ir_inst_jump = func(modv: u64, kind: u64, label: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_jump(h.ir, modv, kind, label);
+};
+
+pub let ir_inst_call = func(modv: u64, res: u64, callee: u64, tail: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_call(h.ir, modv, res, callee, tail);
+};
+
+pub let ir_inst_call_indirect = func(modv: u64, res: u64, k: u64, w: u64, plo: u64,
+                                     phi: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_call_indirect(h.ir, modv, res, k, w, plo, phi);
+};
+
+pub let ir_inst_mem = func(modv: u64, kind: u64, res: u64, k: u64, w: u64,
+                           order: u64, vol: u64, align: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_mem(h.ir, modv, kind, res, k, w, order, vol, align);
+};
+
+pub let ir_inst_symbol = func(modv: u64, kind: u64, res: u64, symbol: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_inst_symbol(h.ir, modv, kind, res, symbol);
+};
+
+pub let ir_mod_verify = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_mod_verify(h.ir, modv);
+};
+
+pub let ir_mod_clone_completed = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_mod_clone_completed(h.ir, modv);
+};
+
+pub let ir_mod_free = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.ir_mod_free(h.ir, modv);
+};
+
+pub let diag_emit = func(span: u64, level: u64, p: Ref(u8), n: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return irh.diag_emit(h.ir, span, level, p, n);
+};
+
+// --- 模块查找与发射 ---------------------------------------------------------
+let trap_mod = func(cause: u64) -> Mut(irh.ModState) {
+  let dead: u64 = halt(cause);
+  return null_ref(Mut(irh.ModState));
+};
+
+let mod_of = func(ir: Mut(irh.HostIr), modv: u64) -> Mut(irh.ModState) {
+  if modv == 0 { return trap_mod(modv); }
+  if modv > ir.mod_cap { return trap_mod(modv); }
+  let raw: Mut(u8) = ptr_cast(Mut(u8), ir.mods);
+  let m: Mut(irh.ModState) = ptr_cast(Mut(irh.ModState),
+                                     raw + (modv - 1) * size_of(ModStateCell));
+  if m.in_use == 0 { return trap_mod(modv); }
+  return m;
+};
+
+let module_of = func(m: Mut(irh.ModState)) -> vf.IrModule {
+  return vf.module_new(m.name,
+                       ptr_cast(Ref(vf.IrProc), m.procs), m.proc_count,
+                       ptr_cast(Ref(vf.IrRegion), m.regions), m.region_count,
+                       ptr_cast(Ref(vf.IrInst), m.insts), m.inst_count,
+                       ptr_cast(Ref(vf.IrCase), m.cases), m.case_count,
+                       m.scratch);
+};
+
+let emit_data_all = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+  if i >= m.data_count { return 1; }
+  let at: Mut(irh.DataRec) = m.data + i * size_of(DataRecCell);
+  let d: irh.DataRec = deref(at);
+  let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
+  let rc: u64 = c99.emit_data_decl(w, d.symbol, bytes, d.is_writable);
+  return emit_data_all(w, m, i + 1);
+};
+
+let emit_procs_all = func(w: Mut(c99.C99Writer), mv: Ref(vf.IrModule), count: u64,
+                          i: u64) -> u64 {
+  if i >= count { return 1; }
+  let a: u64 = c99.emit_proc_decl(w, mv, i);
+  let b: u64 = c99.emit_proc_c99(w, mv, i);
+  return emit_procs_all(w, mv, count, i + 1);
+};
+
+// 把模块的 .l1 文本渲染进 buf，交回写出的字节数；写满时交回 0。
+let render_l1 = func(h: Mut(HostRt), m: Mut(irh.ModState), buf: Mut(u8), cap: u64) -> u64 {
+  let modval: vf.IrModule = module_of(m);
+  let mv: Ref(vf.IrModule) = ref_of(modval);
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
+  let w0: emit_text.TextWriter = emit_text.writer_new(ms);
+  let w: Mut(emit_text.TextWriter) = mut_of(w0);
+  let data: Ref(emit_text.IrDataView) = ptr_cast(Ref(emit_text.IrDataView), m.data);
+  let nsyms: Mut(symtab.HostSymTab) = h.syms;
+  let n: u64 = emit_text.emit_module_text(w, nsyms, mv, data, m.data_count);
+  let ok: u64 = emit_text.writer_ok(w);
+  if ok == 0 { return 0; }
+  return emit_text.writer_len(w);
+};
+
+// 只渲染 .l1 文本并交回字节数，不碰文件系统；落盘交给 emit_l1_file。
+pub let ir_mod_emit_output = func(modv: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let m: Mut(irh.ModState) = mod_of(h.ir, modv);
+  let cap: u64 = out_bytes();
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 { return halt(0); }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let wrote: u64 = render_l1(h, m, buf, cap);
+  os.free_bytes(raw);
+  return wrote;
+};
+
+pub let emit_l1_file = func(modv: u64, path: Slice(u8)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let m: Mut(irh.ModState) = mod_of(h.ir, modv);
+  let cap: u64 = out_bytes();
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 { return 1; }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let wrote: u64 = render_l1(h, m, buf, cap);
+  if wrote == 0 {
+    os.free_bytes(raw);
+    return 1;
+  }
+  let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
+  let rc: u64 = os.write_file(path, out);
+  os.free_bytes(raw);
+  return rc;
+};
+
+pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
+                             print_result: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let m: Mut(irh.ModState) = mod_of(h.ir, modv);
+  let modval: vf.IrModule = module_of(m);
+  let mv: Ref(vf.IrModule) = ref_of(modval);
+  let cap: u64 = out_bytes();
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 { return 1; }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
+  let w0: c99.C99Writer = c99.new_writer(ms);
+  let w: Mut(c99.C99Writer) = mut_of(w0);
+  let pn: u64 = c99.emit_preamble_lib(w);
+  let dn: u64 = emit_data_all(w, m, 0);
+  let pr: u64 = emit_procs_all(w, mv, m.proc_count, 0);
+  let es: u64 = sym_intern(entry.ptr, entry.len);
+  let en: u64 = c99.emit_entry_main(w, mv, es, print_result);
+  let ok: u64 = c99.writer_ok(w);
+  let wrote: u64 = c99.writer_len(w);
+  if ok == 0 {
+    os.free_bytes(raw);
+    return 1;
+  }
+  let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
+  let rc: u64 = os.write_file(path, out);
+  os.free_bytes(raw);
+  return rc;
+};
+
+// --- 虚拟机 -----------------------------------------------------------------
+pub let apply_module = func(modv: u64, entry: u64, args: Ref(u8), arg_n: u64,
+                            out: Mut(u8), out_cap: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let av: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), args), arg_n);
+  return vmh.apply_module(h.vm, modv, entry, av, out, out_cap);
+};
+
+pub let apply_module_bytes = func(modv: u64, entry: u64, out: Mut(u8),
+                                  out_cap: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  return vmh.apply_module_bytes(h.vm, modv, entry, out, out_cap);
+};
+
+// --- 追踪 -------------------------------------------------------------------
+pub let trace_enabled = func() -> u64 {
+  let h: Mut(HostRt) = rt();
+  return h.trace_on;
+};
+
+pub let trace_set_path = func(path: Slice(u8)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  if h.trace_path_len != 0 {
+    os.free_bytes(h.trace_path_ptr);
+    h.trace_path_ptr = 0;
+    h.trace_path_len = 0;
+  }
+  if path.len == 0 {
+    h.trace_on = 0;
+    h.trace_flushed = 0;
+    return 0;
+  }
+  let raw: u64 = os.alloc_bytes(path.len + 1);
+  if raw == 0 { return halt(0); }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let copied: u64 = copy_bytes(buf, path.ptr, path.len);
+  let z: Mut(u8) = buf + path.len;
+  deref(z) = 0;
+  h.trace_path_ptr = raw;
+  h.trace_path_len = path.len;
+  h.trace_on = 1;
+  h.trace_flushed = 0;
+  return 0;
+};
+
+pub let trace_flush = func(json_ptr: Ref(u8), json_len: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  if h.trace_path_len == 0 { return 0; }
+  let path: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), h.trace_path_ptr),
+                                   h.trace_path_len);
+  let json: Slice(u8) = make_slice(Slice(u8), json_ptr, json_len);
+  let rc: u64 = os.write_file(path, json);
+  h.trace_flushed = h.trace_flushed + 1;
+  return rc;
+};
+
+// --- 诊断 -------------------------------------------------------------------
+// 每条诊断写成一行：级别、消息，有跨度时再附上跨度号。消息末尾不带换行的
+// 部分由这里补上，因此写入标准错误的内容逐条独立。
+let diag_head = func(level: u64) -> Slice(u8) {
+  if level == 1 { return "error: "; }
+  return "warning: ";
+};
+
+// 一条诊断最长是「前缀 + 消息 + 跨度括注 + 换行」，因此按消息长度逐条切缓冲，
+// 不预设固定上限。
+pub let print_diags = func() -> u64 {
+  let h: Mut(HostRt) = rt();
+  let ir: Mut(irh.HostIr) = h.ir;
+  let n: u64 = irh.host_diag_count(ir);
+  if n == 0 { return 0; }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let level: u64 = irh.host_diag_level(ir, i);
+    let span: u64 = irh.host_diag_span(ir, i);
+    let msg: Slice(u8) = irh.host_diag_message(ir, i);
+    let head: Slice(u8) = diag_head(level);
+    let raw: u64 = os.alloc_bytes(head.len + msg.len + 32);
+    if raw == 0 { return halt(0); }
+    let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+    let a: u64 = put_text(buf, 0, head);
+    let b: u64 = put_text(buf, a, msg);
+    let c: u64 = if span == 0 { b } else { put_text(buf, b, " (span ") };
+    let d: u64 = if span == 0 { c } else { put_dec(buf, c, span) };
+    let e: u64 = if span == 0 { d } else { put_text(buf, d, ")") };
+    let f: u64 = put_text(buf, e, "\n");
+    let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), f);
+    let wrote: u64 = os.eprint(line);
+    os.free_bytes(raw);
+    i = i + 1;
+  };
+  return n;
+};

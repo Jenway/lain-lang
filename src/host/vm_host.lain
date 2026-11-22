@@ -31,6 +31,64 @@ pub let MEM_CAP = func() -> u64 { return 3072; };
 pub let TCB_CAP = func() -> u64 { return 3072; };
 pub let CAP_ENTRY_CAP = func() -> u64 { return 4; };
 
+// --- 容量配置 -------------------------------------------------------------
+// 小容量配置与上面的常量逐项相同，供既有宿主测试使用；编译器侧执行
+// comptime / eval / inject 模块时改用 default_large_config。
+pub let VmHostConfig = struct {
+  proc_cap: u64,
+  region_cap: u64,
+  inst_cap: u64,
+  operand_cap: u64,
+  result_cap: u64,
+  case_cap: u64,
+  case_index_cap: u64,
+  window_cap: u64,
+  mem_cap: u64,
+  tcb_cap: u64,
+  cap_entry_cap: u64,
+  quota_steps: u64,
+  quota_stack: u64,
+  quota_depth: u64,
+};
+
+pub let default_config = func() -> VmHostConfig {
+  return VmHostConfig {
+    proc_cap: PROC_CAP(),
+    region_cap: REGION_CAP(),
+    inst_cap: INST_CAP(),
+    operand_cap: OPERAND_CAP(),
+    result_cap: RESULT_CAP(),
+    case_cap: CASE_CAP(),
+    case_index_cap: CASE_INDEX_CAP(),
+    window_cap: WINDOW_CAP(),
+    mem_cap: MEM_CAP(),
+    tcb_cap: TCB_CAP(),
+    cap_entry_cap: CAP_ENTRY_CAP(),
+    quota_steps: 200000,
+    quota_stack: 2048,
+    quota_depth: 8,
+  };
+};
+
+pub let default_large_config = func() -> VmHostConfig {
+  return VmHostConfig {
+    proc_cap: 128,
+    region_cap: 512,
+    inst_cap: 4096,
+    operand_cap: 8192,
+    result_cap: 1024,
+    case_cap: 256,
+    case_index_cap: 512,
+    window_cap: 16,
+    mem_cap: 262144,
+    tcb_cap: 65536,
+    cap_entry_cap: 16,
+    quota_steps: 500000,
+    quota_stack: 65536,
+    quota_depth: 128,
+  };
+};
+
 // --- 宿主错误码 -----------------------------------------------------------
 pub let VMH_OK = func() -> u64 { return 0; };
 pub let VMH_ERR_ARG = func() -> u64 { return 2; };
@@ -46,6 +104,8 @@ pub let VMH_ERR_MEMORY = func() -> u64 { return 11; };
 // 导入的结构类型不能直接出现在 size_of 的实参里，用本地单元结构包一层，
 // 字段仍在偏移 0。
 let ModCell = struct { v: irh.ModState };
+let DataRecCell = struct { v: irh.DataRec };
+let DataSymCell = struct { v: im.DataSym };
 let WindowCell = struct { v: vs.Window };
 let SpaceCell = struct { v: vs.VmSpace };
 let RegionCell = struct { v: im.ImageRegion };
@@ -85,6 +145,8 @@ pub let VmHost = struct {
   case_index_len: u64,
   procs: Mut(im.SubInfo),
   proc_len: u64,
+  data_syms: Mut(im.DataSym),
+  data_sym_cap: u64,
   image: Mut(im.VmImage),
   tcb_arena: Mut(u8),
   tcb_len: u64,
@@ -127,7 +189,10 @@ let zero = func(p: Mut(u8), n: u64) -> u64 {
 
 // 构造：先把宿主记录本身放进 Arena，再依次切出底层存储、窗口表、映像表、
 // TCB 区与能力表。任何一块切不出来都留下错误码并交出空指针。
-pub let host_new = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.HostIr)) -> Mut(VmHost) {
+// 容量、配额与窗口数全部由 cfg 决定，切出的长度写回记录，后续装载与执行
+// 只读这些长度字段。
+pub let host_new_with_config = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.HostIr),
+                                    cfg: VmHostConfig) -> Mut(VmHost) {
   if is_null(arena) { return null_ref(Mut(VmHost)); }
   if bytes < size_of(VmHost) { return null_ref(Mut(VmHost)); }
   let vp: Mut(VmHost) = ptr_cast(Mut(VmHost), arena);
@@ -155,15 +220,17 @@ pub let host_new = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.HostIr)) -> Mut(
     case_index_len: 0,
     procs: null_ref(Mut(im.SubInfo)),
     proc_len: 0,
+    data_syms: null_ref(Mut(im.DataSym)),
+    data_sym_cap: 0,
     image: null_ref(Mut(im.VmImage)),
     tcb_arena: null_ref(Mut(u8)),
     tcb_len: 0,
     tcb: null_ref(Mut(eng.TCB)),
     caps: null_ref(Mut(eng.VmCapTable)),
     cap_entries: null_ref(Mut(eng.VmCapEntry)),
-    quota_steps: 200000,
-    quota_stack: 2048,
-    quota_depth: 8,
+    quota_steps: cfg.quota_steps,
+    quota_stack: cfg.quota_stack,
+    quota_depth: cfg.quota_depth,
     owner: 1,
     last_error: 0,
     last_trap: 0,
@@ -171,68 +238,74 @@ pub let host_new = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.HostIr)) -> Mut(
     last_steps: 0,
     last_bytes: 0,
   };
-  let mem: Mut(u8) = take(vp, MEM_CAP(), 16);
+  let mem: Mut(u8) = take(vp, cfg.mem_cap, 16);
   if is_null(mem) { return null_ref(Mut(VmHost)); }
-  let mem_zero: u64 = zero(mem, MEM_CAP());
+  let mem_zero: u64 = zero(mem, cfg.mem_cap);
   vp.mem = mem;
-  vp.mem_len = MEM_CAP();
-  let wins: Mut(u8) = take(vp, WINDOW_CAP() * size_of(WindowCell), 8);
+  vp.mem_len = cfg.mem_cap;
+  let wins: Mut(u8) = take(vp, cfg.window_cap * size_of(WindowCell), 8);
   if is_null(wins) { return null_ref(Mut(VmHost)); }
   vp.wins = ptr_cast(Mut(vs.Window), wins);
-  vp.win_len = WINDOW_CAP();
+  vp.win_len = cfg.window_cap;
   let sp: Mut(u8) = take(vp, size_of(SpaceCell), 8);
   if is_null(sp) { return null_ref(Mut(VmHost)); }
   vp.space = ptr_cast(Mut(vs.VmSpace), sp);
-  let rg: Mut(u8) = take(vp, REGION_CAP() * size_of(RegionCell), 8);
+  let rg: Mut(u8) = take(vp, cfg.region_cap * size_of(RegionCell), 8);
   if is_null(rg) { return null_ref(Mut(VmHost)); }
   vp.regions = ptr_cast(Mut(im.ImageRegion), rg);
-  vp.region_len = REGION_CAP();
-  let ins: Mut(u8) = take(vp, INST_CAP() * size_of(InstCell), 8);
+  vp.region_len = cfg.region_cap;
+  let ins: Mut(u8) = take(vp, cfg.inst_cap * size_of(InstCell), 8);
   if is_null(ins) { return null_ref(Mut(VmHost)); }
   vp.insts = ptr_cast(Mut(im.InstMeta), ins);
-  vp.inst_len = INST_CAP();
-  let ops: Mut(u8) = take(vp, OPERAND_CAP() * size_of(OperandCell), 8);
+  vp.inst_len = cfg.inst_cap;
+  let ops: Mut(u8) = take(vp, cfg.operand_cap * size_of(OperandCell), 8);
   if is_null(ops) { return null_ref(Mut(VmHost)); }
   vp.operands = ptr_cast(Mut(im.OperandRef), ops);
-  vp.operand_len = OPERAND_CAP();
-  let res: Mut(u8) = take(vp, RESULT_CAP() * size_of(u64), 8);
+  vp.operand_len = cfg.operand_cap;
+  let res: Mut(u8) = take(vp, cfg.result_cap * size_of(u64), 8);
   if is_null(res) { return null_ref(Mut(VmHost)); }
   vp.results = ptr_cast(Mut(u64), res);
-  vp.result_len = RESULT_CAP();
-  let cas: Mut(u8) = take(vp, CASE_CAP() * size_of(CaseCell), 8);
+  vp.result_len = cfg.result_cap;
+  let cas: Mut(u8) = take(vp, cfg.case_cap * size_of(CaseCell), 8);
   if is_null(cas) { return null_ref(Mut(VmHost)); }
   vp.cases = ptr_cast(Mut(im.CaseInfo), cas);
-  vp.case_len = CASE_CAP();
-  let cix: Mut(u8) = take(vp, CASE_INDEX_CAP() * size_of(u64), 8);
+  vp.case_len = cfg.case_cap;
+  let cix: Mut(u8) = take(vp, cfg.case_index_cap * size_of(u64), 8);
   if is_null(cix) { return null_ref(Mut(VmHost)); }
   vp.case_index = ptr_cast(Mut(u64), cix);
-  vp.case_index_len = CASE_INDEX_CAP();
-  let pr: Mut(u8) = take(vp, PROC_CAP() * size_of(SubCell), 8);
+  vp.case_index_len = cfg.case_index_cap;
+  let pr: Mut(u8) = take(vp, cfg.proc_cap * size_of(SubCell), 8);
   if is_null(pr) { return null_ref(Mut(VmHost)); }
   vp.procs = ptr_cast(Mut(im.SubInfo), pr);
-  vp.proc_len = PROC_CAP();
+  vp.proc_len = cfg.proc_cap;
   let img: Mut(u8) = take(vp, size_of(ImageCell), 8);
   if is_null(img) { return null_ref(Mut(VmHost)); }
   vp.image = ptr_cast(Mut(im.VmImage), img);
-  let tcbm: Mut(u8) = take(vp, TCB_CAP(), 16);
+  let tcbm: Mut(u8) = take(vp, cfg.tcb_cap, 16);
   if is_null(tcbm) { return null_ref(Mut(VmHost)); }
-  let tcb_zero: u64 = zero(tcbm, TCB_CAP());
+  let tcb_zero: u64 = zero(tcbm, cfg.tcb_cap);
   vp.tcb_arena = tcbm;
-  vp.tcb_len = TCB_CAP();
+  vp.tcb_len = cfg.tcb_cap;
   let tcbp: Mut(u8) = take(vp, size_of(TcbCell), 8);
   if is_null(tcbp) { return null_ref(Mut(VmHost)); }
   vp.tcb = ptr_cast(Mut(eng.TCB), tcbp);
-  let cep: Mut(u8) = take(vp, CAP_ENTRY_CAP() * size_of(CapEntryCell), 8);
+  let cep: Mut(u8) = take(vp, cfg.cap_entry_cap * size_of(CapEntryCell), 8);
   if is_null(cep) { return null_ref(Mut(VmHost)); }
   vp.cap_entries = ptr_cast(Mut(eng.VmCapEntry), cep);
   let capsp: Mut(u8) = take(vp, size_of(CapTableCell), 8);
   if is_null(capsp) { return null_ref(Mut(VmHost)); }
   vp.caps = ptr_cast(Mut(eng.VmCapTable), capsp);
-  let table: eng.VmCapTable = eng.caps_new(vp.cap_entries, CAP_ENTRY_CAP());
+  let table: eng.VmCapTable = eng.caps_new(vp.cap_entries, cfg.cap_entry_cap);
   deref(vp.caps) = table;
   let frozen: u64 = eng.caps_freeze(vp.caps);
   vp.last_error = VMH_OK();
   return vp;
+};
+
+// 既有签名：小容量配置，行为与引入配置结构之前逐字节相同。
+pub let host_new = func(arena: Mut(u8), bytes: u64, ir: Mut(irh.HostIr)) -> Mut(VmHost) {
+  let cfg: VmHostConfig = default_config();
+  return host_new_with_config(arena, bytes, ir, cfg);
 };
 
 pub let host_error = func(v: Mut(VmHost)) -> u64 {
@@ -280,6 +353,13 @@ let module_of = func(ir: Mut(irh.HostIr), hd: u64) -> vf.IrModule {
       m.scratch);
 };
 
+// 按句柄取出 ir_host 的模块记录；调用前已用 module_live 确认槽位活着。
+let mod_state = func(ir: Mut(irh.HostIr), hd: u64) -> Mut(irh.ModState) {
+  let slot: u64 = hd - 1;
+  let raw: Mut(u8) = ptr_cast(Mut(u8), ir.mods);
+  return ptr_cast(Mut(irh.ModState), raw + slot * size_of(ModCell));
+};
+
 let module_live = func(ir: Mut(irh.HostIr), hd: u64) -> u64 {
   if hd == 0 { return 0; }
   let slot: u64 = hd - 1;
@@ -290,37 +370,188 @@ let module_live = func(ir: Mut(irh.HostIr), hd: u64) -> u64 {
   return 1;
 };
 
-let layout_of = func(v: Mut(VmHost)) -> im.ImageLayout {
-  let empty: Slice(u8) = make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+// 映像表的指针都指向 v 的 Arena。切片头部由调用方持有：layout_fill 把
+// out.ro / out.rw 写成调用方给的头部地址，若在这里构造局部 Slice 再随结构体
+// 返回，头部地址会在本过程返回后失效。
+// 只读段固定在 4096；读写段紧接在只读段之后按 16 字节对齐排开，没有只读段
+// 时沿用 8192 基址。两段的虚拟范围不重叠，由 vspace 的映射检查兜住。
+let layout_fill = func(v: Mut(VmHost), ro: Slice(u8), rw: Slice(u8),
+                       out: Mut(im.ImageLayout)) -> u64 {
+  out.ro_base = 4096;
+  out.ro = ro;
+  out.rw_base = if ro.len == 0 { 8192 } else { 4096 + round_up(ro.len as u64, 16) };
+  out.rw = rw;
+  out.regions_ptr = v.regions;
+  out.regions_len = v.region_len;
+  out.insts_ptr = v.insts;
+  out.insts_len = v.inst_len;
+  out.operands_ptr = v.operands;
+  out.operands_len = v.operand_len;
+  out.results_ptr = v.results;
+  out.results_len = v.result_len;
+  out.cases_ptr = v.cases;
+  out.cases_len = v.case_len;
+  out.case_index_ptr = v.case_index;
+  out.case_index_len = v.case_index_len;
+  out.procs_ptr = v.procs;
+  out.procs_len = v.proc_len;
+  return VMH_OK();
+};
+
+// --- 静态数据段 -----------------------------------------------------------
+// 数据记录的顺序就是 ir_host 数据表的顺序：装载器 resolve 符号时按同一下标
+// 记进 OperandRef，执行期再用 vm_symbol_addr 查同一张表。
+let data_rec_at = func(m: Mut(irh.ModState), i: u64) -> Mut(irh.DataRec) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), m.data);
+  return ptr_cast(Mut(irh.DataRec), raw + i * size_of(DataRecCell));
+};
+
+let data_sym_at = func(syms: Mut(im.DataSym), i: u64) -> Mut(im.DataSym) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), syms);
+  return ptr_cast(Mut(im.DataSym), raw + i * size_of(DataSymCell));
+};
+
+let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let d: Mut(u8) = dst + i;
+    let s: Ref(u8) = src + i;
+    deref(d) = deref(s);
+    i = i + 1;
+  };
+  return 0;
+};
+
+// 一段静态数据的容量：每条记录之间按 8 字节边界对齐，记录内字节原样拼起来。
+let data_seg_bytes = func(m: Mut(irh.ModState), writable: u64, i: u64, acc: u64) -> u64 {
+  if i >= m.data_count { return acc; }
+  let d: irh.DataRec = deref(data_rec_at(m, i));
+  let add: u64 = if d.is_writable == writable { round_up(d.size, 8) } else { 0 };
+  return data_seg_bytes(m, writable, i + 1, acc + add);
+};
+
+// 拼装数据段所需的全部目标装在一条记录里：调用参数数量受前端上限约束，
+// 这里把六个目标字段打包传下去。
+let DataSeg = struct {
+  ro: Mut(u8),
+  rw: Mut(u8),
+  syms: Mut(im.DataSym),
+  ro_base: u64,
+  rw_base: u64,
+};
+
+// 一遍扫完整张数据表：把记录拼进它所属的那一段，同时登记它的虚拟地址。
+let pack_data = func(m: Mut(irh.ModState), seg: DataSeg,
+                    i: u64, ro_off: u64, rw_off: u64) -> u64 {
+  if i >= m.data_count { return 0; }
+  let d: irh.DataRec = deref(data_rec_at(m, i));
+  let read_only: u64 = if d.is_writable == 0 { 1 } else { 0 };
+  let buf: Mut(u8) = if read_only == 1 { seg.ro } else { seg.rw };
+  let base: u64 = if read_only == 1 { seg.ro_base } else { seg.rw_base };
+  let off: u64 = if read_only == 1 { ro_off } else { rw_off };
+  let copied: u64 = copy_bytes(buf + off, d.bytes, d.size);
+  let slot: Mut(im.DataSym) = data_sym_at(seg.syms, i);
+  deref(slot) = im.DataSym { symbol: d.symbol, vaddr: base + off };
+  let step: u64 = round_up(d.size, 8);
+  let next_ro: u64 = if read_only == 1 { ro_off + step } else { ro_off };
+  let next_rw: u64 = if read_only == 1 { rw_off } else { rw_off + step };
+  return pack_data(m, seg, i + 1, next_ro, next_rw);
+};
+
+// 符号表容量只增不减；不够时按倍数扩一块新的，旧的直接丢弃。
+let data_sym_table = func(v: Mut(VmHost), count: u64) -> Mut(im.DataSym) {
+  if count <= v.data_sym_cap { return v.data_syms; }
+  let start: u64 = if v.data_sym_cap == 0 { count } else { v.data_sym_cap };
+  let cap: u64 = loop c(cap: u64 = start) while cap < count { cap = cap * 2; };
+  let raw: Mut(u8) = take(v, cap * size_of(DataSymCell), 8);
+  if is_null(raw) { return null_ref(Mut(im.DataSym)); }
+  v.data_syms = ptr_cast(Mut(im.DataSym), raw);
+  v.data_sym_cap = cap;
+  return v.data_syms;
+};
+
+// 空的布局结构：两段静态数据都为空，七张表全部空。有数据的路径先用它
+// 把表指针填完，再换上数据段。
+// 当前后端把布局里的切片字段当成「切片头部地址」：layout_fill 里的
+// out.ro / out.rw 赋值写进的是这两个头部，image_load 再顺着头部读出指针与
+// 长度。所以两段必须各拿一份独立的空头部，否则后写的会盖掉先写的。
+let blank_layout = func(ro_empty: Slice(u8), rw_empty: Slice(u8)) -> im.ImageLayout {
   return im.ImageLayout {
-    ro_base: 4096,
-    ro: empty,
-    rw_base: 8192,
-    rw: empty,
-    regions_ptr: v.regions,
-    regions_len: v.region_len,
-    insts_ptr: v.insts,
-    insts_len: v.inst_len,
-    operands_ptr: v.operands,
-    operands_len: v.operand_len,
-    results_ptr: v.results,
-    results_len: v.result_len,
-    cases_ptr: v.cases,
-    cases_len: v.case_len,
-    case_index_ptr: v.case_index,
-    case_index_len: v.case_index_len,
-    procs_ptr: v.procs,
-    procs_len: v.proc_len,
+    ro_base: 0,
+    ro: ro_empty,
+    rw_base: 0,
+    rw: rw_empty,
+    regions_ptr: null_ref(Mut(im.ImageRegion)),
+    regions_len: 0,
+    insts_ptr: null_ref(Mut(im.InstMeta)),
+    insts_len: 0,
+    operands_ptr: null_ref(Mut(im.OperandRef)),
+    operands_len: 0,
+    results_ptr: null_ref(Mut(u64)),
+    results_len: 0,
+    cases_ptr: null_ref(Mut(im.CaseInfo)),
+    cases_len: 0,
+    case_index_ptr: null_ref(Mut(u64)),
+    case_index_len: 0,
+    procs_ptr: null_ref(Mut(im.SubInfo)),
+    procs_len: 0,
   };
 };
 
-let load_space = func(v: Mut(VmHost), m: Ref(vf.IrModule)) -> u64 {
+// 符号表要活到执行结束（执行期按符号下标查虚拟地址），又不能每次 apply 都
+// 从 Arena 里重新切一块：容量只增不减，够用时就沿用上一次的表，每次装载
+// 都把前 data_count 项重新写满。两段数据字节只活到 image_load 把内容拷进
+// 地址空间为止，用完把 Arena 游标推回，不占常驻容量。
+let load_space_with_data = func(v: Mut(VmHost), m: Ref(vf.IrModule),
+                                 ms: Mut(irh.ModState), ro_empty: Slice(u8),
+                                 rw_empty: Slice(u8)) -> u64 {
+  let syms: Mut(im.DataSym) = data_sym_table(v, ms.data_count);
+  if is_null(syms) { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
+  let keep: u64 = v.used;
+  let ro_bytes: u64 = data_seg_bytes(ms, 0, 0, 0);
+  let rw_bytes: u64 = data_seg_bytes(ms, 1, 0, 0);
+  let ro_raw: Mut(u8) = take(v, ro_bytes, 8);
+  if is_null(ro_raw) { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
+  let rw_raw: Mut(u8) = take(v, rw_bytes, 8);
+  if is_null(rw_raw) { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
+  let ro: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), ro_raw), ro_bytes);
+  let rw: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), rw_raw), rw_bytes);
+  let blank: im.ImageLayout = blank_layout(ro_empty, rw_empty);
+  let lay: Mut(im.ImageLayout) = mut_of(blank);
+  let filled: u64 = layout_fill(v, ro, rw, lay);
+  let plan: im.ImageLayout = deref(lay);
+  let seg: DataSeg = DataSeg {
+    ro: ro_raw,
+    rw: rw_raw,
+    syms: syms,
+    ro_base: plan.ro_base,
+    rw_base: plan.rw_base,
+  };
+  let packed: u64 = pack_data(ms, seg, 0, 0, 0);
+  let loaded: u64 = im.image_load_with_data(m, v.space, plan, v.image,
+                                            ptr_cast(Ref(im.DataSym), syms), ms.data_count);
+  // 两段字节已经由 init_window 拷进地址空间，缓冲区立刻交还。
+  v.used = keep;
+  if loaded != im.ERR_OK() { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
+  return VMH_OK();
+};
+
+let load_space = func(v: Mut(VmHost), m: Ref(vf.IrModule),
+                      ms: Mut(irh.ModState)) -> u64 {
   let mem: MutSlice(u8) = make_slice(MutSlice(u8), v.mem, v.mem_len);
   let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window), v.wins, v.win_len);
   let t: u64 = vs.vspace_new(mem, wins, v.space);
   if t != vs.TRAP_NONE() { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
-  let lay: im.ImageLayout = layout_of(v);
-  let loaded: u64 = im.image_load(m, v.space, lay, v.image);
+  let ro_empty: Slice(u8) = make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+  let rw_empty: Slice(u8) = make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+  if ms.data_count != 0 {
+    return load_space_with_data(v, m, ms, ro_empty, rw_empty);
+  }
+  // 空切片的头部、布局结构与映像装载处在同一个栈帧里，布局与头部都必须活过
+  // image_load 的读取，因此它们的存储都由这里持有。
+  let blank: im.ImageLayout = blank_layout(ro_empty, rw_empty);
+  let lay: Mut(im.ImageLayout) = mut_of(blank);
+  let filled: u64 = layout_fill(v, ro_empty, rw_empty, lay);
+  let loaded: u64 = im.image_load(m, v.space, deref(lay), v.image);
   if loaded != im.ERR_OK() { v.last_error = VMH_ERR_MEMORY(); return VMH_ERR_MEMORY(); }
   return VMH_OK();
 };
@@ -384,21 +615,24 @@ let run_scalar = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
 
 // --- 字节通道 -------------------------------------------------------------
 // 与 vm_apply 相同的建帧流程，但字节必须在 vm_tcb_free 撤销栈窗口之前拷出。
-let copy_out = func(v: Mut(VmHost), where: u64, out: Mut(u8), cap: u64, i: u64) -> u64 {
-  if i >= cap { return VMH_OK(); }
-  let ok: u64 = vs.vm_check(v.space, where + i, 1, vs.MEM_READ());
-  if ok == 0 {
-    v.last_error = VMH_ERR_RANGE();
-    return VMH_ERR_RANGE();
-  }
-  let r: vs.MemResult = vs.load_u8(v.space, where + i);
-  if r.trap != vs.TRAP_NONE() {
-    v.last_error = VMH_ERR_RANGE();
-    return VMH_ERR_RANGE();
-  }
-  let dst: Mut(u8) = out + i;
-  deref(dst) = r.value as u8;
-  return copy_out(v, where, out, cap, i + 1);
+// 逐个字节推进用循环而非递归：拷贝长度由调用方给出，递归会随长度吃光栈。
+let copy_out = func(v: Mut(VmHost), where: u64, out: Mut(u8), cap: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < cap {
+    let ok: u64 = vs.vm_check(v.space, where + i, 1, vs.MEM_READ());
+    if ok == 0 {
+      v.last_error = VMH_ERR_RANGE();
+      return VMH_ERR_RANGE();
+    }
+    let r: vs.MemResult = vs.load_u8(v.space, where + i);
+    if r.trap != vs.TRAP_NONE() {
+      v.last_error = VMH_ERR_RANGE();
+      return VMH_ERR_RANGE();
+    }
+    let dst: Mut(u8) = out + i;
+    deref(dst) = r.value as u8;
+    i = i + 1;
+  };
+  return VMH_OK();
 };
 
 let engine_has_result = func(tcb: Mut(eng.TCB)) -> u64 {
@@ -447,7 +681,7 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
       let widened: u64 = vs.vm_set_accessible(v.space, lease, peak);
     }
     let value: eng.VmValue = eng.vm_tcb_result(ref_of(deref(tcb)));
-    code = copy_out(v, value.bits, out, cap, 0);
+    code = copy_out(v, value.bits, out, cap);
     if code == VMH_OK() { v.last_bytes = cap; }
   } else {
     v.last_error = VMH_ERR_RESULT();
@@ -461,6 +695,21 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
 };
 
 // --- 公共入口 -------------------------------------------------------------
+// TCB 区的大小取决于本次执行映像的区域深度与值槽总数，不同模块差别很大。
+// 固定容量既会浪费，也会把小映像能跑的配额卡在大映像上；这里按本次映像的
+// 实际需求重新切一块，容量只增不减，切不出来就交回容量错误。
+let tcb_reserve = func(v: Mut(VmHost), image: Ref(im.VmImage)) -> u64 {
+  let quota: eng.VmQuota = eng.quota_new(v.quota_steps, v.quota_stack, v.quota_depth);
+  let need: u64 = eng.vm_tcb_bytes(image, quota);
+  if need <= v.tcb_len { return VMH_OK(); }
+  let raw: Mut(u8) = take(v, need, 16);
+  if is_null(raw) { return VMH_ERR_CAPACITY(); }
+  let cleared: u64 = zero(raw, need);
+  v.tcb_arena = raw;
+  v.tcb_len = need;
+  return VMH_OK();
+};
+
 // 模块视图、地址空间与映像必须活到执行结束：load_space 把 IrModule 的指针
 // 记进映像，所以这些一步都在 run 的同一帧里完成。
 let run = func(v: Mut(VmHost), mod: u64, entry: u64, args: Slice(u64),
@@ -473,9 +722,12 @@ let run = func(v: Mut(VmHost), mod: u64, entry: u64, args: Slice(u64),
   let code: u64 = irh.ir_mod_verify(v.ir, mod);
   if code != 0 { v.last_error = VMH_ERR_IR(); return VMH_ERR_IR(); }
   let modv: vf.IrModule = module_of(v.ir, mod);
-  let loaded: u64 = load_space(v, ref_of(modv));
+  let ms: Mut(irh.ModState) = mod_state(v.ir, mod);
+  let loaded: u64 = load_space(v, ref_of(modv), ms);
   if loaded != VMH_OK() { return loaded; }
   let image: Ref(im.VmImage) = ref_of(deref(v.image));
+  let room: u64 = tcb_reserve(v, image);
+  if room != VMH_OK() { v.last_error = room; return room; }
   let index: u64 = find_sub(v, entry, 0);
   if index == im.NO_INDEX() { v.last_error = VMH_ERR_ENTRY(); return VMH_ERR_ENTRY(); }
   let sub: im.SubInfo = im.vm_sub(image, index);

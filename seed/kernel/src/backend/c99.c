@@ -1377,6 +1377,84 @@ static void emit_preamble(FILE *out) {
       "    lain_trap(\"clock_gettime failed\");\n"
       "  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;\n"
       "#endif\n"
+      "}\n\n"
+      "static int g_lain_argc = 0;\n"
+      "static char **g_lain_argv = NULL;\n\n"
+      "static uint64_t lain_os_argc(void) {\n"
+      "  return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0);\n"
+      "}\n\n"
+      "static uint64_t lain_os_argv_len(uint64_t idx) {\n"
+      "  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0))\n"
+      "    return 0;\n"
+      "  return (uint64_t)strlen(g_lain_argv[idx]);\n"
+      "}\n\n"
+      "static uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n"
+      "  size_t n;\n"
+      "  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0))\n"
+      "    return 0;\n"
+      "  n = strlen(g_lain_argv[idx]);\n"
+      "  if (n > (size_t)cap) n = (size_t)cap;\n"
+      "  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n"
+      "  return (uint64_t)n;\n"
+      "}\n\n"
+      "static uint64_t lain_os_alloc(uint64_t bytes) {\n"
+      "  void *p = calloc(1, (size_t)(bytes ? bytes : 1));\n"
+      "  return (uint64_t)(uintptr_t)p;\n"
+      "}\n\n"
+      "static uint64_t lain_os_free(uint64_t ptr) {\n"
+      "  free((void *)(uintptr_t)ptr);\n"
+      "  return 0;\n"
+      "}\n\n"
+      "static uint64_t lain_os_read_file(const void *path_ptr, uint64_t path_len,\n"
+      "                                 uint64_t *out_ptr, uint64_t *out_len) {\n"
+      "  char *p = (char *)malloc((size_t)path_len + 1);\n"
+      "  FILE *f;\n"
+      "  long sz;\n"
+      "  char *buf;\n"
+      "  if (!p) return 1;\n"
+      "  if (path_len > 0 && path_ptr) memcpy(p, path_ptr, (size_t)path_len);\n"
+      "  p[path_len] = 0;\n"
+      "  f = fopen(p, \"rb\");\n"
+      "  free(p);\n"
+      "  if (!f) return 1;\n"
+      "  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }\n"
+      "  sz = ftell(f);\n"
+      "  if (sz < 0) { fclose(f); return 1; }\n"
+      "  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }\n"
+      "  buf = (char *)malloc((size_t)sz + 1);\n"
+      "  if (!buf) { fclose(f); return 1; }\n"
+      "  if (sz > 0 && fread(buf, 1, (size_t)sz, f) != (size_t)sz) {\n"
+      "    fclose(f);\n"
+      "    free(buf);\n"
+      "    return 1;\n"
+      "  }\n"
+      "  buf[sz] = 0;\n"
+      "  fclose(f);\n"
+      "  *out_ptr = (uint64_t)(uintptr_t)buf;\n"
+      "  *out_len = (uint64_t)sz;\n"
+      "  return 0;\n"
+      "}\n\n"
+      "static uint64_t lain_os_write_file(const void *path_ptr, uint64_t path_len,\n"
+      "                                  const void *data_ptr, uint64_t data_len) {\n"
+      "  char *p = (char *)malloc((size_t)path_len + 1);\n"
+      "  FILE *f;\n"
+      "  int ok = 1;\n"
+      "  if (!p) return 1;\n"
+      "  if (path_len > 0 && path_ptr) memcpy(p, path_ptr, (size_t)path_len);\n"
+      "  p[path_len] = 0;\n"
+      "  f = fopen(p, \"wb\");\n"
+      "  free(p);\n"
+      "  if (!f) return 1;\n"
+      "  if (data_len > 0) {\n"
+      "    size_t wrote = fwrite(data_ptr, 1, (size_t)data_len, f);\n"
+      "    if (wrote != (size_t)data_len) ok = 0;\n"
+      "  }\n"
+      "  fclose(f);\n"
+      "  return ok ? 0 : 1;\n"
+      "}\n\n"
+      "static uint64_t lain_os_eprint(const void *ptr, uint64_t len) {\n"
+      "  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n"
+      "  return len;\n"
       "}\n\n",
       out);
 }
@@ -1484,7 +1562,10 @@ static bool emit_main_wrapper(C99Ctx *ctx, const LainC99Options *opts) {
     return false;
   }
   FILE *out = ctx->out;
-  fputs("int main(void) {\n", out);
+  fputs("int main(int argc, char **argv) {\n"
+        "  g_lain_argc = argc;\n"
+        "  g_lain_argv = argv;\n",
+        out);
   if (entry->result_count == 0) {
     fputs("  ", out);
     emit_sub_c_name(out, entry);
@@ -1518,13 +1599,16 @@ static bool emit_main_wrapper(C99Ctx *ctx, const LainC99Options *opts) {
   return true;
 }
 
-/* 这六个符号由前导代码直接定义，不能再发 extern 原型。 */
+/* 这些符号由前导代码直接定义，不能再发 extern 原型。 */
 static bool c99_preamble_symbol(const char *name) {
   static const char *const names[] = {
       "lain_io_write",     "lain_io_print_i64", "lain_io_print_u64",
       "lain_io_newline",   "lain_perf_steps",   "lain_perf_nanos",
       "lain2_sym_addr",    "lain2_sym_len",     "lain2_sym_find",
-      "lain2_sym_same",    "lain2_sym_intern",
+      "lain2_sym_same",    "lain2_sym_intern",  "lain_os_argc",
+      "lain_os_argv_len",  "lain_os_argv_copy", "lain_os_alloc",
+      "lain_os_free",      "lain_os_read_file", "lain_os_write_file",
+      "lain_os_eprint",
   };
   if (!name) return false;
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {

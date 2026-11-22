@@ -3,12 +3,7 @@
 let st = import("state");
 let ty = import("types");
 let ir = import("ir");
-
-extern lain2_sym_addr(h: u64) -> Ref(u8) = lain2_sym_addr;
-extern lain2_sym_len(h: u64) -> u64 = lain2_sym_len;
-extern lain2_sym_find(p: Ref(u8), n: u64) -> u64 = lain2_sym_find;
-extern lain2_sym_same(a: u64, b: u64) -> u64 = lain2_sym_same;
-extern lain2_sym_intern(p: Ref(u8), n: u64) -> u64 = lain2_sym_intern;
+let hr = import("src::host_rt");
 
 pub let ModEntry = struct {
   alias: u64,
@@ -37,12 +32,12 @@ pub let SymEntry = struct {
 // --- 符号字节 -----------------------------------------------------------
 pub let sym_addr = func(h: u64) -> Ref(u8) {
   if h == 0 { return null_ref(Ref(u8)); }
-  return lain2_sym_addr(h);
+  return hr.sym_addr(h);
 };
 
 pub let sym_len = func(h: u64) -> u64 {
   if h == 0 { return 0; }
-  return lain2_sym_len(h);
+  return hr.sym_len(h);
 };
 
 // 把十进制写进 p，返回字节数。
@@ -86,7 +81,7 @@ pub let qual_full = func(s: Mut(st.State), src: u64, name: u64, tail: u64) -> u6
     let pfl: u64 = copy_sym(pp, pf);
     let pnl: u64 = copy_sym(pp + pfl, name);
     let ptl: u64 = copy_sym(pp + pfl + pnl, tail);
-    return lain2_sym_intern(pp, pfl + pnl + ptl);
+    return hr.sym_intern(pp, pfl + pnl + ptl);
   }
   let p: Mut(u8) = st.st_scratch(s);
   let n: u64 = digits_at(p + 1, src);
@@ -99,7 +94,7 @@ pub let qual_full = func(s: Mut(st.State), src: u64, name: u64, tail: u64) -> u6
   let nl: u64 = copy_sym(p + 3 + n, name);
   let off: u64 = 3 + n + nl;
   let tl: u64 = copy_sym(p + off, tail);
-  return lain2_sym_intern(p, off + tl);
+  return hr.sym_intern(p, off + tl);
 };
 
 pub let qual = func(s: Mut(st.State), src: u64, name: u64) -> u64 {
@@ -119,7 +114,7 @@ pub let qual_num = func(s: Mut(st.State), src: u64, prefix: u64, v: u64) -> u64 
   let pl: u64 = copy_sym(p + 3 + n, prefix);
   let off: u64 = 3 + n + pl;
   let dl: u64 = digits_at(p + off, v);
-  return lain2_sym_intern(p, off + dl);
+  return hr.sym_intern(p, off + dl);
 };
 
 // 当前模块号：内联 module / 函子实例体内是虚拟模块号，文件顶层就是源号。
@@ -270,7 +265,7 @@ let name_key = func(s: Mut(st.State), h: u64) -> u64 {
   let n: u64 = sym_len(h);
   if n == 0 { return 0; }
   // 符号池已经映射进 guest 空间，可以直接按内容查表，不必复制文本。
-  let f: u64 = lain2_sym_find(sym_addr(h), n);
+  let f: u64 = hr.sym_find(sym_addr(h), n);
   if f != 0 { return f; }
   return h;
 };
@@ -326,7 +321,7 @@ pub let sym_pub = func(p: Mut(SymEntry)) -> u64 { return p.pub_flag; };
 pub let sym_set_pub = func(p: Mut(SymEntry), v: u64) -> u64 { p.pub_flag = v; return v; };
 
 // AST 的符号句柄按出现位置分配，同名不同位置句柄不同，比名一律走这条。
-let sym_same = func(a: u64, b: u64) -> u64 { return lain2_sym_same(a, b); };
+let sym_same = func(a: u64, b: u64) -> u64 { return hr.sym_same(a, b); };
 
 let sym_scan = func(s: Mut(st.State), mod: u64, name: u64, i: u64, n: u64) -> Mut(SymEntry) {
   if i >= n { return null_ref(Mut(SymEntry)); }
@@ -334,7 +329,7 @@ let sym_scan = func(s: Mut(st.State), mod: u64, name: u64, i: u64, n: u64) -> Mu
   if p.modv == mod {
     if p.name != 0 {
       if name != 0 {
-        if lain2_sym_same(p.name, name) == 1 { return p; }
+        if hr.sym_same(p.name, name) == 1 { return p; }
       }
     }
   }

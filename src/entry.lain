@@ -1,60 +1,153 @@
 // entry.lain —— Meta 编译器入口。所有源码编进同一个 LAINIR 模块，跨源调用才成立。
+// 两种入口共用同一条编译流水线：lain_meta_v2_entry 供宿主嵌入调用，main 供命令行使用。
+let os = import("std::os");
 let st = import("state");
 let ev = import("eval");
 let ir = import("ir");
 let tr = import("std::trace");
+let hr = import("src::host_rt");
 
-extern lain2_source_count() -> u64 = lain2_source_count;
-extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
-// 追踪通道：宿主给缓冲区、由宿主落盘。C99 后端只导出 lain_meta_v2_entry 这一个
-// 过程，所以开关与导出都从模块这边发起，宿主只提供缓冲与写入。
-extern lain2_trace_on() -> u64 = lain2_trace_on;
-extern lain2_trace_buf() -> Mut(u8) = lain2_trace_buf;
-extern lain2_trace_cap() -> u64 = lain2_trace_cap;
-extern lain2_trace_flush(len: u64) -> u64 = lain2_trace_flush;
+// --- 命令行参数 ---------------------------------------------------------
+// 解析结果放在静态字表里，字段含义见下面的注释。
+// 0 c99 开关；1 print_result 开关；2 有 --out；3 out 指针；4 out 长度；
+// 5 有 --trace；6 trace 指针；7 trace 长度；8 有 --entry；9 entry 指针；
+// 10 entry 长度；11 源文件指针；12 源文件长度；13 参数错误。
+let opts_table: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+let opts = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(opts_table), 16);
+};
+
+let same_range = func(a: Slice(u8), b: Slice(u8), i: u64) -> u64 {
+  if i >= a.len { return 1; }
+  if a[i] != b[i] { return 0; }
+  return same_range(a, b, i + 1);
+};
+
+let same = func(a: Slice(u8), b: Slice(u8)) -> u64 {
+  if a.len != b.len { return 0; }
+  return same_range(a, b, 0);
+};
+
+let ends_c = func(s: Slice(u8)) -> u64 {
+  if s.len < 2 { return 0; }
+  if s[s.len - 2] != 46 { return 0; }
+  if s[s.len - 1] != 99 { return 0; }
+  return 1;
+};
+
+// 第 i 个命令行参数：长度向宿主问一次，再复制进一块新分配的缓冲。
+// 命令行进程里参数数量很少，这些小块随进程结束一起归还。
+let arg = func(i: u64) -> Slice(u8) {
+  let n: u64 = os.argv_len(i);
+  let cap: u64 = n + 1;
+  let raw: u64 = os.alloc_bytes(cap);
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let got: u64 = os.argv_copy(i, buf);
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got);
+};
+
+let store_pair = func(w: MutSlice(u64), pslot: u64, lslot: u64, s: Slice(u8)) -> u64 {
+  w[pslot] = s.ptr as u64;
+  w[lslot] = s.len;
+  return 1;
+};
+
+let load_slice = func(w: MutSlice(u64), pslot: u64, lslot: u64) -> Slice(u8) {
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), w[pslot]), w[lslot]);
+};
+
+let usage = func() -> u64 {
+  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--entry <name>] [--trace <trace.json>] [--print-result]\n";
+  return os.eprint(msg);
+};
+
+let parse = func(i: u64, n: u64) -> u64 {
+  let w: MutSlice(u64) = opts();
+  if i >= n { return 0; }
+  let s: Slice(u8) = arg(i);
+  if (same(s, "--out") == 1) and (i + 1 < n) {
+    w[2] = 1;
+    let st1: u64 = store_pair(w, 3, 4, arg(i + 1));
+    return parse(i + 2, n);
+  }
+  if (same(s, "--entry") == 1) and (i + 1 < n) {
+    w[8] = 1;
+    let st2: u64 = store_pair(w, 9, 10, arg(i + 1));
+    return parse(i + 2, n);
+  }
+  if (same(s, "--trace") == 1) and (i + 1 < n) {
+    w[5] = 1;
+    let st3: u64 = store_pair(w, 6, 7, arg(i + 1));
+    return parse(i + 2, n);
+  }
+  if same(s, "--c99") == 1 {
+    w[0] = 1;
+    return parse(i + 1, n);
+  }
+  if same(s, "--print-result") == 1 {
+    w[1] = 1;
+    return parse(i + 1, n);
+  }
+  if (same(s, "--out") == 1) or (same(s, "--entry") == 1) or (same(s, "--trace") == 1) {
+    w[13] = 1;
+    return 1;
+  }
+  if w[11] == 0 {
+    let st4: u64 = store_pair(w, 11, 12, s);
+    return parse(i + 1, n);
+  }
+  w[13] = 1;
+  return 1;
+};
+
+let entry_name = func() -> Slice(u8) {
+  let w: MutSlice(u64) = opts();
+  if w[8] == 0 { return "s0__main"; }
+  return load_slice(w, 9, 10);
+};
+
+// 把事件表写成 JSON 写进临时缓冲并交给宿主落盘；没开追踪就原样返回结果码。
+let trace_finish = func(rc: u64) -> u64 {
+  if tr.trace_is_enabled() == 0 { return rc; }
+  let cap: u64 = 4194304;
+  let p: Mut(u8) = hr.mem_alloc(cap, 8);
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), p, cap);
+  let n: u64 = tr.dump_json(ms);
+  hr.trace_flush(ptr_cast(Ref(u8), p), n);
+  return rc;
+};
 
 // 逐源编译：每步重读源数量，import 新增的源会被一并编掉。
 pub let build = func(k: Mut(st.State), i: u64, count: u64) -> u64 {
   if i >= count { return st.st_ok(k); }
   let e: u64 = ev.compile_source(k, i);
   if st.st_ok(k) != 0 { return st.st_ok(k); }
-  let total: u64 = lain2_source_count();
+  let total: u64 = hr.source_count();
   return build(k, i + 1, total);
-};
-
-// 把事件表写成 JSON 写进宿主缓冲并交给宿主落盘；没开追踪就原样返回结果码。
-let trace_finish = func(rc: u64) -> u64 {
-  if tr.trace_is_enabled() == 0 { return rc; }
-  let cap: u64 = lain2_trace_cap();
-  let p: Mut(u8) = lain2_trace_buf();
-  let ms: MutSlice(u8) = make_slice(MutSlice(u8), p, cap);
-  let n: u64 = tr.dump_json(ms);
-  let w: u64 = lain2_trace_flush(n);
-  return rc;
 };
 
 @root
 let lain_meta_v2_entry = func(count: u64) -> u64 {
-  if lain2_trace_on() == 1 {
-    let on: u64 = tr.trace_enable(1);
+  hr.rt_init();
+  if hr.trace_enabled() == 1 {
+    tr.trace_enable(1);
   }
   let k: Mut(st.State) = st.st_new(65536);
-  let mname: u64 = lain2_source_name(0);
+  let mname: u64 = hr.source_name(0);
   let md: u64 = ir.mod_new(k, mname);
   let t_build: u64 = tr.span_begin();
   let code: u64 = build(k, 0, count);
   let ev_build: u64 = tr.span_end("lainc_build", "lainc", t_build, count);
   if code != 0 {
-    let msg: Ref(u8) = "compile failed";
-    let d: u64 = ir.diag(k, code, 1, msg, 14);
+    hr.print_diags();
     return trace_finish(code);
   }
   let t_verify: u64 = tr.span_begin();
   let v: u64 = ir.verify(k);
   let ev_verify: u64 = tr.span_end("ir_verify", "lainc", t_verify, v);
   if v != 0 {
-    let msg2: Ref(u8) = "verify failed";
-    let d2: u64 = ir.diag(k, v, 1, msg2, 13);
+    hr.print_diags();
     return trace_finish(v);
   }
   // emit_output 返回的是写出的字节数，不是错误码。
@@ -62,4 +155,54 @@ let lain_meta_v2_entry = func(count: u64) -> u64 {
   let written: u64 = ir.emit_output(k);
   let ev_emit: u64 = tr.span_end("ir_emit", "lainc", t_emit, written);
   return trace_finish(st.st_ok(k));
+};
+
+@root
+let main = func() -> u64 {
+  hr.rt_init();
+  let w: MutSlice(u64) = opts();
+  let argc: u64 = os.argc();
+  if argc < 2 {
+    usage();
+    return 2;
+  }
+  parse(1, argc);
+  if w[13] != 0 {
+    usage();
+    return 2;
+  }
+  let src: Slice(u8) = load_slice(w, 11, 12);
+  if w[5] != 0 {
+    let trace_path: Slice(u8) = load_slice(w, 6, 7);
+    hr.trace_set_path(trace_path);
+    tr.trace_enable(1);
+  }
+  let added: u64 = hr.source_add_file(src);
+  if added == hr.NO_SOURCE() {
+    hr.print_diags();
+    return 1;
+  }
+  let k: Mut(st.State) = st.st_new(65536);
+  let mname: u64 = hr.source_name(added);
+  let md: u64 = ir.mod_new(k, mname);
+  let code: u64 = build(k, 0, 1);
+  if code != 0 {
+    hr.print_diags();
+    return trace_finish(code);
+  }
+  let v: u64 = ir.verify(k);
+  if v != 0 {
+    hr.print_diags();
+    return trace_finish(v);
+  }
+  if w[2] != 0 {
+    let out_path: Slice(u8) = load_slice(w, 3, 4);
+    if (w[0] != 0) or (ends_c(out_path) == 1) {
+      let en: Slice(u8) = entry_name();
+      hr.emit_c99_file(st.st_mod(k), out_path, en, w[1]);
+    } else {
+      hr.emit_l1_file(st.st_mod(k), out_path);
+    }
+  }
+  return trace_finish(0);
 };

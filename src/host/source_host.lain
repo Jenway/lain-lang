@@ -326,9 +326,19 @@ pub let ast_delim = func(h: Mut(HostSources), node: u64) -> u64 {
 pub let ast_sym = func(h: Mut(HostSources), node: u64) -> u64 {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
-    // Reader 只产出零语义形式，标识符尚未驻留成符号。
-    let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
-    return 0;
+    // Reader 只产出零语义形式：词的文本按需驻留，与 C 版解析器把每个词都
+    // 驻留成 SymId 的行为一致。组没有符号。
+    let src: u64 = source_of(node);
+    let slot: u64 = slot_of(node);
+    let n: rd.RawNode = raw_at(h, src, slot);
+    if is_raw_group(n.kind) == 1 { return 0; }
+    let rec: Mut(Source) = source_at(h, src);
+    let ast: rd.RawAst = source_ast(rec);
+    let sp: rd.Span = rd.node_span(ast, slot);
+    if sp.len == 0 { return 0; }
+    let id: u64 = sym.sym_intern(h.syms, rec.text_ptr + sp.offset, sp.len);
+    if id > INDEX_MASK() { return halt(id); }
+    return handle_sym(id);
   }
   if cls == CLASS_AST_OUT() {
     let id: u64 = ao.node_sym(h.out, out_index_of(node));
@@ -373,14 +383,14 @@ pub let ast_child = func(h: Mut(HostSources), node: u64, i: u64) -> u64 {
   return halt(node);
 };
 
-// 词文本的起点。组没有文本，调用它就是程序错误。
+// 词文本的起点。组没有文本，回空引用。
 pub let ast_literal_addr = func(h: Mut(HostSources), node: u64) -> Ref(u8) {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
     let src: u64 = source_of(node);
     let slot: u64 = slot_of(node);
     let n: rd.RawNode = raw_at(h, src, slot);
-    if is_raw_group(n.kind) == 1 { return trap_ref(node); }
+    if is_raw_group(n.kind) == 1 { return null_ref(Ref(u8)); }
     let rec: Mut(Source) = source_at(h, src);
     let ast: rd.RawAst = source_ast(rec);
     let sp: rd.Span = rd.node_span(ast, slot);
@@ -389,7 +399,7 @@ pub let ast_literal_addr = func(h: Mut(HostSources), node: u64) -> Ref(u8) {
   if cls == CLASS_AST_OUT() {
     let a: Mut(ao.AstOut) = h.out;
     let idx: u64 = out_index_of(node);
-    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return trap_ref(node); }
+    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return null_ref(Ref(u8)); }
     let text: Slice(u8) = ao.text_of(a, idx);
     return text.ptr;
   }
@@ -468,15 +478,27 @@ pub let ast_mk_token = func(h: Mut(HostSources), sym_handle: u64, origin: u64,
 };
 
 // 造组：kids 是紧排的 32 位统一句柄，逐个翻成 AstOut 下标后写进暂存区。
-// AstOut 只能引用自己节点表里的节点，所以孩子必须是 AST_OUT 句柄。
+// AstOut 的孩子表只存自己节点表里的下标，所以来自 Reader 的词（AST_IN）先按
+// 原文拷成 AstOut 里的词再进孩子表；Reader 的组没法这样拷（它的孩子又都是
+// Reader 句柄），调用方必须先递归展开成 AstOut 组。
+let token_index = func(h: Mut(HostSources), kid: u64) -> u64 {
+  if ast_kind(h, kid) != ao.KIND_TOKEN() { return halt(kid); }
+  let sym_id: u64 = sym_index(ast_sym(h, kid));
+  let text: Slice(u8) = make_slice(Slice(u8), ast_literal_addr(h, kid),
+                                  ast_literal_len(h, kid));
+  return ao.mk_token(h.out, sym_id, kid, 0, text);
+};
+
 pub let ast_mk_group = func(h: Mut(HostSources), delim: u64, kids: Slice(u32)) -> u64 {
   let n: u64 = kids.len;
   if n > h.kids_cap { return halt(n); }
   let i: u64 = loop c(i: u64 = 0) while i < n {
     let raw: u32 = kids[i];
     let kid: u64 = raw as u64;
-    if class_of(kid) != CLASS_AST_OUT() { return halt(kid); }
-    let idx: u64 = out_index_of(kid);
+    let idx: u64 = if class_of(kid) == CLASS_AST_IN() { token_index(h, kid) } else {
+      if class_of(kid) != CLASS_AST_OUT() { return halt(kid); }
+      out_index_of(kid)
+    };
     let slot: Mut(u32) = h.kids + i * 4;
     deref(slot) = idx as u32;
     i = i + 1;

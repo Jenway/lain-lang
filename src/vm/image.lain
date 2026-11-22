@@ -87,6 +87,12 @@ pub let CaseInfo = struct {
   region: u64,
 };
 
+// 模块级静态数据符号：名字与它映射到的虚拟地址。
+pub let DataSym = struct {
+  symbol: u64,
+  vaddr: u64,
+};
+
 pub let SubInfo = struct {
   sub: Ref(vf.IrProc),
   name: u64,
@@ -129,6 +135,8 @@ pub let VmImage = struct {
   procs_ptr: Mut(SubInfo),
   procs_len: u64,
   proc_count: u64,
+  data_syms: Ref(DataSym),
+  data_count: u64,
   max_depth: u64,
   max_slots: u64,
 };
@@ -464,6 +472,31 @@ let find_proc = func(c: Mut(Loader), name: u64) -> u64 {
   return NO_INDEX();
 };
 
+// --- 模块级符号 -----------------------------------------------------------
+// 数据符号在装载表里按调用方给定的顺序查；过程入口只认非 extern 且确实有函数体的。
+let find_data_sym = func(c: Mut(Loader), name: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  if is_null(img.data_syms) { return NO_INDEX(); }
+  let syms: Slice(DataSym) = make_slice(Slice(DataSym), img.data_syms, img.data_count);
+  let i: u64 = loop i(i: u64 = 0) while i < img.data_count {
+    let s: DataSym = syms[i];
+    if s.symbol == name { return i; }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+let find_body_proc = func(c: Mut(Loader), name: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let procs: MutSlice(SubInfo) = m_procs(img);
+  let i: u64 = loop i(i: u64 = 0) while i < img.proc_count {
+    let p: SubInfo = procs[i];
+    if (p.is_extern == 0) and (p.name == name) { return i; }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
 // --- 装载 -----------------------------------------------------------------
 let push_operand = func(c: Mut(Loader), op: OperandRef) -> u64 {
   let img: Mut(VmImage) = c.img;
@@ -532,20 +565,46 @@ let load_operands = func(c: Mut(Loader), region_id: u64, it: vf.IrInst,
     return load_operands(c, region_id, it, k + 1);
   }
   let hit: Lookup = resolve_walk(c, region_id, op.name, 0);
-  if hit.found == 0 {
-    c.err = ERR_UNDEFINED();
-    return c.err;
+  if hit.found == 1 {
+    let ref: OperandRef = OperandRef {
+      is_literal: 0,
+      is_symbol: 0,
+      is_proc: 0,
+      frame_distance: hit.distance,
+      slot: hit.slot,
+      symbol_index: NO_INDEX(),
+    };
+    push_operand(c, ref);
+    return load_operands(c, region_id, it, k + 1);
   }
-  let ref: OperandRef = OperandRef {
-    is_literal: 0,
-    is_symbol: 0,
-    is_proc: 0,
-    frame_distance: hit.distance,
-    slot: hit.slot,
-    symbol_index: NO_INDEX(),
-  };
-  push_operand(c, ref);
-  return load_operands(c, region_id, it, k + 1);
+  let di: u64 = find_data_sym(c, op.name);
+  if di != NO_INDEX() {
+    let dref: OperandRef = OperandRef {
+      is_literal: 0,
+      is_symbol: 1,
+      is_proc: 0,
+      frame_distance: 0,
+      slot: 0,
+      symbol_index: di,
+    };
+    push_operand(c, dref);
+    return load_operands(c, region_id, it, k + 1);
+  }
+  let pi: u64 = find_body_proc(c, op.name);
+  if pi != NO_INDEX() {
+    let pref: OperandRef = OperandRef {
+      is_literal: 0,
+      is_symbol: 0,
+      is_proc: 1,
+      frame_distance: 0,
+      slot: 0,
+      symbol_index: pi,
+    };
+    push_operand(c, pref);
+    return load_operands(c, region_id, it, k + 1);
+  }
+  c.err = ERR_UNDEFINED();
+  return c.err;
 };
 
 let load_results = func(c: Mut(Loader), base: u64, it: vf.IrInst, k: u64) -> u64 {
@@ -688,6 +747,14 @@ let zero_cases = func(table: MutSlice(u64)) -> u64 {
 
 pub let image_load = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpace),
                           layout: ImageLayout, out: Mut(VmImage)) -> u64 {
+  return image_load_with_data(m, space, layout, out, null_ref(Ref(DataSym)), 0);
+};
+
+pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpace),
+                                    layout: ImageLayout, out: Mut(VmImage),
+                                    data_syms: Ref(DataSym), data_count: u64) -> u64 {
+  out.data_syms = data_syms;
+  out.data_count = data_count;
   out.ir = m;
   out.space = space;
   out.ro_base = layout.ro_base;
@@ -895,7 +962,11 @@ pub let vm_case = func(img: Ref(VmImage), index: u64) -> CaseInfo {
 };
 
 pub let vm_symbol_addr = func(img: Ref(VmImage), symbol_index: u64) -> u64 {
-  return 0;
+  if is_null(img.data_syms) { return 0; }
+  if symbol_index >= img.data_count { return 0; }
+  let syms: Slice(DataSym) = make_slice(Slice(DataSym), img.data_syms, img.data_count);
+  let s: DataSym = syms[symbol_index];
+  return s.vaddr;
 };
 
 pub let vm_sub = func(img: Ref(VmImage), sub_index: u64) -> SubInfo {

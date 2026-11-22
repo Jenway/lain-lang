@@ -226,6 +226,93 @@ static uint64_t lain_perf_nanos(void) {
 #endif
 }
 
+static int g_lain_argc = 0;
+static char **g_lain_argv = NULL;
+
+static uint64_t lain_os_argc(void) {
+  return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0);
+}
+
+static uint64_t lain_os_argv_len(uint64_t idx) {
+  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0))
+    return 0;
+  return (uint64_t)strlen(g_lain_argv[idx]);
+}
+
+static uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {
+  size_t n;
+  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0))
+    return 0;
+  n = strlen(g_lain_argv[idx]);
+  if (n > (size_t)cap) n = (size_t)cap;
+  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);
+  return (uint64_t)n;
+}
+
+static uint64_t lain_os_alloc(uint64_t bytes) {
+  void *p = calloc(1, (size_t)(bytes ? bytes : 1));
+  return (uint64_t)(uintptr_t)p;
+}
+
+static uint64_t lain_os_free(uint64_t ptr) {
+  free((void *)(uintptr_t)ptr);
+  return 0;
+}
+
+static uint64_t lain_os_read_file(const void *path_ptr, uint64_t path_len,
+                                 uint64_t *out_ptr, uint64_t *out_len) {
+  char *p = (char *)malloc((size_t)path_len + 1);
+  FILE *f;
+  long sz;
+  char *buf;
+  if (!p) return 1;
+  if (path_len > 0 && path_ptr) memcpy(p, path_ptr, (size_t)path_len);
+  p[path_len] = 0;
+  f = fopen(p, "rb");
+  free(p);
+  if (!f) return 1;
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+  sz = ftell(f);
+  if (sz < 0) { fclose(f); return 1; }
+  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }
+  buf = (char *)malloc((size_t)sz + 1);
+  if (!buf) { fclose(f); return 1; }
+  if (sz > 0 && fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+    fclose(f);
+    free(buf);
+    return 1;
+  }
+  buf[sz] = 0;
+  fclose(f);
+  *out_ptr = (uint64_t)(uintptr_t)buf;
+  *out_len = (uint64_t)sz;
+  return 0;
+}
+
+static uint64_t lain_os_write_file(const void *path_ptr, uint64_t path_len,
+                                  const void *data_ptr, uint64_t data_len) {
+  char *p = (char *)malloc((size_t)path_len + 1);
+  FILE *f;
+  int ok = 1;
+  if (!p) return 1;
+  if (path_len > 0 && path_ptr) memcpy(p, path_ptr, (size_t)path_len);
+  p[path_len] = 0;
+  f = fopen(p, "wb");
+  free(p);
+  if (!f) return 1;
+  if (data_len > 0) {
+    size_t wrote = fwrite(data_ptr, 1, (size_t)data_len, f);
+    if (wrote != (size_t)data_len) ok = 0;
+  }
+  fclose(f);
+  return ok ? 0 : 1;
+}
+
+static uint64_t lain_os_eprint(const void *ptr, uint64_t len) {
+  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);
+  return len;
+}
+
 static const uint8_t lain_data_s5__strlit_0[4] = {
   0x66,0x75,0x6e,0x63
 };
@@ -7424,7 +7511,7 @@ static void * lain_fn_s1__st_new(uint64_t arg_0) {
   void * v__t12_64 = lain2_mem_alloc((uint64_t)UINT64_C(8192), (uint64_t)UINT64_C(8));
   uint64_t v__t13_65 = (uint64_t)(uintptr_t)v__t12_64;
   lain_store_bits(v__v6_6, (uint64_t)v__t13_65, 64);
-  void * v__t14_66 = lain2_mem_alloc((uint64_t)UINT64_C(1048576), (uint64_t)UINT64_C(8));
+  void * v__t14_66 = lain2_mem_alloc((uint64_t)UINT64_C(16777216), (uint64_t)UINT64_C(8));
   uint64_t v__t15_67 = (uint64_t)(uintptr_t)v__t14_66;
   lain_store_bits(v__v7_7, (uint64_t)v__t15_67, 64);
   void * v__t16_68 = lain2_mem_alloc((uint64_t)UINT64_C(262144), (uint64_t)UINT64_C(8));
@@ -7653,7 +7740,7 @@ static void * lain_fn_s1__st_new(uint64_t arg_0) {
   void *v__t162_217 = lain_load_addr(v__t161_216);
   void *v__t163_218 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t162_217) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(224)));
   void *v__t164_219 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t163_218) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
-  lain_store_bits(v__t164_219, (uint64_t)(uint64_t)UINT64_C(1048576), 64);
+  lain_store_bits(v__t164_219, (uint64_t)(uint64_t)UINT64_C(16777216), 64);
   void *v__t165_220 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__v30_30) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
   void *v__t166_221 = (void *)(uintptr_t)((uint64_t)(uintptr_t)(v__t165_220) + ((uint64_t)(uint64_t)UINT64_C(0)) * ((uint64_t)(uint64_t)UINT64_C(1)) + ((uint64_t)(uint64_t)UINT64_C(0)));
   void *v__t167_222 = lain_load_addr(v__t166_221);

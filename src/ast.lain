@@ -1,19 +1,6 @@
 // ast.lain —— AST 节点访问与字面量读取。句柄约定见 seed/kernel/src/meta/host_v2.c。
 // 组的分隔符就是 ASCII 码；根组是 0。
-extern lain2_ast_kind(h: u64) -> u64 = lain2_ast_kind;
-extern lain2_ast_delim(h: u64) -> u64 = lain2_ast_delim;
-extern lain2_ast_sym(h: u64) -> u64 = lain2_ast_sym;
-extern lain2_ast_child_count(h: u64) -> u64 = lain2_ast_child_count;
-extern lain2_ast_child(h: u64, i: u64) -> u64 = lain2_ast_child;
-extern lain2_ast_literal_addr(h: u64) -> Ref(u8) = lain2_ast_literal_addr;
-extern lain2_ast_literal_len(h: u64) -> u64 = lain2_ast_literal_len;
-// AstOut 事务与构造原语。孩子数组按紧排的 32 位句柄传递。
-extern lain2_ast_tx_begin() -> u64 = lain2_ast_tx_begin;
-extern lain2_ast_tx_commit(root: u64) -> u64 = lain2_ast_tx_commit;
-extern lain2_ast_tx_rollback() -> u64 = lain2_ast_tx_rollback;
-extern lain2_ast_mk_token(sym: u64, origin: u64, text: Ref(u8), len: u64) -> u64 = lain2_ast_mk_token;
-extern lain2_ast_mk_group(delim: u64, count: u64, kids: Ref(u32)) -> u64 = lain2_ast_mk_group;
-
+let hr = import("src::host_rt");
 let st = import("state");
 let ty = import("types");
 
@@ -29,10 +16,10 @@ pub let no_slot = func() -> u64 { return 999999; };
 // 同一条 extern（同一份台账只能有一处）。
 pub let delim = func(h: u64) -> u64 {
   if h == 0 { return 0; }
-  return lain2_ast_delim(h);
+  return hr.ast_delim(h);
 };
-pub let lit_addr = func(h: u64) -> Ref(u8) { return lain2_ast_literal_addr(h); };
-pub let lit_len = func(h: u64) -> u64 { return lain2_ast_literal_len(h); };
+pub let lit_addr = func(h: u64) -> Ref(u8) { return hr.ast_literal_addr(h); };
+pub let lit_len = func(h: u64) -> u64 { return hr.ast_literal_len(h); };
 
 pub let e_ast = func() -> u64 { return 1; };
 pub let e_unbound = func() -> u64 { return 2; };
@@ -55,25 +42,25 @@ pub let box_put = func(p: Mut(u64), v: u64) -> u64 { deref(p) = v; return v; };
 pub let box_get = func(p: Mut(u64)) -> u64 { return deref(p); };
 
 // --- AST 访问（调用前必须自己保证下标没有越界） -------------------------
-pub let n_count = func(g: u64) -> u64 { return lain2_ast_child_count(g); };
+pub let n_count = func(g: u64) -> u64 { return hr.ast_child_count(g); };
 pub let n_at = func(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
-  return lain2_ast_child(g, i);
+  return hr.ast_child(g, i);
 };
 pub let n_sym = func(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
   let h: u64 = n_at(g, i);
   if h == 0 { return 0; }
-  return lain2_ast_sym(h);
+  return hr.ast_sym(h);
 };
 pub let node_count = func(h: u64) -> u64 {
   if h == 0 { return 0; }
-  return lain2_ast_child_count(h);
+  return hr.ast_child_count(h);
 };
 // 节点种类：1 = 词，2 = 组。空组的孩子数是 0，只能靠种类认出来。
 pub let node_kind = func(h: u64) -> u64 {
   if h == 0 { return 0; }
-  return lain2_ast_kind(h);
+  return hr.ast_kind(h);
 };
 pub let is_group_node = func(h: u64) -> u64 {
   if node_kind(h) == 2 { return 1; }
@@ -81,7 +68,7 @@ pub let is_group_node = func(h: u64) -> u64 {
 };
 pub let node_sym = func(h: u64) -> u64 {
   if h == 0 { return 0; }
-  return lain2_ast_sym(h);
+  return hr.ast_sym(h);
 };
 pub let is_group = func(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
@@ -89,7 +76,7 @@ pub let is_group = func(g: u64, i: u64) -> u64 {
 };
 pub let delim_of = func(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
-  return lain2_ast_delim(n_at(g, i));
+  return hr.ast_delim(n_at(g, i));
 };
 let byte_at = func(p: Ref(u8), k: u64) -> u64 {
   let b: u8 = deref(p + k);
@@ -100,9 +87,10 @@ pub let tok_first = func(g: u64, i: u64) -> u64 {
   let h: u64 = n_at(g, i);
   if h == 0 { return 0; }
   if is_group_node(h) == 1 { return 0; }
-  let len: u64 = lain2_ast_literal_len(h);
+  let len: u64 = hr.ast_literal_len(h);
   if len == 0 { return 0; }
-  let p: Ref(u8) = lain2_ast_literal_addr(h);
+  let p: Ref(u8) = hr.ast_literal_addr(h);
+  if is_null(p) { return 0; }
   return byte_at(p, 0);
 };
 pub let is_digit_token = func(g: u64, i: u64) -> u64 {
@@ -116,8 +104,10 @@ let tok_is = func(g: u64, i: u64, code: u64) -> u64 {
   if is_group(g, i) == 1 { return 0; }
   let h: u64 = n_at(g, i);
   if h == 0 { return 0; }
-  if lain2_ast_literal_len(h) != 1 { return 0; }
-  let b: u64 = byte_at(lain2_ast_literal_addr(h), 0);
+  if hr.ast_literal_len(h) != 1 { return 0; }
+  let p: Ref(u8) = hr.ast_literal_addr(h);
+  if is_null(p) { return 0; }
+  let b: u64 = byte_at(p, 0);
   if b == code { return 1; }
   return 0;
 };
@@ -138,6 +128,8 @@ pub let skip_semi = func(g: u64, j: u64) -> u64 {
 
 // 十进制 / 0x 十六进制字面量。
 pub let num_value = func(p: Ref(u8), n: u64) -> u64 {
+  if n == 0 { return 0; }
+  if is_null(p) { return 0; }
   let b0: u64 = byte_at(p, 0);
   if n > 2 and b0 == 48 {
     let b1: u64 = byte_at(p, 1);
@@ -161,19 +153,19 @@ pub let num_value = func(p: Ref(u8), n: u64) -> u64 {
 // tx_begin 开一次游标事务，返回值是事务号；提交时交回整棵新树的根节点句柄；
 // 回滚不需要参数，游标直接复位到事务开始时的水位。三个原语都要求宿主已经
 // 挂好输出缓冲区，重复开事务或没有开事务就提交由宿主报错。
-pub let tx_begin = func() -> u64 { return lain2_ast_tx_begin(); };
-pub let tx_commit = func(root: u64) -> u64 { return lain2_ast_tx_commit(root); };
-pub let tx_rollback = func() -> u64 { return lain2_ast_tx_rollback(); };
+pub let tx_begin = func() -> u64 { return hr.ast_tx_begin(); };
+pub let tx_commit = func(root: u64) -> u64 { return hr.ast_tx_commit(root); };
+pub let tx_rollback = func() -> u64 { return hr.ast_tx_rollback(); };
 // 词：sym 是符号句柄（0 表示没有符号），origin 是被拷贝的源节点句柄
 // （0 表示凭空构造），text/len 是这个词的原始字节。
 pub let mk_token = func(sym: u64, origin: u64, text: Ref(u8), len: u64) -> u64 {
-  return lain2_ast_mk_token(sym, origin, text, len);
+  return hr.ast_mk_token(sym, origin, text, len);
 };
 // 凭空造词：没有源节点的常见情形。
 pub let mk_token_new = func(sym: u64, text: Ref(u8), len: u64) -> u64 {
-  return lain2_ast_mk_token(sym, 0, text, len);
+  return hr.ast_mk_token(sym, 0, text, len);
 };
 // 组：delim 是分隔符的 ASCII 码，kids 指向紧排的 32 位孩子句柄数组。
 pub let mk_group = func(delim: u64, count: u64, kids: Ref(u32)) -> u64 {
-  return lain2_ast_mk_group(delim, count, kids);
+  return hr.ast_mk_group(delim, count, kids);
 };
