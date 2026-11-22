@@ -1,0 +1,86 @@
+// std::collections 回归：ArenaVec 与 HashMapU64 两个函子的实例化、
+// UFCS 方法调用、覆盖写、满表拒绝、哈希冲突探测与实例独立性。返回值 95。
+let col = import("std::collections");
+
+let IntVec = col.ArenaVec(i64, 16);
+let SymMap = col.HashMapU64(i64, 32);
+
+use IntVec;
+use SymMap;
+
+let main = func() -> i64 {
+  // --- ArenaVec：追加 10 / 20 / 30，覆盖第 0 槽为 40 ---
+  let v: IntVec.Self = IntVec.new();
+  let p0: u64 = v.push(10);
+  let p1: u64 = v.push(20);
+  let p2: u64 = v.push(30);
+  let n_before: u64 = v.count();
+  let s0: u64 = v.set(0, 40);
+  let e0: i64 = v.get(0);
+  let e1: i64 = v.get(1);
+  let e2: i64 = v.get(2);
+  let vec_sum: i64 = e0 + e1 + e2;
+
+  // 填满 16 个槽：第 17 次 push 必须被拒绝。
+  let fill_ok: u64 = loop f(i: u64 = 0, ok: u64 = 1) while i < 13 {
+    ok = v.push(1);
+    i = i + 1;
+  };
+  let n_full: u64 = v.count();
+  let full_push: u64 = v.push(99);
+
+  let clr: u64 = v.clear();
+  let n_after: u64 = v.count();
+
+  // 第二个 Vec 与 v 的存储互不重叠。
+  let w: IntVec.Self = IntVec.new();
+  let wp: u64 = w.push(7);
+  let wn: u64 = w.count();
+  let wg: i64 = w.get(0);
+
+  // --- HashMapU64：键 1 与 33 的混合值落在同一个槽位（25），构成冲突 ---
+  let m: SymMap.Self = SymMap.new();
+  let q0: u64 = m.put(1, 4);
+  let q1: u64 = m.put(33, 9);
+  let q2: u64 = m.put(9, 1);
+  let n_map: u64 = m.count();
+  // 覆盖写：键 1 的值从 4 变成 5，长度不变。
+  let q3: u64 = m.put(1, 5);
+  let n_map2: u64 = m.count();
+
+  let out1: i64 = 0;
+  let f1: u64 = m.get(1, mut_of(out1));
+  let out33: i64 = 0;
+  let f33: u64 = m.get(33, mut_of(out33));
+  let out9: i64 = 0;
+  let f9: u64 = m.get(9, mut_of(out9));
+  let hit: u64 = m.has(33);
+  let miss: u64 = m.has(2);
+
+  // 第二张 Map 与 m 的存储互不重叠。
+  let m2: SymMap.Self = SymMap.new();
+  let r0: u64 = m2.put(1, 100);
+  let out_m2: i64 = 0;
+  let f_m2: u64 = m2.get(1, mut_of(out_m2));
+  let m2_n: u64 = m2.count();
+
+  // 每一项偏差都必须是 0；正确时总和 = vec_sum(90) + out1(5) = 95。
+  let push_bias: i64 = ((p0 + p1 + p2) as i64) - 3;
+  let count_bias: i64 = (n_before as i64) - 3;
+  let set_bias: i64 = (s0 as i64) - 1;
+  let full_bias: i64 = (fill_ok as i64) - 1 + (n_full as i64) - 16 + (full_push as i64);
+  let clear_bias: i64 = (clr as i64) - (n_after as i64) - 1;
+  let vec2_bias: i64 = (wp as i64) - 1 + (wn as i64) - 1 + wg - 7;
+  let put_bias: i64 = ((q0 + q1 + q2 + q3) as i64) - 4;
+  let map_len_bias: i64 = (n_map as i64) - 3 + (n_map2 as i64) - 3;
+  let get_flags: i64 = ((f1 + f33 + f9) as i64) - 3;
+  let collision_bias: i64 = out33 - 9;
+  let key_bias: i64 = out9 - 1;
+  let hit_bias: i64 = (hit as i64) - 1;
+  let miss_bias: i64 = miss as i64;
+  let map2_bias: i64 = (r0 as i64) - 1 + (f_m2 as i64) - 1 + (m2_n as i64) - 1 + out_m2 - 100;
+
+  return vec_sum + out1 + push_bias + count_bias + set_bias + full_bias + clear_bias
+    + vec2_bias + put_bias + map_len_bias + get_flags + collision_bias + key_bias
+    + hit_bias + miss_bias + map2_bias;
+};

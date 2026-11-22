@@ -30,6 +30,9 @@ pub let C99Writer = struct {
   ok: u64,
 };
 
+// 关联类型导出：调用方可以按 UFCS 写成 w.put_str(...)。
+pub let Self = C99Writer;
+
 pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
   return C99Writer { buf: buf, len: 0, ok: 1 };
 };
@@ -521,13 +524,39 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
 };
 
 // --- 整数与浮点运算 -------------------------------------------------------
+// 算子码到枚举的映射同样只做一次，取文本的地方对枚举做穷尽 match。
+let IntArithOp = enum {
+  Add
+  Sub
+  Mul
+  And
+  Or
+  Xor
+  Unknown
+};
+
+let int_arith_op = func(k: u64) -> IntArithOp {
+  if k == codes.INST_ADD() { return IntArithOp.Add { }; }
+  if k == codes.INST_SUB() { return IntArithOp.Sub { }; }
+  if k == codes.INST_MUL() { return IntArithOp.Mul { }; }
+  if k == codes.INST_AND() { return IntArithOp.And { }; }
+  if k == codes.INST_OR() { return IntArithOp.Or { }; }
+  if k == codes.INST_XOR() { return IntArithOp.Xor { }; }
+  return IntArithOp.Unknown { };
+};
+
 let int_op_text = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_ADD() { return "+"; }
-  if k == codes.INST_SUB() { return "-"; }
-  if k == codes.INST_MUL() { return "*"; }
-  if k == codes.INST_AND() { return "&"; }
-  if k == codes.INST_OR() { return "|"; }
-  return "^";
+  let op: IntArithOp = int_arith_op(k);
+  return match op {
+    Add => "+",
+    Sub => "-",
+    Mul => "*",
+    And => "&",
+    Or => "|",
+    Xor => "^",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => "^",
+  };
 };
 
 let emit_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
@@ -552,14 +581,41 @@ let emit_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   return 1;
 };
 
+let DivShiftOp = enum {
+  Sdiv
+  Srem
+  Udiv
+  Urem
+  Shl
+  Lshr
+  Ashr
+  Unknown
+};
+
+let div_shift_op = func(k: u64) -> DivShiftOp {
+  if k == codes.INST_SDIV() { return DivShiftOp.Sdiv { }; }
+  if k == codes.INST_SREM() { return DivShiftOp.Srem { }; }
+  if k == codes.INST_UDIV() { return DivShiftOp.Udiv { }; }
+  if k == codes.INST_UREM() { return DivShiftOp.Urem { }; }
+  if k == codes.INST_SHL() { return DivShiftOp.Shl { }; }
+  if k == codes.INST_LSHR() { return DivShiftOp.Lshr { }; }
+  if k == codes.INST_ASHR() { return DivShiftOp.Ashr { }; }
+  return DivShiftOp.Unknown { };
+};
+
 let div_shift_name = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_SDIV() { return "lain_sdiv"; }
-  if k == codes.INST_SREM() { return "lain_srem"; }
-  if k == codes.INST_UDIV() { return "lain_udiv"; }
-  if k == codes.INST_UREM() { return "lain_urem"; }
-  if k == codes.INST_SHL() { return "lain_shl"; }
-  if k == codes.INST_LSHR() { return "lain_lshr"; }
-  return "lain_ashr";
+  let op: DivShiftOp = div_shift_op(k);
+  return match op {
+    Sdiv => "lain_sdiv",
+    Srem => "lain_srem",
+    Udiv => "lain_udiv",
+    Urem => "lain_urem",
+    Shl => "lain_shl",
+    Lshr => "lain_lshr",
+    Ashr => "lain_ashr",
+    // 域外算子沿用原来的兜底名字。
+    Unknown => "lain_ashr",
+  };
 };
 
 let emit_int_div_shift = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
@@ -583,11 +639,36 @@ let emit_int_div_shift = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64
   return 1;
 };
 
+let FloatArithOp = enum {
+  Fadd
+  Fsub
+  Fmul
+  Fdiv
+  Fneg
+  Unknown
+};
+
+let float_arith_op = func(k: u64) -> FloatArithOp {
+  if k == codes.INST_FADD() { return FloatArithOp.Fadd { }; }
+  if k == codes.INST_FSUB() { return FloatArithOp.Fsub { }; }
+  if k == codes.INST_FMUL() { return FloatArithOp.Fmul { }; }
+  if k == codes.INST_FDIV() { return FloatArithOp.Fdiv { }; }
+  if k == codes.INST_FNEG() { return FloatArithOp.Fneg { }; }
+  return FloatArithOp.Unknown { };
+};
+
 let float_op_text = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_FADD() { return "+"; }
-  if k == codes.INST_FSUB() { return "-"; }
-  if k == codes.INST_FMUL() { return "*"; }
-  return "/";
+  let op: FloatArithOp = float_arith_op(k);
+  return match op {
+    Fadd => "+",
+    Fsub => "-",
+    Fmul => "*",
+    Fdiv => "/",
+    // FNEG 由 emit_float_arith 的取负路径单独处理，不走二元文本。
+    Fneg => "/",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => "/",
+  };
 };
 
 let emit_float_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
@@ -613,20 +694,66 @@ let emit_float_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   return 1;
 };
 
+let IntCmpOp = enum {
+  Eq
+  Ne
+  Ult
+  Ule
+  Ugt
+  Uge
+  Unknown
+};
+
+let int_cmp_op = func(k: u64) -> IntCmpOp {
+  if k == codes.INST_EQ() { return IntCmpOp.Eq { }; }
+  if k == codes.INST_NE() { return IntCmpOp.Ne { }; }
+  if k == codes.INST_ULT() { return IntCmpOp.Ult { }; }
+  if k == codes.INST_ULE() { return IntCmpOp.Ule { }; }
+  if k == codes.INST_UGT() { return IntCmpOp.Ugt { }; }
+  if k == codes.INST_UGE() { return IntCmpOp.Uge { }; }
+  return IntCmpOp.Unknown { };
+};
+
 let int_cmp_text = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_EQ() { return "=="; }
-  if k == codes.INST_NE() { return "!="; }
-  if k == codes.INST_ULT() { return "<"; }
-  if k == codes.INST_ULE() { return "<="; }
-  if k == codes.INST_UGT() { return ">"; }
-  return ">=";
+  let op: IntCmpOp = int_cmp_op(k);
+  return match op {
+    Eq => "==",
+    Ne => "!=",
+    Ult => "<",
+    Ule => "<=",
+    Ugt => ">",
+    Uge => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
+};
+
+let SignedCmpOp = enum {
+  Slt
+  Sle
+  Sgt
+  Sge
+  Unknown
+};
+
+let signed_cmp_op = func(k: u64) -> SignedCmpOp {
+  if k == codes.INST_SLT() { return SignedCmpOp.Slt { }; }
+  if k == codes.INST_SLE() { return SignedCmpOp.Sle { }; }
+  if k == codes.INST_SGT() { return SignedCmpOp.Sgt { }; }
+  if k == codes.INST_SGE() { return SignedCmpOp.Sge { }; }
+  return SignedCmpOp.Unknown { };
 };
 
 let signed_cmp_text = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_SLT() { return "<"; }
-  if k == codes.INST_SLE() { return "<="; }
-  if k == codes.INST_SGT() { return ">"; }
-  return ">=";
+  let op: SignedCmpOp = signed_cmp_op(k);
+  return match op {
+    Slt => "<",
+    Sle => "<=",
+    Sgt => ">",
+    Sge => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
 };
 
 let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
@@ -674,13 +801,56 @@ let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   return 1;
 };
 
+let FloatCmpOp = enum {
+  Oeq
+  One
+  Olt
+  Ole
+  Ogt
+  Oge
+  Ueq
+  Une
+  Uelt
+  Uele
+  Uegt
+  Uege
+  Unknown
+};
+
+let float_cmp_op = func(k: u64) -> FloatCmpOp {
+  if k == codes.INST_FOEQ() { return FloatCmpOp.Oeq { }; }
+  if k == codes.INST_FONE() { return FloatCmpOp.One { }; }
+  if k == codes.INST_FOLT() { return FloatCmpOp.Olt { }; }
+  if k == codes.INST_FOLE() { return FloatCmpOp.Ole { }; }
+  if k == codes.INST_FOGT() { return FloatCmpOp.Ogt { }; }
+  if k == codes.INST_FOGE() { return FloatCmpOp.Oge { }; }
+  if k == codes.INST_FUEQ() { return FloatCmpOp.Ueq { }; }
+  if k == codes.INST_FUNE() { return FloatCmpOp.Une { }; }
+  if k == codes.INST_FULT() { return FloatCmpOp.Uelt { }; }
+  if k == codes.INST_FULE() { return FloatCmpOp.Uele { }; }
+  if k == codes.INST_FUGT() { return FloatCmpOp.Uegt { }; }
+  if k == codes.INST_FUGE() { return FloatCmpOp.Uege { }; }
+  return FloatCmpOp.Unknown { };
+};
+
 let float_cmp_text = func(k: u64) -> Slice(u8) {
-  if (k == codes.INST_FOEQ()) or (k == codes.INST_FUEQ()) { return "=="; }
-  if (k == codes.INST_FONE()) or (k == codes.INST_FUNE()) { return "!="; }
-  if (k == codes.INST_FOLT()) or (k == codes.INST_FULT()) { return "<"; }
-  if (k == codes.INST_FOLE()) or (k == codes.INST_FULE()) { return "<="; }
-  if (k == codes.INST_FOGT()) or (k == codes.INST_FUGT()) { return ">"; }
-  return ">=";
+  let op: FloatCmpOp = float_cmp_op(k);
+  return match op {
+    Oeq => "==",
+    Ueq => "==",
+    One => "!=",
+    Une => "!=",
+    Olt => "<",
+    Uelt => "<",
+    Ole => "<=",
+    Uele => "<=",
+    Ogt => ">",
+    Uegt => ">",
+    Oge => ">=",
+    Uege => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
 };
 
 let emit_float_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {

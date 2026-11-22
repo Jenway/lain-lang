@@ -1,0 +1,132 @@
+// err.lain —— 编译器的代数效应错误层。
+// 宿主失败、编译失败统一收进 ErrInfo，编译期通过 CompileErr 效应的 fail
+// 操作中止当前路径；错误信息只往调用方给的 MutSlice(u8) 里写字节，
+// 整个过程不申请任何堆内存。
+let fmt = import("std::fmt");
+
+// 错误来源：宿主能力调用失败，以及编译流水线各阶段的失败。
+pub let ErrKind = enum {
+  HostCap
+  HostHandle
+  HostArg
+  HostRange
+  HostIr
+  CompileSyntax
+  CompileType
+  CompileUnbound
+  CompileVerify
+  CompileEval
+  CompileBorrow
+  CompileEffect
+};
+
+// code 是阶段内的具体错误码，src/span 定位源码，detail 放附加数值，
+// msg 是已经静态化的一段说明文本。
+pub let ErrInfo = struct {
+  kind: ErrKind,
+  code: u64,
+  src: u64,
+  span: u64,
+  detail: u64,
+  msg: Slice(u8),
+};
+
+// 载荷类型 E 通过效应参数登记：跨模块的 handle 用同一个类型号算出运行期 tag，
+// 中止性由 op 的 Never 返回值表达。
+let ErrEffect = func(E: Type) -> Effect {
+  return effect {
+    op fail(info: E) -> Never;
+  };
+};
+
+// 编译期错误效应：perform 之后控制流交给最近的 handle，永不回到调用点。
+pub let CompileErr = ErrEffect(ErrInfo);
+
+pub let err_kind_name = func(k: ErrKind) -> Slice(u8) {
+  let name: Slice(u8) = match k {
+    HostCap => "host_cap",
+    HostHandle => "host_handle",
+    HostArg => "host_arg",
+    HostRange => "host_range",
+    HostIr => "host_ir",
+    CompileSyntax => "compile_syntax",
+    CompileType => "compile_type",
+    CompileUnbound => "compile_unbound",
+    CompileVerify => "compile_verify",
+    CompileEval => "compile_eval",
+    CompileBorrow => "compile_borrow",
+    CompileEffect => "compile_effect",
+  };
+  return name;
+};
+
+// ErrInfo 的落点在静态数据区：perform 把载荷地址交给处理器，静态区不会随帧消失。
+// 枚举与切片字段在实参、字段位置上按地址表示，所以它们各自也住在静态区，
+// 字段里存的是指向这些静态槽的地址。布局：
+//   0 kind（枚举槽地址） 8 code 16 src 24 span 32 detail 40 msg（切片槽地址）
+let info_words: Array(u64, 8) = [0, 0, 0, 0, 0, 0, 0, 0];
+let kind_words: Array(u64, 1) = [0];
+let msg_words: Array(u64, 2) = [0, 0];
+
+// 造一条 ErrInfo 并立刻中止。返回类型写成 u64 是为了让调用点的 `!` 有一个
+// 值槽可用；perform 一旦执行，后面的 return 永不抵达。
+pub let fail_info = func(kind: ErrKind, code: u64, src: u64, span: u64, detail: u64,
+    msg: Slice(u8)) -> u64 !{ CompileErr } {
+  let kb: Mut(u8) = ptr_cast(Mut(u8), mut_of(kind_words));
+  let kp: Mut(ErrKind) = ptr_cast(Mut(ErrKind), kb);
+  deref(kp) = kind;
+  let mb: Mut(u8) = ptr_cast(Mut(u8), mut_of(msg_words));
+  let mp: Mut(Slice(u8)) = ptr_cast(Mut(Slice(u8)), mb);
+  deref(mp) = msg;
+  let bb: Mut(u8) = ptr_cast(Mut(u8), mut_of(info_words));
+  let w0: Mut(u64) = ptr_cast(Mut(u64), bb);
+  deref(w0) = kb as u64;
+  let w1: Mut(u64) = ptr_cast(Mut(u64), bb + 8);
+  deref(w1) = code;
+  let w2: Mut(u64) = ptr_cast(Mut(u64), bb + 16);
+  deref(w2) = src;
+  let w3: Mut(u64) = ptr_cast(Mut(u64), bb + 24);
+  deref(w3) = span;
+  let w4: Mut(u64) = ptr_cast(Mut(u64), bb + 32);
+  deref(w4) = detail;
+  let w5: Mut(u64) = ptr_cast(Mut(u64), bb + 40);
+  deref(w5) = mb as u64;
+  let p: Mut(ErrInfo) = ptr_cast(Mut(ErrInfo), bb);
+  perform CompileErr.fail(deref(p));
+  return 0;
+};
+
+// 把 src 的字节逐个搬进 dst，搬完回写出的字节数。dst 装不下时索引越界即刻陷阱，
+// 错误消息绝不静默截断。
+let copy_at = func(dst: MutSlice(u8), src: Slice(u8), i: u64) -> u64 {
+  if i >= src.len { return i; }
+  dst[i] = src[i];
+  return copy_at(dst, src, i + 1);
+};
+
+// 纯函数：先在同一条 fmt 消息里拼出整行文本，再整段抄进 dst。
+// 输出形如 [compile_type] code=7 src=1 span=3 detail=0: type mismatch\n
+pub let format_err = func(info: ErrInfo, dst: MutSlice(u8)) -> u64 {
+  // 先把字段落到局部变量：结构体字段直接当实参传会在 C99 后端丢掉取址这一步。
+  let kind: ErrKind = info.kind;
+  let code: u64 = info.code;
+  let src: u64 = info.src;
+  let span: u64 = info.span;
+  let detail: u64 = info.detail;
+  let msg: Slice(u8) = info.msg;
+  let c0: fmt.Cursor = fmt.write_str(fmt.fmt_begin(), "[");
+  let c1: fmt.Cursor = fmt.write_str(c0, err_kind_name(kind));
+  let c2: fmt.Cursor = fmt.write_str(c1, "] code=");
+  let c3: fmt.Cursor = fmt.write_u64(c2, code);
+  let c4: fmt.Cursor = fmt.write_str(c3, " src=");
+  let c5: fmt.Cursor = fmt.write_u64(c4, src);
+  let c6: fmt.Cursor = fmt.write_str(c5, " span=");
+  let c7: fmt.Cursor = fmt.write_u64(c6, span);
+  let c8: fmt.Cursor = fmt.write_str(c7, " detail=");
+  let c9: fmt.Cursor = fmt.write_u64(c8, detail);
+  let c10: fmt.Cursor = fmt.write_str(c9, ": ");
+  let c11: fmt.Cursor = fmt.write_str(c10, msg);
+  let c12: fmt.Cursor = fmt.write_str(c11, "\n");
+  let line: Slice(u8) = fmt.fmt_done(c12);
+  return copy_at(dst, line, 0);
+};

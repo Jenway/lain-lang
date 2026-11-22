@@ -5,8 +5,9 @@
 //   区域句柄把模块序号与区域序号打包成一个整数；
 //   操作数邮箱跟着模块走，下一条 #inst* 取走并清空。
 // 这里只负责表示与追加，类型检查交给 src::ir::verify，C99 文本交给
-// src::backend::c99。容量、句柄、状态上的任何违例都在发生位置就地终止。
-// 诊断是普通输出，不写进失败状态。
+// src::backend::c99。容量、句柄、状态上的任何违例都在发生位置就地终止，
+// 终止之前把说明文本与细节值写进 HostIr，事后可用 last_err_msg /
+// last_err_detail 读出崩溃点上下文。诊断是普通输出，不写进失败状态。
 let codes = import("src::ir_codes");
 let vf = import("src::ir::verify");
 let c99 = import("src::backend::c99");
@@ -124,6 +125,9 @@ pub let HostIr = struct {
   cap: u64,
   used: u64,
   err: u64,
+  err_msg_ptr: Ref(u8),
+  err_msg_len: u64,
+  err_detail: u64,
   last_verify: u64,
   mods: Mut(ModState),
   mod_cap: u64,
@@ -131,6 +135,9 @@ pub let HostIr = struct {
   diag_cap: u64,
   diag_count: u64,
 };
+
+// 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
+pub let Self = HostIr;
 
 // 记录步长：导入的结构类型不能直接出现在 size_of 的实参里，用本地单元
 // 结构包一层，字段仍在偏移 0。
@@ -162,9 +169,47 @@ let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return 0;
 };
 
-let fail = func(h: Mut(HostIr), code: u64) -> u64 {
-  if h.err == 0 { h.err = code; }
+let fail_msg = func(h: Mut(HostIr), msg: Slice(u8), code: u64) -> u64 {
+  if h.err == 0 {
+    h.err = code;
+    h.err_msg_ptr = msg.ptr;
+    h.err_msg_len = msg.len;
+    h.err_detail = code;
+  }
   return halt(code);
+};
+
+let msg_state = func() -> Slice(u8) { return "ir_host: state mismatch"; };
+let msg_arg = func() -> Slice(u8) { return "ir_host: invalid argument"; };
+let msg_handle = func() -> Slice(u8) { return "ir_host: invalid mod handle"; };
+let msg_capacity = func() -> Slice(u8) { return "ir_host: capacity exhausted"; };
+let msg_range = func() -> Slice(u8) { return "ir_host: range violation"; };
+let msg_type = func() -> Slice(u8) { return "ir_host: invalid type code"; };
+let msg_ir = func() -> Slice(u8) { return "ir_host: verification failed"; };
+
+let msg_for = func(code: u64) -> Slice(u8) {
+  if code == HOST_ERR_STATE() { return msg_state(); }
+  if code == HOST_ERR_ARG() { return msg_arg(); }
+  if code == HOST_ERR_HANDLE() { return msg_handle(); }
+  if code == HOST_ERR_CAPACITY() { return msg_capacity(); }
+  if code == HOST_ERR_RANGE() { return msg_range(); }
+  if code == HOST_ERR_TYPE() { return msg_type(); }
+  return msg_ir();
+};
+
+// 说明文本只在第一次失败时落笔：最深的发生位置最有上下文价值。
+let fail = func(h: Mut(HostIr), code: u64) -> u64 {
+  return fail_msg(h, msg_for(code), code);
+};
+
+pub let last_err_msg = func(h: Mut(HostIr)) -> Slice(u8) {
+  if is_null(h) { return make_slice(Slice(u8), null_ref(Ref(u8)), 0); }
+  return make_slice(Slice(u8), h.err_msg_ptr, h.err_msg_len);
+};
+
+pub let last_err_detail = func(h: Mut(HostIr)) -> u64 {
+  if is_null(h) { return HOST_ERR_HANDLE(); }
+  return h.err_detail;
 };
 
 let trap_host = func(cause: u64) -> Mut(HostIr) {
@@ -242,7 +287,8 @@ let arena_take = func(h: Mut(HostIr), bytes: u64, align: u64) -> Mut(u8) {
   let miss: u64 = want % a;
   let off: u64 = if miss == 0 { want } else { want + (a - miss) };
   if (off + bytes) > h.cap {
-    let dead: u64 = fail(h, HOST_ERR_CAPACITY());
+    let dead: u64 = fail_msg(h, "ir_host: arena_take capacity",
+                             HOST_ERR_CAPACITY());
     return null_ref(Mut(u8));
   }
   h.used = off + bytes;
@@ -259,7 +305,9 @@ let arena_zero = func(h: Mut(HostIr), bytes: u64, align: u64) -> Mut(u8) {
 let grow_bytes = func(h: Mut(HostIr), old: Mut(u8), old_cap: u64, new_cap: u64,
                       elem: u64) -> Mut(u8) {
   let p: Mut(u8) = arena_zero(h, new_cap * elem, 8);
-  if is_null(p) { return p; }
+  if is_null(p) {
+    return fail_msg(h, "ir_host: grow_bytes capacity", HOST_ERR_CAPACITY());
+  }
   if old_cap != 0 {
     let rc: u64 = copy_bytes(p, ptr_cast(Ref(u8), old), old_cap * elem);
   }
@@ -281,6 +329,9 @@ pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
     cap: bytes,
     used: used,
     err: 0,
+    err_msg_ptr: null_ref(Ref(u8)),
+    err_msg_len: 0,
+    err_detail: 0,
     last_verify: 0,
     mods: null_ref(Mut(ModState)),
     mod_cap: 0,
@@ -600,14 +651,20 @@ let finalize_extern = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
 // --- 指令构造 -------------------------------------------------------------
 let make_inst = func(h: Mut(HostIr), m: Mut(ModState), kind: u64) -> Mut(vf.IrInst) {
   let src: u64 = mod_ensure_inst(h, m);
-  if src != 0 { fail(h, HOST_ERR_CAPACITY()); return null_ref(Mut(vf.IrInst)); }
+  if src != 0 {
+    fail_msg(h, "ir_host: make_inst module inst capacity", HOST_ERR_CAPACITY());
+    return null_ref(Mut(vf.IrInst));
+  }
   let ii: u64 = m.inst_count;
   let slot: Mut(vf.IrInst) = inst_slot(m.insts, ii);
   deref(slot) = vf.inst_new(kind);
   m.inst_count = ii + 1;
   let f: Mut(Frame) = frame_slot(m.frames, m.depth - 1);
   let frc: u64 = frame_ensure_inst(h, f);
-  if frc != 0 { fail(h, HOST_ERR_CAPACITY()); return null_ref(Mut(vf.IrInst)); }
+  if frc != 0 {
+    fail_msg(h, "ir_host: make_inst frame inst capacity", HOST_ERR_CAPACITY());
+    return null_ref(Mut(vf.IrInst));
+  }
   let at: Mut(u64) = u64_slot(f.insts, f.inst_count);
   deref(at) = ii;
   f.inst_count = f.inst_count + 1;
@@ -1226,7 +1283,9 @@ pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
     code = vf.verify_module(ref_of(modval));
   } else {
     let raw: Mut(u8) = arena_take(h, m.data_count * size_of(u64), 8);
-    if is_null(raw) { return fail(h, HOST_ERR_CAPACITY()); }
+    if is_null(raw) {
+      return fail_msg(h, "ir_host: ir_mod_verify data arena", HOST_ERR_CAPACITY());
+    }
     let syms: Mut(u64) = ptr_cast(Mut(u64), raw);
     let i: u64 = loop c(i: u64 = 0) while i < m.data_count {
       let d: Mut(DataRec) = data_slot(m.data, i);
@@ -1375,10 +1434,18 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
   let w: Mut(c99.C99Writer) = mut_of(w0);
   let pn: u64 = c99.emit_preamble(w);
   let dn: u64 = emit_data(w, m, 0);
-  if dn == 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  if dn == 0 {
+    return fail_msg(h, "ir_host: ir_mod_emit_c99 data", HOST_ERR_CAPACITY());
+  }
   let prc: u64 = emit_procs(w, mv, m.proc_count, 0);
-  if prc == 0 { return fail(h, HOST_ERR_CAPACITY()); }
-  if c99.writer_ok(w) == 0 { return fail(h, HOST_ERR_CAPACITY()); }
+  if prc == 0 {
+    return fail_msg(h, "ir_host: ir_mod_emit_c99 procedures",
+                    HOST_ERR_CAPACITY());
+  }
+  if c99.writer_ok(w) == 0 {
+    return fail_msg(h, "ir_host: ir_mod_emit_c99 buffer overflow",
+                    HOST_ERR_CAPACITY());
+  }
   return c99.writer_len(w);
 };
 

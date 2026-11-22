@@ -1133,12 +1133,30 @@ let find_with = func(g: u64, i: u64) -> u64 {
   return find_with(g, i + 1);
 };
 
+// 读取词节点文本的第 k 个字节；越界读由节点文本长度自行保证。
+let tok_byte = func(ag: u64, i: u64, k: u64) -> u64 {
+  let h: u64 = n_at(ag, i);
+  let p: Ref(u8) = ax.lit_addr(h);
+  let b: u8 = deref(p + k);
+  return b as u64;
+};
+
+// => 在两种 AST 里长得不一样：前端 reader 给出单个两字节词，内核 meta 解析器
+// 给出相邻的 = 与 > 两个词。两种形态都要接受。
 let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
   let n: u64 = n_count(ag);
-  if i + 1 >= n { st.st_fail(k, ax.e_ast()); return i + 1; }
-  if n_sym(ag, i) != s.p_eq() { st.st_fail(k, ax.e_ast()); return i + 1; }
-  if n_sym(ag, i + 1) != s.o_gt() { st.st_fail(k, ax.e_ast()); return i + 1; }
-  return i + 2;
+  if i >= n { st.st_fail(k, ax.e_ast()); return i + 1; }
+  if is_group(ag, i) == 0 {
+    let h: u64 = n_at(ag, i);
+    if h != 0 and ax.lit_len(h) == 2 {
+      if tok_byte(ag, i, 0) == 61 and tok_byte(ag, i, 1) == 62 { return i + 1; }
+    }
+  }
+  if i + 1 < n and is_group(ag, i + 1) == 0 {
+    if n_sym(ag, i) == s.p_eq() and n_sym(ag, i + 1) == s.o_gt() { return i + 2; }
+  }
+  st.st_fail(k, ax.e_ast());
+  return i + 1;
 };
 
 let arm_end = func(ag: u64, i: u64) -> u64 {

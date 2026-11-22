@@ -12,6 +12,7 @@
 // 容量与句柄上的任何违例都在发生位置就地终止，绝不返回半成品。
 
 let os = import("std::os");
+let err = import("src::err");
 let symtab = import("src::host::symtab");
 let ao = import("src::meta::ast_out");
 let sh = import("src::host::source_host");
@@ -33,6 +34,23 @@ let halt = func(cause: u64) -> u64 {
 let trap_mut = func(cause: u64) -> Mut(u8) {
   let dead: u64 = halt(cause);
   return null_ref(Mut(u8));
+};
+
+// 就地终止之前先往标准错误写一句说明，用户就能看到完整原因。
+let die_u64 = func(msg: Slice(u8), cause: u64) -> u64 {
+  os.eprint(msg);
+  return halt(cause);
+};
+
+let die_mut = func(msg: Slice(u8), cause: u64) -> Mut(u8) {
+  os.eprint(msg);
+  return trap_mut(cause);
+};
+
+// 交回失败码 1 并附一句说明；用于可以正常返回、但结果不可用的情况。
+let note_fail = func(msg: Slice(u8)) -> u64 {
+  os.eprint(msg);
+  return 1;
 };
 
 // --- 容量 -------------------------------------------------------------------
@@ -135,13 +153,19 @@ let put_dec = func(dst: Mut(u8), at: u64, v: u64) -> u64 {
 // --- 递增区 -----------------------------------------------------------------
 let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = if align == 0 { 16 } else { align };
-  if (a & (a - 1)) != 0 { return trap_mut(bytes); }
-  if a > 4096 { return trap_mut(align); }
+  if (a & (a - 1)) != 0 {
+    return die_mut("[host_rt] bump allocation alignment is not a power of two\n", bytes);
+  }
+  if a > 4096 {
+    return die_mut("[host_rt] bump allocation alignment exceeds one page\n", align);
+  }
   let base: u64 = h.bump_base as u64;
   let want: u64 = h.bump_used;
   let miss: u64 = want % a;
   let off: u64 = if miss == 0 { want } else { want + (a - miss) };
-  if (off + bytes) > h.bump_cap { return trap_mut(bytes); }
+  if (off + bytes) > h.bump_cap {
+    return die_mut("[host_rt] bump arena exhausted\n", bytes);
+  }
   h.bump_used = off + bytes;
   return ptr_cast(Mut(u8), base + off);
 };
@@ -149,42 +173,44 @@ let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
 // --- 构造 -------------------------------------------------------------------
 let host_new = func() -> u64 {
   let raw_ptr: u64 = os.alloc_bytes(size_of(HostRt));
-  if raw_ptr == 0 { return halt(raw_ptr); }
+  if raw_ptr == 0 {
+    return die_u64("[host_rt] host struct allocation failed\n", raw_ptr);
+  }
   let stab: Mut(symtab.HostSymTab) =
     ptr_cast(Mut(symtab.HostSymTab), os.alloc_bytes(size_of(SymTabCell)));
-  if is_null(stab) { return halt(0); }
+  if is_null(stab) { return die_u64("[host_rt] symtab init failed\n", 0); }
   let sbase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(sym_bytes()));
-  if is_null(sbase) { return halt(0); }
+  if is_null(sbase) { return die_u64("[host_rt] symtab arena allocation failed\n", 0); }
   let sbuf: MutSlice(u8) = make_slice(MutSlice(u8), sbase, sym_bytes());
   deref(stab) = symtab.symtab_new(sbuf);
 
   let arena_bytes: u64 = ao.ast_out_bytes(ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
                                           ast_mark_cap());
   let abase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(arena_bytes));
-  if is_null(abase) { return halt(0); }
+  if is_null(abase) { return die_u64("[host_rt] ast arena allocation failed\n", 0); }
   let ast_out: Mut(ao.AstOut) = ptr_cast(Mut(ao.AstOut), os.alloc_bytes(size_of(AstOutCell)));
-  if is_null(ast_out) { return halt(0); }
+  if is_null(ast_out) { return die_u64("[host_rt] ast_out init failed\n", 0); }
   deref(ast_out) = ao.ast_out_init(abase, ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
                                    ast_mark_cap());
 
   let sources: Mut(sh.HostSources) =
     ptr_cast(Mut(sh.HostSources), os.alloc_bytes(size_of(SourcesCell)));
-  if is_null(sources) { return halt(0); }
+  if is_null(sources) { return die_u64("[host_rt] source manager init failed\n", 0); }
   deref(sources) = sh.host_sources_new(stab, ast_out, source_cap(), source_kids_cap());
 
   let ir_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(ir_bytes()));
-  if is_null(ir_base) { return halt(0); }
+  if is_null(ir_base) { return die_u64("[host_rt] ir arena allocation failed\n", 0); }
   let ir: Mut(irh.HostIr) = irh.host_new(ir_base, ir_bytes());
-  if is_null(ir) { return halt(0); }
+  if is_null(ir) { return die_u64("[host_rt] ir host init failed\n", 0); }
 
   let vm_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(vm_bytes()));
-  if is_null(vm_base) { return halt(0); }
+  if is_null(vm_base) { return die_u64("[host_rt] vm arena allocation failed\n", 0); }
   let vm: Mut(vmh.VmHost) =
     vmh.host_new_with_config(vm_base, vm_bytes(), ir, vmh.default_large_config());
-  if is_null(vm) { return halt(0); }
+  if is_null(vm) { return die_u64("[host_rt] vm host init failed\n", 0); }
 
   let bump_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(bump_bytes()));
-  if is_null(bump_base) { return halt(0); }
+  if is_null(bump_base) { return die_u64("[host_rt] bump arena allocation failed\n", 0); }
 
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   deref(h) = HostRt {
@@ -211,7 +237,7 @@ pub let rt_init = func() -> u64 {
   s[0] = raw_ptr;
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   let rc: u64 = c99.set_syms(h.syms);
-  if rc != 0 { return halt(rc); }
+  if rc != 0 { return die_u64("[host_rt] c99 symbol table wiring failed\n", rc); }
   return raw_ptr;
 };
 
@@ -367,6 +393,20 @@ let read_keep = func(h: Mut(HostRt), p: Ref(u8), n: u64, out_len: Mut(u64)) -> M
   return keep;
 };
 
+// 读不到文件时把归一化后的路径写给用户，交回 0。
+let report_missing = func(dst: Mut(u8), n: u64) -> u64 {
+  os.eprint("[host_rt] cannot read source file: ");
+  os.eprint(make_slice(Slice(u8), ptr_cast(Ref(u8), dst), n));
+  return os.eprint("\n");
+};
+
+// 导入的模块在所有候选路径上都找不到时报告模块名。
+let report_missing_module = func(modv: Slice(u8)) -> u64 {
+  os.eprint("[host_rt] cannot find imported module: ");
+  os.eprint(modv);
+  return os.eprint("\n");
+};
+
 // 以给定名字读入文件并登记成一份源码；读不到时交回 NO_SOURCE。
 let load_source = func(h: Mut(HostRt), p: Mut(u8), n: u64) -> u64 {
   let len: Mut(u64) = ptr_cast(Mut(u64), bump_take(h, 8, 8));
@@ -394,7 +434,8 @@ pub let source_root = func(src: u64) -> u64 {
 };
 
 // 以文件路径登记源码：路径分隔符归一化，重复登记直接交回已有的源码号。
-pub let source_add_file = func(path: Slice(u8)) -> u64 {
+// 读不到时交回 NO_SOURCE 且不向 stderr 报告，供尝试候选路径的调用方使用。
+pub let source_add_file_quiet = func(path: Slice(u8)) -> u64 {
   let h: Mut(HostRt) = rt();
   let hs: Mut(sh.HostSources) = h.sources;
   let dst: Mut(u8) = bump_take(h, path.len + 8, 8);
@@ -402,6 +443,16 @@ pub let source_add_file = func(path: Slice(u8)) -> u64 {
   let hit: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n);
   if hit < hs.source_count { return hit; }
   return load_source(h, dst, n);
+};
+
+// 以文件路径登记源码：命令行显式给出的输入文件读不到时把路径报告给用户。
+pub let source_add_file = func(path: Slice(u8)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let dst: Mut(u8) = bump_take(h, path.len + 8, 8);
+  let n: u64 = put_norm(dst, 0, path.ptr, path.len);
+  let got: u64 = source_add_file_quiet(path);
+  if got == NO_SOURCE() { report_missing(dst, n); }
+  return got;
 };
 
 // 解析模块名：先按原样解析（"std::foo::bar" 归一化成 "std/foo/bar.lain"），
@@ -416,15 +467,15 @@ pub let source_import = func(cur_src: u64, mod_ptr: Ref(u8), mod_len: u64) -> u6
   let dst: Mut(u8) = bump_take(h, dir.len + mod_len + 8, 8);
   let empty: Slice(u8) = "";
   let n1: u64 = build_cand(dst, empty, modv);
-  let hit1: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n1);
-  if hit1 < hs.source_count { return hit1; }
-  let got1: u64 = load_source(h, dst, n1);
+  let got1: u64 = source_add_file_quiet(make_slice(Slice(u8), ptr_cast(Ref(u8), dst), n1));
   if got1 != NO_SOURCE() { return got1; }
-  if dir.len == 0 { return NO_SOURCE(); }
-  let n2: u64 = build_cand(dst, dir, modv);
-  let hit2: u64 = find_named(hs, ptr_cast(Ref(u8), dst), n2);
-  if hit2 < hs.source_count { return hit2; }
-  return load_source(h, dst, n2);
+  if dir.len != 0 {
+    let n2: u64 = build_cand(dst, dir, modv);
+    let got2: u64 = source_add_file_quiet(make_slice(Slice(u8), ptr_cast(Ref(u8), dst), n2));
+    if got2 != NO_SOURCE() { return got2; }
+  }
+  report_missing_module(modv);
+  return NO_SOURCE();
 };
 
 pub let ast_parse_snippet = func(p: Ref(u8), n: u64) -> u64 {
@@ -449,7 +500,7 @@ let sym_id_of = func(v: u64) -> u64 {
 let sym_handle_of = func(v: u64) -> u64 {
   if v == 0 { return 0; }
   if (v >> CLASS_SHIFT()) == SYM_CLASS() { return v; }
-  if v > INDEX_MASK() { return halt(v); }
+  if v > INDEX_MASK() { return die_u64("[host_rt] symbol handle out of range\n", v); }
   return (SYM_CLASS() << CLASS_SHIFT()) | v;
 };
 
@@ -499,7 +550,7 @@ pub let ast_tx_begin = func() -> u64 {
 let current_tx = func(h: Mut(HostRt)) -> u64 {
   let a: Mut(ao.AstOut) = h.ast_out;
   let d: u64 = ao.tx_depth(a);
-  if d == 0 { return halt(d); }
+  if d == 0 { return die_u64("[host_rt] ast transaction stack is empty\n", d); }
   let at: Mut(ao.Mark) = a.marks + (d - 1) * size_of(MarkCell);
   let m: ao.Mark = deref(at);
   return m.tx;
@@ -681,18 +732,21 @@ pub let diag_emit = func(span: u64, level: u64, p: Ref(u8), n: u64) -> u64 {
 };
 
 // --- 模块查找与发射 ---------------------------------------------------------
-let trap_mod = func(cause: u64) -> Mut(irh.ModState) {
+let die_mod = func(msg: Slice(u8), cause: u64) -> Mut(irh.ModState) {
+  os.eprint(msg);
   let dead: u64 = halt(cause);
   return null_ref(Mut(irh.ModState));
 };
 
 let mod_of = func(ir: Mut(irh.HostIr), modv: u64) -> Mut(irh.ModState) {
-  if modv == 0 { return trap_mod(modv); }
-  if modv > ir.mod_cap { return trap_mod(modv); }
+  if modv == 0 { return die_mod("[host_rt] module handle is zero\n", modv); }
+  if modv > ir.mod_cap {
+    return die_mod("[host_rt] module handle above capacity\n", modv);
+  }
   let raw: Mut(u8) = ptr_cast(Mut(u8), ir.mods);
   let m: Mut(irh.ModState) = ptr_cast(Mut(irh.ModState),
                                      raw + (modv - 1) * size_of(ModStateCell));
-  if m.in_use == 0 { return trap_mod(modv); }
+  if m.in_use == 0 { return die_mod("[host_rt] module handle is not in use\n", modv); }
   return m;
 };
 
@@ -743,7 +797,9 @@ pub let ir_mod_emit_output = func(modv: u64) -> u64 {
   let m: Mut(irh.ModState) = mod_of(h.ir, modv);
   let cap: u64 = out_bytes();
   let raw: u64 = os.alloc_bytes(cap);
-  if raw == 0 { return halt(0); }
+  if raw == 0 {
+    return die_u64("[host_rt] ir_mod_emit_output: output buffer allocation failed\n", 0);
+  }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let wrote: u64 = render_l1(h, m, buf, cap);
   os.free_bytes(raw);
@@ -755,16 +811,19 @@ pub let emit_l1_file = func(modv: u64, path: Slice(u8)) -> u64 {
   let m: Mut(irh.ModState) = mod_of(h.ir, modv);
   let cap: u64 = out_bytes();
   let raw: u64 = os.alloc_bytes(cap);
-  if raw == 0 { return 1; }
+  if raw == 0 {
+    return note_fail("[host_rt] emit_l1_file: output buffer allocation failed\n");
+  }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let wrote: u64 = render_l1(h, m, buf, cap);
   if wrote == 0 {
     os.free_bytes(raw);
-    return 1;
+    return note_fail("[host_rt] emit_l1_file buffer overflow\n");
   }
   let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
   let rc: u64 = os.write_file(path, out);
   os.free_bytes(raw);
+  if rc != 0 { return note_fail("[host_rt] emit_l1_file: write to output path failed\n"); }
   return rc;
 };
 
@@ -776,7 +835,9 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
   let mv: Ref(vf.IrModule) = ref_of(modval);
   let cap: u64 = out_bytes();
   let raw: u64 = os.alloc_bytes(cap);
-  if raw == 0 { return 1; }
+  if raw == 0 {
+    return note_fail("[host_rt] emit_c99_file: output buffer allocation failed\n");
+  }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
   let w0: c99.C99Writer = c99.new_writer(ms);
@@ -790,11 +851,12 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
   let wrote: u64 = c99.writer_len(w);
   if ok == 0 {
     os.free_bytes(raw);
-    return 1;
+    return note_fail("[host_rt] emit_c99_file buffer overflow\n");
   }
   let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
   let rc: u64 = os.write_file(path, out);
   os.free_bytes(raw);
+  if rc != 0 { return note_fail("[host_rt] emit_c99_file: write to output path failed\n"); }
   return rc;
 };
 
@@ -831,7 +893,9 @@ pub let trace_set_path = func(path: Slice(u8)) -> u64 {
     return 0;
   }
   let raw: u64 = os.alloc_bytes(path.len + 1);
-  if raw == 0 { return halt(0); }
+  if raw == 0 {
+    return die_u64("[host_rt] trace_set_path: trace path allocation failed\n", 0);
+  }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let copied: u64 = copy_bytes(buf, path.ptr, path.len);
   let z: Mut(u8) = buf + path.len;
@@ -875,7 +939,9 @@ pub let print_diags = func() -> u64 {
     let msg: Slice(u8) = irh.host_diag_message(ir, i);
     let head: Slice(u8) = diag_head(level);
     let raw: u64 = os.alloc_bytes(head.len + msg.len + 32);
-    if raw == 0 { return halt(0); }
+    if raw == 0 {
+      return die_u64("[host_rt] print_diags: diagnostic line allocation failed\n", 0);
+    }
     let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
     let a: u64 = put_text(buf, 0, head);
     let b: u64 = put_text(buf, a, msg);
@@ -889,4 +955,27 @@ pub let print_diags = func() -> u64 {
     i = i + 1;
   };
   return n;
+};
+
+// --- 错误报告 ---------------------------------------------------------------
+// 把一条 ErrInfo 写成一行文本交给标准错误。缓冲按消息长度算足，format_err 抄写
+// 时不会碰到边界；报告过程不占用递增区，递增区耗尽时也能输出。
+pub let report_err = func(info: err.ErrInfo) -> u64 {
+  let msg: Slice(u8) = info.msg;
+  let cap: u64 = 256 + msg.len;
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 { return note_fail("[host_rt] error report allocation failed\n"); }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
+  let n: u64 = err.format_err(info, ms);
+  let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), n);
+  let rc: u64 = os.eprint(line);
+  os.free_bytes(raw);
+  return rc;
+};
+
+// 宿主侧统一的失败出口：把类别、错误码、附加数值与说明交给 CompileErr。
+pub let fail_host = func(kind: err.ErrKind, code: u64, detail: u64,
+    msg: Slice(u8)) -> u64 !{ err.CompileErr } {
+  return err.fail_info(kind, code, 0, 0, detail, msg)!;
 };

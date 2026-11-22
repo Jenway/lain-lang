@@ -420,6 +420,10 @@ pub let TCB = struct {
   cur_position: u64,
 };
 
+// TCB 的 UFCS 入口：调用方 use 本模块后可以写 tcb.vm_step()、tcb.vm_tcb_steps()
+// 这类形式，接收者可以是 TCB、Ref(TCB) 或 Mut(TCB)。
+pub let Self = TCB;
+
 let tcb_lease = func(tcb: Mut(TCB)) -> vs.StackLease {
   return vs.StackLease { index: tcb.lease_index, generation: tcb.lease_generation };
 };
@@ -932,6 +936,63 @@ let pop_to_call_frame = func(tcb: Mut(TCB)) -> u64 {
 };
 
 // --- ALU：整数 ------------------------------------------------------------
+// 整数算子的分类只做一次：指令码到枚举的映射放在 int_bin_op / int_cmp_op /
+// int_conv_op 里，真正执行语义的地方是对枚举的穷尽 match。新增算子时编译器会
+// 强制在每个分派处补一条，不会静默落进「未知算子」。
+let IntBinOp = enum {
+  Add
+  Sub
+  Mul
+  And
+  Or
+  Xor
+  Shl
+  Lshr
+  Ashr
+  Udiv
+  Urem
+  Sdiv
+  Srem
+  Unknown
+};
+
+let int_bin_op = func(k: u64) -> IntBinOp {
+  if k == codes.INST_ADD() { return IntBinOp.Add { }; }
+  if k == codes.INST_SUB() { return IntBinOp.Sub { }; }
+  if k == codes.INST_MUL() { return IntBinOp.Mul { }; }
+  if k == codes.INST_AND() { return IntBinOp.And { }; }
+  if k == codes.INST_OR() { return IntBinOp.Or { }; }
+  if k == codes.INST_XOR() { return IntBinOp.Xor { }; }
+  if k == codes.INST_SHL() { return IntBinOp.Shl { }; }
+  if k == codes.INST_LSHR() { return IntBinOp.Lshr { }; }
+  if k == codes.INST_ASHR() { return IntBinOp.Ashr { }; }
+  if k == codes.INST_UDIV() { return IntBinOp.Udiv { }; }
+  if k == codes.INST_UREM() { return IntBinOp.Urem { }; }
+  if k == codes.INST_SDIV() { return IntBinOp.Sdiv { }; }
+  if k == codes.INST_SREM() { return IntBinOp.Srem { }; }
+  return IntBinOp.Unknown { };
+};
+
+// 有符号除法与取余共用同一组判定：除零、最小负数除以 -1 的溢出。两个算子的
+// 溢出判定完全一致（SREM 也在这里拒），语义与逐个分支的写法相同。
+let signed_div_rem = func(tcb: Mut(TCB), x: u64, y: u64, width: u64,
+                          want_rem: u64, out: Mut(u64)) -> u64 {
+  let one: u64 = 1;
+  let filled_x: u64 = sign_fill(x, width);
+  let filled_y: u64 = sign_fill(y, width);
+  let sx: i64 = filled_x as i64;
+  let sy: i64 = filled_y as i64;
+  if sy == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
+  if (sy == (0 - 1)) and (filled_x == (one << 63)) {
+    return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_INT_OVERFLOW());
+  }
+  let q: i64 = sx / sy;
+  let m: i64 = sx % sy;
+  let r: u64 = if want_rem == 1 { m as u64 } else { q as u64 };
+  deref(out) = r;
+  return 0;
+};
+
 let op_int_bin = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let width: u64 = type_width(inst.ty_kind, inst.ty_width);
   let a: VmValue = value_zero();
@@ -942,63 +1003,82 @@ let op_int_bin = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   if sb != 0 { return sb; }
   let x: u64 = a.bits;
   let y: u64 = b.bits;
-  let one: u64 = 1;
-  let k: u64 = inst.kind;
   let r: u64 = 0;
 
-  if k == codes.INST_ADD() { r = x + y; }
-  else if k == codes.INST_SUB() { r = x - y; }
-  else if k == codes.INST_MUL() { r = x * y; }
-  else if k == codes.INST_AND() { r = x & y; }
-  else if k == codes.INST_OR() { r = x | y; }
-  else if k == codes.INST_XOR() { r = x ^ y; }
-  else if k == codes.INST_SHL() {
-    if y >= width {
-      return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE());
-    }
-    r = x << y;
-  }
-  else if k == codes.INST_LSHR() {
-    if y >= width {
-      return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE());
-    }
-    r = (x & width_mask(width)) >> y;
-  }
-  else if k == codes.INST_ASHR() {
-    if y >= width {
-      return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE());
-    }
-    let filled: u64 = sign_fill(x, width);
-    let sx: i64 = filled as i64;
-    let sy: i64 = y as i64;
-    let shifted: i64 = sx >> sy;
-    r = shifted as u64;
-  }
-  else if k == codes.INST_UDIV() {
-    if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-    r = (x & width_mask(width)) / (y & width_mask(width));
-  }
-  else if k == codes.INST_UREM() {
-    if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-    r = (x & width_mask(width)) % (y & width_mask(width));
-  }
-  else if (k == codes.INST_SDIV()) or (k == codes.INST_SREM()) {
-    let filled_x: u64 = sign_fill(x, width);
-    let filled_y: u64 = sign_fill(y, width);
-    let sx: i64 = filled_x as i64;
-    let sy: i64 = filled_y as i64;
-    if sy == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-    if (sy == (0 - 1)) and (filled_x == (one << 63)) {
-      return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_INT_OVERFLOW());
-    }
-    let q: i64 = sx / sy;
-    let m: i64 = sx % sy;
-    if k == codes.INST_SDIV() { r = q as u64; } else { r = m as u64; }
-  }
-  else {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_BITS_OP());
+  match int_bin_op(inst.kind) {
+    Add => { r = x + y; },
+    Sub => { r = x - y; },
+    Mul => { r = x * y; },
+    And => { r = x & y; },
+    Or => { r = x | y; },
+    Xor => { r = x ^ y; },
+    Shl => {
+      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
+      r = x << y;
+    },
+    Lshr => {
+      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
+      r = (x & width_mask(width)) >> y;
+    },
+    Ashr => {
+      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
+      let filled: u64 = sign_fill(x, width);
+      let sx: i64 = filled as i64;
+      let sy: i64 = y as i64;
+      let shifted: i64 = sx >> sy;
+      r = shifted as u64;
+    },
+    Udiv => {
+      if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
+      r = (x & width_mask(width)) / (y & width_mask(width));
+    },
+    Urem => {
+      if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
+      r = (x & width_mask(width)) % (y & width_mask(width));
+    },
+    Sdiv => {
+      let q: u64 = 0;
+      let s: u64 = signed_div_rem(tcb, x, y, width, 0, mut_of(q));
+      if s != 0 { return s; }
+      r = q;
+    },
+    Srem => {
+      let q: u64 = 0;
+      let s: u64 = signed_div_rem(tcb, x, y, width, 1, mut_of(q));
+      if s != 0 { return s; }
+      r = q;
+    },
+    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_BITS_OP()); },
   }
   return write_result_bits(tcb, inst, 0, r, width);
+};
+
+let IntCmpOp = enum {
+  Eq
+  Ne
+  Slt
+  Sle
+  Sgt
+  Sge
+  Ult
+  Ule
+  Ugt
+  Uge
+  Unknown
+};
+
+let int_cmp_op = func(k: u64) -> IntCmpOp {
+  if k == codes.INST_EQ() { return IntCmpOp.Eq { }; }
+  if k == codes.INST_NE() { return IntCmpOp.Ne { }; }
+  if k == codes.INST_SLT() { return IntCmpOp.Slt { }; }
+  if k == codes.INST_SLE() { return IntCmpOp.Sle { }; }
+  if k == codes.INST_SGT() { return IntCmpOp.Sgt { }; }
+  if k == codes.INST_SGE() { return IntCmpOp.Sge { }; }
+  if k == codes.INST_ULT() { return IntCmpOp.Ult { }; }
+  if k == codes.INST_ULE() { return IntCmpOp.Ule { }; }
+  if k == codes.INST_UGT() { return IntCmpOp.Ugt { }; }
+  if k == codes.INST_UGE() { return IntCmpOp.Uge { }; }
+  return IntCmpOp.Unknown { };
 };
 
 let op_int_cmp = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
@@ -1016,21 +1096,38 @@ let op_int_cmp = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let filled_y: u64 = sign_fill(b.bits, width);
   let sx: i64 = filled_x as i64;
   let sy: i64 = filled_y as i64;
-  let k: u64 = inst.kind;
   let truth: u64 = 0;
 
-  if k == codes.INST_EQ() { truth = if mx == my { 1 } else { 0 }; }
-  else if k == codes.INST_NE() { truth = if mx != my { 1 } else { 0 }; }
-  else if k == codes.INST_SLT() { truth = if sx < sy { 1 } else { 0 }; }
-  else if k == codes.INST_SLE() { truth = if sx <= sy { 1 } else { 0 }; }
-  else if k == codes.INST_SGT() { truth = if sx > sy { 1 } else { 0 }; }
-  else if k == codes.INST_SGE() { truth = if sx >= sy { 1 } else { 0 }; }
-  else if k == codes.INST_ULT() { truth = if mx < my { 1 } else { 0 }; }
-  else if k == codes.INST_ULE() { truth = if mx <= my { 1 } else { 0 }; }
-  else if k == codes.INST_UGT() { truth = if mx > my { 1 } else { 0 }; }
-  else if k == codes.INST_UGE() { truth = if mx >= my { 1 } else { 0 }; }
-  else { return trap_now(tcb, TRAP_STATE(), ST_BAD_COMPARE_OP()); }
+  match int_cmp_op(inst.kind) {
+    Eq => { truth = if mx == my { 1 } else { 0 }; },
+    Ne => { truth = if mx != my { 1 } else { 0 }; },
+    Slt => { truth = if sx < sy { 1 } else { 0 }; },
+    Sle => { truth = if sx <= sy { 1 } else { 0 }; },
+    Sgt => { truth = if sx > sy { 1 } else { 0 }; },
+    Sge => { truth = if sx >= sy { 1 } else { 0 }; },
+    Ult => { truth = if mx < my { 1 } else { 0 }; },
+    Ule => { truth = if mx <= my { 1 } else { 0 }; },
+    Ugt => { truth = if mx > my { 1 } else { 0 }; },
+    Uge => { truth = if mx >= my { 1 } else { 0 }; },
+    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_COMPARE_OP()); },
+  }
   return write_result_bits(tcb, inst, 0, truth, 1);
+};
+
+let IntConvOp = enum {
+  Zext
+  Sext
+  Trunc
+  Bitcast
+  Unknown
+};
+
+let int_conv_op = func(k: u64) -> IntConvOp {
+  if k == codes.INST_ZEXT() { return IntConvOp.Zext { }; }
+  if k == codes.INST_SEXT() { return IntConvOp.Sext { }; }
+  if k == codes.INST_TRUNC() { return IntConvOp.Trunc { }; }
+  if k == codes.INST_BITCAST() { return IntConvOp.Bitcast { }; }
+  return IntConvOp.Unknown { };
 };
 
 let op_int_conv = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
@@ -1039,12 +1136,14 @@ let op_int_conv = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   if sa != 0 { return sa; }
   let target: u64 = type_width(inst.ty_kind, inst.ty_width);
   let source: u64 = if a.width == 0 { target } else { a.width };
-  let k: u64 = inst.kind;
   let r: u64 = 0;
-  if k == codes.INST_ZEXT() { r = a.bits & width_mask(source); }
-  else if k == codes.INST_SEXT() { r = sign_fill(a.bits, source); }
-  else if (k == codes.INST_TRUNC()) or (k == codes.INST_BITCAST()) { r = a.bits; }
-  else { return trap_now(tcb, TRAP_STATE(), ST_BAD_CONVERT_OP()); }
+  match int_conv_op(inst.kind) {
+    Zext => { r = a.bits & width_mask(source); },
+    Sext => { r = sign_fill(a.bits, source); },
+    Trunc => { r = a.bits; },
+    Bitcast => { r = a.bits; },
+    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_CONVERT_OP()); },
+  }
   return write_result_bits(tcb, inst, 0, r, target);
 };
 
@@ -1586,31 +1685,82 @@ let is_atomic = func(k: u64) -> bool {
   return true;
 };
 
+// 指令族的分类结果。分类本身只在这一个阶梯里做一次，dispatch 只对枚举做穷尽
+// match：新增指令族时编译器会在两处同时要求补齐，不会静默落进未知指令。
+let OpClass = enum {
+  IntBin
+  IntCmp
+  IntConv
+  Float
+  Vector
+  Atomic
+  Lea
+  Load
+  Store
+  Alloca
+  Call
+  If
+  Loop
+  Switch
+  Yield
+  Break
+  Continue
+  Return
+  Unreachable
+  Unknown
+};
+
+let op_class = func(k: u64) -> OpClass {
+  if is_int_bin(k) { return OpClass.IntBin { }; }
+  if is_int_cmp(k) { return OpClass.IntCmp { }; }
+  if is_int_conv(k) { return OpClass.IntConv { }; }
+  if is_float_bin(k) { return OpClass.Float { }; }
+  if is_float_cmp(k) { return OpClass.Float { }; }
+  if is_float_conv(k) { return OpClass.Float { }; }
+  if is_vector(k) { return OpClass.Vector { }; }
+  if is_atomic(k) { return OpClass.Atomic { }; }
+  if k == codes.INST_FNEG() { return OpClass.Float { }; }
+  if k == codes.INST_LEA() { return OpClass.Lea { }; }
+  if k == codes.INST_LOAD() { return OpClass.Load { }; }
+  if k == codes.INST_STORE() { return OpClass.Store { }; }
+  if k == codes.INST_ALLOCA() { return OpClass.Alloca { }; }
+  if k == codes.INST_CALL() { return OpClass.Call { }; }
+  if k == codes.INST_IF() { return OpClass.If { }; }
+  if k == codes.INST_LOOP() { return OpClass.Loop { }; }
+  if k == codes.INST_SWITCH() { return OpClass.Switch { }; }
+  if k == codes.INST_YIELD() { return OpClass.Yield { }; }
+  if k == codes.INST_BREAK() { return OpClass.Break { }; }
+  if k == codes.INST_CONTINUE() { return OpClass.Continue { }; }
+  if k == codes.INST_RETURN() { return OpClass.Return { }; }
+  if k == codes.INST_UNREACHABLE() { return OpClass.Unreachable { }; }
+  return OpClass.Unknown { };
+};
+
 let dispatch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let k: u64 = inst.kind;
-  if is_int_bin(k) { return op_int_bin(tcb, inst); }
-  if is_int_cmp(k) { return op_int_cmp(tcb, inst); }
-  if is_int_conv(k) { return op_int_conv(tcb, inst); }
-  if is_float_bin(k) { return op_float_any(tcb); }
-  if is_float_cmp(k) { return op_float_any(tcb); }
-  if is_float_conv(k) { return op_float_any(tcb); }
-  if is_vector(k) { return op_vector_any(tcb); }
-  if is_atomic(k) { return op_atomic_any(tcb); }
-  if k == codes.INST_FNEG() { return op_float_any(tcb); }
-  if k == codes.INST_LEA() { return op_lea(tcb, inst); }
-  if k == codes.INST_LOAD() { return op_load(tcb, inst); }
-  if k == codes.INST_STORE() { return op_store(tcb, inst); }
-  if k == codes.INST_ALLOCA() { return op_alloca(tcb, inst); }
-  if k == codes.INST_CALL() { return op_call(tcb, inst); }
-  if k == codes.INST_IF() { return op_if(tcb, inst); }
-  if k == codes.INST_LOOP() { return op_loop(tcb, inst); }
-  if k == codes.INST_SWITCH() { return op_switch(tcb, inst); }
-  if k == codes.INST_YIELD() { return op_yield(tcb, inst); }
-  if k == codes.INST_BREAK() { return op_break(tcb, inst); }
-  if k == codes.INST_CONTINUE() { return op_continue(tcb, inst); }
-  if k == codes.INST_RETURN() { return op_return(tcb, inst); }
-  if k == codes.INST_UNREACHABLE() { return op_unreachable(tcb); }
-  return trap_now(tcb, TRAP_STATE(), ST_UNKNOWN_INST());
+  let cls: OpClass = op_class(inst.kind);
+  let result: u64 = match cls {
+    IntBin => op_int_bin(tcb, inst),
+    IntCmp => op_int_cmp(tcb, inst),
+    IntConv => op_int_conv(tcb, inst),
+    Float => op_float_any(tcb),
+    Vector => op_vector_any(tcb),
+    Atomic => op_atomic_any(tcb),
+    Lea => op_lea(tcb, inst),
+    Load => op_load(tcb, inst),
+    Store => op_store(tcb, inst),
+    Alloca => op_alloca(tcb, inst),
+    Call => op_call(tcb, inst),
+    If => op_if(tcb, inst),
+    Loop => op_loop(tcb, inst),
+    Switch => op_switch(tcb, inst),
+    Yield => op_yield(tcb, inst),
+    Break => op_break(tcb, inst),
+    Continue => op_continue(tcb, inst),
+    Return => op_return(tcb, inst),
+    Unreachable => op_unreachable(tcb),
+    Unknown => trap_now(tcb, TRAP_STATE(), ST_UNKNOWN_INST()),
+  };
+  return result;
 };
 
 // --- CU -------------------------------------------------------------------

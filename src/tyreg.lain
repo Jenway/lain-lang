@@ -84,34 +84,6 @@ let reg_at = func(k: Mut(st.State), i: u64) -> Mut(TypeRegEntry) {
 let reg_slot = func(k: Mut(st.State), id: u64) -> Mut(TypeRegEntry) { return reg_at(k, id - 1); };
 pub let reg_count = func(k: Mut(st.State)) -> u64 { return st.st_tyused(k) / reg_size(); };
 
-let reg_init = func(k: Mut(st.State)) -> u64 {
-  if (st.st_tybase(k) as u64) != 0 { return 1; }
-  let b: Mut(u8) = st.st_ralloc(k, reg_size() * reg_init_cap());
-  let c: u64 = st.st_set_tycap(k, reg_init_cap());
-  let d: u64 = st.st_set_tybase(k, b);
-  return 1;
-};
-
-// 翻倍：新块从持久池里取，旧块随编译结束一起作废。
-let reg_grow = func(k: Mut(st.State)) -> u64 {
-  let n: u64 = reg_count(k);
-  let ncap: u64 = st.st_tycap(k) * 2;
-  let nb: Mut(u8) = st.st_ralloc(k, reg_size() * ncap);
-  if st.st_ok(k) != 0 { return 0; }
-  let i: u64 = loop c(i: u64 = 0) while i < n {
-    let src: Mut(TypeRegEntry) = reg_at(k, i);
-    let dst: Mut(TypeRegEntry) = ptr_cast(Mut(TypeRegEntry), nb + i * 40);
-    dst.kind = src.kind;
-    dst.width = src.width;
-    dst.sg = src.sg;
-    dst.sh = src.sh;
-    i = i + 1;
-  };
-  let a: u64 = st.st_set_tybase(k, nb);
-  let b: u64 = st.st_set_tycap(k, ncap);
-  return 1;
-};
-
 let reg_hit = func(k: Mut(st.State), i: u64, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let p: Mut(TypeRegEntry) = reg_at(k, i);
   if p.kind == kk {
@@ -124,17 +96,126 @@ let reg_hit = func(k: Mut(st.State), i: u64, kk: u64, w: u64, sg: u64, sh: u64) 
   return 0;
 };
 
-let reg_scan = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64, i: u64, n: u64) -> u64 {
-  if i >= n { return 0; }
-  if reg_hit(k, i, kk, w, sg, sh) == 1 { return i + 1; }
-  return reg_scan(k, kk, w, sg, sh, i + 1, n);
+// --- 类型索引 ---------------------------------------------------------------
+// 开放寻址槽表紧贴在注册表条目区之后，容量恒为条目容量的两倍，装载因子不超过
+// 一半；整块跟条目区一起在持久池里按 State 分配，多个 State 的索引各自独立。
+// 槽里存 TypeId，0 表示空槽；命中判定一律回到注册表条目上比对四个字段，
+// 哈希碰撞只增加探测步数，不改变查询结果。
+let idx_cap = func(k: Mut(st.State)) -> u64 { return st.st_tycap(k) * 2; };
+
+let idx_word = func(k: Mut(st.State), i: u64) -> Mut(u64) {
+  let b: Mut(u8) = st.st_tybase(k);
+  return ptr_cast(Mut(u64), b + reg_size() * st.st_tycap(k) + i * 8);
+};
+
+// 索引区字节数：条目容量两倍的 u64 槽位。
+let idx_bytes = func(cap: u64) -> u64 { return cap * 16; };
+
+let idx_zero = func(k: Mut(st.State), n: u64) -> u64 {
+  let i: u64 = loop z(i: u64 = 0) while i < n {
+    deref(idx_word(k, i)) = 0;
+    i = i + 1;
+  };
+  return n;
+};
+
+// FNV-1a 累乘四个字段，再用 splitmix64 的收尾混合把高位打散。
+let idx_mix = func(kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
+  let h0: u64 = 0xcbf29ce484222325;
+  let h1: u64 = (h0 ^ kk) * 0x100000001b3;
+  let h2: u64 = (h1 ^ w) * 0x100000001b3;
+  let h3: u64 = (h2 ^ sg) * 0x100000001b3;
+  let h4: u64 = (h3 ^ sh) * 0x100000001b3;
+  let h5: u64 = (h4 ^ (h4 >> 33)) * 0xff51afd7ed558ccd;
+  let h6: u64 = (h5 ^ (h5 >> 33)) * 0xc4ceb9fe1a85ec53;
+  return h6 ^ (h6 >> 33);
+};
+
+// 沿探测链找同键条目：命中返回它的 TypeId，未命中返回 0。
+let idx_find = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
+  let cap: u64 = idx_cap(k);
+  let start: u64 = idx_mix(kk, w, sg, sh) % cap;
+  let hit: u64 = loop f(i: u64 = 0, got: u64 = 0) while i < cap {
+    let idx: u64 = (start + i) % cap;
+    let cur: u64 = deref(idx_word(k, idx));
+    if cur == 0 {
+      i = cap;
+    } else {
+      if reg_hit(k, cur - 1, kk, w, sg, sh) == 1 {
+        got = cur;
+        i = cap;
+      } else {
+        i = i + 1;
+      }
+    }
+  };
+  return hit;
+};
+
+// 占用探测链上的第一个空槽。条目数不到容量的一半，必有空槽。
+let idx_put = func(k: Mut(st.State), id: u64) -> u64 {
+  let p: Mut(TypeRegEntry) = reg_at(k, id - 1);
+  let cap: u64 = idx_cap(k);
+  let start: u64 = idx_mix(p.kind, p.width, p.sg, p.sh) % cap;
+  let done: u64 = loop q(i: u64 = 0) while i < cap {
+    let w: Mut(u64) = idx_word(k, (start + i) % cap);
+    if deref(w) == 0 {
+      deref(w) = id;
+      i = cap;
+    } else {
+      i = i + 1;
+    }
+  };
+  return 1;
+};
+
+// 翻倍重分配之后把已有条目重新散布进新槽表。
+let reg_rehash = func(k: Mut(st.State), n: u64) -> u64 {
+  let i: u64 = loop r(id: u64 = 1) while id <= n {
+    let put: u64 = idx_put(k, id);
+    id = id + 1;
+  };
+  return 1;
+};
+
+let reg_init = func(k: Mut(st.State)) -> u64 {
+  if (st.st_tybase(k) as u64) != 0 { return 1; }
+  let cap: u64 = reg_init_cap();
+  let b: Mut(u8) = st.st_ralloc(k, reg_size() * cap + idx_bytes(cap));
+  if st.st_ok(k) != 0 { return 0; }
+  let c: u64 = st.st_set_tycap(k, cap);
+  let d: u64 = st.st_set_tybase(k, b);
+  let z: u64 = idx_zero(k, idx_cap(k));
+  return 1;
+};
+
+// 翻倍：新块从持久池里取，旧块随编译结束一起作废。
+let reg_grow = func(k: Mut(st.State)) -> u64 {
+  let n: u64 = reg_count(k);
+  let ncap: u64 = st.st_tycap(k) * 2;
+  let nb: Mut(u8) = st.st_ralloc(k, reg_size() * ncap + idx_bytes(ncap));
+  if st.st_ok(k) != 0 { return 0; }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let src: Mut(TypeRegEntry) = reg_at(k, i);
+    let dst: Mut(TypeRegEntry) = ptr_cast(Mut(TypeRegEntry), nb + i * 40);
+    dst.kind = src.kind;
+    dst.width = src.width;
+    dst.sg = src.sg;
+    dst.sh = src.sh;
+    i = i + 1;
+  };
+  let a: u64 = st.st_set_tybase(k, nb);
+  let b: u64 = st.st_set_tycap(k, ncap);
+  let z: u64 = idx_zero(k, idx_cap(k));
+  return reg_rehash(k, n);
 };
 
 // 登记一个类型并回它的 TypeId（1 起）；同种类同宽同符号性同形状共用编号。
 pub let ty_add = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let e: u64 = reg_init(k);
+  if st.st_ok(k) != 0 { return 0; }
   let n: u64 = reg_count(k);
-  let hit: u64 = reg_scan(k, kk, w, sg, sh, 0, n);
+  let hit: u64 = idx_find(k, kk, w, sg, sh);
   if hit != 0 { return hit; }
   if n >= st.st_tycap(k) {
     let g: u64 = reg_grow(k);
@@ -146,6 +227,7 @@ pub let ty_add = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u6
   p.sg = sg;
   p.sh = sh;
   let m: u64 = st.st_set_tyused(k, (n + 1) * reg_size());
+  let q: u64 = idx_put(k, n + 1);
   return n + 1;
 };
 

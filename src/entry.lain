@@ -6,6 +6,7 @@ let ev = import("eval");
 let ir = import("ir");
 let tr = import("std::trace");
 let hr = import("src::host_rt");
+let err = import("src::err");
 
 // --- 命令行参数 ---------------------------------------------------------
 // 解析结果放在静态字表里，字段含义见下面的注释。
@@ -118,17 +119,40 @@ let trace_finish = func(rc: u64) -> u64 {
   return rc;
 };
 
-// 逐源编译：每步重读源数量，import 新增的源会被一并编掉。
-pub let build = func(k: Mut(st.State), i: u64, count: u64) -> u64 {
-  if i >= count { return st.st_ok(k); }
-  let e: u64 = ev.compile_source(k, i);
-  if st.st_ok(k) != 0 { return st.st_ok(k); }
-  let total: u64 = hr.source_count();
-  return build(k, i + 1, total);
+// 状态码 → 错误类别：2、21、22 是名字无法解析，3、4 是类型问题，其余归入语法。
+let kind_of = func(code: u64) -> err.ErrKind {
+  if code == 2 { return err.ErrKind.CompileUnbound { }; }
+  if code == 21 { return err.ErrKind.CompileUnbound { }; }
+  if code == 22 { return err.ErrKind.CompileUnbound { }; }
+  if code == 3 { return err.ErrKind.CompileType { }; }
+  if code == 4 { return err.ErrKind.CompileType { }; }
+  return err.ErrKind.CompileSyntax { };
 };
 
-@root
-let lain_meta_v2_entry = func(count: u64) -> u64 {
+// 错误通道的出口：先出格式化的诊断行，退出码取载荷里的错误码，0 号错误码退到 1。
+let report_fail = func(info: err.ErrInfo) -> u64 {
+  hr.report_err(info);
+  let code: u64 = info.code;
+  if code != 0 { return code; }
+  return 1;
+};
+
+// 逐源编译：每步重读源数量，import 新增的源会被一并编掉。
+// 任一源失败就把诊断写完、把追踪落盘，再用 CompileErr 中止整条流水线。
+pub let build = func(k: Mut(st.State), i: u64, count: u64) -> u64 !{ err.CompileErr } {
+  if i >= count { return st.st_ok(k); }
+  let e: u64 = ev.compile_source(k, i);
+  let code: u64 = st.st_ok(k);
+  if code != 0 {
+    hr.print_diags();
+    trace_finish(code);
+    return err.fail_info(kind_of(code), code, i, 0, 0, "source compilation failed")!;
+  }
+  let total: u64 = hr.source_count();
+  return build(k, i + 1, total)!;
+};
+
+let run_meta = func(count: u64) -> u64 !{ err.CompileErr } {
   hr.rt_init();
   if hr.trace_enabled() == 1 {
     tr.trace_enable(1);
@@ -137,18 +161,16 @@ let lain_meta_v2_entry = func(count: u64) -> u64 {
   let mname: u64 = hr.source_name(0);
   let md: u64 = ir.mod_new(k, mname);
   let t_build: u64 = tr.span_begin();
-  let code: u64 = build(k, 0, count);
+  let built: u64 = build(k, 0, count)!;
   let ev_build: u64 = tr.span_end("lainc_build", "lainc", t_build, count);
-  if code != 0 {
-    hr.print_diags();
-    return trace_finish(code);
-  }
   let t_verify: u64 = tr.span_begin();
   let v: u64 = ir.verify(k);
   let ev_verify: u64 = tr.span_end("ir_verify", "lainc", t_verify, v);
   if v != 0 {
     hr.print_diags();
-    return trace_finish(v);
+    trace_finish(v);
+    return err.fail_info(err.ErrKind.CompileVerify { }, v, 0, 0, 0,
+                         "LAINIR verification failed")!;
   }
   // emit_output 返回的是写出的字节数，不是错误码。
   let t_emit: u64 = tr.span_begin();
@@ -158,7 +180,15 @@ let lain_meta_v2_entry = func(count: u64) -> u64 {
 };
 
 @root
-let main = func() -> u64 {
+let lain_meta_v2_entry = func(count: u64) -> u64 {
+  return handle run_meta(count) with {
+    return(v) => v,
+    fail(info) => report_fail(info),
+  };
+};
+
+// 命令行流水线：参数、读源、建模块、编译、校验、落盘；每一步的失败都走 CompileErr。
+let run_cli = func() -> u64 !{ err.CompileErr } {
   hr.rt_init();
   let w: MutSlice(u64) = opts();
   let argc: u64 = os.argc();
@@ -179,30 +209,44 @@ let main = func() -> u64 {
   }
   let added: u64 = hr.source_add_file(src);
   if added == hr.NO_SOURCE() {
-    hr.print_diags();
-    return 1;
+    return err.fail_info(err.ErrKind.HostHandle { }, 1, 0, 0, 0,
+                         "cannot read source file")!;
   }
   let k: Mut(st.State) = st.st_new(65536);
   let mname: u64 = hr.source_name(added);
   let md: u64 = ir.mod_new(k, mname);
-  let code: u64 = build(k, 0, 1);
-  if code != 0 {
-    hr.print_diags();
-    return trace_finish(code);
-  }
+  let built: u64 = build(k, 0, 1)!;
   let v: u64 = ir.verify(k);
   if v != 0 {
     hr.print_diags();
-    return trace_finish(v);
+    trace_finish(v);
+    return err.fail_info(err.ErrKind.CompileVerify { }, v, added, 0, 0,
+                         "LAINIR verification failed")!;
   }
   if w[2] != 0 {
     let out_path: Slice(u8) = load_slice(w, 3, 4);
     if (w[0] != 0) or (ends_c(out_path) == 1) {
       let en: Slice(u8) = entry_name();
-      hr.emit_c99_file(st.st_mod(k), out_path, en, w[1]);
+      let rc: u64 = hr.emit_c99_file(st.st_mod(k), out_path, en, w[1]);
+      if rc != 0 {
+        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
+                             "failed to write C99 output")!;
+      }
     } else {
-      hr.emit_l1_file(st.st_mod(k), out_path);
+      let rc: u64 = hr.emit_l1_file(st.st_mod(k), out_path);
+      if rc != 0 {
+        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
+                             "failed to write LAINIR text output")!;
+      }
     }
   }
   return trace_finish(0);
+};
+
+@root
+let main = func() -> u64 {
+  return handle run_cli() with {
+    return(v) => v,
+    fail(info) => report_fail(info),
+  };
 };

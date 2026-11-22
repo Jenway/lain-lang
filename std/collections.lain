@@ -1,0 +1,219 @@
+// std::collections —— 定长容量的泛型容器函子。
+//
+// 两个函子只依赖语言核心（Array / loop / 引用族），不触碰 std::os，
+// 因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
+//
+// 存储：LAINIR 里的 Array 与 struct 都是「指向块的指针」，函数返回时只拷指针字，
+// 被调过程调用帧里的块随返回失效。因此容器块统一从本模块的静态 arena 切分，
+// 每调用一次 new 就占用一段互不重叠的块，块的生命期与进程相同。
+// arena 容量固定，耗尽时以整除零陷阱立即中止。
+
+let ArenaBacking = struct {
+  bytes: Array(u8, 16384),
+};
+
+// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
+// 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
+let arena_backing: ArenaBacking = ArenaBacking { };
+
+let ArenaHalt = struct { zero: u64 };
+
+let arena_halt_at = func(h: ArenaHalt) -> u64 {
+  return 1 / h.zero;
+};
+
+// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
+let arena_halt = func(cause: u64) -> u64 {
+  let h: ArenaHalt = ArenaHalt { zero: cause - cause };
+  return arena_halt_at(h);
+};
+
+// 从静态 arena 切出 bytes 字节，回块起点的原始地址。
+// 起点与长度都补成 8 字节的整数倍；游标在前 8 字节，载荷从第 8 字节开始。
+let arena_take = func(bytes: u64) -> u64 {
+  let base: u64 = ptr_of(arena_backing);
+  let head: Mut(u64) = ptr_cast(Mut(u64), base);
+  let used: u64 = deref(head);
+  let start: u64 = ((used + 7) / 8) * 8;
+  let end: u64 = start + ((bytes + 7) / 8) * 8;
+  if end + 8 > 16384 {
+    let dead: u64 = arena_halt(end);
+    return dead;
+  }
+  deref(head) = end;
+  return base + 8 + start;
+};
+
+// ---------------------------------------------------------------------------
+// ArenaVec：定长数组 + 长度计数。
+// ---------------------------------------------------------------------------
+pub let ArenaVec = func(T: Type, Cap: u64) -> Module {
+  return module {
+    pub let Vec = struct {
+      data: Array(T, Cap),
+      len: u64,
+    };
+
+    pub let Self = Vec;
+
+    // 空容器：每个聚合字段从 arena 切一块，长度归零。
+    pub let new = func() -> Vec {
+      let v: Vec = Vec { len: 0 };
+      comptime for f in fields_of(Vec) {
+        let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(v) + (f.offset as u64));
+        deref(dst) = arena_take(size_of(f.type) as u64);
+      }
+      v.len = 0;
+      return v;
+    };
+
+    pub let count = func(v: Ref(Vec)) -> u64 {
+      return deref(v).len;
+    };
+
+    // 容量未满时追加到尾部，返回 1；满了返回 0。
+    pub let push = func(v: Mut(Vec), item: T) -> u64 {
+      if deref(v).len >= Cap {
+        return 0;
+      }
+      deref(v).data[deref(v).len] = item;
+      deref(v).len = deref(v).len + 1;
+      return 1;
+    };
+
+    // 有效区间内按下标读取；调用方保证 i < count。
+    pub let get = func(v: Ref(Vec), i: u64) -> T {
+      return deref(v).data[i];
+    };
+
+    // 覆盖有效区间内的元素，返回 1；越界返回 0。
+    pub let set = func(v: Mut(Vec), i: u64, item: T) -> u64 {
+      if i >= deref(v).len {
+        return 0;
+      }
+      deref(v).data[i] = item;
+      return 1;
+    };
+
+    // 清空只回退长度，底层槽位保留。
+    pub let clear = func(v: Mut(Vec)) -> u64 {
+      deref(v).len = 0;
+      return 1;
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// HashMapU64：u64 键的开放寻址哈希表（线性探测）。
+// ---------------------------------------------------------------------------
+pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
+  return module {
+    pub let Map = struct {
+      keys: Array(u64, Cap),
+      used: Array(u8, Cap),
+      vals: Array(V, Cap),
+      len: u64,
+    };
+
+    pub let Self = Map;
+
+    // splitmix64 的一轮混合：把连续键打散成近似均匀的槽位。
+    let mix = func(key: u64) -> u64 {
+      let x: u64 = key ^ (key >> 30);
+      return x * 0xbf58476d1ce4e5b9;
+    };
+
+    let slot_of = func(key: u64) -> u64 {
+      return mix(key) % Cap;
+    };
+
+    // 命中返回槽位，未命中返回 Cap。
+    let find_used = func(m: Ref(Map), key: u64) -> u64 {
+      let start: u64 = slot_of(key);
+      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
+        let idx: u64 = (start + i) % Cap;
+        if deref(m).used[idx] == 1 {
+          if deref(m).keys[idx] == key {
+            slot = idx;
+            i = Cap;
+          } else {
+            i = i + 1;
+          }
+        } else {
+          i = Cap;
+        }
+      };
+      return slot;
+    };
+
+    // 沿着探测链找第一个空槽，整张表满了返回 Cap。
+    let find_free = func(m: Ref(Map), key: u64) -> u64 {
+      let start: u64 = slot_of(key);
+      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
+        let idx: u64 = (start + i) % Cap;
+        if deref(m).used[idx] == 1 {
+          i = i + 1;
+        } else {
+          slot = idx;
+          i = Cap;
+        }
+      };
+      return slot;
+    };
+
+    // keys / used / vals 三块数据从 arena 切分；len 槽随后覆盖回 0。
+    pub let new = func() -> Map {
+      let m: Map = Map { len: 0 };
+      comptime for f in fields_of(Map) {
+        let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(m) + (f.offset as u64));
+        deref(dst) = arena_take(size_of(f.type) as u64);
+      }
+      m.len = 0;
+      comptime for i in 0..Cap {
+        m.used[i] = 0;
+      }
+      return m;
+    };
+
+    pub let count = func(m: Ref(Map)) -> u64 {
+      return deref(m).len;
+    };
+
+    // 已存在则更新，否则占用探测链上的第一个空槽；满表返回 0。
+    pub let put = func(m: Mut(Map), key: u64, val: V) -> u64 {
+      let mr: Ref(Map) = m;
+      let hit: u64 = find_used(mr, key);
+      if hit < Cap {
+        deref(m).vals[hit] = val;
+        return 1;
+      }
+      let spot: u64 = find_free(mr, key);
+      if spot >= Cap {
+        return 0;
+      }
+      deref(m).keys[spot] = key;
+      deref(m).used[spot] = 1;
+      deref(m).vals[spot] = val;
+      deref(m).len = deref(m).len + 1;
+      return 1;
+    };
+
+    pub let has = func(m: Ref(Map), key: u64) -> u64 {
+      let hit: u64 = find_used(m, key);
+      if hit >= Cap {
+        return 0;
+      }
+      return 1;
+    };
+
+    // 命中时把值写进 out 并返回 1，否则返回 0。
+    pub let get = func(m: Ref(Map), key: u64, out: Mut(V)) -> u64 {
+      let hit: u64 = find_used(m, key);
+      if hit >= Cap {
+        return 0;
+      }
+      deref(out) = deref(m).vals[hit];
+      return 1;
+    };
+  };
+};

@@ -4,6 +4,7 @@ let st = import("state");
 let ty = import("types");
 let ir = import("ir");
 let hr = import("src::host_rt");
+let fm = import("std::fmt");
 
 pub let ModEntry = struct {
   alias: u64,
@@ -40,23 +41,29 @@ pub let sym_len = func(h: u64) -> u64 {
   return hr.sym_len(h);
 };
 
-// 把十进制写进 p，返回字节数。
-let digits_at = func(p: Mut(u8), v: u64) -> u64 {
-  let n: u64 = loop c(x: u64 = v, n: u64 = 1) while x >= 10 {
-    x = x / 10;
-    n = n + 1;
-  };
-  let buf: MutSlice(u8) = make_slice(MutSlice(u8), p, n);
-  let w: u64 = loop w(y: u64 = v, i: u64 = n) while i > 0 {
-    let d: u64 = y - y / 10 * 10;
-    let d8: u8 = d as u8;
-    let base: u8 = 48;
-    let at: u64 = i - 1;
-    buf[at] = base + d8;
-    y = y / 10;
-    i = i - 1;
-  };
-  return n;
+// 符号句柄 → 只读字节视图；0 号句柄视为空串。
+let sym_slice = func(h: u64) -> Slice(u8) {
+  if h == 0 { return ""; }
+  return make_slice(Slice(u8), sym_addr(h), sym_len(h));
+};
+
+// 一个名字段写进格式化游标；0 号句柄不写任何字节。
+let put_sym = func(c: fm.Cursor, h: u64) -> fm.Cursor {
+  return fm.write_str(c, sym_slice(h));
+};
+
+// 名字的公共头：虚拟模块用登记的前缀，其余一律 s<源号>__。
+let put_head = func(c: fm.Cursor, src: u64, pf: u64) -> fm.Cursor {
+  if pf != 0 { return put_sym(c, pf); }
+  let c1: fm.Cursor = fm.write_str(c, "s");
+  let c2: fm.Cursor = fm.write_u64(c1, src);
+  return fm.write_str(c2, "__");
+};
+
+// 已写完的格式化消息驻留成符号。
+let intern_done = func(c: fm.Cursor) -> u64 {
+  let done: Slice(u8) = fm.fmt_done(c);
+  return hr.sym_intern(done.ptr, done.len);
 };
 
 pub let copy_sym = func(dst: Mut(u8), h: u64) -> u64 {
@@ -76,25 +83,9 @@ pub let copy_sym = func(dst: Mut(u8), h: u64) -> u64 {
 // 尾巴为 0 表示没有。s<源号>__ 形式对 vmod >= 1000 本身已经唯一。
 pub let qual_full = func(s: Mut(st.State), src: u64, name: u64, tail: u64) -> u64 {
   let pf: u64 = if src >= 1000 { mod_lookup_prefix(s, src) } else { 0 };
-  if pf != 0 {
-    let pp: Mut(u8) = st.st_scratch(s);
-    let pfl: u64 = copy_sym(pp, pf);
-    let pnl: u64 = copy_sym(pp + pfl, name);
-    let ptl: u64 = copy_sym(pp + pfl + pnl, tail);
-    return hr.sym_intern(pp, pfl + pnl + ptl);
-  }
-  let p: Mut(u8) = st.st_scratch(s);
-  let n: u64 = digits_at(p + 1, src);
-  let hd: MutSlice(u8) = make_slice(MutSlice(u8), p, 3 + n);
-  let one: u8 = 115;
-  let us: u8 = 95;
-  hd[0] = one;
-  hd[1 + n] = us;
-  hd[2 + n] = us;
-  let nl: u64 = copy_sym(p + 3 + n, name);
-  let off: u64 = 3 + n + nl;
-  let tl: u64 = copy_sym(p + off, tail);
-  return hr.sym_intern(p, off + tl);
+  let c0: fm.Cursor = put_head(fm.fmt_begin(), src, pf);
+  let c1: fm.Cursor = put_sym(c0, name);
+  return intern_done(put_sym(c1, tail));
 };
 
 pub let qual = func(s: Mut(st.State), src: u64, name: u64) -> u64 {
@@ -103,18 +94,9 @@ pub let qual = func(s: Mut(st.State), src: u64, name: u64) -> u64 {
 
 // s<源号>__<前缀><十进制>
 pub let qual_num = func(s: Mut(st.State), src: u64, prefix: u64, v: u64) -> u64 {
-  let p: Mut(u8) = st.st_scratch(s);
-  let n: u64 = digits_at(p + 1, src);
-  let hd: MutSlice(u8) = make_slice(MutSlice(u8), p, 3 + n);
-  let one: u8 = 115;
-  let us: u8 = 95;
-  hd[0] = one;
-  hd[1 + n] = us;
-  hd[2 + n] = us;
-  let pl: u64 = copy_sym(p + 3 + n, prefix);
-  let off: u64 = 3 + n + pl;
-  let dl: u64 = digits_at(p + off, v);
-  return hr.sym_intern(p, off + dl);
+  let c0: fm.Cursor = put_head(fm.fmt_begin(), src, 0);
+  let c1: fm.Cursor = put_sym(c0, prefix);
+  return intern_done(fm.write_u64(c1, v));
 };
 
 // 当前模块号：内联 module / 函子实例体内是虚拟模块号，文件顶层就是源号。
@@ -125,7 +107,12 @@ let in_cur = func(s: Mut(st.State), name: u64) -> u64 { return qual(s, cur(s), n
 // --- 模块表 -------------------------------------------------------------
 // 条目 48 字节：[别名符号, 源号, 种类, 导入方模块号, 封签模块号, 名字前缀]。
 // 别名是文件局部的：两份源各自 import 同一个别名指不同目标时不能互相串。
-// 种类：1 导入的模块、2 open 链接、4 父模块链接、5 虚拟模块（内联 module / 函子实例）。
+// 种类：导入的模块、open 链接、父模块链接、虚拟模块（内联 module / 函子实例）。
+pub let mod_kind_import = func() -> u64 { return 1; };
+pub let mod_kind_open = func() -> u64 { return 2; };
+pub let mod_kind_parent = func() -> u64 { return 4; };
+pub let mod_kind_vmod = func() -> u64 { return 5; };
+
 pub let mod_add_in = func(s: Mut(st.State), owner: u64, alias: u64, src: u64, kind: u64, seal: u64, prefix: u64) -> Mut(ModEntry) {
   let p: Mut(ModEntry) = ptr_cast(Mut(ModEntry), st.st_mod_new(s, 48));
   if is_null(p) { return null_ref(Mut(ModEntry)); }
@@ -146,21 +133,21 @@ pub let mod_add = func(s: Mut(st.State), alias: u64, src: u64, kind: u64) -> u64
 
 // open 链接：owner 按 seal 视图引入 target_mod 的全部公开名字。
 pub let mod_add_open = func(s: Mut(st.State), owner: u64, target_mod: u64, seal: u64) -> u64 {
-  let p: Mut(ModEntry) = mod_add_in(s, owner, 0, target_mod, 2, seal, 0);
+  let p: Mut(ModEntry) = mod_add_in(s, owner, 0, target_mod, mod_kind_open(), seal, 0);
   if is_null(p) { return 0; }
   return 1;
 };
 
 // 父模块链接：名字查找可以沿这条链上溯。
 pub let mod_set_parent = func(s: Mut(st.State), child_mod: u64, parent_mod: u64) -> u64 {
-  let p: Mut(ModEntry) = mod_add_in(s, child_mod, 0, parent_mod, 4, 0, 0);
+  let p: Mut(ModEntry) = mod_add_in(s, child_mod, 0, parent_mod, mod_kind_parent(), 0, 0);
   if is_null(p) { return 0; }
   return 1;
 };
 
 // 虚拟模块登记：src 就是模块号本身，名字前缀供限定名拼装。
 pub let mod_register_vmod = func(s: Mut(st.State), vmod: u64, prefix: u64) -> u64 {
-  let p: Mut(ModEntry) = mod_add_in(s, vmod, 0, vmod, 5, 0, prefix);
+  let p: Mut(ModEntry) = mod_add_in(s, vmod, 0, vmod, mod_kind_vmod(), 0, prefix);
   if is_null(p) { return 0; }
   return vmod;
 };
@@ -213,7 +200,7 @@ let prefix_scan = func(s: Mut(st.State), vmod: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let p: Mut(ModEntry) = mod_at(s, i);
   if p.src == vmod and p.prefix != 0 {
-    if p.kind == 5 or p.kind == 1 { return p.prefix; }
+    if p.kind == mod_kind_vmod() or p.kind == mod_kind_import() { return p.prefix; }
   }
   return prefix_scan(s, vmod, i + 1, n);
 };
@@ -226,7 +213,7 @@ let mod_lookup_prefix = func(s: Mut(st.State), vmod: u64) -> u64 {
 let parent_scan = func(s: Mut(st.State), child_mod: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let p: Mut(ModEntry) = mod_at(s, i);
-  if p.owner == child_mod and p.kind == 4 { return p.src + 1; }
+  if p.owner == child_mod and p.kind == mod_kind_parent() { return p.src + 1; }
   return parent_scan(s, child_mod, i + 1, n);
 };
 
@@ -432,7 +419,7 @@ pub let mod_resolve_path = func(s: Mut(st.State), cur_mod: u64, first_name: u64,
 let open_scan = func(s: Mut(st.State), owner: u64, name: u64, cur_mod: u64, i: u64, n: u64) -> Mut(SymEntry) {
   if i >= n { return null_ref(Mut(SymEntry)); }
   let p: Mut(ModEntry) = mod_at(s, i);
-  if p.owner == owner and p.kind == 2 {
+  if p.owner == owner and p.kind == mod_kind_open() {
     let e: Mut(SymEntry) = sym_lookup_in(s, p.src, p.seal, name, cur_mod);
     if (e as u64) != 0 { return e; }
   }
