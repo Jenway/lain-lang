@@ -419,6 +419,10 @@ META_CASES = [
     # HostVmHost 在全新地址空间执行标量与字节入口，返回 64。
     {"file": "phase6_host_cutover.lain", "entry": "s0__main", "value": 64,
      "folds": [], "procs": [], "absent": []},
+    # std::trace 的 Chrome Trace / Perfetto 导出：嵌套区间与计数事件写进固定静态表，
+    # dump_json 把事件表按 JSON 格式写进调用方提供的缓冲；开关关闭后不再记事件。
+    {"file": "trace_perfetto.lain", "entry": "s0__main", "value": 75,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},

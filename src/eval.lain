@@ -25,6 +25,7 @@ let gv = import("given");
 let gn = import("generics");
 let ex = import("expand");
 let ef = import("effects");
+let tr = import("std::trace");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
@@ -880,13 +881,24 @@ let compile_as = func(k: Mut(st.State), src: u64, root: u64) -> u64 {
   st.st_set_vmod(k, 0);
   let mk: u64 = env.env_release(k, 0);
   // 展开先跑：f"..." 与 match 在细化之前换成基础形式。
+  let t_exp: u64 = tr.span_begin();
   let exp_root: u64 = ex.expand_root(k, root);
+  let ev_exp: u64 = tr.span_end("expand", "lainc", t_exp, src);
   st.st_set_root(k, exp_root);
   if st.st_ok(k) != 0 { return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod); }
   let n: u64 = n_count(exp_root);
+  let t_p1: u64 = tr.span_begin();
   let a: u64 = phase1(k, exp_root, 0, n);
+  let ev_p1: u64 = tr.span_end("phase1_elaborate", "lainc", t_p1, n);
   if st.st_ok(k) != 0 { return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod); }
+  let t_p2: u64 = tr.span_begin();
   let b: u64 = phase2(k, exp_root, 0, n);
+  let ev_p2: u64 = tr.span_end("phase2_lower", "lainc", t_p2, n);
+  // 计数事件在还原 arena 之前采，否则 arena 水位已经被回退到本轮起点。
+  let c_arena: u64 = tr.counter("arena_kb", st.st_arenaused(k) / 1024);
+  let c_syms: u64 = tr.counter("symbols", modules.sym_count(k));
+  let c_shapes: u64 = tr.counter("shapes", st.st_shpused(k) / agg.shp_rec());
+  let c_types: u64 = tr.counter("types", ireg.reg_count(k));
   return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod);
 };
 
@@ -904,7 +916,10 @@ pub let compile_source = func(k: Mut(st.State), src: u64) -> u64 {
   if st.st_done(k, src) == 1 { return st.st_ok(k); }
   let m: u64 = st.st_mark_done(k, src);
   let root: u64 = lain2_source_root(src);
-  return compile_as(k, src, root);
+  let t_src: u64 = tr.span_begin();
+  let rc: u64 = compile_as(k, src, root);
+  let ev_src: u64 = tr.span_end("compile_source", "lainc", t_src, src);
+  return rc;
 };
 
 // --- 编译期注入 ---------------------------------------------------------

@@ -20,6 +20,7 @@ let ctf = import("ctfor");
 let gn = import("generics");
 let gv = import("given");
 let ef = import("effects");
+let tr = import("std::trace");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern decl_compile_vmod_p2(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 = lainc_compile_functor_mod_p2;
@@ -181,7 +182,36 @@ let flush_fq = func(k: Mut(st.State)) -> u64 {
 };
 
 // 匿名过程、泛型单态化与函子 phase2 按批排空：每轮处理一条，再回到队头。
+// 排空的调用非常频繁（每个过程体收尾都调一次），所以只在最外层那一趟记事件：
+// 门有两个格子：[行进中的排空深度, 已处理条目数]，没真的处理条目就不记。
+let drain_gate: Array(u64, 2) = [0, 0];
+
+let gate_cells = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(drain_gate), 2);
+};
+
+let handled = func() -> u64 {
+  let g: MutSlice(u64) = gate_cells();
+  g[1] = g[1] + 1;
+  return g[1];
+};
+
 let flush_queue = func(k: Mut(st.State)) -> u64 {
+  let g: MutSlice(u64) = gate_cells();
+  if g[0] != 0 { return drain_queue(k); }
+  let before: u64 = g[1];
+  g[0] = 1;
+  let t0: u64 = tr.span_begin();
+  let rc: u64 = drain_queue(k);
+  g[0] = 0;
+  let done: u64 = g[1] - before;
+  if done != 0 {
+    let ev: u64 = tr.span_end("flush_queue", "lainc", t0, done);
+  }
+  return rc;
+};
+
+let drain_queue = func(k: Mut(st.State)) -> u64 {
   let e: Mut(an.AnonEntry) = an.pending(k);
   if is_null(e) == 0 {
     let q: u64 = an.entry_name(e);
@@ -196,6 +226,7 @@ let flush_queue = func(k: Mut(st.State)) -> u64 {
     st.st_set_vmod(k, avm);
     let row0: Mut(ef.EffRow) = ef.row_empty(k);
     let b: u64 = compile_body(k, g, node, q, row0);
+    let h0: u64 = handled();
     if st.st_ok(k) != 0 {
       // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
       let m: Ref(u8) = "anonymous func cannot capture";
@@ -203,15 +234,20 @@ let flush_queue = func(k: Mut(st.State)) -> u64 {
     }
     st.st_set_vmod(k, saved_vmod);
     st.st_set_src(k, saved_src);
-    return flush_queue(k);
+    return drain_queue(k);
   }
   if ef.handler_pending(k) == 1 {
     let hh: u64 = ef.flush_one_handler(k);
-    return flush_queue(k);
+    let h1: u64 = handled();
+    return drain_queue(k);
   }
   let ge: Mut(gn.GenQRec) = gn.genq_pending(k);
-  if is_null(ge) == 0 { return flush_gen_rec(k, ge); }
+  if is_null(ge) == 0 {
+    let h2: u64 = handled();
+    return flush_gen_rec(k, ge);
+  }
   if st.st_in_proc(k) != 0 { return 0; }
+  if st.st_fqused(k) != 0 { let h3: u64 = handled(); }
   return flush_fq(k);
 };
 

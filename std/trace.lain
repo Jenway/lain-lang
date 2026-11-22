@@ -1,0 +1,314 @@
+// std::trace —— 静态表里的 Chrome Trace Event / Perfetto 事件记录与 JSON 导出。
+// 事件写在固定的 512 格静态表里，全程不申请堆内存；表写满后新事件被丢弃并计入
+// 丢弃计数，导出时只写出真正记录下来的事件。时间戳统一用微秒，自第一次取时刻
+// 起算相对时间，因此导出的 JSON 不必关心宿主时钟的起点。
+//
+// 导出的缓冲由调用方提供：dump_json 往 MutSlice(u8) 里写，返回写入的字节数。
+// 缓冲不足以容纳整份 JSON 时以除零陷阱终止程序，绝不写出被截断的 JSON。
+extern trace_clock_ns() -> u64 = lain_perf_nanos;
+
+pub let TraceEvent = struct {
+  name_ptr: Ref(u8),
+  name_len: u64,
+  cat_ptr: Ref(u8),
+  cat_len: u64,
+  ph: u8,
+  ts_us: u64,
+  dur_us: u64,
+  arg_val: u64,
+};
+
+// 常量写成过程：顶层值符号在结构体字段与实参位置上会有物理类型偏差。
+pub let capacity = func() -> u64 { return 512; };
+let state_words = func() -> u64 { return 8; };
+let state_enabled = func() -> u64 { return 0; };
+let state_count = func() -> u64 { return 1; };
+let state_first = func() -> u64 { return 2; };
+let state_started = func() -> u64 { return 3; };
+let state_dropped = func() -> u64 { return 4; };
+
+let blank = func() -> TraceEvent {
+  return TraceEvent {
+    name_ptr: null_ref(Ref(u8)),
+    name_len: 0,
+    cat_ptr: null_ref(Ref(u8)),
+    cat_len: 0,
+    ph: 0 as u8,
+    ts_us: 0,
+    dur_us: 0,
+    arg_val: 0,
+  };
+};
+
+let table: Array(TraceEvent, 512) = [blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
+  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank()];
+
+let state: Array(u64, 8) = [0, 0, 0, 0, 0, 0, 0, 0];
+
+let events = func() -> MutSlice(TraceEvent) {
+  return make_slice(MutSlice(TraceEvent), mut_of(table), capacity());
+};
+
+let flags = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(state), state_words());
+};
+
+let now_us = func() -> u64 {
+  return trace_clock_ns() / 1000;
+};
+
+// 相对微秒：第一次取时刻时定下起点，之后都相对这个起点。
+let relative_us = func() -> u64 {
+  let us: u64 = now_us();
+  let w: MutSlice(u64) = flags();
+  if w[state_started()] == 0 {
+    w[state_first()] = us;
+    w[state_started()] = 1;
+  }
+  return us - w[state_first()];
+};
+
+pub let trace_enable = func(flag: u64) -> u64 {
+  let w: MutSlice(u64) = flags();
+  w[state_enabled()] = flag;
+  return w[state_enabled()];
+};
+
+pub let trace_is_enabled = func() -> u64 {
+  let w: MutSlice(u64) = flags();
+  return w[state_enabled()];
+};
+
+pub let span_begin = func() -> u64 {
+  return relative_us();
+};
+
+let record = func(name: Slice(u8), cat: Slice(u8), ph: u64, ts: u64, dur: u64, arg: u64) -> u64 {
+  let w: MutSlice(u64) = flags();
+  if w[state_enabled()] == 0 { return 0; }
+  let n: u64 = w[state_count()];
+  if n >= capacity() {
+    w[state_dropped()] = w[state_dropped()] + 1;
+    return 0;
+  }
+  let t: MutSlice(TraceEvent) = events();
+  t[n] = TraceEvent {
+    name_ptr: name.ptr,
+    name_len: name.len,
+    cat_ptr: cat.ptr,
+    cat_len: cat.len,
+    ph: ph as u8,
+    ts_us: ts,
+    dur_us: dur,
+    arg_val: arg,
+  };
+  w[state_count()] = n + 1;
+  return n + 1;
+};
+
+pub let span_end = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val: u64) -> u64 {
+  let w: MutSlice(u64) = flags();
+  if w[state_enabled()] == 0 { return 0; }
+  let now: u64 = relative_us();
+  let dur: u64 = if now >= start_us { now - start_us } else { 0 };
+  return record(name, cat, 88, start_us, dur, arg_val);
+};
+
+pub let counter = func(name: Slice(u8), val: u64) -> u64 {
+  let w: MutSlice(u64) = flags();
+  if w[state_enabled()] == 0 { return 0; }
+  let cat: Slice(u8) = "";
+  return record(name, cat, 67, relative_us(), 0, val);
+};
+
+pub let event_count = func() -> u64 {
+  let w: MutSlice(u64) = flags();
+  return w[state_count()];
+};
+
+pub let dropped_count = func() -> u64 {
+  let w: MutSlice(u64) = flags();
+  return w[state_dropped()];
+};
+
+// 清空事件表与时间起点，开关状态保持不变；返回被清掉的事件数。
+pub let trace_reset = func() -> u64 {
+  let w: MutSlice(u64) = flags();
+  let prev: u64 = w[state_count()];
+  w[state_count()] = 0;
+  w[state_first()] = 0;
+  w[state_started()] = 0;
+  w[state_dropped()] = 0;
+  return prev;
+};
+
+// 输出游标：base 是缓冲起点，p 是下一个待写字节，left 是剩余字节数。
+let Out = struct {
+  base: Mut(u8),
+  p: Mut(u8),
+  left: u64,
+};
+
+let overflow = func(o: Out) -> Out {
+  let boom: u64 = 1 / o.left;
+  return Out { base: o.base, p: o.p, left: o.left + boom };
+};
+
+let put_byte = func(o: Out, b: u8) -> Out {
+  if o.left == 0 { return overflow(o); }
+  let q: Mut(u8) = o.p;
+  deref(q) = b;
+  return Out { base: o.base, p: q + 1, left: o.left - 1 };
+};
+
+let put_str = func(o: Out, s: Slice(u8), i: u64) -> Out {
+  if i >= s.len { return o; }
+  return put_str(put_byte(o, s[i]), s, i + 1);
+};
+
+let put_text = func(o: Out, s: Slice(u8)) -> Out {
+  return put_str(o, s, 0);
+};
+
+let put_u64 = func(o: Out, v: u64) -> Out {
+  if v >= 10 {
+    let head: Out = put_u64(o, v / 10);
+    return put_byte(head, (48 + (v % 10)) as u8);
+  }
+  return put_byte(o, (48 + v) as u8);
+};
+
+let hex_digit = func(v: u64) -> u8 {
+  if v < 10 { return (48 + v) as u8; }
+  return (65 + v - 10) as u8;
+};
+
+let put_unicode = func(o: Out, b: u64) -> Out {
+  let head: Out = put_text(o, "\\u00");
+  let hi: Out = put_byte(head, hex_digit((b / 16) % 16));
+  return put_byte(hi, hex_digit(b % 16));
+};
+
+// JSON 字符串：按双引号、反斜杠与控制字符转义，其余字节原样写出。
+let put_json_body = func(o: Out, s: Slice(u8), i: u64) -> Out {
+  if i >= s.len { return o; }
+  let b: u64 = s[i] as u64;
+  if b == 34 { return put_json_body(put_text(o, "\\\""), s, i + 1); }
+  if b == 92 { return put_json_body(put_text(o, "\\\\"), s, i + 1); }
+  if b < 32 { return put_json_body(put_unicode(o, b), s, i + 1); }
+  return put_json_body(put_byte(o, b as u8), s, i + 1);
+};
+
+let put_json_str = func(o: Out, s: Slice(u8)) -> Out {
+  let open: Out = put_byte(o, 34 as u8);
+  return put_byte(put_json_body(open, s, 0), 34 as u8);
+};
+
+let put_head = func(o: Out, e: TraceEvent) -> Out {
+  let ns: Slice(u8) = make_slice(Slice(u8), e.name_ptr, e.name_len);
+  let cs: Slice(u8) = make_slice(Slice(u8), e.cat_ptr, e.cat_len);
+  let a: Out = put_text(o, "{\"name\":");
+  let b: Out = put_json_str(a, ns);
+  let c: Out = put_text(b, ",\"cat\":");
+  return put_json_str(c, cs);
+};
+
+let put_span = func(o: Out, e: TraceEvent) -> Out {
+  let a: Out = put_text(put_head(o, e), ",\"ph\":\"X\",\"ts\":");
+  let b: Out = put_u64(a, e.ts_us);
+  let c: Out = put_text(b, ",\"dur\":");
+  let d: Out = put_u64(c, e.dur_us);
+  let f: Out = put_text(d, ",\"pid\":1,\"tid\":1,\"args\":{\"v\":");
+  return put_text(put_u64(f, e.arg_val), "}}");
+};
+
+let put_counter = func(o: Out, e: TraceEvent) -> Out {
+  let a: Out = put_text(put_head(o, e), ",\"ph\":\"C\",\"ts\":");
+  let b: Out = put_u64(a, e.ts_us);
+  let c: Out = put_text(b, ",\"pid\":1,\"tid\":1,\"args\":{\"value\":");
+  return put_text(put_u64(c, e.arg_val), "}}");
+};
+
+let put_event = func(o: Out, t: MutSlice(TraceEvent), i: u64) -> Out {
+  let e: TraceEvent = t[i];
+  if (e.ph as u64) == 67 { return put_counter(o, e); }
+  return put_span(o, e);
+};
+
+let put_events = func(o: Out, t: MutSlice(TraceEvent), i: u64, n: u64) -> Out {
+  if i >= n { return o; }
+  let sep: Out = if i == 0 { o } else { put_text(o, ",") };
+  return put_events(put_event(sep, t, i), t, i + 1, n);
+};
+
+pub let dump_json = func(buf: MutSlice(u8)) -> u64 {
+  let w: MutSlice(u64) = flags();
+  let t: MutSlice(TraceEvent) = events();
+  let start: Out = Out { base: buf.ptr, p: buf.ptr, left: buf.len };
+  let head: Out = put_text(start, "{\"traceEvents\":[");
+  let n: u64 = w[state_count()];
+  let body: Out = put_events(head, t, 0, n);
+  let done: Out = put_text(body, "]}");
+  return buf.len - done.left;
+};

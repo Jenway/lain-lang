@@ -28,7 +28,17 @@ static uint64_t call_host_u64(const char *name, const uint64_t *args,
   uint64_t out = 0;
   uint32_t rc = e->fn(e->context, args, argc, &out);
   if (rc != 0) {
-    fprintf(stderr, "native-meta: host cap %s failed rc=%u\n", name, rc);
+    fprintf(stderr,
+            "native-meta: host cap %s failed rc=%u args=[%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu]\n",
+            name, rc, argc > 0 ? (unsigned long long)args[0] : 0ull,
+            argc > 1 ? (unsigned long long)args[1] : 0ull,
+            argc > 2 ? (unsigned long long)args[2] : 0ull,
+            argc > 3 ? (unsigned long long)args[3] : 0ull,
+            argc > 4 ? (unsigned long long)args[4] : 0ull,
+            argc > 5 ? (unsigned long long)args[5] : 0ull,
+            argc > 6 ? (unsigned long long)args[6] : 0ull,
+            argc > 7 ? (unsigned long long)args[7] : 0ull);
     abort();
   }
   return out;
@@ -177,6 +187,60 @@ uint64_t lain2_ast_parse_snippet(void *p, uint64_t len) {
 extern uint64_t lain_fn_lain_meta_v2_entry(uint64_t count);
 extern const void *lain_c99_data_anchor(void);
 
+/* 追踪通道：--trace 时由宿主准备缓冲，模块把事件表写成 JSON 后调
+   lain2_trace_flush 交回来落盘；没给 --trace 时 lain2_trace_on 返 0。 */
+#define TRACE_BUF_BYTES (4u << 20)
+
+static void *g_trace_buf = NULL;
+static uint64_t g_trace_cap = 0;
+static const char *g_trace_path = NULL;
+static int g_trace_done = 0;
+
+uint64_t lain2_trace_on(void) {
+  return (g_trace_path && g_trace_buf) ? 1u : 0u;
+}
+
+void *lain2_trace_buf(void) { return g_trace_buf; }
+
+uint64_t lain2_trace_cap(void) { return g_trace_cap; }
+
+uint64_t lain2_trace_flush(uint64_t len) {
+  if (!g_trace_path || !g_trace_buf) {
+    fprintf(stderr, "native-meta: trace flush without a buffer\n");
+    abort();
+  }
+  if (len > g_trace_cap) {
+    fprintf(stderr, "native-meta: trace length %llu exceeds capacity %llu\n",
+            (unsigned long long)len, (unsigned long long)g_trace_cap);
+    abort();
+  }
+  FILE *f = fopen(g_trace_path, "wb");
+  if (!f) {
+    fprintf(stderr, "cannot write %s\n", g_trace_path);
+    abort();
+  }
+  size_t wrote = fwrite(g_trace_buf, 1, (size_t)len, f);
+  fclose(f);
+  if (wrote != (size_t)len) {
+    fprintf(stderr, "short write %s\n", g_trace_path);
+    abort();
+  }
+  g_trace_done = 1;
+  return len;
+}
+
+/* 宿主按调用方源码的目录回溯仓库根来解析 std:: 模块；路径里混进反斜杠
+   会让目录识别失败，同一个 std 模块就会以两个不同的规范路径被编两遍
+   （静态表各一份）。所以交给 host 的源码路径统一成 '/' 分隔。 */
+static char *slash_path(const char *path) {
+  size_t n = strlen(path);
+  char *copy = (char *)malloc(n + 1);
+  if (!copy) return NULL;
+  for (size_t i = 0; i < n; ++i) copy[i] = (path[i] == '\\') ? '/' : path[i];
+  copy[n] = '\0';
+  return copy;
+}
+
 static int ends_with(const char *s, const char *suf) {
   size_t sl = strlen(s), fl = strlen(suf);
   return sl >= fl && strcmp(s + sl - fl, suf) == 0;
@@ -254,6 +318,7 @@ int main(int argc, char **argv) {
   char *source_texts[NATIVE_MAX_SOURCES] = {0};
   uint32_t source_count = 0;
   const char *out_path = NULL;
+  const char *trace_path = NULL;
   const char *entry = NULL;
   int quiet = 0;
   int c99_mode = 0;
@@ -264,6 +329,8 @@ int main(int argc, char **argv) {
       out_path = argv[++i];
     } else if (strcmp(argv[i], "--entry") == 0 && i + 1 < argc) {
       entry = argv[++i];
+    } else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
+      trace_path = argv[++i];
     } else if (strcmp(argv[i], "--c99") == 0) {
       c99_mode = 1;
     } else if (strcmp(argv[i], "--print-result") == 0) {
@@ -297,8 +364,20 @@ int main(int argc, char **argv) {
   if (source_count == 0) {
     fprintf(stderr,
             "usage: lain-stage <source.lain> [--out <out.l1|out.c>] [--c99] "
-            "[--entry <name>] [--print-result]\n");
+            "[--entry <name>] [--trace <trace.json>] [--print-result]\n");
     return 1;
+  }
+
+  void *trace_buf = NULL;
+  if (trace_path) {
+    trace_buf = malloc(TRACE_BUF_BYTES);
+    if (!trace_buf) {
+      fprintf(stderr, "native-meta: trace buffer alloc failed\n");
+      return 1;
+    }
+    g_trace_buf = trace_buf;
+    g_trace_cap = TRACE_BUF_BYTES;
+    g_trace_path = trace_path;
   }
 
   LainVmQuota quota;
@@ -355,10 +434,14 @@ int main(int argc, char **argv) {
       return 1;
     }
     source_texts[i] = txt;
-    if (!lainv2_host_add_source(host, source_paths[i], txt, len, &idx)) {
+    char *host_path = slash_path(source_paths[i]);
+    if (!host_path) return 1;
+    if (!lainv2_host_add_source(host, host_path, txt, len, &idx)) {
       fprintf(stderr, "add_source failed %s\n", source_paths[i]);
+      free(host_path);
       return 1;
     }
+    free(host_path);
   }
 
   lainvm_caps_init(&g_caps, g_cap_entries, 128);
@@ -369,6 +452,15 @@ int main(int argc, char **argv) {
   lainvm_caps_freeze(&g_caps);
 
   uint64_t rc = lain_fn_lain_meta_v2_entry(source_count);
+  if (trace_path && !g_trace_done) {
+    fprintf(stderr,
+            "native-meta: 编译器没有调用 lain2_trace_flush，%s 没有写出来\n",
+            trace_path);
+    free(trace_buf);
+    for (uint32_t i = 0; i < source_count; ++i) free(source_texts[i]);
+    lainv2_host_free(host);
+    return 1;
+  }
   uint32_t out_len = 0;
   const char *out_text = lainv2_host_output(host, &out_len);
 
@@ -416,6 +508,7 @@ int main(int argc, char **argv) {
   }
 
   for (uint32_t i = 0; i < source_count; ++i) free(source_texts[i]);
+  free(trace_buf);
   lainv2_host_free(host);
   return rc == 0 ? 0 : 1;
 }
