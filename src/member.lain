@@ -17,6 +17,8 @@ let ireg = import("tyreg");
 let ctf = import("ctfor");
 let tb = import("tbuild");
 let ctfn = import("ctfn");
+let ct = import("ctypes");
+let gv = import("given");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
@@ -141,12 +143,149 @@ let path_member = func(k: Mut(st.State), g: u64, last: u64, e: Mut(modules.SymEn
   return member_entry(k, g, last, e, want, out);
 };
 
+// --- UFCS 方法调用糖 ------------------------------------------------------
+// receiver.method(args...) 里 receiver 是局部名字、method 不是接收者类型的字段、
+// 后面跟着实参组时，检索导出 pub let Self = T 并导出该方法的活跃模块，把调用改派
+// 成 M.method(适配后的接收者, ...)。回 0 表示没有模块命中，调用方回落常规成员语义。
+let ufcs_zero = func(ab: Mut(ty.Val), i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  let nn: u64 = ty.val_none(val_idx(ab, i));
+  return ufcs_zero(ab, i + 1, n);
+};
+
+let ufcs_ref_ty = func(k: Mut(st.State), self_tid: u64, mutv: u64) -> Mut(ty.Ty) {
+  let t: Mut(ty.Ty) = new_ty(k);
+  let id: u64 = ct.ref_t(k, self_tid, mutv);
+  let p: u64 = ireg.project(k, id, t);
+  return t;
+};
+
+// 首参自适配：Self 传值，Ref(Self) 传地址，Mut(Self) 只接受可变左值与 Mut(T)。
+let ufcs_adapt = func(k: Mut(st.State), off: u64, vt: Mut(ty.Ty), p0: Mut(ty.Ty), self_tid: u64, out: Mut(ty.Val)) -> u64 {
+  let sh: u64 = ty.tsh(vt);
+  let rk: u64 = if sh == 0 { 0 } else { agg.shp_kind(sh) };
+  let is_ref: u64 = if rk == agg.kind_ref() { 1 } else { 0 };
+  let is_mut: u64 = if rk == agg.kind_mut() { 1 } else { 0 };
+  let psh: u64 = ty.tsh(p0);
+  let pk: u64 = if psh == 0 { 0 } else { agg.shp_kind(psh) };
+  let want_ref: u64 = 0;
+  let want_mut: u64 = 0;
+  if pk == agg.kind_ref() {
+    if ct.elem_tid(k, psh) == self_tid { want_ref = 1; }
+  }
+  if pk == agg.kind_mut() {
+    if ct.elem_tid(k, psh) == self_tid { want_mut = 1; }
+  }
+  let want_val: u64 = if ireg.tid_of(k, p0) == self_tid { 1 } else { 0 };
+  let ov: Mut(ty.Val) = new_val(k);
+  let sv: u64 = cx.slot_get(k, env.env_slot(k, off), vt, ov);
+  if want_val == 1 {
+    if is_ref == 1 or is_mut == 1 {
+      let et: Mut(ty.Ty) = new_ty(k);
+      let pr: u64 = ireg.project(k, ct.elem_tid(k, sh), et);
+      let got: Mut(ty.Val) = new_val(k);
+      if rf.deref_loads(ty.tsh(et)) == 1 {
+        let l: u64 = agg.load_at(k, ty.vn(ov), 0, et, got);
+      } else {
+        let r: u64 = ty.val_ref(got, ty.vn(ov), et);
+      }
+      return cx.coerce(k, got, et, p0, out);
+    }
+    return cx.coerce(k, ov, vt, p0, out);
+  }
+  if want_ref == 1 or want_mut == 1 {
+    if want_mut == 1 and is_ref == 1 {
+      ctf.fail_msg(k, "immutable receiver cannot bind Mut(Self)", 40, ax.e_type());
+      return 0;
+    }
+    let rt: Mut(ty.Ty) = ufcs_ref_ty(k, self_tid, want_mut);
+    if is_ref == 1 or is_mut == 1 {
+      let rv: Mut(ty.Val) = new_val(k);
+      let r0: u64 = ty.val_ref(rv, ty.vn(ov), rt);
+      return cx.coerce(k, rv, rt, p0, out);
+    }
+    if sh == 0 {
+      let res: u64 = ir.fresh_t(k);
+      let rc: u64 = ir.args_reset(k);
+      let lea: u64 = ir.emit_lea(k, res, ir.slot_name(k, env.env_slot(k, off)), 0, 1, 0);
+      let rv2: Mut(ty.Val) = new_val(k);
+      let r2: u64 = ty.val_ref(rv2, res, rt);
+      return cx.coerce(k, rv2, rt, p0, out);
+    }
+    if ty.tk(ty.vty(ov)) != 3 {
+      ctf.fail_msg(k, "ufcs receiver is not addressable", 33, ax.e_type());
+      return 0;
+    }
+    let rv3: Mut(ty.Val) = new_val(k);
+    let r3: u64 = ty.val_ref(rv3, ty.vn(ov), rt);
+    return cx.coerce(k, rv3, rt, p0, out);
+  }
+  ctf.fail_msg(k, "ufcs method first parameter is not Self", 39, ax.e_type());
+  return 0;
+};
+
+let ufcs_dispatch = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let off: u64 = env.env_find(k, ax.n_sym(g, i));
+  let name: u64 = ax.n_sym(g, i + 2);
+  let vt: Mut(ty.Ty) = new_ty(k);
+  let e0: u64 = env.env_ty(k, off, vt);
+  let sh: u64 = ty.tsh(vt);
+  let rk: u64 = if sh == 0 { 0 } else { agg.shp_kind(sh) };
+  let is_ref_or_mut: u64 = if rk == agg.kind_ref() or rk == agg.kind_mut() { 1 } else { 0 };
+  // 同名结构体字段优先：命中字段时按字段语义处理，不参与 UFCS 检索。
+  let esh: u64 = 0;
+  if is_ref_or_mut == 1 {
+    let et: Mut(ty.Ty) = new_ty(k);
+    let pr: u64 = ireg.project(k, ct.elem_tid(k, sh), et);
+    esh = ty.tsh(et);
+  } else {
+    esh = sh;
+  }
+  if esh != 0 {
+    if is_null(agg.mem_find(esh, name)) == 0 { return 0; }
+  }
+  let self_tid: u64 = if is_ref_or_mut == 1 { ct.elem_tid(k, sh) } else { ireg.tid_of(k, vt) };
+  let hit: Mut(gv.UfcsHit) = ptr_cast(Mut(gv.UfcsHit), st.st_alloc(k, 16));
+  let found: u64 = gv.ufcs_method(k, self_tid, name, hit);
+  if st.st_ok(k) != 0 { return i + 4; }
+  if found == 0 { return 0; }
+  if hit.count > 1 {
+    ctf.fail_msg(k, "ambiguous UFCS method", 21, ax.e_type());
+    return i + 4;
+  }
+  let me: Mut(modules.SymEntry) = modules.sym_find(k, hit.modv, name);
+  let sg: Mut(u8) = modules.sym_sig(me);
+  let np: u64 = cx.sig_np(sg);
+  if np == 0 {
+    ctf.fail_msg(k, "ufcs method has no receiver parameter", 37, ax.e_type());
+    return i + 4;
+  }
+  let ps: Mut(ty.Ty) = cx.sig_params(sg);
+  let p0: Mut(ty.Ty) = cx.ty_idx(ps, 0);
+  let av: Mut(ty.Val) = new_val(k);
+  let ad: u64 = ufcs_adapt(k, off, vt, p0, self_tid, av);
+  if st.st_ok(k) != 0 { return i + 4; }
+  let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, np * 56 + 8));
+  let z: u64 = ufcs_zero(ab, 0, np);
+  ty.val_at(val_idx(ab, 0), av);
+  let j: u64 = cl.call_args(k, n_at(g, i + 3), 0, 1, np, ab, ps);
+  if st.st_ok(k) != 0 { return i + 4; }
+  let ep: u64 = cl.emit_prepared(k, modules.sym_qual(me), cx.sig_ret(sg), np, ab, want, out);
+  return i + 4;
+};
+
 // 名字 . 名字：本地变量、枚举变体与静态数据走运行期路径，其余按模块成员路径解析。
 pub let dotted = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let a: u64 = n_sym(g, i);
   let b: u64 = n_sym(g, i + 2);
-  // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
+  let total: u64 = n_count(g);
+  // 局部变量：先试 UFCS 方法调用，再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
   if env.env_find(k, a) != 0 {
+    if i + 3 < total and is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_paren() {
+      let uf: u64 = ufcs_dispatch(k, g, i, want, out);
+      if st.st_ok(k) != 0 { return uf; }
+      if uf != 0 { return uf; }
+    }
     let bv: Mut(ty.Val) = new_val(k);
     let bj: u64 = cl.var_ref(k, g, i, tnone(k), bv);
     if st.st_ok(k) != 0 { return i + 3; }

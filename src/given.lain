@@ -419,3 +419,95 @@ pub let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal
 pub let witness_field_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
   return null_ref(Mut(WField));
 };
+
+// --- UFCS 方法检索 --------------------------------------------------------
+// 活跃模块由三处给出：use 压入的模块见证、当前模块自身、以及经 open 或选择性
+// use 把方法名接进当前作用域的模块。越内层的 use 越优先，同层多个候选就是歧义。
+pub let UfcsHit = struct {
+  modv: u64,
+  count: u64
+};
+
+let UfcsCand = struct {
+  depth: u64,
+  modv: u64,
+  count: u64,
+  has: u64
+};
+
+// 模块是否为类型 self_tid 提供公开可调用的方法 name。
+pub let ufcs_mod_ok = func(k: Mut(st.State), modv: u64, self_tid: u64, name: u64) -> u64 {
+  if modv == 0 { return 0; }
+  if mod_self_tid(k, modv) != self_tid { return 0; }
+  let e: Mut(modules.SymEntry) = modules.sym_find(k, modv, name);
+  if is_null(e) { return 0; }
+  if modules.sym_pub(e) == 0 { return 0; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd == modules.sym_kind_func() or kd == modules.sym_kind_extern() { return 1; }
+  return 0;
+};
+
+// 记下一个候选：更深的替换当前胜者，同深不同模块则累加歧义计数。
+let ufcs_note = func(c: Mut(UfcsCand), mv: u64, dp: u64) -> u64 {
+  if c.has == 0 {
+    c.has = 1;
+    c.depth = dp;
+    c.modv = mv;
+    c.count = 1;
+    return 1;
+  }
+  if dp > c.depth {
+    c.depth = dp;
+    c.modv = mv;
+    c.count = 1;
+    return 1;
+  }
+  if dp == c.depth {
+    if mv != c.modv { c.count = c.count + 1; }
+  }
+  return 1;
+};
+
+let ufcs_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, self_tid: u64, name: u64, c: Mut(UfcsCand)) -> u64 {
+  if off == 0 { return 1; }
+  let back: u64 = off - 40;
+  let p: Mut(GivenEntry) = given_at(base, back);
+  if p.implicit == 2 {
+    if ufcs_mod_ok(k, p.tid, self_tid, name) == 1 {
+      let r: u64 = ufcs_note(c, p.tid, p.depth);
+    }
+  }
+  return ufcs_scan(k, base, back, self_tid, name, c);
+};
+
+// 当前词法作用域里为 self_tid 提供方法 name 的活跃模块。回 0 表示没有候选；
+// 命中多个同层候选时 hit.count > 1，由调用方报歧义。
+pub let ufcs_method = func(k: Mut(st.State), self_tid: u64, name: u64, hit: Mut(UfcsHit)) -> u64 {
+  hit.modv = 0;
+  hit.count = 0;
+  if self_tid == 0 { return 0; }
+  let c: Mut(UfcsCand) = ptr_cast(Mut(UfcsCand), st.st_alloc(k, 32));
+  c.depth = 0;
+  c.modv = 0;
+  c.count = 0;
+  c.has = 0;
+  let r0: u64 = ufcs_scan(k, g_base(k), g_used(k), self_tid, name, c);
+  if st.st_ok(k) != 0 { return 0; }
+  // 当前模块自身与 open 引入的方法名按最外层计，内层 use 可以遮蔽它们。
+  let own: u64 = modules.cur(k);
+  if ufcs_mod_ok(k, own, self_tid, name) == 1 {
+    let r1: u64 = ufcs_note(c, own, 0);
+  }
+  let e: Mut(modules.SymEntry) = modules.find_here(k, name);
+  if is_null(e) == 0 {
+    if modules.sym_pub(e) == 1 {
+      if ufcs_mod_ok(k, modules.sym_mod(e), self_tid, name) == 1 {
+        let r2: u64 = ufcs_note(c, modules.sym_mod(e), 0);
+      }
+    }
+  }
+  if c.has == 0 { return 0; }
+  hit.modv = c.modv;
+  hit.count = c.count;
+  return 1;
+};

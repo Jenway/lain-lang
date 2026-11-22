@@ -375,6 +375,17 @@ META_CASES = [
     # + 数组 tail 的 10 + 15。
     {"file": "ast_out_expand.lain", "entry": "s0__main", "value": 42,
      "folds": [], "procs": [], "absent": []},
+    # Phase 5.2：UFCS 值接收者 + Ref(Self) / Mut(Self) 首参自动借用。
+    # 41 = len2(Vec2{3, 4}) 的 25 + add_x(mut_of(v), 5) 的 8 + get_x(ref_of(v)) 的 8。
+    {"file": "ufcs_basic.lain", "entry": "s0__main", "value": 41,
+     "folds": [], "procs": [], "absent": []},
+    # Phase 5.2：f"..." 插值写入栈上字符池并经 std::io 输出，返回确定性整数。
+    {"file": "fmt_interp.lain", "entry": "s0__main", "value": 42,
+     "folds": [], "procs": [], "absent": []},
+    # Phase 5.2：match 返回 i64，Some(x) 绑定载荷。
+    # 42 = unwrap_plus_one(Some(41)) 的 42 + unwrap_plus_one(None) 的 0。
+    {"file": "match_enum.lain", "entry": "s0__main", "value": 42,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -412,6 +423,8 @@ META_NEGATIVE = [
     {"file": "legacy_given_err.lain", "why": "given 关键字已退场，必须改用 sig + module + use"},
     {"file": "mod_private_err.lain", "why": "模块私有成员不能被模块外访问"},
     {"file": "sig_mismatch_err.lain", "why": "实现模块缺少签名要求的公开成员"},
+    {"file": "ufcs_ambig_err.lain", "why": "两个活跃模块为同一类型导出同名 UFCS 方法，必须报歧义"},
+    {"file": "match_nonexhaustive_err.lain", "why": "枚举变体未覆盖且没有通配分支，必须报穷尽缺失"},
 ]
 
 

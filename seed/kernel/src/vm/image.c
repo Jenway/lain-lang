@@ -224,7 +224,8 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
       }
       meta->case_base = L->image->case_count;
       for (i = 0; i < inst->case_count; i++) {
-        L->image->case_regions[L->image->case_count++] =
+        uint32_t slot = L->image->case_count++;
+        L->image->case_regions[slot] =
             add_region(L, inst->cases[i].body, id, depth + 1, NULL, 0);
       }
     }

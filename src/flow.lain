@@ -23,8 +23,16 @@ let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
 let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
 let dl_paren = func() -> u64 { return ax.dl_paren(); };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
+let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
+let is_digit_token = func(g: u64, i: u64) -> u64 { return ax.is_digit_token(g, i); };
+let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
+let num_value = func(p: Ref(u8), n: u64) -> u64 { return ax.num_value(p, n); };
+let lit_addr = func(h: u64) -> Ref(u8) { return ax.lit_addr(h); };
+let lit_len = func(h: u64) -> u64 { return ax.lit_len(h); };
+let dl_brace = func() -> u64 { return ax.dl_brace(); };
 let no_slot = func() -> u64 { return ax.no_slot(); };
 let e_ast = func() -> u64 { return ax.e_ast(); };
+let e_type = func() -> u64 { return ax.e_type(); };
 let e_frame = func() -> u64 { return ax.e_frame(); };
 let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
@@ -33,6 +41,7 @@ let val_force = func(k: Mut(st.State), v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { 
 let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.slot_put(k, j, v, tp); };
 let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.slot_get(k, j, tp, out); };
 let slot_copy = func(k: Mut(st.State), dst: u64, src: u64) -> u64 { return cx.slot_copy(k, dst, src); };
+let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
 let alloc_res_slot = func(k: Mut(st.State)) -> u64 { return cx.alloc_res_slot(k); };
 let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
 let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
@@ -189,4 +198,411 @@ let loop_plain = func(k: Mut(st.State), g: u64, j: u64, out: Mut(ty.Val), f: Mut
   env.env_release(k, mark);
   if resj != no_slot() { slot_get(k, resj, wt, out); } else { ty.val_none(out); }
   return j + 1;
+};
+
+// --- match ---------------------------------------------------------------
+// 臂的静态记录：种类（0 整数字面量、1 枚举变体、2 通配）、比对值、载荷绑定
+// 名字、成员指针（载荷偏移与类型由它给出）、体起点、体是否是花括号组。
+let Arm = struct {
+  kind: u64,
+  value: u64,
+  bind: u64,
+  mem: u64,
+  body: u64,
+  blk: u64,
+  region: u64
+};
+
+let arm_rec = func() -> u64 { return 56; };
+
+let arm_at = func(base: Mut(Arm), i: u64) -> Mut(Arm) {
+  return ptr_cast(Mut(Arm), ptr_cast(Mut(u8), base) + i * arm_rec());
+};
+
+let pat_int = func() -> u64 { return 0; };
+let pat_var = func() -> u64 { return 1; };
+let pat_wild = func() -> u64 { return 2; };
+
+// 一条臂发射出来的东西：区域句柄与「体是否必然终结」。
+let ArmOut = struct {
+  region: u64,
+  term: u64,
+  end: u64
+};
+
+// 一次 match 的全部编译状态。resj 在无值类型时为 no_slot。
+let MatchCtx = struct {
+  ag: u64,
+  sh: u64,
+  obj: u64,
+  sel_ty: Mut(ty.Ty),
+  want: Mut(ty.Ty),
+  resj: u64,
+  arms: Mut(Arm),
+  nrec: u64,
+  cases: u64,
+  hasdef: u64,
+  defr: u64,
+  defterm: u64,
+  allterm: u64,
+  pslot: u64,
+  yields: u64,
+  resname: u64
+};
+
+// 通配符也可以省略载荷绑定的下划线。
+let wild_sym = func() -> u64 { return s.intern("_", 1); };
+
+let skip_seps = func(ag: u64, i: u64) -> u64 {
+  if i >= n_count(ag) { return i; }
+  if is_comma(ag, i) == 1 { return skip_seps(ag, i + 1); }
+  if is_semi(ag, i) == 1 { return skip_seps(ag, i + 1); }
+  return i;
+};
+
+// 体的边界：花括号组就一个记号；表达式到顶层的逗号/分号为止。
+let skip_to_sep = func(ag: u64, i: u64) -> u64 {
+  if i >= n_count(ag) { return i; }
+  if is_comma(ag, i) == 1 { return i; }
+  if is_semi(ag, i) == 1 { return i; }
+  return skip_to_sep(ag, i + 1);
+};
+
+let skip_body = func(ag: u64, b: u64) -> u64 {
+  if b >= n_count(ag) { return b; }
+  if is_group(ag, b) == 1 { return b + 1; }
+  return skip_to_sep(ag, b);
+};
+
+// 模式 -> 一条臂记录。变体模式要求 scrutinee 是枚举；整数模式要求整数。
+let pat_parse = func(k: Mut(st.State), ag: u64, i: u64, sh: u64, a: Mut(Arm)) -> u64 {
+  a.bind = 0;
+  a.mem = 0;
+  a.body = 0;
+  a.blk = 0;
+  if is_group(ag, i) == 1 { st.st_fail(k, e_ast()); return i + 1; }
+  if is_digit_token(ag, i) == 1 {
+    if sh != 0 {
+      let m0: Ref(u8) = "integer pattern on enum";
+      let d0: u64 = ir.diag(k, n_at(ag, i), 1, m0, 23);
+      st.st_fail(k, e_type());
+      return i + 1;
+    }
+    let h: u64 = n_at(ag, i);
+    a.kind = pat_int();
+    a.value = num_value(lit_addr(h), lit_len(h));
+    return i + 1;
+  }
+  if is_name(ag, i) == 0 { st.st_fail(k, e_ast()); return i + 1; }
+  let nm: u64 = n_sym(ag, i);
+  if nm == wild_sym() {
+    a.kind = pat_wild();
+    a.value = 0;
+    return i + 1;
+  }
+  if sh == 0 {
+    let m1: Ref(u8) = "match scrutinee is not an enum";
+    let d1: u64 = ir.diag(k, n_at(ag, i), 1, m1, 30);
+    st.st_fail(k, e_type());
+    return i + 1;
+  }
+  let mv: Mut(agg.Member) = agg.mem_find(sh, nm);
+  if is_null(mv) {
+    let m2: Ref(u8) = "unknown enum variant";
+    let d2: u64 = ir.diag(k, n_at(ag, i), 1, m2, 20);
+    st.st_fail(k, e_type());
+    return i + 1;
+  }
+  a.kind = pat_var();
+  a.value = agg.mem_tag(mv);
+  a.mem = mv as u64;
+  a.region = 0;
+  let j: u64 = i + 1;
+  if (j < n_count(ag)) and (is_group(ag, j) == 1) and (delim_of(ag, j) == dl_paren()) {
+    let pg: u64 = n_at(ag, j);
+    if (n_count(pg) > 0) and (is_name(pg, 0) == 1) {
+      let bn: u64 = n_sym(pg, 0);
+      if bn != wild_sym() {
+        if agg.mem_has(mv) == 0 {
+          let m3: Ref(u8) = "variant has no payload";
+          let d3: u64 = ir.diag(k, n_at(pg, 0), 1, m3, 22);
+          st.st_fail(k, e_type());
+          return j + 1;
+        }
+        a.bind = bn;
+      }
+    }
+    return j + 1;
+  }
+  return j;
+};
+
+// `=>` 在词法上落成两个单字节记号 `=` 与 `>`。
+let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
+  if i + 1 >= n_count(ag) { st.st_fail(k, e_ast()); return i + 1; }
+  if n_sym(ag, i) != s.p_eq() { st.st_fail(k, e_ast()); return i + 1; }
+  if n_sym(ag, i + 1) != s.o_gt() { st.st_fail(k, e_ast()); return i + 1; }
+  return i + 2;
+};
+
+// 之前的臂是否已经罩住了这条模式（通配符或同值重复）。
+let shadowed = func(arms: Mut(Arm), upto: u64, kind: u64, value: u64, j: u64) -> u64 {
+  if j >= upto { return 0; }
+  let p: Mut(Arm) = arm_at(arms, j);
+  if p.kind == pat_wild() { return 1; }
+  if (kind != pat_wild()) and (p.kind == kind) and (p.value == value) { return 1; }
+  return shadowed(arms, upto, kind, value, j + 1);
+};
+
+// 分支区全部是表达式的时候，switch 直接带结果：每个分支 #yield 自己的值，
+// 不再占一个栈槽。只要有一条花括号体，就退回结果槽（块体只会写槽）。
+let find_arrow = func(ag: u64, i: u64) -> u64 {
+  if i + 1 >= n_count(ag) { return 0; }
+  if (n_sym(ag, i) == s.p_eq()) and (n_sym(ag, i + 1) == s.o_gt()) { return i + 2; }
+  return find_arrow(ag, i + 1);
+};
+
+let all_expr_arms = func(ag: u64, i: u64) -> u64 {
+  let j: u64 = skip_seps(ag, i);
+  if j >= n_count(ag) { return 1; }
+  let b: u64 = find_arrow(ag, j);
+  if b == 0 { return 0; }
+  if (b < n_count(ag)) and (is_group(ag, b) == 1) and (delim_of(ag, b) == dl_brace()) { return 0; }
+  return all_expr_arms(ag, skip_body(ag, b));
+};
+
+// match 自己的槽从 1000000 起编号，并在当前位置发一条 #alloca：过程入口预排的
+// `_v0..` 池子只装普通 let / 分支结果，match 的临时量不占那份额度。
+let alloc_match_slot = func(k: Mut(st.State)) -> u64 {
+  let n: u64 = st.st_next_tmp(k);
+  let j: u64 = 1000000 + n;
+  let nm: u64 = ir.slot_name(k, j);
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, 8);
+  ir.emit_mem(k, codes.INST_ALLOCA(), nm, t8, 0);
+  ir.args_reset(k);
+  ir.arg_int(k, 0);
+  ir.arg_ref(k, nm);
+  ir.emit_mem(k, codes.INST_STORE(), 0, ir.tbits(k, 64), 0);
+  return j;
+};
+
+// 发射一条臂的区域：载荷先取出绑定到局部槽，体按语句块或表达式编译。
+let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(ArmOut)) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  let mark: u64 = env.env_mark(k);
+  if c.yields == 1 { ir.region_result(k, c.want); }
+  let bt: Mut(u64) = box(k);
+  let ej: u64 = a.body;
+  if a.bind != 0 {
+    let m: Mut(agg.Member) = ptr_cast(Mut(agg.Member), a.mem);
+    let mt: Mut(ty.Ty) = new_ty(k);
+    let rc: u64 = agg.mem_ty(k, m, mt);
+    let pv: Mut(ty.Val) = new_val(k);
+    let ld: u64 = agg.load_at(k, c.obj, agg.mem_off(m), mt, pv);
+    slot_put(k, c.pslot, pv, mt);
+    env.env_push(k, a.bind, c.pslot, mt);
+  }
+  if a.blk == 1 {
+    let bg: u64 = n_at(c.ag, a.body);
+    flow_block(k, bg, 0, bt, c.resj, c.want);
+  } else {
+    let av: Mut(ty.Val) = new_val(k);
+    ej = flow_expr(k, c.ag, a.body, 0, c.want, av);
+    if c.yields == 1 {
+      let yv: Mut(ty.Val) = new_val(k);
+      coerce(k, av, ty.vty(av), c.want, yv);
+      ir.args_reset(k);
+      push_val(k, yv);
+      ir.emit_jump(k, codes.INST_YIELD(), 0);
+    } else {
+      if (st.st_ok(k) == 0) and (c.resj != no_slot()) and (ty.val_known(av) == 1) {
+        slot_put(k, c.resj, av, ty.vty(av));
+      }
+    }
+  }
+  env.env_release(k, mark);
+  if st.st_ok(k) != 0 { return 0; }
+  let h: u64 = ir.region_end(k);
+  o.region = h;
+  o.term = box_get(bt);
+  o.end = ej;
+  return 0;
+};
+
+let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
+  let ag: u64 = c.ag;
+  let j: u64 = skip_seps(ag, i);
+  if j >= n_count(ag) { return j; }
+  let a: Mut(Arm) = arm_at(c.arms, c.nrec);
+  let pj: u64 = pat_parse(k, ag, j, c.sh, a);
+  if st.st_ok(k) != 0 { return pj; }
+  let bj: u64 = arrow_at(k, ag, pj);
+  if st.st_ok(k) != 0 { return bj; }
+  let shadow: u64 = shadowed(c.arms, c.nrec, a.kind, a.value, 0);
+  if shadow == 1 {
+    let m: Ref(u8) = "unreachable match arm";
+    let d: u64 = ir.diag(k, n_at(ag, j), 2, m, 21);
+    return arm_loop(k, c, skip_body(ag, bj));
+  }
+  c.nrec = c.nrec + 1;
+  let isblk: u64 = if (is_group(ag, bj) == 1) and (delim_of(ag, bj) == dl_brace()) { 1 } else { 0 };
+  a.body = bj;
+  a.blk = isblk;
+  if (a.bind != 0) and (c.pslot == no_slot()) { c.pslot = alloc_match_slot(k); }
+  let ao: Mut(ArmOut) = ptr_cast(Mut(ArmOut), st.st_alloc(k, 24));
+  ao.region = 0;
+  ao.term = 0;
+  ao.end = bj;
+  arm_region(k, c, a, ao);
+  if st.st_ok(k) != 0 { return bj; }
+  a.region = ao.region;
+  let next: u64 = if isblk == 1 { bj + 1 } else { ao.end };
+  if a.kind == pat_wild() {
+    c.hasdef = 1;
+    c.defr = ao.region;
+    c.defterm = ao.term;
+  } else {
+    c.cases = c.cases + 1;
+  }
+  if ao.term == 0 { c.allterm = 0; }
+  return arm_loop(k, c, next);
+};
+
+// 分支区域先全部编完再统一 case_add：嵌套 match 的 switch 会在这儿之前
+// 把自己的分支取走，外层的分支不会和它提前混在同一张表里。
+let add_cases = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
+  if i >= c.nrec { return i; }
+  let a: Mut(Arm) = arm_at(c.arms, i);
+  if a.kind != pat_wild() { ir.case_add(k, a.value, a.region); }
+  return add_cases(k, c, i + 1);
+};
+
+// 枚举的穷尽性：全部变体都要有臂（或存在通配符）。
+let covered = func(arms: Mut(Arm), nrec: u64, tag: u64, j: u64) -> u64 {
+  if j >= nrec { return 0; }
+  let p: Mut(Arm) = arm_at(arms, j);
+  if p.kind == pat_wild() { return 1; }
+  if (p.kind == pat_var()) and (p.value == tag) { return 1; }
+  return covered(arms, nrec, tag, j + 1);
+};
+
+let find_missing = func(arms: Mut(Arm), nrec: u64, cnt: u64, i: u64) -> u64 {
+  if i >= cnt { return 0; }
+  if covered(arms, nrec, i, 0) == 0 { return i + 1; }
+  return find_missing(arms, nrec, cnt, i + 1);
+};
+
+let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u64 {
+  if c.sh == 0 {
+    if c.hasdef == 1 { return 1; }
+    let mi: Ref(u8) = "non-exhaustive match";
+    let di: u64 = ir.diag(k, span, 1, mi, 20);
+    st.st_fail(k, e_type());
+    return 0;
+  }
+  if c.hasdef == 1 { return 1; }
+  let cnt: u64 = agg.shp_count(c.sh);
+  let miss: u64 = find_missing(c.arms, c.nrec, cnt, 0);
+  if miss == 0 { return 1; }
+  let me: Ref(u8) = "non-exhaustive match";
+  let de: u64 = ir.diag(k, span, 1, me, 20);
+  st.st_fail(k, e_type());
+  return 0;
+};
+
+// 枚举 scrutinee 取首字节标签当选择子；整数 scrutinee 直接用自身。
+let match_selector = func(k: Mut(st.State), cv: Mut(ty.Val), sh: u64, sel_ty: Mut(ty.Ty), obj: Mut(u64)) -> u64 {
+  let vt: Mut(ty.Ty) = ty.vty(cv);
+  if sh != 0 {
+    let on: u64 = ty.vn(cv);
+    if on == 0 { st.st_fail(k, e_type()); return 0; }
+    ty.ty_u8(sel_ty);
+    let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+    let tagv: Mut(ty.Val) = new_val(k);
+    let ld: u64 = agg.load_at(k, on, 0, t8, tagv);
+    box_put(obj, on);
+    return ty.vn(tagv);
+  }
+  if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return 0; }
+  if ty.tk(vt) != codes.TY_BITS() {
+    let m: Ref(u8) = "match scrutinee must be an integer";
+    let d: u64 = ir.diag(k, 0, 1, m, 34);
+    st.st_fail(k, e_type());
+    return 0;
+  }
+  ty.ty_at(sel_ty, vt);
+  return val_force(k, cv, sel_ty);
+};
+
+pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
+  let n: u64 = n_count(g);
+  let j0: u64 = i + 1;
+  if j0 >= n { st.st_fail(k, e_ast()); return j0; }
+  let cv: Mut(ty.Val) = new_val(k);
+  let sj: u64 = flow_expr(k, g, j0, 0, tnone(k), cv);
+  if st.st_ok(k) != 0 { return sj; }
+  if sj >= n { st.st_fail(k, e_ast()); return sj; }
+  if is_group(g, sj) == 0 { st.st_fail(k, e_ast()); return sj + 1; }
+  if delim_of(g, sj) != dl_brace() { st.st_fail(k, e_ast()); return sj + 1; }
+  let ag: u64 = n_at(g, sj);
+  let sh0: u64 = ty.tsh(ty.vty(cv));
+  let sh: u64 = if sh0 == 0 { 0 } else { if agg.shp_kind(sh0) == agg.kind_enum() { sh0 } else { 0 } };
+  let sel_ty: Mut(ty.Ty) = new_ty(k);
+  let ob: Mut(u64) = box(k);
+  let sel: u64 = match_selector(k, cv, sh, sel_ty, ob);
+  if st.st_ok(k) != 0 { return sj + 1; }
+  let has_res: u64 = ty.ty_known(want);
+  let yields: u64 = if has_res == 1 { all_expr_arms(ag, 0) } else { 0 };
+  let resj: u64 = if (has_res == 1) and (yields == 0) { alloc_match_slot(k) } else { no_slot() };
+  let resname: u64 = if yields == 1 { ir.fresh_t(k) } else { 0 };
+  let cnt: u64 = n_count(ag);
+  let arms: Mut(Arm) = ptr_cast(Mut(Arm), st.st_alloc(k, cnt * arm_rec() + arm_rec()));
+  let c: Mut(MatchCtx) = ptr_cast(Mut(MatchCtx), st.st_alloc(k, 128));
+  c.ag = ag;
+  c.sh = sh;
+  c.obj = box_get(ob);
+  c.sel_ty = sel_ty;
+  c.want = want;
+  c.resj = resj;
+  c.arms = arms;
+  c.nrec = 0;
+  c.cases = 0;
+  c.hasdef = 0;
+  c.defr = 0;
+  c.defterm = 1;
+  c.allterm = 1;
+  c.pslot = no_slot();
+  c.yields = yields;
+  c.resname = resname;
+  let cj: u64 = arm_loop(k, c, 0);
+  if st.st_ok(k) != 0 { return sj + 1; }
+  if c.nrec == 0 {
+    let me: Ref(u8) = "non-exhaustive match";
+    let de: u64 = ir.diag(k, n_at(g, i), 1, me, 20);
+    st.st_fail(k, e_type());
+    return sj + 1;
+  }
+  let span: u64 = n_at(g, i);
+  check_exhaustive(k, c, span);
+  if st.st_ok(k) != 0 { return sj + 1; }
+  add_cases(k, c, 0);
+  if (c.hasdef == 1) and (c.defterm == 0) { c.allterm = 0; }
+  let dref: u64 = if c.hasdef == 1 { c.defr } else {
+    let dr: u64 = ir.region_begin(k);
+    if c.yields == 1 { ir.region_result(k, c.want); }
+    ir.args_reset(k);
+    ir.emit_jump(k, codes.INST_UNREACHABLE(), 0);
+    ir.region_end(k)
+  };
+  if c.allterm == 1 { box_put(term, 1); }
+  ir.emit_switch(k, c.resname, sel, sel_ty, dref);
+  if st.st_ok(k) != 0 { return sj + 1; }
+  if yields == 1 {
+    ty.val_ref(out, resname, want);
+  } else {
+    if has_res == 1 { slot_get(k, resj, want, out); } else { ty.val_none(out); }
+  }
+  return sj + 1;
 };

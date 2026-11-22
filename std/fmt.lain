@@ -1,0 +1,174 @@
+// std::fmt —— f"..." 的栈上格式化基元。
+// 格式化只往一块静态字符池里写字节，整个过程不申请任何堆内存。池头一格是
+// 轮转分块号，其后是 16 个 256 字节的消息区：一条消息领一块，用完不归还，
+// 下一块接着用，写到池尾再从第一块绕回。所以顺序调用与循环里的调用都不会
+// 耗尽池子，同时还能容纳若干条并存的消息。一条消息写满仍未结束时立即以
+// 除零陷阱终止程序，绝不静默截断。
+//
+// 两种用法：
+//   * 游标显式传递 —— fmt_begin 领一块，write_* 逐个写，fmt_done/emit 收尾；
+//   * f"..." 展开 —— 每一步交给 f_step，把上一段消息、一个值与尾随文本
+//     接成新的一条消息，回现成的 Slice(u8)。以槽结尾的模板补一段空文本，
+//     所以实参形状总是 (头, 值, 尾)。
+let io = import("std::io");
+
+// 格式化游标：base 是本条消息的起点，p 是下一个待写字节，left 是剩余字节数。
+pub let Cursor = struct {
+  base: Mut(u8),
+  p: Mut(u8),
+  left: u64,
+};
+
+// 常量写成过程：顶层值符号在结构体字段与实参位置上会有物理类型偏差。
+pub let capacity = func() -> u64 { return 256; };
+let chunks = func() -> u64 { return 16; };
+// 池布局：1 个轮转号 + 16 块 * 256 字节 = 1 + 512 个字。
+let pool_words = func() -> u64 { return 513; };
+let data_off = func() -> u64 { return 8; };
+
+let pool: Array(u64, 513) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+let slots = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(pool), pool_words());
+};
+
+let bytes = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), mut_of(pool));
+};
+
+// 缓冲用尽：整除零在 VM 与 C99 后端都是确定性陷阱。
+let overflow = func(c: Cursor) -> Cursor {
+  let boom: u64 = 1 / c.left;
+  return Cursor { base: c.base, p: c.p, left: c.left + boom };
+};
+
+let put_byte = func(c: Cursor, b: u8) -> Cursor {
+  if c.left == 0 { return overflow(c); }
+  let q: Mut(u8) = c.p;
+  deref(q) = b;
+  return Cursor { base: c.base, p: q + 1, left: c.left - 1 };
+};
+
+let str_at = func(c: Cursor, s: Slice(u8), i: u64) -> Cursor {
+  if i >= s.len { return c; }
+  return str_at(put_byte(c, s[i]), s, i + 1);
+};
+
+pub let write_str = func(c: Cursor, s: Slice(u8)) -> Cursor {
+  return str_at(c, s, 0);
+};
+
+pub let write_u64 = func(c: Cursor, v: u64) -> Cursor {
+  if v >= 10 {
+    let head: Cursor = write_u64(c, v / 10);
+    return put_byte(head, (48 + (v % 10)) as u8);
+  }
+  return put_byte(c, (48 + v) as u8);
+};
+
+// 负数先写符号再按补码取绝对值，i64 最小值也不会溢出。
+pub let write_i64 = func(c: Cursor, v: i64) -> Cursor {
+  if v < 0 {
+    let head: Cursor = put_byte(c, 45);
+    let uv: u64 = v as u64;
+    return write_u64(head, 0 - uv);
+  }
+  return write_u64(c, v as u64);
+};
+
+pub let write_bool = func(c: Cursor, v: bool) -> Cursor {
+  if v { return write_str(c, "true"); }
+  return write_str(c, "false");
+};
+
+// 开一条消息：领一块字符区，把轮转号推到下一块。
+pub let fmt_begin = func() -> Cursor {
+  let s: MutSlice(u64) = slots();
+  let idx: u64 = s[0];
+  s[0] = (idx + 1) % chunks();
+  let base: Mut(u8) = bytes() + data_off() + idx * capacity();
+  return Cursor { base: base, p: base, left: capacity() };
+};
+
+// 收一条消息：交回指向已写字节的只读视图。
+pub let fmt_done = func(c: Cursor) -> Slice(u8) {
+  return make_slice(Slice(u8), c.base, capacity() - c.left);
+};
+
+// --- 可格式化 -----------------------------------------------------------
+// 可格式化的值：见证模块把自己的类型写进游标。
+pub let Formattable = sig {
+  pub let Self: Type;
+  pub let write: Fn((Cursor, Self) -> Cursor);
+};
+
+pub let fmt_val = func(c: Cursor, v: T) ?{ T: Type, f: Formattable } -> Cursor {
+  return f.write(c, v);
+};
+
+pub let FmtI64: Formattable = module {
+  pub let Self = i64;
+  pub let write = func(c: Cursor, v: i64) -> Cursor { return write_i64(c, v); };
+};
+
+pub let FmtU64: Formattable = module {
+  pub let Self = u64;
+  pub let write = func(c: Cursor, v: u64) -> Cursor { return write_u64(c, v); };
+};
+
+pub let FmtBool: Formattable = module {
+  pub let Self = bool;
+  pub let write = func(c: Cursor, v: bool) -> Cursor { return write_bool(c, v); };
+};
+
+pub let FmtStr: Formattable = module {
+  pub let Self = Slice(u8);
+  pub let write = func(c: Cursor, s: Slice(u8)) -> Cursor { return write_str(c, s); };
+};
+
+// --- 模板的一步 ---
+// 收 (上一段消息, 值, 尾随文本) 三段：上一段消息先抄进新领的消息区，再写值
+// 与尾随文本。展开出来的模板是一条左折叠，每个槽各自单态化出写入过程。
+pub let f_step = func(head: Slice(u8), v: T, tail: Slice(u8)) ?{ T: Type, w: Formattable } -> Slice(u8) {
+  let c0: Cursor = write_str(fmt_begin(), head);
+  let c1: Cursor = w.write(c0, v);
+  return fmt_done(write_str(c1, tail));
+};
+
+// --- 写到标准输出 -------------------------------------------------------
+pub let emit = func(c: Cursor) -> u64 {
+  return io.write_str(fmt_done(c));
+};
+
+pub let emit_line = func(c: Cursor) -> u64 {
+  return io.write_str(fmt_done(c)) + io.newline();
+};
+
+pub let print = func(s: Slice(u8)) -> u64 { return io.write_str(s); };
+
+pub let println = func(s: Slice(u8)) -> u64 { return io.write_str(s) + io.newline(); };
