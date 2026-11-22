@@ -1,0 +1,1518 @@
+// LAINIR 模块表示与静态验证器。
+//
+// 表示用平坦下标：过程、区域、指令、分支各自放在连续记录里，彼此用下标引用。
+// 所有聚合都用 Mut 指针加计数表示，验证器按记录类型的大小做字节偏移访问，
+// 不依赖数组下标的元素步长。调用方用 IrBuilder 在一块原始字节区上顺序追加
+// 记录，构造过程不产生任何堆分配。
+// 验证器只读模块；绑定表放在 VfCtx 的定长数组里。
+let codes = import("src::ir_codes");
+
+// --- 类型类别 -------------------------------------------------------------
+// 物理类型类别与 ir_codes 的编号保持一致；void 与 bool 是本层额外区分。
+pub let TY_VOID = func() -> u64 { return 5; };
+pub let TY_BITS = func() -> u64 { return codes.TY_BITS(); };
+pub let TY_FLOAT = func() -> u64 { return codes.TY_FLOATS(); };
+pub let TY_ADDR = func() -> u64 { return codes.TY_ADDR(); };
+pub let TY_BOOL = func() -> u64 { return 4; };
+pub let TY_VEC = func() -> u64 { return codes.TY_VEC(); };
+
+// --- 操作数类别 -----------------------------------------------------------
+pub let OP_VALUE = func() -> u64 { return 0; };
+pub let OP_INT = func() -> u64 { return 1; };
+pub let OP_FLOAT = func() -> u64 { return 2; };
+
+// --- 验证器错误码 ---------------------------------------------------------
+pub let ERR_OK = func() -> u64 { return 0; };
+pub let ERR_BAD_OPCODE = func() -> u64 { return 1; };
+pub let ERR_UNDEF_VAL = func() -> u64 { return 2; };
+pub let ERR_TYPE_MISMATCH = func() -> u64 { return 3; };
+pub let ERR_NO_TERM = func() -> u64 { return 4; };
+pub let ERR_DUP_DEF = func() -> u64 { return 5; };
+pub let ERR_BAD_SWITCH = func() -> u64 { return 6; };
+
+// --- 容量上限 -------------------------------------------------------------
+pub let MAX_OPERANDS = func() -> u64 { return 8; };
+pub let MAX_RESULTS = func() -> u64 { return 2; };
+pub let MAX_BINDINGS = func() -> u64 { return 64; };
+pub let MAX_LOOPS = func() -> u64 { return 8; };
+pub let MAX_DEPTH = func() -> u64 { return 64; };
+
+pub let INST_CAP = func() -> u64 { return 8; };
+pub let REGION_CAP = func() -> u64 { return 8; };
+pub let PROC_CAP = func() -> u64 { return 2; };
+pub let PARAM_CAP = func() -> u64 { return 8; };
+pub let TYPE_CAP = func() -> u64 { return 4; };
+pub let CASE_CAP = func() -> u64 { return 4; };
+
+// 没有区域的哨兵值。
+pub let NO_REGION = func() -> u64 { return 4294967295; };
+
+// --- 数据结构 -------------------------------------------------------------
+pub let IrType = struct {
+  kind: u64,
+  width: u64,
+};
+
+pub let IrOperand = struct {
+  kind: u64,
+  name: u64,
+  bits: u64,
+};
+
+pub let IrParam = struct {
+  name: u64,
+  ty_kind: u64,
+  ty_width: u64,
+};
+
+pub let IrCase = struct {
+  value: u64,
+  body: u64,
+};
+
+pub let IrInst = struct {
+  kind: u64,
+  ty_kind: u64,
+  ty_width: u64,
+  has_ty: u64,
+  op0_kind: u64,
+  op0_name: u64,
+  op0_bits: u64,
+  op1_kind: u64,
+  op1_name: u64,
+  op1_bits: u64,
+  op2_kind: u64,
+  op2_name: u64,
+  op2_bits: u64,
+  op3_kind: u64,
+  op3_name: u64,
+  op3_bits: u64,
+  op4_kind: u64,
+  op4_name: u64,
+  op4_bits: u64,
+  op5_kind: u64,
+  op5_name: u64,
+  op5_bits: u64,
+  op6_kind: u64,
+  op6_name: u64,
+  op6_bits: u64,
+  op7_kind: u64,
+  op7_name: u64,
+  op7_bits: u64,
+  operand_count: u64,
+  r0: u64,
+  r1: u64,
+  result_count: u64,
+  body: u64,
+  else_body: u64,
+  default_body: u64,
+  cases_at: u64,
+  case_count: u64,
+  label: u64,
+  symbol: u64,
+  align: u64,
+};
+
+pub let IrRegion = struct {
+  params: Ref(IrParam),
+  param_count: u64,
+  results: Ref(IrType),
+  result_count: u64,
+  insts: Ref(u64),
+  inst_count: u64,
+};
+
+pub let IrProc = struct {
+  name: u64,
+  link_name: u64,
+  is_extern: u64,
+  params: Ref(IrParam),
+  param_count: u64,
+  results: Ref(IrType),
+  result_count: u64,
+  body: u64,
+};
+
+pub let IrModule = struct {
+  name: u64,
+  procs: Ref(IrProc),
+  proc_count: u64,
+  regions: Ref(IrRegion),
+  region_count: u64,
+  insts: Ref(IrInst),
+  inst_count: u64,
+  cases: Ref(IrCase),
+  case_count: u64,
+  scratch: Mut(u64),
+};
+
+// --- 构造器 ---------------------------------------------------------------
+pub let op_zero = func() -> IrOperand {
+  return IrOperand { kind: OP_VALUE(), name: 0, bits: 0 };
+};
+
+pub let op_value = func(name: u64) -> IrOperand {
+  return IrOperand { kind: OP_VALUE(), name: name, bits: 0 };
+};
+
+pub let op_int = func(bits: u64) -> IrOperand {
+  return IrOperand { kind: OP_INT(), name: 0, bits: bits };
+};
+
+pub let op_float = func(bits: u64) -> IrOperand {
+  return IrOperand { kind: OP_FLOAT(), name: 0, bits: bits };
+};
+
+pub let type_void = func() -> IrType { return IrType { kind: TY_VOID(), width: 0 }; };
+pub let type_bits = func(w: u64) -> IrType { return IrType { kind: TY_BITS(), width: w }; };
+pub let type_float = func(w: u64) -> IrType { return IrType { kind: TY_FLOAT(), width: w }; };
+pub let type_addr = func() -> IrType { return IrType { kind: TY_ADDR(), width: 0 }; };
+pub let type_bool = func() -> IrType { return IrType { kind: TY_BOOL(), width: 1 }; };
+pub let type_vec = func(w: u64) -> IrType { return IrType { kind: TY_VEC(), width: w }; };
+
+pub let param_new = func(name: u64, ty: IrType) -> IrParam {
+  return IrParam { name: name, ty_kind: ty.kind, ty_width: ty.width };
+};
+
+pub let case_new = func(value: u64, body: u64) -> IrCase {
+  return IrCase { value: value, body: body };
+};
+
+pub let inst_new = func(kind: u64) -> IrInst {
+  return IrInst {
+    kind: kind,
+    ty_kind: TY_VOID(),
+    ty_width: 0,
+    has_ty: 0,
+    op0_kind: OP_VALUE(),
+    op0_name: 0,
+    op0_bits: 0,
+    op1_kind: OP_VALUE(),
+    op1_name: 0,
+    op1_bits: 0,
+    op2_kind: OP_VALUE(),
+    op2_name: 0,
+    op2_bits: 0,
+    op3_kind: OP_VALUE(),
+    op3_name: 0,
+    op3_bits: 0,
+    op4_kind: OP_VALUE(),
+    op4_name: 0,
+    op4_bits: 0,
+    op5_kind: OP_VALUE(),
+    op5_name: 0,
+    op5_bits: 0,
+    op6_kind: OP_VALUE(),
+    op6_name: 0,
+    op6_bits: 0,
+    op7_kind: OP_VALUE(),
+    op7_name: 0,
+    op7_bits: 0,
+    operand_count: 0,
+    r0: 0,
+    r1: 0,
+    result_count: 0,
+    body: NO_REGION(),
+    else_body: NO_REGION(),
+    default_body: NO_REGION(),
+    cases_at: 0,
+    case_count: 0,
+    label: 0,
+    symbol: 0,
+    align: 0,
+  };
+};
+
+pub let region_new = func(params: Ref(IrParam), param_count: u64,
+                          results: Ref(IrType), result_count: u64,
+                          insts: Ref(u64), inst_count: u64) -> IrRegion {
+  return IrRegion {
+    params: params,
+    param_count: param_count,
+    results: results,
+    result_count: result_count,
+    insts: insts,
+    inst_count: inst_count,
+  };
+};
+
+pub let proc_new = func(name: u64, params: Ref(IrParam), param_count: u64,
+                        results: Ref(IrType), result_count: u64) -> IrProc {
+  return IrProc {
+    name: name,
+    link_name: 0,
+    is_extern: 0,
+    params: params,
+    param_count: param_count,
+    results: results,
+    result_count: result_count,
+    body: NO_REGION(),
+  };
+};
+
+pub let module_new = func(name: u64, procs: Ref(IrProc), proc_count: u64,
+                          regions: Ref(IrRegion), region_count: u64,
+                          insts: Ref(IrInst), inst_count: u64,
+                          cases: Ref(IrCase), case_count: u64,
+                          scratch: Mut(u64)) -> IrModule {
+  return IrModule {
+    name: name,
+    procs: procs,
+    proc_count: proc_count,
+    regions: regions,
+    region_count: region_count,
+    insts: insts,
+    inst_count: inst_count,
+    cases: cases,
+    case_count: case_count,
+    scratch: scratch,
+  };
+};
+
+// --- 指令修改 -------------------------------------------------------------
+let set_op = func(it: Mut(IrInst), i: u64, op: IrOperand) -> u64 {
+  if i == 0 { it.op0_kind = op.kind; it.op0_name = op.name; it.op0_bits = op.bits; }
+  if i == 1 { it.op1_kind = op.kind; it.op1_name = op.name; it.op1_bits = op.bits; }
+  if i == 2 { it.op2_kind = op.kind; it.op2_name = op.name; it.op2_bits = op.bits; }
+  if i == 3 { it.op3_kind = op.kind; it.op3_name = op.name; it.op3_bits = op.bits; }
+  if i == 4 { it.op4_kind = op.kind; it.op4_name = op.name; it.op4_bits = op.bits; }
+  if i == 5 { it.op5_kind = op.kind; it.op5_name = op.name; it.op5_bits = op.bits; }
+  if i == 6 { it.op6_kind = op.kind; it.op6_name = op.name; it.op6_bits = op.bits; }
+  if i == 7 { it.op7_kind = op.kind; it.op7_name = op.name; it.op7_bits = op.bits; }
+  return 0;
+};
+
+pub let inst_set_type = func(it: Mut(IrInst), kind: u64, width: u64) -> u64 {
+  it.ty_kind = kind;
+  it.ty_width = width;
+  it.has_ty = 1;
+  return 0;
+};
+
+pub let inst_add_operand = func(it: Mut(IrInst), op: IrOperand) -> u64 {
+  let at: u64 = it.operand_count;
+  if at >= MAX_OPERANDS() { return 0; }
+  set_op(it, at, op);
+  it.operand_count = at + 1;
+  return 0;
+};
+
+pub let inst_add_result = func(it: Mut(IrInst), name: u64) -> u64 {
+  let at: u64 = it.result_count;
+  if at >= MAX_RESULTS() { return 0; }
+  if at == 0 { it.r0 = name; }
+  if at == 1 { it.r1 = name; }
+  it.result_count = at + 1;
+  return 0;
+};
+
+pub let inst_set_body = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.body = ri;
+  return 0;
+};
+
+pub let inst_set_else = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.else_body = ri;
+  return 0;
+};
+
+pub let inst_set_default = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.default_body = ri;
+  return 0;
+};
+
+pub let inst_set_cases = func(it: Mut(IrInst), at: u64, count: u64) -> u64 {
+  it.cases_at = at;
+  it.case_count = count;
+  return 0;
+};
+
+pub let inst_set_label = func(it: Mut(IrInst), label: u64) -> u64 {
+  it.label = label;
+  return 0;
+};
+
+pub let inst_set_symbol = func(it: Mut(IrInst), symbol: u64) -> u64 {
+  it.symbol = symbol;
+  return 0;
+};
+
+pub let inst_set_align = func(it: Mut(IrInst), align: u64) -> u64 {
+  it.align = align;
+  return 0;
+};
+
+pub let proc_set_body = func(p: Mut(IrProc), ri: u64) -> u64 {
+  p.body = ri;
+  return 0;
+};
+
+pub let proc_set_extern = func(p: Mut(IrProc), link: u64) -> u64 {
+  p.is_extern = 1;
+  p.link_name = link;
+  p.body = NO_REGION();
+  return 0;
+};
+
+// --- 记录读取 -------------------------------------------------------------
+pub let inst_op = func(it: IrInst, i: u64) -> IrOperand {
+  if i == 0 { return IrOperand { kind: it.op0_kind, name: it.op0_name, bits: it.op0_bits }; }
+  if i == 1 { return IrOperand { kind: it.op1_kind, name: it.op1_name, bits: it.op1_bits }; }
+  if i == 2 { return IrOperand { kind: it.op2_kind, name: it.op2_name, bits: it.op2_bits }; }
+  if i == 3 { return IrOperand { kind: it.op3_kind, name: it.op3_name, bits: it.op3_bits }; }
+  if i == 4 { return IrOperand { kind: it.op4_kind, name: it.op4_name, bits: it.op4_bits }; }
+  if i == 5 { return IrOperand { kind: it.op5_kind, name: it.op5_name, bits: it.op5_bits }; }
+  if i == 6 { return IrOperand { kind: it.op6_kind, name: it.op6_name, bits: it.op6_bits }; }
+  if i == 7 { return IrOperand { kind: it.op7_kind, name: it.op7_name, bits: it.op7_bits }; }
+  return op_zero();
+};
+
+pub let inst_result_name = func(it: IrInst, i: u64) -> u64 {
+  if i == 0 { return it.r0; }
+  if i == 1 { return it.r1; }
+  return 0;
+};
+
+pub let inst_ty = func(it: IrInst) -> IrType {
+  return IrType { kind: it.ty_kind, width: it.ty_width };
+};
+
+pub let param_ty = func(p: IrParam) -> IrType {
+  return IrType { kind: p.ty_kind, width: p.ty_width };
+};
+
+// 记录按自身大小做字节偏移，避免依赖数组下标的元素步长。
+pub let inst_slot = func(base: Ref(IrInst), i: u64) -> Mut(IrInst) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(IrInst), raw + i * size_of(IrInst));
+};
+
+pub let region_slot = func(base: Ref(IrRegion), i: u64) -> Mut(IrRegion) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(IrRegion), raw + i * size_of(IrRegion));
+};
+
+pub let proc_slot = func(base: Ref(IrProc), i: u64) -> Mut(IrProc) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(IrProc), raw + i * size_of(IrProc));
+};
+
+pub let param_slot = func(base: Ref(IrParam), i: u64) -> Ref(IrParam) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Ref(IrParam), raw + i * size_of(IrParam));
+};
+
+pub let type_slot = func(base: Ref(IrType), i: u64) -> Ref(IrType) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Ref(IrType), raw + i * size_of(IrType));
+};
+
+pub let case_slot = func(base: Ref(IrCase), i: u64) -> Ref(IrCase) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Ref(IrCase), raw + i * size_of(IrCase));
+};
+
+pub let inst_at_ref = func(base: Ref(IrInst), i: u64) -> IrInst {
+  return deref(inst_slot(base, i));
+};
+
+pub let region_at_ref = func(base: Ref(IrRegion), i: u64) -> IrRegion {
+  return deref(region_slot(base, i));
+};
+
+pub let proc_at_ref = func(base: Ref(IrProc), i: u64) -> IrProc {
+  return deref(proc_slot(base, i));
+};
+
+pub let param_at_ref = func(base: Ref(IrParam), i: u64) -> IrParam {
+  return deref(param_slot(base, i));
+};
+
+pub let type_at_ref = func(base: Ref(IrType), i: u64) -> IrType {
+  return deref(type_slot(base, i));
+};
+
+pub let case_at_ref = func(base: Ref(IrCase), i: u64) -> IrCase {
+  return deref(case_slot(base, i));
+};
+
+// --- 构造器（顺序追加到原始字节区）---------------------------------------
+pub let IrBuilder = struct {
+  insts: Mut(IrInst),
+  inst_count: u64,
+  regions: Mut(IrRegion),
+  region_count: u64,
+  procs: Mut(IrProc),
+  proc_count: u64,
+  params: Mut(IrParam),
+  param_count: u64,
+  types: Mut(IrType),
+  type_count: u64,
+  cases: Mut(IrCase),
+  case_count: u64,
+  scratch: Mut(u64),
+};
+
+pub let builder_new = func(arena: Mut(u8)) -> IrBuilder {
+  let inst_bytes: u64 = INST_CAP() * size_of(IrInst);
+  let region_bytes: u64 = REGION_CAP() * size_of(IrRegion);
+  let proc_bytes: u64 = PROC_CAP() * size_of(IrProc);
+  let param_bytes: u64 = PARAM_CAP() * size_of(IrParam);
+  let type_bytes: u64 = TYPE_CAP() * size_of(IrType);
+  let regions_at: Mut(u8) = arena + inst_bytes;
+  let procs_at: Mut(u8) = regions_at + region_bytes;
+  let params_at: Mut(u8) = procs_at + proc_bytes;
+  let types_at: Mut(u8) = params_at + param_bytes;
+  let cases_at: Mut(u8) = types_at + type_bytes;
+  let scratch_at: Mut(u64) = ptr_cast(Mut(u64), cases_at + CASE_CAP() * size_of(IrCase));
+  return IrBuilder {
+    insts: ptr_cast(Mut(IrInst), arena),
+    inst_count: 0,
+    regions: ptr_cast(Mut(IrRegion), regions_at),
+    region_count: 0,
+    procs: ptr_cast(Mut(IrProc), procs_at),
+    proc_count: 0,
+    params: ptr_cast(Mut(IrParam), params_at),
+    param_count: 0,
+    types: ptr_cast(Mut(IrType), types_at),
+    type_count: 0,
+    cases: ptr_cast(Mut(IrCase), cases_at),
+    case_count: 0,
+    scratch: scratch_at,
+  };
+};
+
+pub let builder_clear = func(b: Mut(IrBuilder)) -> u64 {
+  b.inst_count = 0;
+  b.region_count = 0;
+  b.proc_count = 0;
+  b.param_count = 0;
+  b.type_count = 0;
+  b.case_count = 0;
+  return 0;
+};
+
+pub let add_inst = func(b: Mut(IrBuilder), kind: u64) -> Mut(IrInst) {
+  let i: u64 = b.inst_count;
+  let p: Mut(IrInst) = inst_slot(b.insts, i);
+  deref(p) = inst_new(kind);
+  b.inst_count = i + 1;
+  return p;
+};
+
+pub let add_region = func(b: Mut(IrBuilder), params: Ref(IrParam), param_count: u64,
+                          results: Ref(IrType), result_count: u64,
+                          insts: Ref(u64), inst_count: u64) -> Mut(IrRegion) {
+  let i: u64 = b.region_count;
+  let p: Mut(IrRegion) = region_slot(b.regions, i);
+  deref(p) = region_new(params, param_count, results, result_count, insts, inst_count);
+  b.region_count = i + 1;
+  return p;
+};
+
+pub let add_proc = func(b: Mut(IrBuilder), name: u64,
+                        params: Ref(IrParam), param_count: u64,
+                        results: Ref(IrType), result_count: u64) -> Mut(IrProc) {
+  let i: u64 = b.proc_count;
+  let p: Mut(IrProc) = proc_slot(b.procs, i);
+  deref(p) = proc_new(name, params, param_count, results, result_count);
+  b.proc_count = i + 1;
+  return p;
+};
+
+pub let add_param = func(b: Mut(IrBuilder), name: u64, ty: IrType) -> Ref(IrParam) {
+  let i: u64 = b.param_count;
+  let p: Ref(IrParam) = param_slot(b.params, i);
+  let raw: Mut(IrParam) = ptr_cast(Mut(IrParam), p);
+  deref(raw) = param_new(name, ty);
+  b.param_count = i + 1;
+  return p;
+};
+
+pub let add_type = func(b: Mut(IrBuilder), ty: IrType) -> Ref(IrType) {
+  let i: u64 = b.type_count;
+  let p: Ref(IrType) = type_slot(b.types, i);
+  let raw: Mut(IrType) = ptr_cast(Mut(IrType), p);
+  deref(raw) = ty;
+  b.type_count = i + 1;
+  return p;
+};
+
+pub let add_case = func(b: Mut(IrBuilder), value: u64, body: u64) -> Ref(IrCase) {
+  let i: u64 = b.case_count;
+  let p: Ref(IrCase) = case_slot(b.cases, i);
+  let raw: Mut(IrCase) = ptr_cast(Mut(IrCase), p);
+  deref(raw) = case_new(value, body);
+  b.case_count = i + 1;
+  return p;
+};
+
+pub let builder_module = func(b: Mut(IrBuilder), name: u64) -> IrModule {
+  return module_new(name,
+                    ptr_cast(Ref(IrProc), b.procs), b.proc_count,
+                    ptr_cast(Ref(IrRegion), b.regions), b.region_count,
+                    ptr_cast(Ref(IrInst), b.insts), b.inst_count,
+                    ptr_cast(Ref(IrCase), b.cases), b.case_count,
+                    b.scratch);
+};
+
+// --- 验证上下文 -----------------------------------------------------------
+// 绑定表与循环标签表都由调用方提供的原始数组充当；上下文自身只存指针与计数。
+pub let VfCtx = struct {
+  m: Ref(IrModule),
+  proc: u64,
+  count: u64,
+  depth: u64,
+  err: u64,
+  names: Mut(u64),
+  kinds: Mut(u64),
+  widths: Mut(u64),
+  loop_depth: u64,
+  loop_labels: Mut(u64),
+  loop_regions: Mut(u64),
+};
+
+pub let VF_SCRATCH = func() -> u64 {
+  return MAX_BINDINGS() * 3 + MAX_LOOPS() * 2;
+};
+
+// 绑定表是 u64 数组；指针算术按字节推进，所以下标必须乘上元素宽度。
+let word_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), base) + i * size_of(u64));
+};
+
+pub let vf_new = func(m: Ref(IrModule)) -> VfCtx {
+  let scratch: Mut(u64) = m.scratch;
+  let names_at: Mut(u64) = scratch;
+  let kinds_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS());
+  let widths_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS() * 2);
+  let labels_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS() * 3);
+  let regions_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS() * 3 + MAX_LOOPS());
+  return VfCtx {
+    m: m,
+    proc: 0,
+    count: 0,
+    depth: 0,
+    err: 0,
+    names: names_at,
+    kinds: kinds_at,
+    widths: widths_at,
+    loop_depth: 0,
+    loop_labels: labels_at,
+    loop_regions: regions_at,
+  };
+};
+
+// --- 基础判定 -------------------------------------------------------------
+let set_err = func(c: Mut(VfCtx), code: u64) -> u64 {
+  if c.err == 0 { c.err = code; }
+  return code;
+};
+
+let type_ok = func(t: IrType) -> u64 {
+  let k: u64 = t.kind;
+  if k == TY_VOID() {
+    if t.width != 0 { return 0; }
+    return 1;
+  }
+  if k == TY_BITS() {
+    if t.width == 0 { return 0; }
+    if t.width > 64 { return 0; }
+    return 1;
+  }
+  if k == TY_FLOAT() {
+    if t.width == 32 { return 1; }
+    if t.width == 64 { return 1; }
+    return 0;
+  }
+  if k == TY_ADDR() { return 1; }
+  if k == TY_BOOL() {
+    if t.width == 1 { return 1; }
+    return 0;
+  }
+  if k == TY_VEC() {
+    if (t.width == 128) or (t.width == 256) or (t.width == 512) { return 1; }
+    return 0;
+  }
+  return 0;
+};
+
+let same_type = func(a: IrType, b: IrType) -> u64 {
+  if a.kind != b.kind { return 0; }
+  if a.kind == TY_ADDR() { return 1; }
+  if a.width == b.width { return 1; }
+  return 0;
+};
+
+let byte_addressable = func(t: IrType) -> u64 {
+  if t.kind == TY_ADDR() { return 1; }
+  if t.width == 0 { return 0; }
+  if t.width > 64 { return 0; }
+  if (t.width - t.width / 8 * 8) != 0 { return 0; }
+  return 1;
+};
+
+let is_bool_type = func(t: IrType) -> u64 {
+  if t.kind == TY_BOOL() {
+    if t.width == 1 { return 1; }
+    return 0;
+  }
+  if t.kind == TY_BITS() {
+    if t.width == 1 { return 1; }
+    return 0;
+  }
+  return 0;
+};
+
+// --- 操作码分类 -----------------------------------------------------------
+let is_int_arith = func(k: u64) -> u64 {
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_ASHR()) { return 1; }
+  return 0;
+};
+
+let is_float_arith = func(k: u64) -> u64 {
+  if (k >= codes.INST_FADD()) and (k <= codes.INST_FNEG()) { return 1; }
+  return 0;
+};
+
+let is_int_compare = func(k: u64) -> u64 {
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return 1; }
+  return 0;
+};
+
+let is_float_compare = func(k: u64) -> u64 {
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return 1; }
+  return 0;
+};
+
+let is_int_conv = func(k: u64) -> u64 {
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return 1; }
+  return 0;
+};
+
+let is_float_conv = func(k: u64) -> u64 {
+  if (k >= codes.INST_FPEXT()) and (k <= codes.INST_UITOFP()) { return 1; }
+  return 0;
+};
+
+let is_vector = func(k: u64) -> u64 {
+  if (k >= codes.INST_VADD()) and (k <= codes.INST_VCMPGT()) { return 1; }
+  return 0;
+};
+
+let is_atomic = func(k: u64) -> u64 {
+  if (k >= codes.INST_XCHG()) and (k <= codes.INST_RMW_XOR()) { return 1; }
+  return 0;
+};
+
+let is_terminator = func(k: u64) -> u64 {
+  if k == codes.INST_YIELD() { return 1; }
+  if k == codes.INST_BREAK() { return 1; }
+  if k == codes.INST_CONTINUE() { return 1; }
+  if k == codes.INST_RETURN() { return 1; }
+  if k == codes.INST_UNREACHABLE() { return 1; }
+  return 0;
+};
+
+// --- 绑定 -----------------------------------------------------------------
+let scan_name = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
+  if i >= c.count { return 0; }
+  if deref(word_slot(c.names, i)) == name { return i + 1; }
+  return scan_name(c, name, i + 1);
+};
+
+let binding_pos = func(c: Mut(VfCtx), name: u64) -> u64 {
+  if name == 0 { return 0; }
+  return scan_name(c, name, 0);
+};
+
+let bind = func(c: Mut(VfCtx), name: u64, t: IrType) -> u64 {
+  if name == 0 { return set_err(c, ERR_UNDEF_VAL()); }
+  if binding_pos(c, name) != 0 { return set_err(c, ERR_DUP_DEF()); }
+  if c.count >= MAX_BINDINGS() { return set_err(c, ERR_DUP_DEF()); }
+  let at: u64 = c.count;
+  deref(word_slot(c.names, at)) = name;
+  deref(word_slot(c.kinds, at)) = t.kind;
+  deref(word_slot(c.widths, at)) = t.width;
+  c.count = at + 1;
+  return 0;
+};
+
+let bind_params = func(c: Mut(VfCtx), base: Ref(IrParam), count: u64, i: u64) -> u64 {
+  if i >= count { return 0; }
+  let p: IrParam = param_at_ref(base, i);
+  let t: IrType = param_ty(p);
+  if type_ok(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = bind(c, p.name, t);
+  if e != 0 { return e; }
+  return bind_params(c, base, count, i + 1);
+};
+
+let check_type_array = func(c: Mut(VfCtx), base: Ref(IrType), count: u64, i: u64) -> u64 {
+  if i >= count { return 0; }
+  let t: IrType = type_at_ref(base, i);
+  if type_ok(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return check_type_array(c, base, count, i + 1);
+};
+
+let op_kind_plus = func(c: Mut(VfCtx), op: IrOperand) -> u64 {
+  if op.kind != OP_VALUE() { return 0; }
+  let p: u64 = binding_pos(c, op.name);
+  if p == 0 { return 0; }
+  return deref(word_slot(c.kinds, p - 1)) + 1;
+};
+
+let op_width = func(c: Mut(VfCtx), op: IrOperand) -> u64 {
+  if op.kind != OP_VALUE() { return 0; }
+  let p: u64 = binding_pos(c, op.name);
+  if p == 0 { return 0; }
+  return deref(word_slot(c.widths, p - 1));
+};
+
+let op_is_addr = func(c: Mut(VfCtx), op: IrOperand) -> u64 {
+  let kp: u64 = op_kind_plus(c, op);
+  if kp == 0 { return 0; }
+  if kp - 1 == TY_ADDR() { return 1; }
+  return 0;
+};
+
+let match_value_type = func(c: Mut(VfCtx), op: IrOperand, want: IrType) -> u64 {
+  if op.kind != OP_VALUE() { return 1; }
+  let p: u64 = binding_pos(c, op.name);
+  if p == 0 { return 0; }
+  let have: IrType = IrType { kind: deref(word_slot(c.kinds, p - 1)), width: deref(word_slot(c.widths, p - 1)) };
+  return same_type(have, want);
+};
+
+// --- 操作数检查 -----------------------------------------------------------
+let check_operand_list = func(c: Mut(VfCtx), it: IrInst, i: u64) -> u64 {
+  if i >= it.operand_count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  if op.kind == OP_VALUE() {
+    if binding_pos(c, op.name) == 0 { return set_err(c, ERR_UNDEF_VAL()); }
+  } else if (op.kind != OP_INT()) and (op.kind != OP_FLOAT()) {
+    return set_err(c, ERR_BAD_OPCODE());
+  }
+  return check_operand_list(c, it, i + 1);
+};
+
+let check_operand_class = func(c: Mut(VfCtx), it: IrInst, i: u64,
+                               want_kind: u64, want_width: u64, check_width: u64) -> u64 {
+  if i >= it.operand_count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  if op.kind == OP_VALUE() {
+    let p: u64 = binding_pos(c, op.name);
+    if p == 0 { return set_err(c, ERR_UNDEF_VAL()); }
+    if deref(word_slot(c.kinds, p - 1)) != want_kind { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if check_width == 1 {
+      if deref(word_slot(c.widths, p - 1)) != want_width { return set_err(c, ERR_TYPE_MISMATCH()); }
+    }
+  }
+  return check_operand_class(c, it, i + 1, want_kind, want_width, check_width);
+};
+
+let check_result_count = func(c: Mut(VfCtx), it: IrInst, want: u64) -> u64 {
+  if it.result_count != want { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return 0;
+};
+
+// --- 记录读取 -------------------------------------------------------------
+let region_at = func(c: Mut(VfCtx), ri: u64) -> IrRegion {
+  return region_at_ref(c.m.regions, ri);
+};
+
+let region_ok = func(c: Mut(VfCtx), ri: u64) -> u64 {
+  if ri == NO_REGION() { return 0; }
+  if ri >= c.m.region_count { return 0; }
+  return 1;
+};
+
+let proc_at = func(c: Mut(VfCtx), pi: u64) -> IrProc {
+  return proc_at_ref(c.m.procs, pi);
+};
+
+let inst_at = func(c: Mut(VfCtx), ii: u64) -> IrInst {
+  return inst_at_ref(c.m.insts, ii);
+};
+
+let case_at = func(c: Mut(VfCtx), ci: u64) -> IrCase {
+  return case_at_ref(c.m.cases, ci);
+};
+
+let region_inst = func(r: IrRegion, i: u64) -> u64 {
+  return deref(ptr_cast(Ref(u64), ptr_cast(Mut(u8), r.insts) + i * size_of(u64)));
+};
+
+let scan_proc = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
+  if i >= c.m.proc_count { return 0; }
+  let p: IrProc = proc_at(c, i);
+  if p.name == name { return i + 1; }
+  return scan_proc(c, name, i + 1);
+};
+
+let find_proc = func(c: Mut(VfCtx), name: u64) -> u64 {
+  if name == 0 { return 0; }
+  return scan_proc(c, name, 0);
+};
+
+let scan_loop = func(c: Mut(VfCtx), label: u64, i: u64) -> u64 {
+  if i >= c.loop_depth { return 0; }
+  let at: u64 = c.loop_depth - 1 - i;
+  if deref(word_slot(c.loop_labels, at)) == label { return deref(word_slot(c.loop_regions, at)) + 1; }
+  return scan_loop(c, label, i + 1);
+};
+
+let find_loop = func(c: Mut(VfCtx), label: u64) -> u64 {
+  if label == 0 { return 0; }
+  return scan_loop(c, label, 0);
+};
+
+// --- 结构性终止判定 -------------------------------------------------------
+let cases_terminate = func(c: Mut(VfCtx), cases_at: u64, case_count: u64, i: u64, depth: u64) -> u64 {
+  if i >= case_count { return 1; }
+  let cs: IrCase = case_at(c, cases_at + i);
+  let r: u64 = region_terminates(c, cs.body, depth + 1);
+  if r == 0 { return 0; }
+  return cases_terminate(c, cases_at, case_count, i + 1, depth);
+};
+
+let region_terminates = func(c: Mut(VfCtx), ri: u64, depth: u64) -> u64 {
+  if depth > MAX_DEPTH() { return 0; }
+  if region_ok(c, ri) == 0 { return 0; }
+  let r: IrRegion = region_at(c, ri);
+  if r.inst_count == 0 { return 0; }
+  let last: u64 = region_inst(r, r.inst_count - 1);
+  if last >= c.m.inst_count { return 0; }
+  let it: IrInst = inst_at(c, last);
+  if is_terminator(it.kind) == 1 { return 1; }
+  if it.kind == codes.INST_IF() {
+    if it.else_body == NO_REGION() { return 0; }
+    let a: u64 = region_terminates(c, it.body, depth + 1);
+    if a == 0 { return 0; }
+    return region_terminates(c, it.else_body, depth + 1);
+  }
+  if it.kind == codes.INST_SWITCH() {
+    if it.default_body == NO_REGION() { return 0; }
+    let a: u64 = cases_terminate(c, it.cases_at, it.case_count, 0, depth + 1);
+    if a == 0 { return 0; }
+    return region_terminates(c, it.default_body, depth + 1);
+  }
+  return 0;
+};
+
+let scan_break_cases = func(c: Mut(VfCtx), it: IrInst, label: u64, want: u64, j: u64, depth: u64) -> u64 {
+  if j >= it.case_count { return 0; }
+  let kase: IrCase = case_at(c, it.cases_at + j);
+  let hit: u64 = contains_break(c, kase.body, label, want, depth + 1);
+  if hit == 1 { return 1; }
+  return scan_break_cases(c, it, label, want, j + 1, depth);
+};
+
+let scan_breaks = func(c: Mut(VfCtx), r: IrRegion, label: u64, want: u64, i: u64, depth: u64) -> u64 {
+  if i >= r.inst_count { return 0; }
+  let ii: u64 = region_inst(r, i);
+  if ii >= c.m.inst_count { return 0; }
+  let it: IrInst = inst_at(c, ii);
+  if it.kind == codes.INST_BREAK() {
+    if (it.label == label) and (it.operand_count == want) { return 1; }
+  }
+  let a: u64 = 0;
+  if it.body != NO_REGION() {
+    a = contains_break(c, it.body, label, want, depth + 1);
+  }
+  if a == 1 { return 1; }
+  if it.else_body != NO_REGION() {
+    a = contains_break(c, it.else_body, label, want, depth + 1);
+  }
+  if a == 1 { return 1; }
+  if it.default_body != NO_REGION() {
+    a = contains_break(c, it.default_body, label, want, depth + 1);
+  }
+  if a == 1 { return 1; }
+  let hit: u64 = scan_break_cases(c, it, label, want, 0, depth);
+  if hit == 1 { return 1; }
+  return scan_breaks(c, r, label, want, i + 1, depth);
+};
+
+let contains_break = func(c: Mut(VfCtx), ri: u64, label: u64, want: u64, depth: u64) -> u64 {
+  if depth > MAX_DEPTH() { return 0; }
+  if region_ok(c, ri) == 0 { return 0; }
+  let r: IrRegion = region_at(c, ri);
+  return scan_breaks(c, r, label, want, 0, depth);
+};
+
+let scan_yield_cases = func(c: Mut(VfCtx), it: IrInst, want: u64, j: u64, depth: u64) -> u64 {
+  if j >= it.case_count { return 1; }
+  let kase: IrCase = case_at(c, it.cases_at + j);
+  let hit: u64 = region_yields(c, kase.body, want, 0, depth + 1);
+  if hit == 0 { return 0; }
+  return scan_yield_cases(c, it, want, j + 1, depth);
+};
+
+let region_yields = func(c: Mut(VfCtx), ri: u64, want: u64, loop_label: u64, depth: u64) -> u64 {
+  if depth > MAX_DEPTH() { return 0; }
+  if region_ok(c, ri) == 0 { return 0; }
+  if loop_label != 0 { return contains_break(c, ri, loop_label, want, depth); }
+  let r: IrRegion = region_at(c, ri);
+  if r.inst_count == 0 { return 0; }
+  let ii: u64 = region_inst(r, r.inst_count - 1);
+  if ii >= c.m.inst_count { return 0; }
+  let it: IrInst = inst_at(c, ii);
+  if it.kind == codes.INST_YIELD() {
+    if it.operand_count == want { return 1; }
+    return 0;
+  }
+  if it.kind == codes.INST_RETURN() { return 1; }
+  if it.kind == codes.INST_BREAK() { return 1; }
+  if it.kind == codes.INST_CONTINUE() { return 1; }
+  if it.kind == codes.INST_UNREACHABLE() { return 1; }
+  if it.kind == codes.INST_IF() {
+    if it.else_body == NO_REGION() { return 0; }
+    let a: u64 = region_yields(c, it.body, want, 0, depth + 1);
+    if a == 0 { return 0; }
+    return region_yields(c, it.else_body, want, 0, depth + 1);
+  }
+  if it.kind == codes.INST_SWITCH() {
+    if it.default_body == NO_REGION() { return 0; }
+    let hit: u64 = scan_yield_cases(c, it, want, 0, depth);
+    if hit == 0 { return 0; }
+    return region_yields(c, it.default_body, want, 0, depth + 1);
+  }
+  return 0;
+};
+
+// --- 指令类型检查 ---------------------------------------------------------
+let check_int_arith = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_BITS() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width > 64 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_BITS(), t.width, 1);
+};
+
+let check_int_compare = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_BITS() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width > 64 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_BITS(), t.width, 1);
+};
+
+let check_float_arith = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_FLOAT() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if (t.width != 32) and (t.width != 64) { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_FLOAT(), t.width, 1);
+};
+
+let check_float_compare = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_FLOAT() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if (t.width != 32) and (t.width != 64) { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_FLOAT(), t.width, 1);
+};
+
+let check_int_conv = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_BITS() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.width > 64 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_BITS(), 0, 0);
+};
+
+let check_bitcast = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_BITS() and t.kind != TY_ADDR() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if type_ok(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  if it.operand_count != 1 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let op: IrOperand = inst_op(it, 0);
+  let kp: u64 = op_kind_plus(c, op);
+  if kp != 0 {
+    let k: u64 = kp - 1;
+    if k != TY_BITS() and k != TY_ADDR() { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if (k == TY_BITS()) and (t.kind == TY_BITS()) {
+      if op_width(c, op) != t.width { return set_err(c, ERR_TYPE_MISMATCH()); }
+    }
+  }
+  return 0;
+};
+
+let check_float_conv = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_FLOAT() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if (t.width != 32) and (t.width != 64) { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  if it.kind == codes.INST_SITOFP() or it.kind == codes.INST_UITOFP() {
+    return check_operand_class(c, it, 0, TY_BITS(), 0, 0);
+  }
+  return check_operand_class(c, it, 0, TY_FLOAT(), 0, 0);
+};
+
+let check_vector = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind != TY_VEC() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if type_ok(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  return check_operand_class(c, it, 0, TY_VEC(), t.width, 1);
+};
+
+let check_atomic = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if type_ok(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return check_result_count(c, it, 1);
+};
+
+let check_lea = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.operand_count != 4 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  let base: IrOperand = inst_op(it, 0);
+  if base.kind != OP_VALUE() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if op_is_addr(c, base) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return 0;
+};
+
+let check_load = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if t.kind == TY_VOID() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if byte_addressable(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.operand_count != 1 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  let mem_ptr: IrOperand = inst_op(it, 0);
+  if mem_ptr.kind != OP_VALUE() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if op_is_addr(c, mem_ptr) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return 0;
+};
+
+let check_store = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let t: IrType = inst_ty(it);
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if byte_addressable(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.operand_count != 2 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 0);
+  if e != 0 { return e; }
+  let value: IrOperand = inst_op(it, 0);
+  let dest: IrOperand = inst_op(it, 1);
+  if dest.kind != OP_VALUE() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if op_is_addr(c, dest) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if match_value_type(c, value, t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return 0;
+};
+
+let check_alloca = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if type_ok(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.operand_count != 1 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  let count: IrOperand = inst_op(it, 0);
+  if count.kind != OP_INT() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if count.bits == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return 0;
+};
+
+let check_call_args = func(c: Mut(VfCtx), it: IrInst, base: Ref(IrParam), count: u64, i: u64) -> u64 {
+  if i >= count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  let p: IrParam = param_at_ref(base, i);
+  if match_value_type(c, op, param_ty(p)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return check_call_args(c, it, base, count, i + 1);
+};
+
+let check_call = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.symbol == 0 {
+    if it.operand_count == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    let target: IrOperand = inst_op(it, 0);
+    if target.kind != OP_VALUE() { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if op_is_addr(c, target) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if it.has_ty == 1 {
+      if type_ok(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+      return check_result_count(c, it, 1);
+    }
+    return check_result_count(c, it, 0);
+  }
+  let pi: u64 = find_proc(c, it.symbol);
+  if pi == 0 { return set_err(c, ERR_BAD_OPCODE()); }
+  let p: IrProc = proc_at(c, pi - 1);
+  if it.operand_count != p.param_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = check_result_count(c, it, p.result_count);
+  if e != 0 { return e; }
+  return check_call_args(c, it, p.params, p.param_count, 0);
+};
+
+let check_if = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.operand_count != 1 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let cond: IrOperand = inst_op(it, 0);
+  if cond.kind != OP_VALUE() { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let kp: u64 = op_kind_plus(c, cond);
+  if kp == 0 { return set_err(c, ERR_UNDEF_VAL()); }
+  let ck: IrType = IrType { kind: kp - 1, width: op_width(c, cond) };
+  if is_bool_type(ck) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if region_ok(c, it.body) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let thenr: IrRegion = region_at(c, it.body);
+  if it.result_count != thenr.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if (it.result_count > 0) and (it.else_body == NO_REGION()) {
+    return set_err(c, ERR_TYPE_MISMATCH());
+  }
+  let e: u64 = verify_region(c, it.body);
+  if e != 0 { return e; }
+  if it.else_body != NO_REGION() {
+    if region_ok(c, it.else_body) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    let elser: IrRegion = region_at(c, it.else_body);
+    if elser.result_count != thenr.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+    let e2: u64 = verify_region(c, it.else_body);
+    if e2 != 0 { return e2; }
+    if it.result_count > 0 {
+      let y: u64 = region_yields(c, it.else_body, it.result_count, 0, 0);
+      if y == 0 { return set_err(c, ERR_NO_TERM()); }
+    }
+  }
+  if it.result_count > 0 {
+    let y: u64 = region_yields(c, it.body, it.result_count, 0, 0);
+    if y == 0 { return set_err(c, ERR_NO_TERM()); }
+  }
+  return 0;
+};
+
+let check_loop = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.operand_count != 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.label == 0 { return set_err(c, ERR_BAD_OPCODE()); }
+  if region_ok(c, it.body) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let r: IrRegion = region_at(c, it.body);
+  if it.result_count != r.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if c.loop_depth >= MAX_LOOPS() { return set_err(c, ERR_BAD_OPCODE()); }
+  let at: u64 = c.loop_depth;
+  deref(word_slot(c.loop_labels, at)) = it.label;
+  deref(word_slot(c.loop_regions, at)) = it.body;
+  c.loop_depth = at + 1;
+  let e: u64 = verify_region(c, it.body);
+  c.loop_depth = at;
+  if e != 0 { return e; }
+  let t: u64 = region_terminates(c, it.body, 0);
+  if t == 0 { return set_err(c, ERR_NO_TERM()); }
+  if it.result_count > 0 {
+    let y: u64 = contains_break(c, it.body, it.label, it.result_count, 0);
+    if y == 0 { return set_err(c, ERR_NO_TERM()); }
+  }
+  return 0;
+};
+
+let scan_dup_case = func(c: Mut(VfCtx), it: IrInst, value: u64, j: u64, upto: u64) -> u64 {
+  if j >= upto { return 0; }
+  let prev: IrCase = case_at(c, it.cases_at + j);
+  if prev.value == value { return 1; }
+  return scan_dup_case(c, it, value, j + 1, upto);
+};
+
+let check_case_list = func(c: Mut(VfCtx), it: IrInst, want: u64, i: u64) -> u64 {
+  if i >= it.case_count { return 0; }
+  let cs: IrCase = case_at(c, it.cases_at + i);
+  if region_ok(c, cs.body) == 0 { return set_err(c, ERR_BAD_SWITCH()); }
+  let cr: IrRegion = region_at(c, cs.body);
+  if cr.result_count != want { return set_err(c, ERR_BAD_SWITCH()); }
+  let dup: u64 = scan_dup_case(c, it, cs.value, 0, i);
+  if dup == 1 { return set_err(c, ERR_BAD_SWITCH()); }
+  let e: u64 = verify_region(c, cs.body);
+  if e != 0 { return e; }
+  if want > 0 {
+    let y: u64 = region_yields(c, cs.body, want, 0, 0);
+    if y == 0 { return set_err(c, ERR_NO_TERM()); }
+  }
+  return check_case_list(c, it, want, i + 1);
+};
+
+let check_switch = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.operand_count != 1 { return set_err(c, ERR_BAD_SWITCH()); }
+  let sel: IrOperand = inst_op(it, 0);
+  if sel.kind != OP_VALUE() { return set_err(c, ERR_BAD_SWITCH()); }
+  let kp: u64 = op_kind_plus(c, sel);
+  if kp == 0 { return set_err(c, ERR_UNDEF_VAL()); }
+  if kp - 1 == TY_FLOAT() { return set_err(c, ERR_BAD_SWITCH()); }
+  if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let st: IrType = IrType { kind: kp - 1, width: op_width(c, sel) };
+  if same_type(st, inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.default_body == NO_REGION() { return set_err(c, ERR_BAD_SWITCH()); }
+  if region_ok(c, it.default_body) == 0 { return set_err(c, ERR_BAD_SWITCH()); }
+  if it.cases_at + it.case_count > c.m.case_count { return set_err(c, ERR_BAD_SWITCH()); }
+  let dr: IrRegion = region_at(c, it.default_body);
+  let want: u64 = dr.result_count;
+  if it.result_count != want { return set_err(c, ERR_BAD_SWITCH()); }
+  let e: u64 = check_case_list(c, it, want, 0);
+  if e != 0 { return e; }
+  let de: u64 = verify_region(c, it.default_body);
+  if de != 0 { return de; }
+  if want > 0 {
+    let y: u64 = region_yields(c, it.default_body, want, 0, 0);
+    if y == 0 { return set_err(c, ERR_NO_TERM()); }
+  }
+  return 0;
+};
+
+let yield_matches = func(c: Mut(VfCtx), it: IrInst, base: Ref(IrType), count: u64, i: u64) -> u64 {
+  if i >= count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  if match_value_type(c, op, type_at_ref(base, i)) == 0 {
+    return set_err(c, ERR_TYPE_MISMATCH());
+  }
+  return yield_matches(c, it, base, count, i + 1);
+};
+
+let check_yield = func(c: Mut(VfCtx), ri: u64, it: IrInst) -> u64 {
+  if it.result_count != 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if region_ok(c, ri) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let r: IrRegion = region_at(c, ri);
+  if it.operand_count != r.result_count { return set_err(c, ERR_NO_TERM()); }
+  return yield_matches(c, it, r.results, r.result_count, 0);
+};
+
+let jump_matches = func(c: Mut(VfCtx), it: IrInst, lr: IrRegion, is_break: u64, i: u64) -> u64 {
+  if i >= it.operand_count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  let wt: IrType = if is_break == 1 {
+    type_at_ref(lr.results, i)
+  } else {
+    param_ty(param_at_ref(lr.params, i))
+  };
+  if match_value_type(c, op, wt) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return jump_matches(c, it, lr, is_break, i + 1);
+};
+
+let check_jump = func(c: Mut(VfCtx), it: IrInst, is_break: u64) -> u64 {
+  let lr1: u64 = find_loop(c, it.label);
+  if lr1 == 0 { return set_err(c, ERR_BAD_OPCODE()); }
+  let lr: IrRegion = region_at(c, lr1 - 1);
+  if it.result_count != 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let want: u64 = if is_break == 1 { lr.result_count } else { lr.param_count };
+  if it.operand_count != want { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return jump_matches(c, it, lr, is_break, 0);
+};
+
+let return_matches = func(c: Mut(VfCtx), it: IrInst, base: Ref(IrType), count: u64, i: u64) -> u64 {
+  if i >= count { return 0; }
+  let op: IrOperand = inst_op(it, i);
+  if match_value_type(c, op, type_at_ref(base, i)) == 0 {
+    return set_err(c, ERR_TYPE_MISMATCH());
+  }
+  return return_matches(c, it, base, count, i + 1);
+};
+
+let check_return = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let p: IrProc = proc_at(c, c.proc);
+  if it.result_count != 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  if it.operand_count != p.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return return_matches(c, it, p.results, p.result_count, 0);
+};
+
+let check_unreachable = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  if it.operand_count != 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  return check_result_count(c, it, 0);
+};
+
+// --- 单条指令 -------------------------------------------------------------
+pub let verify_inst = func(c: Mut(VfCtx), ri: u64, ii: u64) -> u64 {
+  if ii >= c.m.inst_count { return set_err(c, ERR_BAD_OPCODE()); }
+  let it: IrInst = inst_at(c, ii);
+  if it.kind >= codes.INST_COUNT() { return set_err(c, ERR_BAD_OPCODE()); }
+  if it.operand_count > MAX_OPERANDS() { return set_err(c, ERR_BAD_OPCODE()); }
+  if it.result_count > MAX_RESULTS() { return set_err(c, ERR_BAD_OPCODE()); }
+  let oe: u64 = check_operand_list(c, it, 0);
+  if oe != 0 { return oe; }
+  let k: u64 = it.kind;
+  if is_int_arith(k) == 1 { return check_int_arith(c, it); }
+  if is_float_arith(k) == 1 { return check_float_arith(c, it); }
+  if is_int_compare(k) == 1 { return check_int_compare(c, it); }
+  if is_float_compare(k) == 1 { return check_float_compare(c, it); }
+  if is_int_conv(k) == 1 { return check_int_conv(c, it); }
+  if k == codes.INST_BITCAST() { return check_bitcast(c, it); }
+  if is_float_conv(k) == 1 { return check_float_conv(c, it); }
+  if is_vector(k) == 1 { return check_vector(c, it); }
+  if is_atomic(k) == 1 { return check_atomic(c, it); }
+  if k == codes.INST_LEA() { return check_lea(c, it); }
+  if k == codes.INST_LOAD() { return check_load(c, it); }
+  if k == codes.INST_STORE() { return check_store(c, it); }
+  if k == codes.INST_ALLOCA() { return check_alloca(c, it); }
+  if k == codes.INST_CALL() { return check_call(c, it); }
+  if k == codes.INST_IF() { return check_if(c, it); }
+  if k == codes.INST_LOOP() { return check_loop(c, it); }
+  if k == codes.INST_SWITCH() { return check_switch(c, it); }
+  if k == codes.INST_YIELD() { return check_yield(c, ri, it); }
+  if k == codes.INST_BREAK() { return check_jump(c, it, 1); }
+  if k == codes.INST_CONTINUE() { return check_jump(c, it, 0); }
+  if k == codes.INST_RETURN() { return check_return(c, it); }
+  if k == codes.INST_UNREACHABLE() { return check_unreachable(c, it); }
+  return set_err(c, ERR_BAD_OPCODE());
+};
+
+// --- 结果类型 -------------------------------------------------------------
+let result_type = func(c: Mut(VfCtx), it: IrInst, i: u64) -> IrType {
+  let k: u64 = it.kind;
+  if is_int_compare(k) == 1 { return type_bool(); }
+  if is_float_compare(k) == 1 { return type_bool(); }
+  if k == codes.INST_LEA() { return type_addr(); }
+  if k == codes.INST_ALLOCA() { return type_addr(); }
+  if k == codes.INST_IF() {
+    if region_ok(c, it.body) == 0 { return type_void(); }
+    let r: IrRegion = region_at(c, it.body);
+    if i >= r.result_count { return type_void(); }
+    return type_at_ref(r.results, i);
+  }
+  if k == codes.INST_LOOP() {
+    if region_ok(c, it.body) == 0 { return type_void(); }
+    let r: IrRegion = region_at(c, it.body);
+    if i >= r.result_count { return type_void(); }
+    return type_at_ref(r.results, i);
+  }
+  if k == codes.INST_SWITCH() {
+    if region_ok(c, it.default_body) == 0 { return type_void(); }
+    let r: IrRegion = region_at(c, it.default_body);
+    if i >= r.result_count { return type_void(); }
+    return type_at_ref(r.results, i);
+  }
+  if k == codes.INST_CALL() and it.symbol != 0 {
+    let pi: u64 = find_proc(c, it.symbol);
+    if pi == 0 { return type_void(); }
+    let p: IrProc = proc_at(c, pi - 1);
+    if i >= p.result_count { return type_void(); }
+    return type_at_ref(p.results, i);
+  }
+  return inst_ty(it);
+};
+
+let define_results = func(c: Mut(VfCtx), it: IrInst, i: u64) -> u64 {
+  if i >= it.result_count { return 0; }
+  let name: u64 = inst_result_name(it, i);
+  let t: IrType = result_type(c, it, i);
+  if type_ok(t) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = bind(c, name, t);
+  if e != 0 { return e; }
+  return define_results(c, it, i + 1);
+};
+
+// --- 区域 -----------------------------------------------------------------
+let scan_region = func(c: Mut(VfCtx), ri: u64, r: IrRegion, i: u64) -> u64 {
+  if i >= r.inst_count { return 0; }
+  let ii: u64 = region_inst(r, i);
+  if ii >= c.m.inst_count { return set_err(c, ERR_BAD_OPCODE()); }
+  if i > 0 {
+    let prev_ii: u64 = region_inst(r, i - 1);
+    if prev_ii >= c.m.inst_count { return set_err(c, ERR_BAD_OPCODE()); }
+    let prev: IrInst = inst_at(c, prev_ii);
+    if is_terminator(prev.kind) == 1 { return set_err(c, ERR_NO_TERM()); }
+  }
+  let e: u64 = verify_inst(c, ri, ii);
+  if e != 0 { return e; }
+  let it: IrInst = inst_at(c, ii);
+  let de: u64 = define_results(c, it, 0);
+  if de != 0 { return de; }
+  return scan_region(c, ri, r, i + 1);
+};
+
+let region_body = func(c: Mut(VfCtx), ri: u64) -> u64 {
+  if c.depth >= MAX_DEPTH() { return set_err(c, ERR_BAD_OPCODE()); }
+  c.depth = c.depth + 1;
+  let r: IrRegion = region_at(c, ri);
+  let te: u64 = check_type_array(c, r.results, r.result_count, 0);
+  if te != 0 { c.depth = c.depth - 1; return te; }
+  let pe: u64 = bind_params(c, r.params, r.param_count, 0);
+  if pe != 0 { c.depth = c.depth - 1; return pe; }
+  let e: u64 = scan_region(c, ri, r, 0);
+  c.depth = c.depth - 1;
+  return e;
+};
+
+pub let verify_region = func(c: Mut(VfCtx), ri: u64) -> u64 {
+  if region_ok(c, ri) == 0 { return set_err(c, ERR_BAD_OPCODE()); }
+  let saved: u64 = c.count;
+  let e: u64 = region_body(c, ri);
+  c.count = saved;
+  return e;
+};
+
+// --- 过程 -----------------------------------------------------------------
+pub let verify_proc = func(c: Mut(VfCtx), pi: u64) -> u64 {
+  if pi >= c.m.proc_count { return set_err(c, ERR_BAD_OPCODE()); }
+  let p: IrProc = proc_at(c, pi);
+  if p.name == 0 { return set_err(c, ERR_BAD_OPCODE()); }
+  c.proc = pi;
+  c.count = 0;
+  c.depth = 0;
+  c.loop_depth = 0;
+  let pe: u64 = bind_params(c, p.params, p.param_count, 0);
+  if pe != 0 { return pe; }
+  let re: u64 = check_type_array(c, p.results, p.result_count, 0);
+  if re != 0 { return re; }
+  if p.is_extern == 1 {
+    if p.body != NO_REGION() { return set_err(c, ERR_TYPE_MISMATCH()); }
+    return 0;
+  }
+  if region_ok(c, p.body) == 0 { return set_err(c, ERR_NO_TERM()); }
+  let r: IrRegion = region_at(c, p.body);
+  if r.result_count != p.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  let e: u64 = verify_region(c, p.body);
+  if e != 0 { return e; }
+  let t: u64 = region_terminates(c, p.body, 0);
+  if t == 0 { return set_err(c, ERR_NO_TERM()); }
+  return 0;
+};
+
+// --- 模块 -----------------------------------------------------------------
+let dup_prev = func(c: Mut(VfCtx), i: u64, j: u64) -> u64 {
+  if j >= i { return 0; }
+  let a: IrProc = proc_at(c, i);
+  let b: IrProc = proc_at(c, j);
+  if (a.name != 0) and (a.name == b.name) {
+    let both_extern: u64 = if (a.is_extern == 1) and (b.is_extern == 1) { 1 } else { 0 };
+    let same_link: u64 = if (a.link_name != 0) and (a.link_name == b.link_name) { 1 } else { 0 };
+    if (both_extern == 1) and (same_link == 1) {
+      return dup_prev(c, i, j + 1);
+    }
+    return ERR_DUP_DEF();
+  }
+  return dup_prev(c, i, j + 1);
+};
+
+let check_dup_procs = func(c: Mut(VfCtx), i: u64) -> u64 {
+  if i >= c.m.proc_count { return 0; }
+  let e: u64 = dup_prev(c, i, 0);
+  if e != 0 { return e; }
+  return check_dup_procs(c, i + 1);
+};
+
+let check_procs = func(c: Mut(VfCtx), i: u64) -> u64 {
+  if i >= c.m.proc_count { return 0; }
+  let e: u64 = verify_proc(c, i);
+  if e != 0 { return e; }
+  return check_procs(c, i + 1);
+};
+
+pub let verify_module = func(m: Ref(IrModule)) -> u64 {
+  let c0: VfCtx = vf_new(m);
+  let c: Mut(VfCtx) = mut_of(c0);
+  let de: u64 = check_dup_procs(c, 0);
+  if de != 0 { return de; }
+  return check_procs(c, 0);
+};

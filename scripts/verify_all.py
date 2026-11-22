@@ -398,6 +398,11 @@ META_CASES = [
     # 55 = 纯实例化 7*2+1 的 15 + 效应实例化 20*2 的 40。
     {"file": "effect_row_poly.lain", "entry": "s0__main", "value": 55,
      "folds": [], "procs": [], "absent": []},
+    # Phase 6.1：纯 Lain 的 LAINIR 校验器与 C99 后端。内存里构造的合法模块必须
+    # 被 verify_module 判为 0，四类畸形模块必须各自被拒；前导 + 过程发射出的
+    # C99 文本必须含 switch / lain_load_bits / return 且非空。
+    {"file": "phase6_ir_c99.lain", "entry": "s0__main", "value": 61,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -758,8 +763,10 @@ def main():
                            for n in sorted(os.listdir(std_dir)) if n.endswith(".lain")]
     src_dir = os.path.join(ROOT, "src")
     if os.path.isdir(src_dir):
-        modern_targets += [os.path.join(src_dir, n)
-                           for n in sorted(os.listdir(src_dir)) if n.endswith(".lain")]
+        for dirpath, dirnames, filenames in os.walk(src_dir):
+            dirnames.sort()
+            modern_targets += [os.path.join(dirpath, n)
+                               for n in sorted(filenames) if n.endswith(".lain")]
     given_exempt = {os.path.join(META_TESTS, "legacy_given_err.lain")}
     for zpath in modern_targets:
         with open(zpath, "r", encoding="utf-8") as zh:

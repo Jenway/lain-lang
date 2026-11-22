@@ -1,0 +1,1375 @@
+// LAINIR -> C99 后端：把内存里的 LAINIR 模块确定性地写成标准 C99 文本。
+// 输出放在调用方给的 MutSlice(u8) 里；写满时 writer 标记失败，后续写入不再推进。
+let codes = import("src::ir_codes");
+let vf = import("src::ir::verify");
+let mx = import("src::modules");
+
+// --- writer ---------------------------------------------------------------
+pub let C99Writer = struct {
+  buf: MutSlice(u8),
+  len: u64,
+  ok: u64,
+};
+
+pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
+  return C99Writer { buf: buf, len: 0, ok: 1 };
+};
+
+pub let writer_new = func(buf: MutSlice(u8)) -> C99Writer {
+  return new_writer(buf);
+};
+
+pub let writer_len = func(w: Mut(C99Writer)) -> u64 {
+  return w.len;
+};
+
+pub let writer_ok = func(w: Mut(C99Writer)) -> u64 {
+  return w.ok;
+};
+
+pub let put_byte = func(w: Mut(C99Writer), b: u8) -> u64 {
+  if w.ok == 0 { return 0; }
+  if w.len >= w.buf.len {
+    w.ok = 0;
+    return 0;
+  }
+  w.buf[w.len] = b;
+  w.len = w.len + 1;
+  return 1;
+};
+
+pub let put_str = func(w: Mut(C99Writer), s: Slice(u8)) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < s.len {
+    let rc: u64 = put_byte(w, s[i]);
+    i = i + 1;
+  };
+  return 1;
+};
+
+pub let put_line = func(w: Mut(C99Writer), s: Slice(u8)) -> u64 {
+  let rc: u64 = put_str(w, s);
+  return put_byte(w, 10);
+};
+
+let put_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
+  let b: u8 = (48 + d) as u8;
+  return put_byte(w, b);
+};
+
+let put_hex_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
+  if d < 10 { return put_digit(w, d); }
+  let b: u8 = (87 + d) as u8;
+  return put_byte(w, b);
+};
+
+pub let put_u64_dec = func(w: Mut(C99Writer), v: u64) -> u64 {
+  if v >= 10 {
+    let rc: u64 = put_u64_dec(w, v / 10);
+  }
+  return put_digit(w, v - v / 10 * 10);
+};
+
+let put_u64_hex_digits = func(w: Mut(C99Writer), v: u64) -> u64 {
+  if v >= 16 {
+    let rc: u64 = put_u64_hex_digits(w, v / 16);
+  }
+  return put_hex_digit(w, v - v / 16 * 16);
+};
+
+pub let put_u64_hex = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let rc: u64 = put_str(w, "0x");
+  return put_u64_hex_digits(w, v);
+};
+
+pub let put_hex2 = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let hi: u64 = v / 16;
+  let lo: u64 = v - hi * 16;
+  let a: u64 = put_hex_digit(w, hi);
+  return put_hex_digit(w, lo);
+};
+
+pub let put_u64_lit = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let a: u64 = put_str(w, "UINT64_C(");
+  let b: u64 = put_u64_dec(w, v);
+  return put_byte(w, 41);
+};
+
+// --- C99 类型 -------------------------------------------------------------
+pub let c_type_name = func(t: vf.IrType) -> Slice(u8) {
+  if t.kind == vf.TY_VOID() { return "void"; }
+  if t.kind == vf.TY_ADDR() { return "void *"; }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return "float"; }
+    return "double";
+  }
+  if t.kind == vf.TY_BOOL() { return "uint8_t"; }
+  if t.kind == vf.TY_VEC() { return "uint64_t"; }
+  if t.width <= 8 { return "uint8_t"; }
+  if t.width <= 16 { return "uint16_t"; }
+  if t.width <= 32 { return "uint32_t"; }
+  return "uint64_t";
+};
+
+pub let emit_type = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  let s: Slice(u8) = c_type_name(t);
+  return put_str(w, s);
+};
+
+let type_width = func(t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() { return 64; }
+  if t.kind == vf.TY_VOID() { return 0; }
+  return t.width;
+};
+
+let type_byte_size = func(t: vf.IrType) -> u64 {
+  let w: u64 = type_width(t);
+  let n: u64 = (w + 7) / 8;
+  if n == 0 { return 1; }
+  return n;
+};
+
+// --- 符号名 ---------------------------------------------------------------
+let sym_byte = func(h: u64, i: u64) -> u64 {
+  let p: Ref(u8) = mx.sym_addr(h);
+  let b: u8 = deref(p + i);
+  return b as u64;
+};
+
+let is_ident_char = func(b: u64) -> u64 {
+  if b == 95 { return 1; }
+  if (b >= 48) and (b <= 57) { return 1; }
+  if (b >= 65) and (b <= 90) { return 1; }
+  if (b >= 97) and (b <= 122) { return 1; }
+  return 0;
+};
+
+pub let put_sanitized = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let n: u64 = mx.sym_len(h);
+  if n == 0 {
+    return put_str(w, "anon");
+  }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let b: u64 = sym_byte(h, i);
+    if is_ident_char(b) == 1 {
+      let rc: u64 = put_byte(w, b as u8);
+    } else if b == 46 {
+      let rc: u64 = put_str(w, "_d_");
+    } else if b == 58 {
+      let rc: u64 = put_str(w, "_c_");
+    } else if b == 45 {
+      let rc: u64 = put_str(w, "_m_");
+    } else {
+      let rc0: u64 = put_byte(w, 95);
+      let rc1: u64 = put_hex2(w, b);
+    }
+    i = i + 1;
+  };
+  return 1;
+};
+
+// 自定义过程的名字只在同一份 C 文本里互相引用，用符号句柄的十进制值命名即可，
+// 不需要宿主符号表；extern 过程必须保留 link_name 的原文才能对上宿主 C 符号。
+let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  if p.is_extern == 1 {
+    if p.link_name != 0 { return put_sanitized(w, p.link_name); }
+    return put_sanitized(w, p.name);
+  }
+  let rc: u64 = put_str(w, "lain_fn_");
+  return put_u64_dec(w, p.name);
+};
+
+let emit_data_name = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let rc: u64 = put_str(w, "lain_data_");
+  return put_sanitized(w, h);
+};
+
+let emit_value_name = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let rc: u64 = put_str(w, "v");
+  return put_u64_dec(w, h);
+};
+
+// --- 模块查询 -------------------------------------------------------------
+let it_ty = func(it: vf.IrInst) -> vf.IrType {
+  return vf.inst_ty(it);
+};
+
+let param_ty = func(p: vf.IrParam) -> vf.IrType {
+  return vf.param_ty(p);
+};
+
+let find_proc_at = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
+  if i >= m.proc_count { return vf.NO_REGION(); }
+  let p: vf.IrProc = vf.proc_at_ref(m.procs, i);
+  if p.name == name { return i; }
+  return find_proc_at(m, name, i + 1);
+};
+
+pub let find_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
+  return find_proc_at(m, name, 0);
+};
+
+let region_at = func(m: Ref(vf.IrModule), ri: u64) -> vf.IrRegion {
+  return vf.region_at_ref(m.regions, ri);
+};
+
+let inst_at = func(m: Ref(vf.IrModule), ii: u64) -> vf.IrInst {
+  return vf.inst_at_ref(m.insts, ii);
+};
+
+let case_at = func(m: Ref(vf.IrModule), ci: u64) -> vf.IrCase {
+  return vf.case_at_ref(m.cases, ci);
+};
+
+let proc_at = func(m: Ref(vf.IrModule), pi: u64) -> vf.IrProc {
+  return vf.proc_at_ref(m.procs, pi);
+};
+
+let region_inst = func(r: vf.IrRegion, i: u64) -> u64 {
+  let base: Ref(u8) = ptr_cast(Ref(u8), r.insts);
+  let p: Ref(u64) = ptr_cast(Ref(u64), base + i * size_of(u64));
+  return deref(p);
+};
+
+let region_type = func(r: vf.IrRegion, i: u64) -> vf.IrType {
+  return vf.type_at_ref(r.results, i);
+};
+
+let region_param = func(r: vf.IrRegion, i: u64) -> vf.IrParam {
+  return vf.param_at_ref(r.params, i);
+};
+
+let proc_type = func(p: vf.IrProc, i: u64) -> vf.IrType {
+  return vf.type_at_ref(p.results, i);
+};
+
+let proc_param = func(p: vf.IrProc, i: u64) -> vf.IrParam {
+  return vf.param_at_ref(p.params, i);
+};
+
+let result_type = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> vf.IrType {
+  let k: u64 = it.kind;
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return vf.type_bool(); }
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return vf.type_bool(); }
+  if k == codes.INST_LEA() { return vf.type_addr(); }
+  if k == codes.INST_ALLOCA() { return vf.type_addr(); }
+  if k == codes.INST_IF() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_LOOP() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_SWITCH() {
+    if it.default_body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.default_body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_CALL() {
+    if it.symbol != 0 {
+      let pi: u64 = find_proc(m, it.symbol);
+      if pi == vf.NO_REGION() { return vf.type_void(); }
+      let p: vf.IrProc = proc_at(m, pi);
+      if i >= p.result_count { return vf.type_void(); }
+      return proc_type(p, i);
+    }
+  }
+  return vf.inst_ty(it);
+};
+
+// --- 发射上下文 -----------------------------------------------------------
+pub let C99Emitter = struct {
+  w: Mut(C99Writer),
+  m: Ref(vf.IrModule),
+  proc: u64,
+  depth: u64,
+  temp: u64,
+  loop_depth: u64,
+  loop_labels: Array(u64, 32),
+  loop_ids: Array(u64, 32),
+  loop_insts: Array(u64, 32),
+  loop_regions: Array(u64, 32),
+};
+
+pub let emitter_new = func(w: Mut(C99Writer), m: Ref(vf.IrModule)) -> C99Emitter {
+  return C99Emitter {
+    w: w,
+    m: m,
+    proc: vf.NO_REGION(),
+    depth: 0,
+    temp: 0,
+    loop_depth: 0,
+    loop_labels: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_ids: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_insts: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_regions: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+  };
+};
+
+let emit_indent = func(em: Mut(C99Emitter), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let rc: u64 = put_str(em.w, "  ");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let next_temp = func(em: Mut(C99Emitter)) -> u64 {
+  let v: u64 = em.temp;
+  em.temp = v + 1;
+  return v;
+};
+
+// --- 操作数 ---------------------------------------------------------------
+let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) -> u64 {
+  if op.kind == vf.OP_VALUE() {
+    return emit_value_name(em.w, op.name);
+  }
+  if op.kind == vf.OP_FLOAT() {
+    if want.kind == vf.TY_FLOAT() {
+      if want.width <= 32 {
+        let a: u64 = put_str(em.w, "lain_bitcast_u32_f32((uint32_t)");
+        let b: u64 = put_u64_lit(em.w, op.bits);
+        return put_byte(em.w, 41);
+      }
+      let a: u64 = put_str(em.w, "lain_bitcast_u64_f64(");
+      let b: u64 = put_u64_lit(em.w, op.bits);
+      return put_byte(em.w, 41);
+    }
+    return put_u64_lit(em.w, op.bits);
+  }
+  if want.kind == vf.TY_ADDR() {
+    let a: u64 = put_str(em.w, "(void *)(uintptr_t)");
+    return put_u64_lit(em.w, op.bits);
+  }
+  let a: u64 = put_str(em.w, "(");
+  let b: u64 = emit_type(em.w, want);
+  let c: u64 = put_byte(em.w, 41);
+  return put_u64_lit(em.w, op.bits);
+};
+
+let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
+  if op.kind == vf.OP_VALUE() {
+    let a: u64 = put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_value_name(em.w, op.name);
+    return put_byte(em.w, 41);
+  }
+  return put_u64_lit(em.w, op.bits);
+};
+
+// --- 声明辅助 -------------------------------------------------------------
+let emit_zero_value = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() { return put_str(w, "(void *)0"); }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return put_str(w, "0.0f"); }
+    return put_str(w, "0.0");
+  }
+  return put_str(w, "0");
+};
+
+let emit_result_decls = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
+    let t: vf.IrType = result_type(em.m, it, i);
+    let rc0: u64 = emit_indent(em, em.depth);
+    let rc1: u64 = emit_type(em.w, t);
+    let rc2: u64 = put_str(em.w, " ");
+    let rc3: u64 = emit_value_name(em.w, vf.inst_result_name(it, i));
+    let rc4: u64 = put_str(em.w, " = ");
+    let rc5: u64 = emit_zero_value(em.w, t);
+    let rc6: u64 = put_str(em.w, ";\n");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let emit_assign_cast = func(em: Mut(C99Emitter), name: u64, t: vf.IrType, op: vf.IrOperand) -> u64 {
+  let rc0: u64 = emit_indent(em, em.depth);
+  let rc1: u64 = emit_value_name(em.w, name);
+  let rc2: u64 = put_str(em.w, " = (");
+  let rc3: u64 = emit_type(em.w, t);
+  let rc4: u64 = put_str(em.w, ")(");
+  let rc5: u64 = emit_operand(em, op, t);
+  let rc6: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 区域 -----------------------------------------------------------------
+let emit_region_insts = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64,
+                             yield_inst: u64, yield_region: u64) -> u64 {
+  if i >= r.inst_count { return 1; }
+  let ii: u64 = region_inst(r, i);
+  let ok: u64 = emit_inst(em, ii, yield_inst, yield_region);
+  if ok == 0 { return 0; }
+  return emit_region_insts(em, r, i + 1, yield_inst, yield_region);
+};
+
+pub let emit_region = func(em: Mut(C99Emitter), ri: u64, yield_inst: u64, yield_region: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 1; }
+  let r: vf.IrRegion = region_at(em.m, ri);
+  return emit_region_insts(em, r, 0, yield_inst, yield_region);
+};
+
+let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region: u64) -> u64 {
+  if em.w.ok == 0 { return 0; }
+  let it: vf.IrInst = inst_at(em.m, ii);
+  let k: u64 = it.kind;
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_XOR()) { return emit_int_arith(em, it, k); }
+  if (k >= codes.INST_SDIV()) and (k <= codes.INST_ASHR()) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.INST_FADD()) and (k <= codes.INST_FNEG()) { return emit_float_arith(em, it, k); }
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_int_compare(em, it, k); }
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return emit_float_compare(em, it, k); }
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return emit_int_convert(em, it, k); }
+  if k == codes.INST_BITCAST() { return emit_bitcast(em, it); }
+  if (k >= codes.INST_FPEXT()) and (k <= codes.INST_UITOFP()) { return emit_float_convert(em, it, k); }
+  if k == codes.INST_LEA() { return emit_lea(em, it); }
+  if k == codes.INST_LOAD() { return emit_load(em, it); }
+  if k == codes.INST_STORE() { return emit_store(em, it); }
+  if k == codes.INST_ALLOCA() { return emit_alloca(em, it); }
+  if k == codes.INST_CALL() { return emit_call(em, it); }
+  if k == codes.INST_IF() { return emit_if(em, it, ii); }
+  if k == codes.INST_LOOP() { return emit_loop(em, it, ii); }
+  if k == codes.INST_SWITCH() { return emit_switch(em, it, ii); }
+  if k == codes.INST_YIELD() { return emit_yield(em, it, yield_inst, yield_region); }
+  if k == codes.INST_BREAK() { return emit_break(em, it); }
+  if k == codes.INST_CONTINUE() { return emit_continue(em, it); }
+  if k == codes.INST_RETURN() { return emit_return(em, it); }
+  if k == codes.INST_UNREACHABLE() { return emit_unreachable(em); }
+  return 0;
+};
+
+// --- 整数与浮点运算 -------------------------------------------------------
+let int_op_text = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_ADD() { return "+"; }
+  if k == codes.INST_SUB() { return "-"; }
+  if k == codes.INST_MUL() { return "*"; }
+  if k == codes.INST_AND() { return "&"; }
+  if k == codes.INST_OR() { return "|"; }
+  return "^";
+};
+
+let emit_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let ty: vf.IrType = it_ty(it);
+  let w: u64 = type_width(ty);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = (");
+  let f: u64 = emit_type(em.w, t);
+  let g: u64 = put_str(em.w, ")(((uint64_t)(");
+  let h: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let i: u64 = put_str(em.w, ")) ");
+  let j: u64 = put_str(em.w, int_op_text(k));
+  let l: u64 = put_str(em.w, " ((uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = put_str(em.w, "))) & lain_mask(");
+  let o: u64 = put_u64_dec(em.w, w);
+  let p: u64 = put_str(em.w, ")));\n");
+  return 1;
+};
+
+let div_shift_name = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_SDIV() { return "lain_sdiv"; }
+  if k == codes.INST_SREM() { return "lain_srem"; }
+  if k == codes.INST_UDIV() { return "lain_udiv"; }
+  if k == codes.INST_UREM() { return "lain_urem"; }
+  if k == codes.INST_SHL() { return "lain_shl"; }
+  if k == codes.INST_LSHR() { return "lain_lshr"; }
+  return "lain_ashr";
+};
+
+let emit_int_div_shift = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let w: u64 = type_width(it_ty(it));
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = (");
+  let f: u64 = emit_type(em.w, t);
+  let g: u64 = put_str(em.w, ")");
+  let h: u64 = put_str(em.w, div_shift_name(k));
+  let i: u64 = put_str(em.w, "((uint64_t)(");
+  let j: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let l: u64 = put_str(em.w, "), (uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = put_str(em.w, "), ");
+  let o: u64 = put_u64_dec(em.w, w);
+  let p: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let float_op_text = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_FADD() { return "+"; }
+  if k == codes.INST_FSUB() { return "-"; }
+  if k == codes.INST_FMUL() { return "*"; }
+  return "/";
+};
+
+let emit_float_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = ");
+  if k == codes.INST_FNEG() {
+    let f: u64 = put_str(em.w, "-(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let h: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = put_str(em.w, "(");
+  let g: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let h: u64 = put_str(em.w, ") ");
+  let i: u64 = put_str(em.w, float_op_text(k));
+  let j: u64 = put_str(em.w, " (");
+  let l: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let m: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let int_cmp_text = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_EQ() { return "=="; }
+  if k == codes.INST_NE() { return "!="; }
+  if k == codes.INST_ULT() { return "<"; }
+  if k == codes.INST_ULE() { return "<="; }
+  if k == codes.INST_UGT() { return ">"; }
+  return ">=";
+};
+
+let signed_cmp_text = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_SLT() { return "<"; }
+  if k == codes.INST_SLE() { return "<="; }
+  if k == codes.INST_SGT() { return ">"; }
+  return ">=";
+};
+
+let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let ty: vf.IrType = it_ty(it);
+  let w: u64 = type_width(ty);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "uint8_t ");
+  let c: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = put_str(em.w, " = (uint8_t)(");
+  if (k >= codes.INST_SLT()) and (k <= codes.INST_SGE()) {
+    let e: u64 = put_str(em.w, "lain_sext((uint64_t)(");
+    let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let g: u64 = put_str(em.w, "), ");
+    let h: u64 = put_u64_dec(em.w, w);
+    let i: u64 = put_str(em.w, ") ");
+    let j: u64 = put_str(em.w, signed_cmp_text(k));
+    let l: u64 = put_str(em.w, " lain_sext((uint64_t)(");
+    let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+    let n: u64 = put_str(em.w, "), ");
+    let o: u64 = put_u64_dec(em.w, w);
+    let p: u64 = put_str(em.w, "));\n");
+    return 1;
+  }
+  if ty.kind == vf.TY_ADDR() {
+    let e: u64 = put_str(em.w, "(uintptr_t)(");
+    let f: u64 = emit_operand(em, vf.inst_op(it, 0), ty);
+    let g: u64 = put_str(em.w, ") ");
+    let h: u64 = put_str(em.w, int_cmp_text(k));
+    let i: u64 = put_str(em.w, " (uintptr_t)(");
+    let j: u64 = emit_operand(em, vf.inst_op(it, 1), ty);
+    let l: u64 = put_str(em.w, "));\n");
+    return 1;
+  }
+  let e: u64 = put_str(em.w, "(((uint64_t)(");
+  let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let g: u64 = put_str(em.w, ") & lain_mask(");
+  let h: u64 = put_u64_dec(em.w, w);
+  let i: u64 = put_str(em.w, ")) ");
+  let j: u64 = put_str(em.w, int_cmp_text(k));
+  let l: u64 = put_str(em.w, " ((uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = put_str(em.w, ") & lain_mask(");
+  let o: u64 = put_u64_dec(em.w, w);
+  let p: u64 = put_str(em.w, "))));\n");
+  return 1;
+};
+
+let float_cmp_text = func(k: u64) -> Slice(u8) {
+  if (k == codes.INST_FOEQ()) or (k == codes.INST_FUEQ()) { return "=="; }
+  if (k == codes.INST_FONE()) or (k == codes.INST_FUNE()) { return "!="; }
+  if (k == codes.INST_FOLT()) or (k == codes.INST_FULT()) { return "<"; }
+  if (k == codes.INST_FOLE()) or (k == codes.INST_FULE()) { return "<="; }
+  if (k == codes.INST_FOGT()) or (k == codes.INST_FUGT()) { return ">"; }
+  return ">=";
+};
+
+let emit_float_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let ordered: u64 = if k <= codes.INST_FOGE() { 1 } else { 0 };
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "uint8_t ");
+  let c: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = put_str(em.w, " = (uint8_t)(");
+  if ordered == 1 {
+    let e: u64 = put_str(em.w, "((");
+    let f: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let g: u64 = put_str(em.w, " == ");
+    let h: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let i: u64 = put_str(em.w, ") && (");
+    let j: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let l: u64 = put_str(em.w, " == ");
+    let m: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let n: u64 = put_str(em.w, ") && ((");
+    let o: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let p: u64 = put_str(em.w, ") ");
+    let q: u64 = put_str(em.w, float_cmp_text(k));
+    let r: u64 = put_str(em.w, " (");
+    let s: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let u: u64 = put_str(em.w, ")));\n");
+    return 1;
+  }
+  let e: u64 = put_str(em.w, "(!(((");
+  let f: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let g: u64 = put_str(em.w, " == ");
+  let h: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let i: u64 = put_str(em.w, ") && (");
+  let j: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let l: u64 = put_str(em.w, " == ");
+  let m: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let n: u64 = put_str(em.w, "))) || ((");
+  let o: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let p: u64 = put_str(em.w, ") ");
+  let q: u64 = put_str(em.w, float_cmp_text(k));
+  let r: u64 = put_str(em.w, " (");
+  let s: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let u: u64 = put_str(em.w, ")));\n");
+  return 1;
+};
+
+let emit_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = (");
+  let f: u64 = emit_type(em.w, t);
+  let g: u64 = put_str(em.w, ")");
+  if k == codes.INST_SEXT() {
+    let h: u64 = put_str(em.w, "lain_sext((uint64_t)(");
+    let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let j: u64 = put_str(em.w, "), ");
+    let l: u64 = put_u64_dec(em.w, type_width(it_ty(it)));
+    let m: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let h: u64 = put_str(em.w, "((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let j: u64 = put_str(em.w, ") & lain_mask(");
+  let l: u64 = put_u64_dec(em.w, type_width(t));
+  let m: u64 = put_str(em.w, "));\n");
+  return 1;
+};
+
+let emit_bitcast = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let ot: vf.IrType = it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = ");
+  if t.kind == vf.TY_ADDR() {
+    let f: u64 = put_str(em.w, "(void *)(uintptr_t)(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_bits(64));
+    let h: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let f: u64 = put_str(em.w, "lain_bitcast_u32_f32((uint32_t)(");
+      let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+      let h: u64 = put_str(em.w, "));\n");
+      return 1;
+    }
+    let f: u64 = put_str(em.w, "lain_bitcast_u64_f64((");
+    let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let h: u64 = put_str(em.w, "));\n");
+    return 1;
+  }
+  if ot.kind == vf.TY_FLOAT() {
+    if ot.width <= 32 {
+      let f: u64 = put_str(em.w, "(uint32_t)lain_bitcast_f32_u32(");
+      let g: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+      let h: u64 = put_str(em.w, ");\n");
+      return 1;
+    }
+    let f: u64 = put_str(em.w, "(uint64_t)lain_bitcast_f64_u64(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+    let h: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = put_str(em.w, "(");
+  let g: u64 = emit_type(em.w, t);
+  let h: u64 = put_str(em.w, ")((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let j: u64 = put_str(em.w, ") & lain_mask(");
+  let l: u64 = put_u64_dec(em.w, type_width(t));
+  let m: u64 = put_str(em.w, "));\n");
+  return 1;
+};
+
+let emit_float_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let ot: vf.IrType = it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = (");
+  let f: u64 = emit_type(em.w, t);
+  let g: u64 = put_str(em.w, ")(");
+  if (k == codes.INST_FPTOSI()) or (k == codes.INST_FPTOUI()) {
+    let h: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+    let i: u64 = put_str(em.w, "));\n");
+    return 1;
+  }
+  if (k == codes.INST_SITOFP()) or (k == codes.INST_UITOFP()) {
+    let h: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let i: u64 = put_str(em.w, "));\n");
+    return 1;
+  }
+  let h: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+  let i: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 指针与内存 -----------------------------------------------------------
+let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "void *");
+  let c: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = put_str(em.w, " = (void *)(uintptr_t)((uint64_t)(uintptr_t)(");
+  let e: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let f: u64 = put_str(em.w, ") + ((uint64_t)(");
+  let g: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let h: u64 = put_str(em.w, ")) * ((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 2));
+  let j: u64 = put_str(em.w, ")) + ((uint64_t)(");
+  let l: u64 = emit_operand_u64(em, vf.inst_op(it, 3));
+  let m: u64 = put_str(em.w, ")));\n");
+  return 1;
+};
+
+let emit_alloca = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let bytes: u64 = type_byte_size(it_ty(it));
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "void *");
+  let c: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = put_str(em.w, " = lain_alloca_push(&_alloca_head, (size_t)");
+  let e: u64 = put_u64_dec(em.w, bytes);
+  let f: u64 = put_str(em.w, " * (size_t)(");
+  let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let h: u64 = put_str(em.w, "));\n");
+  return 1;
+};
+
+let emit_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = ");
+  if t.kind == vf.TY_ADDR() {
+    let f: u64 = put_str(em.w, "lain_load_addr(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+    let h: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let f: u64 = put_str(em.w, "lain_load_f32(");
+      let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+      let h: u64 = put_str(em.w, ");\n");
+      return 1;
+    }
+    let f: u64 = put_str(em.w, "lain_load_f64(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+    let h: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = put_str(em.w, "(");
+  let g: u64 = emit_type(em.w, t);
+  let h: u64 = put_str(em.w, ")lain_load_bits(");
+  let i: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let j: u64 = put_str(em.w, ", ");
+  let l: u64 = put_u64_dec(em.w, type_width(t));
+  let m: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  if t.kind == vf.TY_ADDR() {
+    let b: u64 = put_str(em.w, "lain_store_addr(");
+    let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+    let d: u64 = put_str(em.w, ", ");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let b: u64 = put_str(em.w, "lain_store_f32(");
+      let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+      let d: u64 = put_str(em.w, ", ");
+      let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+      let f: u64 = put_str(em.w, ");\n");
+      return 1;
+    }
+    let b: u64 = put_str(em.w, "lain_store_f64(");
+    let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+    let d: u64 = put_str(em.w, ", ");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let b: u64 = put_str(em.w, "lain_store_bits(");
+  let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+  let d: u64 = put_str(em.w, ", (uint64_t)(");
+  let e: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let f: u64 = put_str(em.w, "), ");
+  let g: u64 = put_u64_dec(em.w, type_width(t));
+  let h: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 调用 -----------------------------------------------------------------
+let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
+                          p: vf.IrProc, i: u64) -> u64 {
+  if i >= it.operand_count { return 1; }
+  if i > 0 { let sep: u64 = put_str(em.w, ", "); }
+  let want: vf.IrType = if i < p.param_count { param_ty(proc_param(p, i)) } else { vf.type_bits(64) };
+  let ok: u64 = emit_operand(em, vf.inst_op(it, i), want);
+  if ok == 0 { return 0; }
+  return emit_call_args(em, it, p, i + 1);
+};
+
+let emit_pair_expr = func(em: Mut(C99Emitter), t: vf.IrType, tmp: u64, which: u64) -> u64 {
+  let field: Slice(u8) = if which == 0 { ".a" } else { ".b" };
+  if t.kind == vf.TY_ADDR() {
+    let a: u64 = put_str(em.w, "(void *)(uintptr_t)_c");
+    let b: u64 = put_u64_dec(em.w, tmp);
+    let c: u64 = put_str(em.w, field);
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let a: u64 = put_str(em.w, "lain_bitcast_u32_f32((uint32_t)_c");
+      let b: u64 = put_u64_dec(em.w, tmp);
+      let c: u64 = put_str(em.w, field);
+      let d: u64 = put_byte(em.w, 41);
+      return 1;
+    }
+    let a: u64 = put_str(em.w, "lain_bitcast_u64_f64(_c");
+    let b: u64 = put_u64_dec(em.w, tmp);
+    let c: u64 = put_str(em.w, field);
+    let d: u64 = put_byte(em.w, 41);
+    return 1;
+  }
+  let a: u64 = put_str(em.w, "(");
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, ")_c");
+  let d: u64 = put_u64_dec(em.w, tmp);
+  let e: u64 = put_str(em.w, field);
+  return 1;
+};
+
+let emit_pair_results = func(em: Mut(C99Emitter), it: vf.IrInst, tmp: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
+    let t: vf.IrType = result_type(em.m, it, i);
+    let a: u64 = emit_indent(em, em.depth);
+    let b: u64 = emit_type(em.w, t);
+    let c: u64 = put_str(em.w, " ");
+    let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, i));
+    let e: u64 = put_str(em.w, " = ");
+    let f: u64 = emit_pair_expr(em, t, tmp, i);
+    let g: u64 = put_str(em.w, ";\n");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let emit_direct_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let pi: u64 = find_proc(em.m, it.symbol);
+  if pi == vf.NO_REGION() { return 0; }
+  let p: vf.IrProc = proc_at(em.m, pi);
+  let tmp: u64 = next_temp(em);
+  let a: u64 = emit_indent(em, em.depth);
+  if p.result_count == 1 {
+    let t: vf.IrType = proc_type(p, 0);
+    let b: u64 = emit_type(em.w, t);
+    let c: u64 = put_str(em.w, " ");
+    let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+    let e: u64 = put_str(em.w, " = ");
+  } else if p.result_count > 1 {
+    let b: u64 = put_str(em.w, "LainPair _c");
+    let c: u64 = put_u64_dec(em.w, tmp);
+    let d: u64 = put_str(em.w, " = ");
+  }
+  let f: u64 = emit_proc_name(em.w, p);
+  let g: u64 = put_byte(em.w, 40);
+  let h: u64 = emit_call_args(em, it, p, 0);
+  let i: u64 = put_str(em.w, ");\n");
+  if p.result_count > 1 {
+    let j: u64 = emit_pair_results(em, it, tmp);
+  }
+  return 1;
+};
+
+let emit_indirect_args = func(em: Mut(C99Emitter), it: vf.IrInst, i: u64) -> u64 {
+  if i >= it.operand_count { return 1; }
+  if i > 1 { let sep: u64 = put_str(em.w, ", "); }
+  let a: u64 = put_str(em.w, "(uint64_t)(");
+  let b: u64 = emit_operand_u64(em, vf.inst_op(it, i));
+  let c: u64 = put_byte(em.w, 41);
+  return emit_indirect_args(em, it, i + 1);
+};
+
+let emit_indirect_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.result_count > 1 { return 0; }
+  let a: u64 = emit_indent(em, em.depth);
+  if it.result_count == 1 {
+    let t: vf.IrType = result_type(em.m, it, 0);
+    let b: u64 = emit_type(em.w, t);
+    let c: u64 = put_str(em.w, " ");
+    let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+    let e: u64 = put_str(em.w, " = ");
+  }
+  let b: u64 = put_str(em.w, "((");
+  if it.result_count == 0 {
+    let c: u64 = put_str(em.w, "void");
+  } else {
+    let t: vf.IrType = result_type(em.m, it, 0);
+    let c: u64 = emit_type(em.w, t);
+  }
+  let c2: u64 = put_str(em.w, " (*)(");
+  let n: u64 = if it.operand_count <= 1 { 0 } else { it.operand_count - 1 };
+  if n == 0 {
+    let d: u64 = put_str(em.w, "void");
+  } else {
+    let i: u64 = loop c(i: u64 = 0) while i < n {
+      if i > 0 { let sep: u64 = put_str(em.w, ", "); }
+      let rc: u64 = put_str(em.w, "uint64_t");
+      i = i + 1;
+    };
+  }
+  let e2: u64 = put_str(em.w, "))(");
+  let f: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let g: u64 = put_str(em.w, "))(");
+  let h: u64 = emit_indirect_args(em, it, 1);
+  let i2: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.symbol != 0 { return emit_direct_call(em, it); }
+  return emit_indirect_call(em, it);
+};
+
+// --- 结构控制流 -----------------------------------------------------------
+let emit_if = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_indent(em, em.depth);
+  let c: u64 = put_str(em.w, "if (((");
+  let d: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_bool());
+  let e: u64 = put_str(em.w, ") & 1u) != 0) {\n");
+  em.depth = em.depth + 1;
+  let f: u64 = emit_region(em, it.body, ii, it.body);
+  em.depth = em.depth - 1;
+  if f == 0 { return 0; }
+  if it.else_body != vf.NO_REGION() {
+    let g: u64 = emit_indent(em, em.depth);
+    let h: u64 = put_str(em.w, "} else {\n");
+    em.depth = em.depth + 1;
+    let i: u64 = emit_region(em, it.else_body, ii, it.else_body);
+    em.depth = em.depth - 1;
+    if i == 0 { return 0; }
+  }
+  let j: u64 = emit_indent(em, em.depth);
+  let k: u64 = put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_region_params = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64) -> u64 {
+  if i >= r.param_count { return 1; }
+  let p: vf.IrParam = region_param(r, i);
+  let pt: vf.IrType = param_ty(p);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, pt);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, p.name);
+  let e: u64 = put_str(em.w, " = ");
+  let f: u64 = emit_zero_value(em.w, pt);
+  let g: u64 = put_str(em.w, ";\n");
+  return emit_region_params(em, r, i + 1);
+};
+
+let emit_loop = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let r: vf.IrRegion = region_at(em.m, it.body);
+  let lid: u64 = next_temp(em);
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_region_params(em, r, 0);
+  let c: u64 = emit_indent(em, em.depth);
+  let d: u64 = put_str(em.w, "for (;;) {\n");
+  let at: u64 = em.loop_depth;
+  if at >= 32 { return 0; }
+  em.loop_labels[at] = it.label;
+  em.loop_ids[at] = lid;
+  em.loop_insts[at] = ii;
+  em.loop_regions[at] = it.body;
+  em.loop_depth = at + 1;
+  em.depth = em.depth + 1;
+  let e: u64 = emit_region(em, it.body, vf.NO_REGION(), vf.NO_REGION());
+  em.depth = em.depth - 1;
+  em.loop_depth = at;
+  if e == 0 { return 0; }
+  let f: u64 = emit_indent(em, em.depth + 1);
+  let g: u64 = put_str(em.w, "lbl_cont_");
+  let h: u64 = put_u64_dec(em.w, lid);
+  let i: u64 = put_str(em.w, ":;\n");
+  let j: u64 = emit_indent(em, em.depth);
+  let k: u64 = put_str(em.w, "}\n");
+  let l: u64 = emit_indent(em, em.depth);
+  let m: u64 = put_str(em.w, "lbl_end_");
+  let n: u64 = put_u64_dec(em.w, lid);
+  let o: u64 = put_str(em.w, ":;\n");
+  return 1;
+};
+
+let emit_switch = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_indent(em, em.depth);
+  let c: u64 = put_str(em.w, "switch ((uint64_t)(");
+  let d: u64 = emit_operand(em, vf.inst_op(it, 0), it_ty(it));
+  let e: u64 = put_str(em.w, ")) {\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.case_count {
+    let cs: vf.IrCase = case_at(em.m, it.cases_at + i);
+    let k0: u64 = emit_indent(em, em.depth);
+    let k1: u64 = put_str(em.w, "case UINT64_C(");
+    let k2: u64 = put_u64_dec(em.w, cs.value);
+    let k3: u64 = put_str(em.w, "): {\n");
+    em.depth = em.depth + 1;
+    let k4: u64 = emit_region(em, cs.body, ii, cs.body);
+    em.depth = em.depth - 1;
+    let k5: u64 = emit_indent(em, em.depth + 1);
+    let k6: u64 = put_str(em.w, "break;\n");
+    let k7: u64 = emit_indent(em, em.depth);
+    let k8: u64 = put_str(em.w, "}\n");
+    i = i + 1;
+  };
+  let j0: u64 = emit_indent(em, em.depth);
+  let j1: u64 = put_str(em.w, "default: {\n");
+  em.depth = em.depth + 1;
+  let j2: u64 = emit_region(em, it.default_body, ii, it.default_body);
+  em.depth = em.depth - 1;
+  let j3: u64 = emit_indent(em, em.depth + 1);
+  let j4: u64 = put_str(em.w, "break;\n");
+  let j5: u64 = emit_indent(em, em.depth);
+  let j6: u64 = put_str(em.w, "}\n");
+  let j7: u64 = emit_indent(em, em.depth);
+  let j8: u64 = put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_yield = func(em: Mut(C99Emitter), it: vf.IrInst, yield_inst: u64, yield_region: u64) -> u64 {
+  if yield_inst == vf.NO_REGION() { return 1; }
+  if yield_region == vf.NO_REGION() { return 1; }
+  let target: vf.IrInst = inst_at(em.m, yield_inst);
+  let r: vf.IrRegion = region_at(em.m, yield_region);
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < target.result_count {
+      let name: u64 = vf.inst_result_name(target, i);
+      let t: vf.IrType = if i < r.result_count { region_type(r, i) } else { result_type(em.m, target, i) };
+      let rc: u64 = emit_assign_cast(em, name, t, vf.inst_op(it, i));
+    }
+    i = i + 1;
+  };
+  return 1;
+};
+
+let scan_loop = func(em: Mut(C99Emitter), label: u64, i: u64) -> u64 {
+  if i >= em.loop_depth { return vf.NO_REGION(); }
+  let at: u64 = em.loop_depth - 1 - i;
+  if em.loop_labels[at] == label { return at; }
+  return scan_loop(em, label, i + 1);
+};
+
+let find_loop = func(em: Mut(C99Emitter), label: u64) -> u64 {
+  return scan_loop(em, label, 0);
+};
+
+let emit_break = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let at: u64 = find_loop(em, it.label);
+  if at == vf.NO_REGION() { return 0; }
+  let loop_inst: u64 = em.loop_insts[at];
+  let lid: u64 = em.loop_ids[at];
+  let target: vf.IrInst = inst_at(em.m, loop_inst);
+  let r: vf.IrRegion = region_at(em.m, em.loop_regions[at]);
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < target.result_count {
+      let name: u64 = vf.inst_result_name(target, i);
+      let t: vf.IrType = if i < r.result_count { region_type(r, i) } else { result_type(em.m, target, i) };
+      let rc: u64 = emit_assign_cast(em, name, t, vf.inst_op(it, i));
+    }
+    i = i + 1;
+  };
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "goto lbl_end_");
+  let c: u64 = put_u64_dec(em.w, lid);
+  let d: u64 = put_str(em.w, ";\n");
+  return 1;
+};
+
+let emit_continue = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let at: u64 = find_loop(em, it.label);
+  if at == vf.NO_REGION() { return 0; }
+  let lid: u64 = em.loop_ids[at];
+  let r: vf.IrRegion = region_at(em.m, em.loop_regions[at]);
+  let base: u64 = next_temp(em);
+  em.temp = base + it.operand_count;
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "{\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < r.param_count {
+      let p: vf.IrParam = region_param(r, i);
+      let pt: vf.IrType = param_ty(p);
+      let c: u64 = emit_indent(em, em.depth + 1);
+      let d: u64 = emit_type(em.w, pt);
+      let e: u64 = put_str(em.w, " _n");
+      let f: u64 = put_u64_dec(em.w, base + i);
+      let g: u64 = put_str(em.w, " = (");
+      let h: u64 = emit_type(em.w, pt);
+      let j: u64 = put_str(em.w, ")(");
+      let k: u64 = emit_operand(em, vf.inst_op(it, i), pt);
+      let l: u64 = put_str(em.w, ");\n");
+    }
+    i = i + 1;
+  };
+  let m: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < r.param_count {
+      let p: vf.IrParam = region_param(r, i);
+      let n: u64 = emit_indent(em, em.depth + 1);
+      let o: u64 = emit_value_name(em.w, p.name);
+      let q: u64 = put_str(em.w, " = _n");
+      let s: u64 = put_u64_dec(em.w, base + i);
+      let t: u64 = put_str(em.w, ";\n");
+    }
+    i = i + 1;
+  };
+  let u: u64 = emit_indent(em, em.depth + 1);
+  let v: u64 = put_str(em.w, "goto lbl_cont_");
+  let x: u64 = put_u64_dec(em.w, lid);
+  let y: u64 = put_str(em.w, ";\n");
+  let z: u64 = emit_indent(em, em.depth);
+  let z2: u64 = put_str(em.w, "}\n");
+  return 1;
+};
+
+let current_proc = func(em: Mut(C99Emitter)) -> vf.IrProc {
+  return proc_at(em.m, em.proc);
+};
+
+let emit_return = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  if it.operand_count == 0 {
+    let b: u64 = put_str(em.w, "return;\n");
+    return 1;
+  }
+  let p: vf.IrProc = current_proc(em);
+  if it.operand_count == 1 {
+    let t: vf.IrType = proc_type(p, 0);
+    let b: u64 = put_str(em.w, "return (");
+    let c: u64 = emit_type(em.w, t);
+    let d: u64 = put_str(em.w, ")(");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = put_str(em.w, ");\n");
+    return 1;
+  }
+  let b: u64 = put_str(em.w, "{\n");
+  let c: u64 = emit_indent(em, em.depth + 1);
+  let d: u64 = put_str(em.w, "LainPair _ret;\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < p.result_count {
+      let e: u64 = emit_indent(em, em.depth + 1);
+      let f: u64 = put_str(em.w, "_ret.");
+      let g: u64 = if i == 0 { put_str(em.w, "a") } else { put_str(em.w, "b") };
+      let h: u64 = put_str(em.w, " = (uint64_t)(");
+      let j: u64 = emit_operand_u64(em, vf.inst_op(it, i));
+      let k: u64 = put_str(em.w, ");\n");
+    }
+    i = i + 1;
+  };
+  let l: u64 = emit_indent(em, em.depth + 1);
+  let m: u64 = put_str(em.w, "return _ret;\n");
+  let n: u64 = emit_indent(em, em.depth);
+  let o: u64 = put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_unreachable = func(em: Mut(C99Emitter)) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "lain_trap(\"unreachable\");\n");
+  return 1;
+};
+
+// --- 过程与模块 -----------------------------------------------------------
+let emit_proc_return_type = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  if p.result_count == 0 { return put_str(w, "void"); }
+  if p.result_count == 1 {
+    let t: vf.IrType = proc_type(p, 0);
+    return emit_type(w, t);
+  }
+  return put_str(w, "LainPair");
+};
+
+pub let emit_proc_signature = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  if p.is_extern == 0 {
+    let a: u64 = put_str(w, "static ");
+  }
+  let a2: u64 = emit_proc_return_type(w, p);
+  let b: u64 = put_str(w, " ");
+  let c: u64 = emit_proc_name(w, p);
+  let d: u64 = put_byte(w, 40);
+  if p.param_count == 0 {
+    let e: u64 = put_str(w, "void");
+  } else {
+    let i: u64 = loop c(i: u64 = 0) while i < p.param_count {
+      if i > 0 { let sep: u64 = put_str(w, ", "); }
+      let prm: vf.IrParam = proc_param(p, i);
+      let e: u64 = emit_type(w, param_ty(prm));
+      let f: u64 = put_str(w, " ");
+      let g: u64 = emit_value_name(w, prm.name);
+      i = i + 1;
+    };
+  }
+  return put_byte(w, 41);
+};
+
+let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
+  if i >= m.proc_count { return 1; }
+  let p: vf.IrProc = proc_at(m, i);
+  let a: u64 = emit_proc_signature(w, p);
+  let b: u64 = put_str(w, ";\n");
+  return emit_all_proc_decls(w, m, i + 1);
+};
+
+pub let emit_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = proc_at(m, pi);
+  let a: u64 = emit_proc_signature(w, p);
+  return put_str(w, ";\n");
+};
+
+pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = put_str(w, "static const uint8_t ");
+  } else {
+    let a: u64 = put_str(w, "static uint8_t ");
+  }
+  let b: u64 = emit_data_name(w, symbol);
+  let c: u64 = put_byte(w, 91);
+  let size: u64 = if bytes.len == 0 { 1 } else { bytes.len };
+  let d: u64 = put_u64_dec(w, size);
+  let e: u64 = put_str(w, "] = {");
+  if bytes.len == 0 {
+    let f: u64 = put_str(w, "0");
+  } else {
+    let i: u64 = loop c(i: u64 = 0) while i < bytes.len {
+      if i > 0 { let sep: u64 = put_byte(w, 44); }
+      if i - i / 16 * 16 == 0 { let nl: u64 = put_str(w, "\n  "); }
+      let f: u64 = put_str(w, "0x");
+      let g: u64 = put_hex2(w, bytes[i] as u64);
+      i = i + 1;
+    };
+  }
+  let h: u64 = put_str(w, "\n};\n");
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  let start: u64 = w.len;
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = proc_at(m, pi);
+  if p.is_extern == 1 { return 0; }
+  let a: u64 = emit_all_proc_decls(w, m, 0);
+  let b: u64 = put_byte(w, 10);
+  let c: u64 = emit_proc_signature(w, p);
+  let d: u64 = put_str(w, " {\n");
+  let e: u64 = put_str(w, "  LainAllocaNode *_alloca_head = NULL;\n");
+  let f: u64 = put_str(w, "  (void)_alloca_head;\n");
+  let e0: C99Emitter = emitter_new(w, m);
+  let em: Mut(C99Emitter) = mut_of(e0);
+  em.proc = pi;
+  em.depth = 1;
+  let g: u64 = emit_region(em, p.body, vf.NO_REGION(), vf.NO_REGION());
+  let h: u64 = put_str(w, "}\n\n");
+  if g == 0 { return 0; }
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// --- 前导文本 -------------------------------------------------------------
+let preamble_helpers = func() -> Slice(u8) {
+  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode { struct LainAllocaNode *next; uint64_t align; } LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
+};
+
+let preamble_memory = func() -> Slice(u8) {
+  return "static inline uint64_t lain_load_bits(const void *p, uint32_t w) {\n  uint64_t v = 0;\n  uint32_t n = (w + 7u) / 8u;\n  if (n > 0u) memcpy(&v, p, n);\n  return v & lain_mask(w);\n}\n\nstatic inline void lain_store_bits(void *p, uint64_t v, uint32_t w) {\n  uint32_t n = (w + 7u) / 8u;\n  uint64_t masked = v & lain_mask(w);\n  if (n > 0u) memcpy(p, &masked, n);\n}\n\nstatic inline void *lain_load_addr(const void *p) {\n  void *v = NULL;\n  memcpy(&v, p, sizeof(v));\n  return v;\n}\n\nstatic inline void lain_store_addr(void *p, void *v) {\n  memcpy(p, &v, sizeof(v));\n}\n\nstatic inline float lain_load_f32(const void *p) { float v = 0.0f; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline double lain_load_f64(const void *p) { double v = 0.0; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline void lain_store_f32(void *p, float v) { memcpy(p, &v, sizeof(v)); }\nstatic inline void lain_store_f64(void *p, double v) { memcpy(p, &v, sizeof(v)); }\nstatic inline float lain_bitcast_u32_f32(uint32_t v) { float f = 0.0f; memcpy(&f, &v, sizeof(f)); return f; }\nstatic inline uint32_t lain_bitcast_f32_u32(float f) { uint32_t v = 0; memcpy(&v, &f, sizeof(v)); return v; }\nstatic inline double lain_bitcast_u64_f64(uint64_t v) { double d = 0.0; memcpy(&d, &v, sizeof(d)); return d; }\nstatic inline uint64_t lain_bitcast_f64_u64(double d) { uint64_t v = 0; memcpy(&v, &d, sizeof(v)); return v; }\n\nstatic inline void *lain_alloca_push(LainAllocaNode **head, size_t n) {\n  LainAllocaNode *node = (LainAllocaNode *)malloc(sizeof(LainAllocaNode) + n);\n  if (!node) lain_trap(\"alloca out of memory\");\n  node->next = *head;\n  node->align = 0;\n  *head = node;\n  return (void *)(node + 1);\n}\n\nstatic inline void lain_alloca_free(LainAllocaNode **head) {\n  LainAllocaNode *cur = *head;\n  while (cur) {\n    LainAllocaNode *next = cur->next;\n    free(cur);\n    cur = next;\n  }\n  *head = NULL;\n}\n";
+};
+
+let preamble_io = func() -> Slice(u8) {
+  return "static uint64_t lain_io_write(void *p, uint64_t len) {\n  size_t wrote;\n  if (len == 0) return 0;\n  wrote = fwrite(p, 1, (size_t)len, stdout);\n  if (wrote != (size_t)len) lain_trap(\"io write failed\");\n  return len;\n}\n\nstatic uint64_t lain_io_print_i64(uint64_t v) {\n  int n = printf(\"%lld\", (long long)(int64_t)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_print_u64(uint64_t v) {\n  int n = printf(\"%llu\", (unsigned long long)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_newline(void) {\n  if (putchar('\\n') == EOF) lain_trap(\"io write failed\");\n  return 1;\n}\n\nstatic uint64_t lain_perf_steps(void) { return 0; }\n\nstatic uint64_t lain_perf_nanos(void) {\n#if defined(_WIN32)\n  static LARGE_INTEGER freq;\n  static int ready = 0;\n  LARGE_INTEGER now;\n  uint64_t sec, rem;\n  if (!ready) {\n    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) lain_trap(\"perf frequency failed\");\n    ready = 1;\n  }\n  if (!QueryPerformanceCounter(&now)) lain_trap(\"perf counter failed\");\n  sec = (uint64_t)(now.QuadPart / freq.QuadPart);\n  rem = (uint64_t)(now.QuadPart % freq.QuadPart);\n  return sec * UINT64_C(1000000000) + (rem * UINT64_C(1000000000)) / (uint64_t)freq.QuadPart;\n#else\n  struct timespec ts;\n  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) lain_trap(\"clock_gettime failed\");\n  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;\n#endif\n}\n";
+};
+
+let preamble_entry = func() -> Slice(u8) {
+  return "static int (*lain_entry_hook)(int, char **) = NULL;\n\nstatic int lain_entry_run(int argc, char **argv) {\n  if (lain_entry_hook) return lain_entry_hook(argc, argv);\n  return 0;\n}\n\nint main(int argc, char **argv) {\n  return lain_entry_run(argc, argv);\n}\n";
+};
+
+pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
+  let start: u64 = w.len;
+  let a: u64 = put_str(w, preamble_helpers());
+  let b: u64 = put_str(w, preamble_memory());
+  let c: u64 = put_str(w, preamble_io());
+  let d: u64 = put_str(w, preamble_entry());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+pub let fnv1a_hash = func(buf: Slice(u8)) -> u64 {
+  let h: u64 = 0xcbf29ce484222325;
+  let i: u64 = loop c(i: u64 = 0) while i < buf.len {
+    h = h ^ (buf[i] as u64);
+    h = h * 0x100000001b3;
+    i = i + 1;
+  };
+  return h;
+};
