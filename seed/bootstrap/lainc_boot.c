@@ -25,6 +25,13 @@ static void lain_trap(const char *msg) {
   abort();
 }
 
+/* 原生 C99 默认没有渲染器符号表；带真实驱动的宿主会以强符号覆盖这些弱定义。 */
+__attribute__((weak, noinline)) void *lain2_sym_addr(uint64_t h) { (void)h; return NULL; }
+__attribute__((weak, noinline)) uint64_t lain2_sym_len(uint64_t h) { (void)h; return 0u; }
+__attribute__((weak, noinline)) uint64_t lain2_sym_find(void *p, uint64_t n) { (void)p; (void)n; return 0u; }
+__attribute__((weak, noinline)) uint64_t lain2_sym_same(uint64_t a, uint64_t b) { return a == b ? 1u : 0u; }
+__attribute__((weak, noinline)) uint64_t lain2_sym_intern(void *p, uint64_t n) { (void)p; (void)n; return 0u; }
+
 static inline uint64_t lain_mask(uint32_t w) {
   return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);
 }
@@ -1735,7 +1742,6 @@ static uint64_t lain_fn_s4__L1V_SWITCH_NO_DEFAULT(void);
 static uint64_t lain_fn_s4__L1V_WIDTH_TOO_WIDE(void);
 static uint64_t lain_fn_s4__L1V_ZERO_WIDTH(void);
 static uint64_t lain_fn_s4__L1V_OUT_OF_MEMORY(void);
-extern uint64_t lain2_sym_intern(void *, uint64_t);
 static uint64_t lain_fn_s5__intern(void * arg_0, uint64_t arg_1);
 static uint64_t lain_fn_s5__k_func(void);
 static uint64_t lain_fn_s5__k_let(void);
@@ -2092,10 +2098,6 @@ static uint64_t lain_fn_s10__sret_ty(void * arg_0);
 static uint64_t lain_fn_s10__copy_words(void * arg_0, uint64_t arg_1, uint64_t arg_2, uint64_t arg_3);
 static uint64_t lain_fn_s10__copy_tail(void * arg_0, uint64_t arg_1, uint64_t arg_2, uint64_t arg_3, uint64_t arg_4);
 static uint64_t lain_fn_s10__copy_block(void * arg_0, uint64_t arg_1, uint64_t arg_2, uint64_t arg_3);
-extern void * lain2_sym_addr(uint64_t);
-extern uint64_t lain2_sym_len(uint64_t);
-extern uint64_t lain2_sym_find(void *, uint64_t);
-extern uint64_t lain2_sym_same(uint64_t, uint64_t);
 static void * lain_fn_s11__sym_addr(uint64_t arg_0);
 static uint64_t lain_fn_s11__sym_len(uint64_t arg_0);
 static uint64_t lain_fn_s11__digits_at(void * arg_0, uint64_t arg_1);

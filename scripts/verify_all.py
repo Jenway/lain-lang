@@ -408,6 +408,11 @@ META_CASES = [
     # AstOut 回滚复位水位，第二次事务提交 sum(1, 2) 子树后结构完整。
     {"file": "phase6_reader_astout.lain", "entry": "s0__main", "value": 62,
      "folds": [], "procs": [], "absent": []},
+    # Phase 6.3：纯 Lain 的确定性沙箱执行引擎。多过程映像执行 #alloca/#store/
+    # #load、#if、#loop、#switch、递归与 extern 能力调用；燃料耗尽、越界访存、
+    # 只读窗口写入、除零与裸地址逃逸各自收敛成确定 Trap。
+    {"file": "phase6_vm_sandbox.lain", "entry": "s0__main", "value": 63,
+     "folds": [], "procs": [], "absent": []},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},

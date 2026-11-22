@@ -1,0 +1,139 @@
+// 纯 Lain 自举流水线的端到端展示：Reader 切词 → 事务化 AstOut 展开 →
+// LAINIR 构造与静态校验 → VM 执行 + C99 发射。机械部分与 !{ Stage } 中止性
+// 效应门控在 examples/lib/self_hosted_pipeline_support.lain。这里用 UFCS、match
+// 与 f"..." 输出确定性报告；VM 与 C99 原生可执行给出逐字节相同的 stdout 与
+// 相同返回值。
+let fmt = import("std::fmt");
+let io = import("std::io");
+let sup = import("examples::lib::self_hosted_pipeline_support");
+
+// 各阶段返回值里的聚合字段只在拿到时读一次，之后全部走独立标量：
+// 前端把「按值返回的聚合」表示成临时块，重复读字段不可靠。
+let Facts = struct {
+  reader_kind: u64,
+  reader_nodes: u64,
+  reader_children: u64,
+  expand_nodes: u64,
+  expand_kids: u64,
+  expand_pool: u64,
+  expand_tx: u64,
+  expand_committed: u64,
+  ir_regions: u64,
+  ir_insts: u64,
+  ir_procs: u64,
+  ir_verify: u64,
+  vm_status: u64,
+  vm_trap: u64,
+  vm_result: u64,
+  vm_steps: u64,
+  c99_bytes: u64,
+  c99_hash: u64,
+};
+
+let Metrics = struct {
+  checksum: u64,
+  stages: u64,
+};
+
+let MetricsOps = module {
+  pub let Self = Metrics;
+  pub let total = func(x: Self) -> u64 { return x.checksum; };
+  pub let depth = func(x: Self) -> u64 { return x.stages; };
+};
+
+use MetricsOps;
+
+let Outcome = enum {
+  Ok
+  Failed
+};
+
+let outcome_code = func(o: Outcome) -> i64 {
+  return match o {
+    Ok => 1,
+    Failed => 0,
+  };
+};
+
+let pack = func(rd: sup.ReaderFacts, ex: sup.ExpandFacts, mo: sup.ModuleFacts,
+                vm: sup.VmFacts, cc: sup.C99Facts) -> Facts {
+  return Facts {
+    reader_kind: rd.kind,
+    reader_nodes: rd.nodes,
+    reader_children: rd.children,
+    expand_nodes: ex.nodes,
+    expand_kids: ex.kids,
+    expand_pool: ex.pool,
+    expand_tx: ex.tx_depth,
+    expand_committed: ex.committed,
+    ir_regions: mo.regions,
+    ir_insts: mo.insts,
+    ir_procs: mo.procs,
+    ir_verify: mo.verify,
+    vm_status: vm.status,
+    vm_trap: vm.trap,
+    vm_result: vm.result,
+    vm_steps: vm.steps,
+    c99_bytes: cc.bytes,
+    c99_hash: cc.hash,
+  };
+};
+
+let checksum_of = func(f: Facts) -> u64 {
+  let n1: u64 = f.reader_nodes * 31 + f.reader_children * 17;
+  let n2: u64 = f.expand_nodes * 7 + f.expand_kids * 3 + f.expand_pool;
+  let n3: u64 = f.ir_regions * 11 + f.ir_insts * 5 + f.ir_procs;
+  let n4: u64 = f.vm_result * 13 + f.vm_steps;
+  return (n1 + n2 + n3 + n4 + f.c99_bytes + (f.c99_hash % 4096)) % 9973;
+};
+
+let emit_report = func(f: Facts, ck: u64, health: i64) -> u64 {
+  let m: Metrics = Metrics { checksum: ck, stages: 5 };
+  let cks: u64 = m.total();
+  let sts: u64 = m.depth();
+  io.println("[pipeline] reader -> ast_out -> verify -> vm + c99");
+  io.println(f"[reader] kind={f.reader_kind}, nodes={f.reader_nodes}");
+  io.println(f"[reader] children={f.reader_children}");
+  io.println(f"[expand] nodes={f.expand_nodes}, kids={f.expand_kids}");
+  io.println(f"[expand] pool={f.expand_pool}, tx={f.expand_tx}");
+  io.println(f"[ir] regions={f.ir_regions}, insts={f.ir_insts}");
+  io.println(f"[ir] procs={f.ir_procs}, verify={f.ir_verify}");
+  io.println(f"[vm] status={f.vm_status}, trap={f.vm_trap}");
+  io.println(f"[vm] value={f.vm_result}, steps={f.vm_steps}");
+  io.println(f"[c99] bytes={f.c99_bytes}, hash={f.c99_hash}");
+  io.println(f"[checksum] value={cks}, stages={sts}");
+  io.println(f"[checksum] health={health}");
+  return 0;
+};
+
+let main = func() -> i64 {
+  let z: u64 = sup.reset();
+  let rd: sup.ReaderFacts = sup.run_reader();
+  let ex: sup.ExpandFacts = sup.run_expand();
+  let mo: sup.ModuleFacts = sup.run_verify();
+  let vm: sup.VmFacts = sup.run_vm();
+  let cc: sup.C99Facts = sup.run_c99();
+  let f: Facts = pack(rd, ex, mo, vm, cc);
+
+  let g1: i64 = sup.gate_stage((if f.reader_kind == 0 { 1 } else { 0 }), 10);
+  if g1 != 0 { return g1; }
+  let g2: i64 = sup.gate_stage((if f.expand_committed > 0 { 1 } else { 0 }), 20);
+  if g2 != 0 { return g2; }
+  let g3: i64 = sup.gate_stage((if f.ir_verify == 0 { 1 } else { 0 }), 30);
+  if g3 != 0 { return g3; }
+  let g4: i64 = sup.gate_stage((if f.vm_status == 1 { 1 } else { 0 }), 40);
+  if g4 != 0 { return g4; }
+  let g5: i64 = sup.gate_stage((if f.c99_bytes > 0 { 1 } else { 0 }), 50);
+  if g5 != 0 { return g5; }
+  let g6: i64 = sup.gate_stage((if f.vm_result == 36 { 1 } else { 0 }), 60);
+  if g6 != 0 { return g6; }
+
+  let ck: u64 = checksum_of(f);
+  let outcome: Outcome = if ck > 0 { Outcome.Ok {} } else { Outcome.Failed {} };
+  let health: i64 = outcome_code(outcome);
+  let r: u64 = emit_report(f, ck, health);
+
+  let code: u64 = ck % 200;
+  if code == 0 { code = 1; }
+  return code as i64;
+};

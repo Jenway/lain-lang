@@ -1165,6 +1165,12 @@ static void emit_preamble(FILE *out) {
       "  fprintf(stderr, \"lain trap: %s\\n\", msg);\n"
       "  abort();\n"
       "}\n\n"
+      "/* 原生 C99 默认没有渲染器符号表；带真实驱动的宿主会以强符号覆盖这些弱定义。 */\n"
+      "__attribute__((weak, noinline)) void *lain2_sym_addr(uint64_t h) { (void)h; return NULL; }\n"
+      "__attribute__((weak, noinline)) uint64_t lain2_sym_len(uint64_t h) { (void)h; return 0u; }\n"
+      "__attribute__((weak, noinline)) uint64_t lain2_sym_find(void *p, uint64_t n) { (void)p; (void)n; return 0u; }\n"
+      "__attribute__((weak, noinline)) uint64_t lain2_sym_same(uint64_t a, uint64_t b) { return a == b ? 1u : 0u; }\n"
+      "__attribute__((weak, noinline)) uint64_t lain2_sym_intern(void *p, uint64_t n) { (void)p; (void)n; return 0u; }\n\n"
       "static inline uint64_t lain_mask(uint32_t w) {\n"
       "  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n"
       "}\n\n"
@@ -1480,6 +1486,8 @@ static bool c99_preamble_symbol(const char *name) {
   static const char *const names[] = {
       "lain_io_write",     "lain_io_print_i64", "lain_io_print_u64",
       "lain_io_newline",   "lain_perf_steps",   "lain_perf_nanos",
+      "lain2_sym_addr",    "lain2_sym_len",     "lain2_sym_find",
+      "lain2_sym_same",    "lain2_sym_intern",
   };
   if (!name) return false;
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {

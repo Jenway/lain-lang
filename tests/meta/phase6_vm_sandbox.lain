@@ -1,0 +1,575 @@
+// Phase 6.3：纯 Lain 的确定性沙箱执行引擎。
+//
+// 内存里搭一个多过程 LAINIR 映像：入口过程走 #alloca/#store/#load、#if、
+// #loop（带 CONTINUE/BREAK）、#switch、对自身的递归调用，并调用一个 extern
+// 能力过程；能力表通过 ?{ caps: HostCaps } 见证分派。映像必须被 verify_module
+// 判为 0，装载进 VSpace 后在 vm_apply 里跑出确定结果。
+//
+// 五个负面场景各自收敛成确定 Trap：燃料耗尽、越界访存、写只读窗口、
+// 除零与裸地址逃逸。
+let codes = import("src::ir_codes");
+let vf = import("src::ir::verify");
+let vs = import("src::vm::vspace");
+let im = import("src::vm::image");
+let eng = import("src::vm::engine");
+
+let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+// 手工模块工作区：28 条指令、10 个区域、2 个过程、4 个形参、1 个类型、
+// 1 个分支与 208 个字的验证器绑定栈。所有表按固定偏移切分。
+let arena_blocks: Array(Array(u64, 16), 144) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+let mem_blocks: Array(Array(u64, 16), 80) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk
+];
+
+let win_blocks: Array(Array(u64, 16), 32) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+// 装载表 + 映像 + 地址空间对象。
+let layout_blocks: Array(Array(u64, 16), 96) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+let tcb_blocks: Array(Array(u64, 16), 96) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+let cap_blocks: Array(Array(u64, 16), 16) = [
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
+  zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
+
+// 工作区里各表的字节边界。IrInst=320、IrRegion=48、IrProc=64、IrParam=24、
+// IrType=16、IrCase=16。
+let arena_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(arena_blocks)); };
+let mem_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(mem_blocks)); };
+let win_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(win_blocks)); };
+let layout_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(layout_blocks)); };
+let tcb_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(tcb_blocks)); };
+let cap_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(cap_blocks)); };
+
+let insts_base = func() -> Mut(vf.IrInst) {
+  return ptr_cast(Mut(vf.IrInst), arena_ptr());
+};
+let regions_base = func() -> Mut(vf.IrRegion) {
+  return ptr_cast(Mut(vf.IrRegion), arena_ptr() + 10240);
+};
+let procs_base = func() -> Mut(vf.IrProc) {
+  return ptr_cast(Mut(vf.IrProc), arena_ptr() + 10816);
+};
+let params_base = func() -> Mut(vf.IrParam) {
+  return ptr_cast(Mut(vf.IrParam), arena_ptr() + 10944);
+};
+let types_base = func() -> Mut(vf.IrType) {
+  return ptr_cast(Mut(vf.IrType), arena_ptr() + 11136);
+};
+let cases_base = func() -> Mut(vf.IrCase) {
+  return ptr_cast(Mut(vf.IrCase), arena_ptr() + 11200);
+};
+let scratch_base = func() -> Mut(u64) {
+  return ptr_cast(Mut(u64), arena_ptr() + 11328);
+};
+let lists_base = func() -> Mut(u64) {
+  return ptr_cast(Mut(u64), arena_ptr() + 14656);
+};
+
+let inst_p = func(i: u64) -> Mut(vf.IrInst) {
+  return ptr_cast(Mut(vf.IrInst), vf.inst_slot(ptr_cast(Ref(vf.IrInst), insts_base()), i));
+};
+let region_p = func(i: u64) -> Mut(vf.IrRegion) {
+  return ptr_cast(Mut(vf.IrRegion), vf.region_slot(ptr_cast(Ref(vf.IrRegion), regions_base()), i));
+};
+let proc_p = func(i: u64) -> Mut(vf.IrProc) {
+  return ptr_cast(Mut(vf.IrProc), vf.proc_slot(ptr_cast(Ref(vf.IrProc), procs_base()), i));
+};
+let param_p = func(i: u64) -> Mut(vf.IrParam) {
+  return ptr_cast(Mut(vf.IrParam), vf.param_slot(ptr_cast(Ref(vf.IrParam), params_base()), i));
+};
+let type_p = func(i: u64) -> Mut(vf.IrType) {
+  return ptr_cast(Mut(vf.IrType), vf.type_slot(ptr_cast(Ref(vf.IrType), types_base()), i));
+};
+let case_p = func(i: u64) -> Mut(vf.IrCase) {
+  return ptr_cast(Mut(vf.IrCase), vf.case_slot(ptr_cast(Ref(vf.IrCase), cases_base()), i));
+};
+let list_slot = func(r: u64, i: u64) -> Mut(u64) {
+  return lists_base() + r * 16 * 8 + i * 8;
+};
+let list_ref = func(r: u64) -> Ref(u64) {
+  return ptr_cast(Ref(u64), lists_base() + r * 16 * 8);
+};
+
+let add_inst = func(i: u64, kind: u64) -> Mut(vf.IrInst) {
+  let p: Mut(vf.IrInst) = inst_p(i);
+  deref(p) = vf.inst_new(kind);
+  return p;
+};
+
+let set_regions = func(tr: Ref(vf.IrType)) -> u64 {
+  let r0: Mut(vf.IrRegion) = region_p(0);
+  deref(r0) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(0), 13);
+  let r1: Mut(vf.IrRegion) = region_p(1);
+  deref(r1) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(1), 1);
+  let r2: Mut(vf.IrRegion) = region_p(2);
+  deref(r2) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(2), 1);
+  let rp: Ref(vf.IrParam) = ptr_cast(Ref(vf.IrParam), ptr_cast(Mut(vf.IrParam), params_base()) + 24);
+  let r3: Mut(vf.IrRegion) = region_p(3);
+  deref(r3) = vf.region_new(rp, 2, tr, 1, list_ref(3), 2);
+  let r4: Mut(vf.IrRegion) = region_p(4);
+  deref(r4) = vf.region_new(null_ref(Ref(vf.IrParam)), 0,
+                            null_ref(Ref(vf.IrType)), 0, list_ref(4), 3);
+  let r5: Mut(vf.IrRegion) = region_p(5);
+  deref(r5) = vf.region_new(null_ref(Ref(vf.IrParam)), 0,
+                            null_ref(Ref(vf.IrType)), 0, list_ref(5), 1);
+  let r6: Mut(vf.IrRegion) = region_p(6);
+  deref(r6) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(6), 1);
+  let r7: Mut(vf.IrRegion) = region_p(7);
+  deref(r7) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(7), 1);
+  let r8: Mut(vf.IrRegion) = region_p(8);
+  deref(r8) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(8), 4);
+  let r9: Mut(vf.IrRegion) = region_p(9);
+  deref(r9) = vf.region_new(null_ref(Ref(vf.IrParam)), 0, tr, 1, list_ref(9), 1);
+  return 0;
+};
+
+// 入口过程（名 1）带一个 u64 形参；extern 能力过程（名 2，link 707）。
+// 递归调用的是同一个入口过程，所以返回的是整条结果链：f(0)=9，
+// f(1)=0+(1+9)+9=19，f(2)=1+(2+19)+9=31，f(3)=3+(3+31)+9=46，
+// n=4 时 f(4)=6+(4+46)+7=63（104 命中 switch 分支）。
+let build_sandbox = func() -> vf.IrModule {
+  let t: Mut(vf.IrType) = type_p(0);
+  deref(t) = vf.type_bits(64);
+  let tr: Ref(vf.IrType) = ptr_cast(Ref(vf.IrType), t);
+  let pn: Mut(vf.IrParam) = param_p(0);
+  deref(pn) = vf.param_new(11, vf.type_bits(64));
+  let pa: Mut(vf.IrParam) = param_p(1);
+  deref(pa) = vf.param_new(31, vf.type_bits(64));
+  let pi: Mut(vf.IrParam) = param_p(2);
+  deref(pi) = vf.param_new(32, vf.type_bits(64));
+  let pc: Mut(vf.IrParam) = param_p(3);
+  deref(pc) = vf.param_new(51, vf.type_bits(64));
+
+  let i0: Mut(vf.IrInst) = add_inst(0, codes.INST_ALLOCA());
+  let x0: u64 = vf.inst_set_type(i0, vf.TY_BITS(), 64);
+  let x1: u64 = vf.inst_add_operand(i0, vf.op_int(1));
+  let x2: u64 = vf.inst_add_result(i0, 10);
+  let i1: Mut(vf.IrInst) = add_inst(1, codes.INST_STORE());
+  let x3: u64 = vf.inst_set_type(i1, vf.TY_BITS(), 64);
+  let x4: u64 = vf.inst_add_operand(i1, vf.op_value(11));
+  let x5: u64 = vf.inst_add_operand(i1, vf.op_value(10));
+  let i2: Mut(vf.IrInst) = add_inst(2, codes.INST_LOAD());
+  let x6: u64 = vf.inst_set_type(i2, vf.TY_BITS(), 64);
+  let x7: u64 = vf.inst_add_operand(i2, vf.op_value(10));
+  let x8: u64 = vf.inst_add_result(i2, 12);
+  let i3: Mut(vf.IrInst) = add_inst(3, codes.INST_CALL());
+  let x9: u64 = vf.inst_set_symbol(i3, 2);
+  let x10: u64 = vf.inst_add_operand(i3, vf.op_value(12));
+  let x11: u64 = vf.inst_add_result(i3, 13);
+  let i4: Mut(vf.IrInst) = add_inst(4, codes.INST_EQ());
+  let x12: u64 = vf.inst_set_type(i4, vf.TY_BITS(), 64);
+  let x13: u64 = vf.inst_add_operand(i4, vf.op_value(13));
+  let x14: u64 = vf.inst_add_operand(i4, vf.op_int(0));
+  let x15: u64 = vf.inst_add_result(i4, 14);
+  let i5: Mut(vf.IrInst) = add_inst(5, codes.INST_IF());
+  let x16: u64 = vf.inst_add_operand(i5, vf.op_value(14));
+  let x17: u64 = vf.inst_set_body(i5, 1);
+  let x18: u64 = vf.inst_set_else(i5, 2);
+  let x19: u64 = vf.inst_add_result(i5, 15);
+  let i6: Mut(vf.IrInst) = add_inst(6, codes.INST_LOOP());
+  let x20: u64 = vf.inst_set_label(i6, 900);
+  let x21: u64 = vf.inst_set_body(i6, 3);
+  let x22: u64 = vf.inst_add_result(i6, 16);
+  let i7: Mut(vf.IrInst) = add_inst(7, codes.INST_SGT());
+  let x23: u64 = vf.inst_set_type(i7, vf.TY_BITS(), 64);
+  let x24: u64 = vf.inst_add_operand(i7, vf.op_value(11));
+  let x25: u64 = vf.inst_add_operand(i7, vf.op_int(0));
+  let x26: u64 = vf.inst_add_result(i7, 19);
+  let i8: Mut(vf.IrInst) = add_inst(8, codes.INST_IF());
+  let x27: u64 = vf.inst_add_operand(i8, vf.op_value(19));
+  let x28: u64 = vf.inst_set_body(i8, 8);
+  let x29: u64 = vf.inst_set_else(i8, 9);
+  let x30: u64 = vf.inst_add_result(i8, 20);
+  let i9: Mut(vf.IrInst) = add_inst(9, codes.INST_SWITCH());
+  let x31: u64 = vf.inst_set_type(i9, vf.TY_BITS(), 64);
+  let x32: u64 = vf.inst_add_operand(i9, vf.op_value(13));
+  let x33: u64 = vf.inst_set_cases(i9, 0, 1);
+  let x34: u64 = vf.inst_set_default(i9, 7);
+  let x35: u64 = vf.inst_add_result(i9, 17);
+  let i10: Mut(vf.IrInst) = add_inst(10, codes.INST_ADD());
+  let x36: u64 = vf.inst_set_type(i10, vf.TY_BITS(), 64);
+  let x37: u64 = vf.inst_add_operand(i10, vf.op_value(16));
+  let x38: u64 = vf.inst_add_operand(i10, vf.op_value(20));
+  let x39: u64 = vf.inst_add_result(i10, 21);
+  let i11: Mut(vf.IrInst) = add_inst(11, codes.INST_ADD());
+  let x40: u64 = vf.inst_set_type(i11, vf.TY_BITS(), 64);
+  let x41: u64 = vf.inst_add_operand(i11, vf.op_value(21));
+  let x42: u64 = vf.inst_add_operand(i11, vf.op_value(17));
+  let x43: u64 = vf.inst_add_result(i11, 22);
+  let i12: Mut(vf.IrInst) = add_inst(12, codes.INST_RETURN());
+  let x44: u64 = vf.inst_add_operand(i12, vf.op_value(22));
+
+  let i13: Mut(vf.IrInst) = add_inst(13, codes.INST_YIELD());
+  let x45: u64 = vf.inst_add_operand(i13, vf.op_int(100));
+  let i14: Mut(vf.IrInst) = add_inst(14, codes.INST_YIELD());
+  let x46: u64 = vf.inst_add_operand(i14, vf.op_value(13));
+
+  let i15: Mut(vf.IrInst) = add_inst(15, codes.INST_SLT());
+  let x47: u64 = vf.inst_set_type(i15, vf.TY_BITS(), 64);
+  let x48: u64 = vf.inst_add_operand(i15, vf.op_value(32));
+  let x49: u64 = vf.inst_add_operand(i15, vf.op_value(11));
+  let x50: u64 = vf.inst_add_result(i15, 33);
+  let i16: Mut(vf.IrInst) = add_inst(16, codes.INST_IF());
+  let x51: u64 = vf.inst_add_operand(i16, vf.op_value(33));
+  let x52: u64 = vf.inst_set_body(i16, 4);
+  let x53: u64 = vf.inst_set_else(i16, 5);
+
+  let i17: Mut(vf.IrInst) = add_inst(17, codes.INST_ADD());
+  let x55: u64 = vf.inst_set_type(i17, vf.TY_BITS(), 64);
+  let x56: u64 = vf.inst_add_operand(i17, vf.op_value(31));
+  let x57: u64 = vf.inst_add_operand(i17, vf.op_value(32));
+  let x58: u64 = vf.inst_add_result(i17, 35);
+  let i18: Mut(vf.IrInst) = add_inst(18, codes.INST_ADD());
+  let x59: u64 = vf.inst_set_type(i18, vf.TY_BITS(), 64);
+  let x60: u64 = vf.inst_add_operand(i18, vf.op_value(32));
+  let x61: u64 = vf.inst_add_operand(i18, vf.op_int(1));
+  let x62: u64 = vf.inst_add_result(i18, 36);
+  let i19: Mut(vf.IrInst) = add_inst(19, codes.INST_CONTINUE());
+  let x63: u64 = vf.inst_set_label(i19, 900);
+  let x64: u64 = vf.inst_add_operand(i19, vf.op_value(35));
+  let x65: u64 = vf.inst_add_operand(i19, vf.op_value(36));
+
+  let i20: Mut(vf.IrInst) = add_inst(20, codes.INST_BREAK());
+  let x66: u64 = vf.inst_set_label(i20, 900);
+  let x67: u64 = vf.inst_add_operand(i20, vf.op_value(31));
+  let i21: Mut(vf.IrInst) = add_inst(21, codes.INST_YIELD());
+  let x68: u64 = vf.inst_add_operand(i21, vf.op_int(7));
+  let i22: Mut(vf.IrInst) = add_inst(22, codes.INST_YIELD());
+  let x69: u64 = vf.inst_add_operand(i22, vf.op_int(9));
+
+  let i23: Mut(vf.IrInst) = add_inst(23, codes.INST_SUB());
+  let x70: u64 = vf.inst_set_type(i23, vf.TY_BITS(), 64);
+  let x71: u64 = vf.inst_add_operand(i23, vf.op_value(11));
+  let x72: u64 = vf.inst_add_operand(i23, vf.op_int(1));
+  let x73: u64 = vf.inst_add_result(i23, 39);
+  let i24: Mut(vf.IrInst) = add_inst(24, codes.INST_CALL());
+  let x74: u64 = vf.inst_set_symbol(i24, 1);
+  let x75: u64 = vf.inst_add_operand(i24, vf.op_value(39));
+  let x76: u64 = vf.inst_add_result(i24, 40);
+  let i25: Mut(vf.IrInst) = add_inst(25, codes.INST_ADD());
+  let x77: u64 = vf.inst_set_type(i25, vf.TY_BITS(), 64);
+  let x78: u64 = vf.inst_add_operand(i25, vf.op_value(11));
+  let x79: u64 = vf.inst_add_operand(i25, vf.op_value(40));
+  let x80: u64 = vf.inst_add_result(i25, 41);
+  let i26: Mut(vf.IrInst) = add_inst(26, codes.INST_YIELD());
+  let x81: u64 = vf.inst_add_operand(i26, vf.op_value(41));
+  let i27: Mut(vf.IrInst) = add_inst(27, codes.INST_YIELD());
+  let x82: u64 = vf.inst_add_operand(i27, vf.op_int(0));
+
+  let k: Mut(vf.IrCase) = case_p(0);
+  deref(k) = vf.case_new(104, 6);
+
+  deref(list_slot(0, 0)) = 0; deref(list_slot(0, 1)) = 1;
+  deref(list_slot(0, 2)) = 2; deref(list_slot(0, 3)) = 3;
+  deref(list_slot(0, 4)) = 4; deref(list_slot(0, 5)) = 5;
+  deref(list_slot(0, 6)) = 6; deref(list_slot(0, 7)) = 7;
+  deref(list_slot(0, 8)) = 8; deref(list_slot(0, 9)) = 9;
+  deref(list_slot(0, 10)) = 10; deref(list_slot(0, 11)) = 11;
+  deref(list_slot(0, 12)) = 12;
+  deref(list_slot(1, 0)) = 13;
+  deref(list_slot(2, 0)) = 14;
+  deref(list_slot(3, 0)) = 15; deref(list_slot(3, 1)) = 16;
+  deref(list_slot(4, 0)) = 17; deref(list_slot(4, 1)) = 18;
+  deref(list_slot(4, 2)) = 19;
+  deref(list_slot(5, 0)) = 20;
+  deref(list_slot(6, 0)) = 21;
+  deref(list_slot(7, 0)) = 22;
+  deref(list_slot(8, 0)) = 23; deref(list_slot(8, 1)) = 24;
+  deref(list_slot(8, 2)) = 25; deref(list_slot(8, 3)) = 26;
+  deref(list_slot(9, 0)) = 27;
+
+  set_regions(tr);
+
+  let p0: Mut(vf.IrProc) = proc_p(0);
+  deref(p0) = vf.proc_new(1, ptr_cast(Ref(vf.IrParam), pn), 1, tr, 1);
+  let x83: u64 = vf.proc_set_body(p0, 0);
+  let p1: Mut(vf.IrProc) = proc_p(1);
+  deref(p1) = vf.proc_new(2, ptr_cast(Ref(vf.IrParam), pc), 1, tr, 1);
+  let x84: u64 = vf.proc_set_extern(p1, 707);
+
+  return vf.module_new(99,
+      ptr_cast(Ref(vf.IrProc), procs_base()), 2,
+      ptr_cast(Ref(vf.IrRegion), regions_base()), 10,
+      ptr_cast(Ref(vf.IrInst), insts_base()), 28,
+      ptr_cast(Ref(vf.IrCase), cases_base()), 1,
+      scratch_base());
+};
+
+// 诊断/陷阱用的小模块走常规 IrBuilder：容量 8 条指令、8 个区域足够。
+// 区域持有的指令下标表放在全局 arena 里：builder 只保存指针，栈上的数组在
+// 构建过程返回后就失效了。
+let small_ptr = func() -> Mut(u8) {
+  return arena_ptr();
+};
+
+let small_list = func(r: u64, i: u64) -> Mut(u64) {
+  return lists_base() + r * 16 * 8 + i * 8;
+};
+
+let small_list_ref = func(r: u64) -> Ref(u64) {
+  return ptr_cast(Ref(u64), lists_base() + r * 16 * 8);
+};
+
+let build_fuel = func() -> vf.IrModule {
+  let b0: vf.IrBuilder = vf.builder_new(small_ptr());
+  let b: Mut(vf.IrBuilder) = mut_of(b0);
+  deref(small_list(0, 0)) = 1;
+  deref(small_list(1, 0)) = 0; deref(small_list(1, 1)) = 2;
+  let i0: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_LOOP());
+  let s0: u64 = vf.inst_set_label(i0, 7);
+  let s1: u64 = vf.inst_set_body(i0, 1);
+  let i1: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_CONTINUE());
+  let s2: u64 = vf.inst_set_label(i1, 7);
+  let i2: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_RETURN());
+  let r0: Mut(vf.IrRegion) = vf.add_region(b, null_ref(Ref(vf.IrParam)), 0,
+                                           null_ref(Ref(vf.IrType)), 0,
+                                           small_list_ref(1), 2);
+  let r1: Mut(vf.IrRegion) = vf.add_region(b, null_ref(Ref(vf.IrParam)), 0,
+                                           null_ref(Ref(vf.IrType)), 0,
+                                           small_list_ref(0), 1);
+  let p: Mut(vf.IrProc) = vf.add_proc(b, 3, null_ref(Ref(vf.IrParam)), 0,
+                                      null_ref(Ref(vf.IrType)), 0);
+  let s3: u64 = vf.proc_set_body(p, 0);
+  return vf.builder_module(b, 90);
+};
+
+let build_oob = func() -> vf.IrModule {
+  let b0: vf.IrBuilder = vf.builder_new(small_ptr());
+  let b: Mut(vf.IrBuilder) = mut_of(b0);
+  let rt: Ref(vf.IrType) = vf.add_type(b, vf.type_bits(64));
+  deref(small_list(2, 0)) = 0; deref(small_list(2, 1)) = 1;
+  deref(small_list(2, 2)) = 2; deref(small_list(2, 3)) = 3;
+  let i0: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_ALLOCA());
+  let s0: u64 = vf.inst_set_type(i0, vf.TY_BITS(), 64);
+  let s1: u64 = vf.inst_add_operand(i0, vf.op_int(1));
+  let s2: u64 = vf.inst_add_result(i0, 10);
+  let i1: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_LEA());
+  let st1: u64 = vf.inst_set_type(i1, vf.TY_ADDR(), 64);
+  let s3: u64 = vf.inst_add_operand(i1, vf.op_value(10));
+  let s4: u64 = vf.inst_add_operand(i1, vf.op_int(0));
+  let s5: u64 = vf.inst_add_operand(i1, vf.op_int(1));
+  let s6: u64 = vf.inst_add_operand(i1, vf.op_int(4294967296));
+  let s7: u64 = vf.inst_add_result(i1, 11);
+  let i2: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_LOAD());
+  let s8: u64 = vf.inst_set_type(i2, vf.TY_BITS(), 64);
+  let s9: u64 = vf.inst_add_operand(i2, vf.op_value(11));
+  let s10: u64 = vf.inst_add_result(i2, 12);
+  let i3: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_RETURN());
+  let s11: u64 = vf.inst_add_operand(i3, vf.op_value(12));
+  let r0: Mut(vf.IrRegion) = vf.add_region(b, null_ref(Ref(vf.IrParam)), 0, rt, 1,
+                                           small_list_ref(2), 4);
+  let p: Mut(vf.IrProc) = vf.add_proc(b, 4, null_ref(Ref(vf.IrParam)), 0, rt, 1);
+  let s12: u64 = vf.proc_set_body(p, 0);
+  return vf.builder_module(b, 91);
+};
+
+let build_divzero = func() -> vf.IrModule {
+  let b0: vf.IrBuilder = vf.builder_new(small_ptr());
+  let b: Mut(vf.IrBuilder) = mut_of(b0);
+  let rt: Ref(vf.IrType) = vf.add_type(b, vf.type_bits(64));
+  deref(small_list(3, 0)) = 0; deref(small_list(3, 1)) = 1;
+  let i0: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_SDIV());
+  let s0: u64 = vf.inst_set_type(i0, vf.TY_BITS(), 64);
+  let s1: u64 = vf.inst_add_operand(i0, vf.op_int(10));
+  let s2: u64 = vf.inst_add_operand(i0, vf.op_int(0));
+  let s3: u64 = vf.inst_add_result(i0, 10);
+  let i1: Mut(vf.IrInst) = vf.add_inst(b, codes.INST_RETURN());
+  let s4: u64 = vf.inst_add_operand(i1, vf.op_value(10));
+  let r0: Mut(vf.IrRegion) = vf.add_region(b, null_ref(Ref(vf.IrParam)), 0, rt, 1,
+                                           small_list_ref(3), 2);
+  let p: Mut(vf.IrProc) = vf.add_proc(b, 5, null_ref(Ref(vf.IrParam)), 0, rt, 1);
+  let s5: u64 = vf.proc_set_body(p, 0);
+  return vf.builder_module(b, 92);
+};
+
+// 通用执行：重新初始化地址空间，重新装载映像，按配额跑一次 apply。
+let run_image = func(m: vf.IrModule, quota: eng.VmQuota, caps: Mut(eng.VmCapTable),
+                     entry: u64, args: Slice(u64)) -> eng.VmResult {
+  let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
+  let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
+  let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
+      ptr_cast(Mut(vs.Window), win_ptr()), 32);
+  let s0: u64 = vs.vspace_new(mem, wins, space);
+  let lay0: im.ImageLayout = im.ImageLayout {
+    ro_base: 4096,
+    ro: make_slice(Slice(u8), ptr_cast(Ref(u8), mem_ptr()), 0),
+    rw_base: 8192,
+    rw: make_slice(Slice(u8), ptr_cast(Ref(u8), mem_ptr()), 0),
+    regions_ptr: ptr_cast(Mut(im.ImageRegion), layout_ptr()),
+    regions_len: 32,
+    insts_ptr: ptr_cast(Mut(im.InstMeta), layout_ptr() + 1536),
+    insts_len: 64,
+    operands_ptr: ptr_cast(Mut(im.OperandRef), layout_ptr() + 4096),
+    operands_len: 128,
+    results_ptr: ptr_cast(Mut(u64), layout_ptr() + 8192),
+    results_len: 64,
+    cases_ptr: ptr_cast(Mut(im.CaseInfo), layout_ptr() + 8704),
+    cases_len: 16,
+    case_index_ptr: ptr_cast(Mut(u64), layout_ptr() + 9088),
+    case_index_len: 16,
+    procs_ptr: ptr_cast(Mut(im.SubInfo), layout_ptr() + 9216),
+    procs_len: 8,
+  };
+  let img: Mut(im.VmImage) = ptr_cast(Mut(im.VmImage), layout_ptr() + 9856);
+  let le: u64 = im.image_load(ref_of(m), space, lay0, img);
+  if le != 0 { return eng.vm_result_trap(eng.TRAP_STATE()); }
+  let tcb_arena: MutSlice(u8) = make_slice(MutSlice(u8), tcb_ptr(), 12288);
+  return eng.vm_apply(ref_of(deref(img)), space, caps, quota, 1, entry, args, tcb_arena);
+};
+
+// 宿主的 VmCaps 见证：用冻结的能力表按 link_name 分派。
+let HostCapsSig = sig {
+  pub let Self: Type;
+  pub let invoke: Fn((Mut(Self), u64, Slice(u64)) -> u64);
+};
+
+let HostCaps: HostCapsSig = module {
+  pub let Self = eng.VmCapTable;
+  pub let invoke = func(self: Mut(Self), link_name: u64, args: Slice(u64)) -> u64 {
+    let hit: u64 = eng.caps_find(self, link_name, 0);
+    if hit == 0 { return 0; }
+    let e: Mut(eng.VmCapEntry) = self.entries + (hit - 1) * 32;
+    let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
+    return fn(e.context, args);
+  };
+};
+
+let invoke_cap = func(table: Mut(eng.VmCapTable), link_name: u64,
+                      args: Slice(u64)) ?{ caps: HostCapsSig } -> u64 {
+  return caps.invoke(table, link_name, args);
+};
+
+let main = func() -> i64 {
+  let host_add: Fn((u64, Slice(u64)) -> u64) = func(ctx: u64, args: Slice(u64)) -> u64 {
+    return args[0] + 100;
+  };
+  let entries: Mut(eng.VmCapEntry) = ptr_cast(Mut(eng.VmCapEntry), cap_ptr());
+  let caps0: eng.VmCapTable = eng.caps_new(entries, 8);
+  let caps: Mut(eng.VmCapTable) = mut_of(caps0);
+  let reg: u64 = eng.caps_register(caps, 707, eng.CAP_FUNCTION(), 0, host_add);
+  let fz: u64 = eng.caps_freeze(caps);
+  if reg != 1 { return 10; }
+  if fz != 1 { return 11; }
+
+  // ?{ caps: HostCaps } 见证分派：5 + 100 = 105。
+  let probe_words: Array(u64, 1) = [5];
+  let probe_args: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(probe_words)), 1);
+  let seen: u64 = invoke_cap(caps, 707, probe_args) ?{ caps: HostCaps };
+  if seen != 105 { return 12; }
+
+  // --- 正常路径：多过程映像 ------------------------------------------------
+  let m: vf.IrModule = build_sandbox();
+  let ve: u64 = vf.verify_module(ref_of(m));
+  if ve != 0 { return 20 + ve as i64; }
+  let quota: eng.VmQuota = eng.quota_new(4000, 8192, 8);
+  let argv: Array(u64, 1) = [4];
+  let args: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(argv)), 1);
+  let ok: eng.VmResult = run_image(m, quota, caps, 0, args);
+  if ok.status != eng.SLICE_DONE() { return 30; }
+  if ok.trap_kind != eng.TRAP_NONE() { return 31; }
+  if ok.result_val.bits != 63 { return 32; }
+
+  // --- (a) 燃料耗尽 --------------------------------------------------------
+  let mf: vf.IrModule = build_fuel();
+  let ef: u64 = vf.verify_module(ref_of(mf));
+  if ef != 0 { return 40; }
+  let no_args: Array(u64, 1) = [0];
+  let empty: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(no_args)), 0);
+  let qf: eng.VmQuota = eng.quota_new(64, 0, 4);
+  let rf: eng.VmResult = run_image(mf, qf, caps, 0, empty);
+  if rf.status != eng.SLICE_TRAPPED() { return 41; }
+  if rf.trap_kind != eng.TRAP_FUEL() { return 42; }
+
+  // --- (b) 越界访存 --------------------------------------------------------
+  let mo: vf.IrModule = build_oob();
+  let eo: u64 = vf.verify_module(ref_of(mo));
+  if eo != 0 { return 50; }
+  let ro: eng.VmResult = run_image(mo, quota, caps, 0, empty);
+  if ro.status != eng.SLICE_TRAPPED() { return 51; }
+  if ro.trap_kind != eng.TRAP_MEMORY_OOB() { return 52; }
+
+  // --- (c) 写只读窗口 ------------------------------------------------------
+  let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
+  let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
+  let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
+      ptr_cast(Mut(vs.Window), win_ptr()), 32);
+  let s0: u64 = vs.vspace_new(mem, wins, space);
+  let hro: vs.Handle = vs.map_window(space, 36864, 8, vs.MEM_READ());
+  if vs.handle_none(hro) == 1 { return 60; }
+  let wr: u64 = vs.vm_store(space, 36864, 8, 63);
+  if wr != vs.TRAP_MEM_PROT() { return 61; }
+
+  // --- (d) 除零 ------------------------------------------------------------
+  let mz: vf.IrModule = build_divzero();
+  let ez: u64 = vf.verify_module(ref_of(mz));
+  if ez != 0 { return 70; }
+  let rz: eng.VmResult = run_image(mz, quota, caps, 0, empty);
+  if rz.status != eng.SLICE_TRAPPED() { return 71; }
+  if rz.trap_kind != eng.TRAP_ARITH_DOMAIN() { return 72; }
+
+  // --- (e) 裸地址逃逸 ------------------------------------------------------
+  let esc0: u64 = vs.check_no_addr_escape(space, 0, 8, vs.MEM_READ());
+  if esc0 != vs.TRAP_MEM_BOUNDS() { return 80; }
+  let esc1: u64 = vs.check_no_addr_escape(space, 4294967296, 8, vs.MEM_READ());
+  if esc1 == vs.TRAP_NONE() { return 81; }
+
+  return 63;
+};

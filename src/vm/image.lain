@@ -1,0 +1,995 @@
+// LAINIR 模块的内存映像：把平坦的 IrModule 变成引擎直接可用的执行形态。
+//
+// 装载期做三件事：
+//   1. 把静态数据段与代码段排进 VSpace 的窗口（只读 / 读写 / 可调用）；
+//   2. 给过程、区域、指令、操作数引用与结果槽建立平坦下标表；
+//   3. 把每个 #switch 的分支装进一张开放寻址表，另外提供按 (指令, 选择子)
+//      一次散列定位的查表接口。
+//
+// 词法作用域在装载期消解成 (帧距离, 槽号)：运行期只做两次数组索引。
+// 所有表的容量由调用方给，装载器只检查够不够，从不自己分配。
+let codes = import("src::ir_codes");
+let vf = import("src::ir::verify");
+let vspace = import("src::vm::vspace");
+
+pub let NO_INDEX = func() -> u64 { return 4294967295; };
+pub let NO_REGION = func() -> u64 { return 4294967295; };
+
+// 代码入口是确定性的虚拟编号，不是宿主地址；代码窗口就登记在这个基址上。
+let CODE_BASE = func() -> u64 { return 268435456; };
+let CODE_ENTRY_SIZE = func() -> u64 { return 8; };
+
+pub let ERR_OK = func() -> u64 { return 0; };
+pub let ERR_REGION_CAP = func() -> u64 { return 1; };
+pub let ERR_INST_CAP = func() -> u64 { return 2; };
+pub let ERR_OPERAND_CAP = func() -> u64 { return 3; };
+pub let ERR_RESULT_CAP = func() -> u64 { return 4; };
+pub let ERR_CASE_CAP = func() -> u64 { return 5; };
+pub let ERR_PROC_CAP = func() -> u64 { return 6; };
+pub let ERR_CASE_INDEX = func() -> u64 { return 7; };
+pub let ERR_UNDEFINED = func() -> u64 { return 8; };
+pub let ERR_BAD_REGION = func() -> u64 { return 9; };
+pub let ERR_MAP_RO = func() -> u64 { return 10; };
+pub let ERR_MAP_RW = func() -> u64 { return 11; };
+pub let ERR_MAP_CODE = func() -> u64 { return 12; };
+
+pub let ImageRegion = struct {
+  image_id: u64,
+  module_region: u64,
+  parent: u64,
+  sub_index: u64,
+  params: Ref(vf.IrParam),
+  param_count: u64,
+  results: Ref(vf.IrType),
+  result_count: u64,
+  extra_count: u64,
+  param_slots: u64,
+  slot_count: u64,
+  meta_base: u64,
+  inst_count: u64,
+  depth: u64,
+  valid: u64,
+};
+
+pub let InstMeta = struct {
+  operand_base: u64,
+  operand_count: u64,
+  result_base: u64,
+  result_count: u64,
+  then_region: u64,
+  else_region: u64,
+  loop_region: u64,
+  default_region: u64,
+  case_base: u64,
+  case_count: u64,
+  sub_index: u64,
+};
+
+// 一个装载后的操作数引用：字面量、符号地址、子过程入口、或某个外层帧的槽。
+pub let OperandRef = struct {
+  is_literal: u64,
+  is_symbol: u64,
+  is_proc: u64,
+  frame_distance: u64,
+  slot: u64,
+  symbol_index: u64,
+};
+
+// 循环参数的初值引用：在父帧里求值。
+pub let ParamInit = struct {
+  init_ref: OperandRef,
+  bits: u64,
+};
+
+pub let CaseInfo = struct {
+  value: u64,
+  owner: u64,
+  region: u64,
+};
+
+pub let SubInfo = struct {
+  sub: Ref(vf.IrProc),
+  name: u64,
+  link_name: u64,
+  is_extern: u64,
+  body_region: u64,
+  entry_addr: u64,
+  params: Ref(vf.IrParam),
+  param_count: u64,
+  results: Ref(vf.IrType),
+  result_count: u64,
+};
+
+// 七张平坦表都写成 (指针, 长度) 标量对：嵌套的 MutSlice 字段经由调用方指针
+// 写入时当前前端会多解一层引用，平铺成标量就绕开了这条路径。
+pub let VmImage = struct {
+  ir: Ref(vf.IrModule),
+  space: Mut(vspace.VmSpace),
+  ro_base: u64,
+  rw_base: u64,
+  code_base: u64,
+  regions_ptr: Mut(ImageRegion),
+  regions_len: u64,
+  region_count: u64,
+  insts_ptr: Mut(InstMeta),
+  insts_len: u64,
+  inst_count: u64,
+  operands_ptr: Mut(OperandRef),
+  operands_len: u64,
+  operand_count: u64,
+  results_ptr: Mut(u64),
+  results_len: u64,
+  result_count: u64,
+  cases_ptr: Mut(CaseInfo),
+  cases_len: u64,
+  case_count: u64,
+  case_index_ptr: Mut(u64),
+  case_index_len: u64,
+  case_mask: u64,
+  procs_ptr: Mut(SubInfo),
+  procs_len: u64,
+  proc_count: u64,
+  max_depth: u64,
+  max_slots: u64,
+};
+
+pub let ImageSizes = struct {
+  regions: u64,
+  insts: u64,
+  operands: u64,
+  results: u64,
+  cases: u64,
+  procs: u64,
+  case_index: u64,
+  max_depth: u64,
+  max_slots: u64,
+};
+
+pub let ImageLayout = struct {
+  ro_base: u64,
+  ro: Slice(u8),
+  rw_base: u64,
+  rw: Slice(u8),
+  regions_ptr: Mut(ImageRegion),
+  regions_len: u64,
+  insts_ptr: Mut(InstMeta),
+  insts_len: u64,
+  operands_ptr: Mut(OperandRef),
+  operands_len: u64,
+  results_ptr: Mut(u64),
+  results_len: u64,
+  cases_ptr: Mut(CaseInfo),
+  cases_len: u64,
+  case_index_ptr: Mut(u64),
+  case_index_len: u64,
+  procs_ptr: Mut(SubInfo),
+  procs_len: u64,
+};
+
+let m_regions = func(img: Mut(VmImage)) -> MutSlice(ImageRegion) {
+  return make_slice(MutSlice(ImageRegion), img.regions_ptr, img.regions_len);
+};
+
+let m_insts = func(img: Mut(VmImage)) -> MutSlice(InstMeta) {
+  return make_slice(MutSlice(InstMeta), img.insts_ptr, img.insts_len);
+};
+
+let m_operands = func(img: Mut(VmImage)) -> MutSlice(OperandRef) {
+  return make_slice(MutSlice(OperandRef), img.operands_ptr, img.operands_len);
+};
+
+let m_results = func(img: Mut(VmImage)) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), img.results_ptr, img.results_len);
+};
+
+let m_cases = func(img: Mut(VmImage)) -> MutSlice(CaseInfo) {
+  return make_slice(MutSlice(CaseInfo), img.cases_ptr, img.cases_len);
+};
+
+let m_case_index = func(img: Mut(VmImage)) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), img.case_index_ptr, img.case_index_len);
+};
+
+let m_procs = func(img: Mut(VmImage)) -> MutSlice(SubInfo) {
+  return make_slice(MutSlice(SubInfo), img.procs_ptr, img.procs_len);
+};
+
+let r_regions = func(img: Ref(VmImage)) -> MutSlice(ImageRegion) {
+  return make_slice(MutSlice(ImageRegion), img.regions_ptr, img.regions_len);
+};
+
+let r_insts = func(img: Ref(VmImage)) -> MutSlice(InstMeta) {
+  return make_slice(MutSlice(InstMeta), img.insts_ptr, img.insts_len);
+};
+
+let r_operands = func(img: Ref(VmImage)) -> MutSlice(OperandRef) {
+  return make_slice(MutSlice(OperandRef), img.operands_ptr, img.operands_len);
+};
+
+let r_results = func(img: Ref(VmImage)) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), img.results_ptr, img.results_len);
+};
+
+let r_cases = func(img: Ref(VmImage)) -> MutSlice(CaseInfo) {
+  return make_slice(MutSlice(CaseInfo), img.cases_ptr, img.cases_len);
+};
+
+let r_case_index = func(img: Ref(VmImage)) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), img.case_index_ptr, img.case_index_len);
+};
+
+let r_procs = func(img: Ref(VmImage)) -> MutSlice(SubInfo) {
+  return make_slice(MutSlice(SubInfo), img.procs_ptr, img.procs_len);
+};
+
+let lay_regions = func(lay: ImageLayout) -> MutSlice(ImageRegion) {
+  return make_slice(MutSlice(ImageRegion), lay.regions_ptr, lay.regions_len);
+};
+
+let lay_insts = func(lay: ImageLayout) -> MutSlice(InstMeta) {
+  return make_slice(MutSlice(InstMeta), lay.insts_ptr, lay.insts_len);
+};
+
+let lay_operands = func(lay: ImageLayout) -> MutSlice(OperandRef) {
+  return make_slice(MutSlice(OperandRef), lay.operands_ptr, lay.operands_len);
+};
+
+let lay_results = func(lay: ImageLayout) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), lay.results_ptr, lay.results_len);
+};
+
+let lay_cases = func(lay: ImageLayout) -> MutSlice(CaseInfo) {
+  return make_slice(MutSlice(CaseInfo), lay.cases_ptr, lay.cases_len);
+};
+
+let lay_case_index = func(lay: ImageLayout) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), lay.case_index_ptr, lay.case_index_len);
+};
+
+let lay_procs = func(lay: ImageLayout) -> MutSlice(SubInfo) {
+  return make_slice(MutSlice(SubInfo), lay.procs_ptr, lay.procs_len);
+};
+
+let Loader = struct {
+  m: Ref(vf.IrModule),
+  img: Mut(VmImage),
+  err: u64,
+};
+
+let zero_ref = func() -> OperandRef {
+  return OperandRef {
+    is_literal: 0,
+    is_symbol: 0,
+    is_proc: 0,
+    frame_distance: 0,
+    slot: 0,
+    symbol_index: NO_INDEX(),
+  };
+};
+
+let literal_ref = func() -> OperandRef {
+  return OperandRef {
+    is_literal: 1,
+    is_symbol: 0,
+    is_proc: 0,
+    frame_distance: 0,
+    slot: 0,
+    symbol_index: NO_INDEX(),
+  };
+};
+
+// 区域里的第 i 条指令在模块平坦指令表里的下标。
+let region_inst = func(r: vf.IrRegion, i: u64) -> u64 {
+  return deref(ptr_cast(Ref(u64), ptr_cast(Mut(u8), r.insts) + i * size_of(u64)));
+};
+
+// --- 量尺寸 ---------------------------------------------------------------
+let count_insts = func(m: Ref(vf.IrModule), r: vf.IrRegion, t: Mut(ImageSizes),
+                       i: u64) -> u64 {
+  if i >= r.inst_count { return 0; }
+  let ii: u64 = region_inst(r, i);
+  let it: vf.IrInst = vf.inst_at_ref(m.insts, ii);
+  t.insts = t.insts + 1;
+  t.operands = t.operands + it.operand_count;
+  t.results = t.results + it.result_count;
+  t.cases = t.cases + it.case_count;
+  return count_insts(m, r, t, i + 1);
+};
+
+let count_slots = func(m: Ref(vf.IrModule), r: vf.IrRegion, i: u64,
+                       acc: u64) -> u64 {
+  if i >= r.inst_count { return acc; }
+  let ii: u64 = region_inst(r, i);
+  let it: vf.IrInst = vf.inst_at_ref(m.insts, ii);
+  return count_slots(m, r, i + 1, acc + it.result_count);
+};
+
+let count_region = func(m: Ref(vf.IrModule), t: Mut(ImageSizes), region_id: u64,
+                        extra: u64, depth: u64) -> u64 {
+  if region_id == NO_REGION() { return 0; }
+  let r: vf.IrRegion = vf.region_at_ref(m.regions, region_id);
+  t.regions = t.regions + 1;
+  if depth > t.max_depth { t.max_depth = depth; }
+  let slots: u64 = extra + r.param_count + count_slots(m, r, 0, 0);
+  if slots > t.max_slots { t.max_slots = slots; }
+  count_insts(m, r, t, 0);
+  let i: u64 = loop i(i: u64 = 0) while i < r.inst_count {
+    let ii: u64 = region_inst(r, i);
+    let it: vf.IrInst = vf.inst_at_ref(m.insts, ii);
+    count_region(m, t, it.body, 0, depth + 1);
+    if it.kind != codes.INST_LOOP() {
+      count_region(m, t, it.else_body, 0, depth + 1);
+    }
+    count_region(m, t, it.default_body, 0, depth + 1);
+    let c: u64 = loop c(c: u64 = 0) while c < it.case_count {
+      let entry: vf.IrCase = vf.case_at_ref(m.cases, it.cases_at + c);
+      count_region(m, t, entry.body, 0, depth + 1);
+      c = c + 1;
+    };
+    i = i + 1;
+  };
+  return 0;
+};
+
+let next_pow2 = func(n: u64) -> u64 {
+  if n == 0 { return 0; }
+  let p: u64 = loop p(p: u64 = 1) while p < n { p = p * 2; };
+  return p;
+};
+
+pub let image_measure = func(m: Ref(vf.IrModule)) -> ImageSizes {
+  let t: ImageSizes = ImageSizes {
+    regions: 0,
+    insts: 0,
+    operands: 0,
+    results: 0,
+    cases: 0,
+    procs: m.proc_count,
+    case_index: 0,
+    max_depth: 0,
+    max_slots: 0,
+  };
+  let tp: Mut(ImageSizes) = mut_of(t);
+  let i: u64 = loop i(i: u64 = 0) while i < m.proc_count {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, i);
+    if p.is_extern == 0 {
+      if p.body != NO_REGION() {
+        count_region(m, tp, p.body, p.param_count, 1);
+      }
+    }
+    i = i + 1;
+  };
+  let out: ImageSizes = deref(tp);
+  out.case_index = next_pow2(out.cases * 2);
+  return out;
+};
+
+// --- 名字作用域 -----------------------------------------------------------
+// found=1 时 slot 命中；found=0 时 slot 是走完这一段之后的游标。
+let Lookup = struct {
+  found: u64,
+  distance: u64,
+  slot: u64,
+};
+
+let scan_params = func(base: Ref(vf.IrParam), name: u64, slot: u64, i: u64,
+                       count: u64) -> Lookup {
+  if i >= count { return Lookup { found: 0, distance: 0, slot: slot }; }
+  let p: vf.IrParam = vf.param_at_ref(base, i);
+  if p.name == name { return Lookup { found: 1, distance: 0, slot: slot }; }
+  return scan_params(base, name, slot + 1, i + 1, count);
+};
+
+let scan_results_inst = func(it: vf.IrInst, name: u64, slot: u64, k: u64) -> Lookup {
+  if k >= it.result_count { return Lookup { found: 0, distance: 0, slot: slot }; }
+  if vf.inst_result_name(it, k) == name {
+    return Lookup { found: 1, distance: 0, slot: slot };
+  }
+  return scan_results_inst(it, name, slot + 1, k + 1);
+};
+
+let scan_results = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, slot: u64,
+                        i: u64) -> Lookup {
+  if i >= r.inst_count { return Lookup { found: 0, distance: 0, slot: slot }; }
+  let ii: u64 = region_inst(r, i);
+  let it: vf.IrInst = vf.inst_at_ref(m.insts, ii);
+  let hit: Lookup = scan_results_inst(it, name, slot, 0);
+  if hit.found == 1 { return hit; }
+  return scan_results(m, r, name, hit.slot, i + 1);
+};
+
+// 一个区域的作用域：过程签名参数（只有根区域有）、区域参数、按指令顺序的结果。
+let lookup_region = func(c: Mut(Loader), region_id: u64, name: u64) -> Lookup {
+  let img: Mut(VmImage) = c.img;
+  let regions: MutSlice(ImageRegion) = m_regions(img);
+  let rec: ImageRegion = regions[region_id];
+  let m: Ref(vf.IrModule) = c.m;
+  let slot: u64 = 0;
+  if rec.extra_count > 0 {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, rec.sub_index);
+    let hit: Lookup = scan_params(p.params, name, 0, 0, rec.extra_count);
+    if hit.found == 1 { return hit; }
+    slot = hit.slot;
+  }
+  let r: vf.IrRegion = vf.region_at_ref(m.regions, rec.module_region);
+  let ph: Lookup = scan_params(r.params, name, slot, 0, r.param_count);
+  if ph.found == 1 { return ph; }
+  return scan_results(m, r, name, ph.slot, 0);
+};
+
+let resolve_walk = func(c: Mut(Loader), region_id: u64, name: u64,
+                        distance: u64) -> Lookup {
+  if region_id == NO_REGION() { return Lookup { found: 0, distance: 0, slot: 0 }; }
+  let hit: Lookup = lookup_region(c, region_id, name);
+  if hit.found == 1 {
+    return Lookup { found: 1, distance: distance, slot: hit.slot };
+  }
+  let img: Mut(VmImage) = c.img;
+  let regions: MutSlice(ImageRegion) = m_regions(img);
+  let rec: ImageRegion = regions[region_id];
+  return resolve_walk(c, rec.parent, name, distance + 1);
+};
+
+// --- 分支散列 -------------------------------------------------------------
+let case_hash = func(owner: u64, value: u64) -> u64 {
+  let h: u64 = (value ^ (owner * 1469598103934665603)) * 1099511628211;
+  return h ^ (h / 4294967296);
+};
+
+let case_index_insert = func(c: Mut(Loader), at: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let table: MutSlice(u64) = m_case_index(img);
+  if table.len == 0 { return 0; }
+  let cases: MutSlice(CaseInfo) = m_cases(img);
+  let entry: CaseInfo = cases[at];
+  let mask: u64 = img.case_mask;
+  let start: u64 = case_hash(entry.owner, entry.value) & mask;
+  let i: u64 = loop probe(i: u64 = start) while table[i] != 0 {
+    i = (i + 1) & mask;
+  };
+  table[i] = at + 1;
+  return 0;
+};
+
+// --- 过程表 ---------------------------------------------------------------
+let find_proc = func(c: Mut(Loader), name: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let procs: MutSlice(SubInfo) = m_procs(img);
+  let n: u64 = img.proc_count;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    let p: SubInfo = procs[i];
+    if p.name == name { return i; }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+// --- 装载 -----------------------------------------------------------------
+let push_operand = func(c: Mut(Loader), op: OperandRef) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let operands: MutSlice(OperandRef) = m_operands(img);
+  let at: u64 = img.operand_count;
+  if at >= operands.len {
+    c.err = ERR_OPERAND_CAP();
+    return NO_INDEX();
+  }
+  operands[at] = op;
+  img.operand_count = at + 1;
+  return at;
+};
+
+let push_result = func(c: Mut(Loader), slot: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let results: MutSlice(u64) = m_results(img);
+  let at: u64 = img.result_count;
+  if at >= results.len {
+    c.err = ERR_RESULT_CAP();
+    return NO_INDEX();
+  }
+  results[at] = slot;
+  img.result_count = at + 1;
+  return at;
+};
+
+let push_case = func(c: Mut(Loader), value: u64, owner: u64, region: u64) -> u64 {
+  let img: Mut(VmImage) = c.img;
+  let cases: MutSlice(CaseInfo) = m_cases(img);
+  let at: u64 = img.case_count;
+  if at >= cases.len {
+    c.err = ERR_CASE_CAP();
+    return NO_INDEX();
+  }
+  let entry: CaseInfo = CaseInfo { value: value, owner: owner, region: region };
+  cases[at] = entry;
+  img.case_count = at + 1;
+  case_index_insert(c, at);
+  return at;
+};
+
+let empty_inst = func() -> InstMeta {
+  return InstMeta {
+    operand_base: NO_INDEX(),
+    operand_count: 0,
+    result_base: NO_INDEX(),
+    result_count: 0,
+    then_region: NO_REGION(),
+    else_region: NO_REGION(),
+    loop_region: NO_REGION(),
+    default_region: NO_REGION(),
+    case_base: NO_INDEX(),
+    case_count: 0,
+    sub_index: NO_INDEX(),
+  };
+};
+
+let load_operands = func(c: Mut(Loader), region_id: u64, it: vf.IrInst,
+                         k: u64) -> u64 {
+  if k >= it.operand_count { return 0; }
+  if c.err != 0 { return c.err; }
+  let op: vf.IrOperand = vf.inst_op(it, k);
+  if op.kind != vf.OP_VALUE() {
+    push_operand(c, literal_ref());
+    return load_operands(c, region_id, it, k + 1);
+  }
+  let hit: Lookup = resolve_walk(c, region_id, op.name, 0);
+  if hit.found == 0 {
+    c.err = ERR_UNDEFINED();
+    return c.err;
+  }
+  let ref: OperandRef = OperandRef {
+    is_literal: 0,
+    is_symbol: 0,
+    is_proc: 0,
+    frame_distance: hit.distance,
+    slot: hit.slot,
+    symbol_index: NO_INDEX(),
+  };
+  push_operand(c, ref);
+  return load_operands(c, region_id, it, k + 1);
+};
+
+let load_results = func(c: Mut(Loader), base: u64, it: vf.IrInst, k: u64) -> u64 {
+  if k >= it.result_count { return 0; }
+  if c.err != 0 { return c.err; }
+  push_result(c, base + k);
+  return load_results(c, base, it, k + 1);
+};
+
+let load_cases = func(c: Mut(Loader), rec: ImageRegion, sub_index: u64, it: vf.IrInst,
+                      owner: u64, k: u64) -> u64 {
+  if k >= it.case_count { return 0; }
+  if c.err != 0 { return c.err; }
+  let m: Ref(vf.IrModule) = c.m;
+  let entry: vf.IrCase = vf.case_at_ref(m.cases, it.cases_at + k);
+  let child: u64 = add_region(c, entry.body, rec.image_id, 0, rec.depth + 1, sub_index);
+  if c.err != 0 { return c.err; }
+  push_case(c, entry.value, owner, child);
+  return load_cases(c, rec, sub_index, it, owner, k + 1);
+};
+
+let load_inst = func(c: Mut(Loader), rec: ImageRegion, r: vf.IrRegion, sub_index: u64,
+                     pos: u64, slot_cursor: u64) -> InstMeta {
+  let m: Ref(vf.IrModule) = c.m;
+  let ii: u64 = region_inst(r, pos);
+  let it: vf.IrInst = vf.inst_at_ref(m.insts, ii);
+  let owner: u64 = rec.meta_base + pos;
+  let mut_meta: InstMeta = empty_inst();
+  let meta: Mut(InstMeta) = mut_of(mut_meta);
+
+  if it.kind == codes.INST_LOOP() {
+    let body: u64 = add_region(c, it.body, rec.image_id, 0, rec.depth + 1, sub_index);
+    meta.loop_region = body;
+  } else {
+    if it.body != NO_REGION() {
+      let then_id: u64 = add_region(c, it.body, rec.image_id, 0, rec.depth + 1, sub_index);
+      meta.then_region = then_id;
+    }
+    if it.else_body != NO_REGION() {
+      let else_id: u64 = add_region(c, it.else_body, rec.image_id, 0, rec.depth + 1, sub_index);
+      meta.else_region = else_id;
+    }
+  }
+  if it.default_body != NO_REGION() {
+    let default_id: u64 = add_region(c, it.default_body, rec.image_id, 0, rec.depth + 1, sub_index);
+    meta.default_region = default_id;
+  }
+  if it.case_count > 0 {
+    let img: Mut(VmImage) = c.img;
+    meta.case_base = img.case_count;
+    meta.case_count = it.case_count;
+    load_cases(c, rec, sub_index, it, owner, 0);
+  }
+  if c.err != 0 { return deref(meta); }
+
+  if it.operand_count > 0 {
+    let img: Mut(VmImage) = c.img;
+    meta.operand_base = img.operand_count;
+    meta.operand_count = it.operand_count;
+    load_operands(c, rec.image_id, it, 0);
+  }
+  if it.result_count > 0 {
+    let img: Mut(VmImage) = c.img;
+    meta.result_base = img.result_count;
+    meta.result_count = it.result_count;
+    load_results(c, slot_cursor, it, 0);
+  }
+  if (it.kind == codes.INST_CALL()) and (it.symbol != 0) {
+    meta.sub_index = find_proc(c, it.symbol);
+  }
+  return deref(meta);
+};
+
+// 前序装载：父区域一定排在子区域前面。
+let add_region = func(c: Mut(Loader), region_id: u64, parent: u64, extra: u64,
+                      depth: u64, sub_index: u64) -> u64 {
+  if region_id == NO_REGION() { return NO_REGION(); }
+  if c.err != 0 { return NO_REGION(); }
+  let img: Mut(VmImage) = c.img;
+  let regions: MutSlice(ImageRegion) = m_regions(img);
+  let m: Ref(vf.IrModule) = c.m;
+  if region_id >= m.region_count {
+    c.err = ERR_BAD_REGION();
+    return NO_REGION();
+  }
+  if img.region_count >= regions.len {
+    c.err = ERR_REGION_CAP();
+    return NO_REGION();
+  }
+  let r: vf.IrRegion = vf.region_at_ref(m.regions, region_id);
+  let id: u64 = img.region_count;
+  img.region_count = id + 1;
+  let insts: MutSlice(InstMeta) = m_insts(img);
+  if (img.inst_count + r.inst_count) > insts.len {
+    c.err = ERR_INST_CAP();
+    return NO_REGION();
+  }
+  let rec: ImageRegion = ImageRegion {
+    image_id: id,
+    module_region: region_id,
+    parent: parent,
+    sub_index: sub_index,
+    params: r.params,
+    param_count: r.param_count,
+    results: r.results,
+    result_count: r.result_count,
+    extra_count: extra,
+    param_slots: extra + r.param_count,
+    slot_count: extra + r.param_count + count_slots(m, r, 0, 0),
+    meta_base: img.inst_count,
+    inst_count: r.inst_count,
+    depth: depth,
+    valid: 1,
+  };
+  if depth > img.max_depth { img.max_depth = depth; }
+  if rec.slot_count > img.max_slots { img.max_slots = rec.slot_count; }
+  img.inst_count = img.inst_count + r.inst_count;
+
+  // 先登记自己再装指令：解析外层名字要沿 parent 链走，链上每个区域都必须是
+  // 已经写进表里的记录。
+  regions[id] = rec;
+  let final_slot: u64 = loop pos(pos: u64 = 0, slot: u64 = rec.param_slots)
+      while pos < r.inst_count {
+    let meta: InstMeta = load_inst(c, rec, r, sub_index, pos, slot);
+    insts[rec.meta_base + pos] = meta;
+    pos = pos + 1;
+    slot = slot + meta.result_count;
+  };
+  return id;
+};
+
+let zero_cases = func(table: MutSlice(u64)) -> u64 {
+  let n: u64 = table.len;
+  let at: u64 = loop at(at: u64 = 0) while at < n {
+    table[at] = 0;
+    at = at + 1;
+  };
+  return 0;
+};
+
+pub let image_load = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpace),
+                          layout: ImageLayout, out: Mut(VmImage)) -> u64 {
+  out.ir = m;
+  out.space = space;
+  out.ro_base = layout.ro_base;
+  out.rw_base = layout.rw_base;
+  out.code_base = CODE_BASE();
+  out.regions_ptr = layout.regions_ptr;
+  out.regions_len = layout.regions_len;
+  out.region_count = 0;
+  out.insts_ptr = layout.insts_ptr;
+  out.insts_len = layout.insts_len;
+  out.inst_count = 0;
+  out.operands_ptr = layout.operands_ptr;
+  out.operands_len = layout.operands_len;
+  out.operand_count = 0;
+  out.results_ptr = layout.results_ptr;
+  out.results_len = layout.results_len;
+  out.result_count = 0;
+  out.cases_ptr = layout.cases_ptr;
+  out.cases_len = layout.cases_len;
+  out.case_count = 0;
+  out.case_index_ptr = layout.case_index_ptr;
+  out.case_index_len = layout.case_index_len;
+  out.procs_ptr = layout.procs_ptr;
+  out.procs_len = layout.procs_len;
+  out.proc_count = 0;
+  out.max_depth = 0;
+  out.max_slots = 0;
+
+  let sizes: ImageSizes = image_measure(m);
+  if layout.regions_len < sizes.regions { return ERR_REGION_CAP(); }
+  if layout.insts_len < sizes.insts { return ERR_INST_CAP(); }
+  if layout.operands_len < sizes.operands { return ERR_OPERAND_CAP(); }
+  if layout.results_len < sizes.results { return ERR_RESULT_CAP(); }
+  if layout.cases_len < sizes.cases { return ERR_CASE_CAP(); }
+  if layout.procs_len < sizes.procs { return ERR_PROC_CAP(); }
+  if sizes.cases > 0 {
+    if layout.case_index_len < sizes.case_index { return ERR_CASE_INDEX(); }
+    if layout.case_index_len == 0 { return ERR_CASE_INDEX(); }
+    let pow2: u64 = layout.case_index_len & (layout.case_index_len - 1);
+    if pow2 != 0 { return ERR_CASE_INDEX(); }
+  }
+  out.case_mask = if layout.case_index_len > 0 { layout.case_index_len - 1 } else { 0 };
+  zero_cases(lay_case_index(layout));
+
+  // 先把过程名全部登记完，再装函数体：直接调用与入口地址解析都不受声明顺序影响。
+  let procs: MutSlice(SubInfo) = m_procs(out);
+  let i: u64 = loop i(i: u64 = 0) while i < m.proc_count {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, i);
+    let entry: u64 = CODE_BASE() + i * CODE_ENTRY_SIZE();
+    let rec: SubInfo = SubInfo {
+      sub: ptr_cast(Ref(vf.IrProc), vf.proc_slot(m.procs, i)),
+      name: p.name,
+      link_name: p.link_name,
+      is_extern: p.is_extern,
+      body_region: NO_REGION(),
+      entry_addr: entry,
+      params: p.params,
+      param_count: p.param_count,
+      results: p.results,
+      result_count: p.result_count,
+    };
+    procs[i] = rec;
+    i = i + 1;
+  };
+  out.proc_count = m.proc_count;
+
+  let l0: Loader = Loader { m: m, img: out, err: 0 };
+  let loader: Mut(Loader) = mut_of(l0);
+  let k: u64 = loop k(k: u64 = 0) while k < m.proc_count {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, k);
+    if (p.is_extern == 0) and (p.body != NO_REGION()) {
+      let body: u64 = add_region(loader, p.body, NO_REGION(), p.param_count, 1, k);
+      if loader.err == 0 {
+        let pr: SubInfo = procs[k];
+        pr.body_region = body;
+        procs[k] = pr;
+      }
+    }
+    k = k + 1;
+  };
+  if loader.err != 0 { return loader.err; }
+
+  // 静态数据段排进地址空间：只读一段、读写一段。句柄只在本过程里用来回滚，
+  // 不写进映像（值类型字段经由调用方指针写入也会多解一层引用）。
+  let ro_h: vspace.Handle = vspace.no_handle();
+  let rw_h: vspace.Handle = vspace.no_handle();
+  if layout.ro.len > 0 {
+    let ro: vspace.Handle = vspace.map_window(space, layout.ro_base,
+                                              layout.ro.len as u64,
+                                              vspace.MEM_READ());
+    if vspace.handle_none(ro) == 1 { return ERR_MAP_RO(); }
+    ro_h = ro;
+    let t: u64 = vspace.init_window(space, ro, layout.ro);
+    if t != 0 { return t; }
+  }
+  if layout.rw.len > 0 {
+    let rw: vspace.Handle = vspace.map_window(space, layout.rw_base,
+                                              layout.rw.len as u64,
+                                              vspace.MEM_READ() | vspace.MEM_WRITE());
+    if vspace.handle_none(rw) == 1 {
+      if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
+      return ERR_MAP_RW();
+    }
+    rw_h = rw;
+    let t: u64 = vspace.init_window(space, rw, layout.rw);
+    if t != 0 { return t; }
+  }
+
+  // 代码段：每条子过程一个入口，长度固定；权限是 READ | CALL。
+  if m.proc_count > 0 {
+    let bytes: u64 = m.proc_count * CODE_ENTRY_SIZE();
+    let code: vspace.Handle = vspace.map_window(space, CODE_BASE(), bytes,
+                                                vspace.MEM_READ() | vspace.MEM_CALL());
+    if vspace.handle_none(code) == 1 {
+      if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
+      if layout.rw.len > 0 { vspace.unmap_window(space, rw_h); }
+      return ERR_MAP_CODE();
+    }
+  }
+  return ERR_OK();
+};
+
+// --- 引擎查询 -------------------------------------------------------------
+let empty_region = func() -> ImageRegion {
+  return ImageRegion {
+    image_id: NO_INDEX(),
+    module_region: NO_REGION(),
+    parent: NO_REGION(),
+    sub_index: NO_INDEX(),
+    params: null_ref(Ref(vf.IrParam)),
+    param_count: 0,
+    results: null_ref(Ref(vf.IrType)),
+    result_count: 0,
+    extra_count: 0,
+    param_slots: 0,
+    slot_count: 0,
+    meta_base: 0,
+    inst_count: 0,
+    depth: 0,
+    valid: 0,
+  };
+};
+
+let empty_sub = func() -> SubInfo {
+  return SubInfo {
+    sub: null_ref(Ref(vf.IrProc)),
+    name: 0,
+    link_name: 0,
+    is_extern: 0,
+    body_region: NO_REGION(),
+    entry_addr: 0,
+    params: null_ref(Ref(vf.IrParam)),
+    param_count: 0,
+    results: null_ref(Ref(vf.IrType)),
+    result_count: 0,
+  };
+};
+
+pub let vm_region = func(img: Ref(VmImage), region_id: u64) -> ImageRegion {
+  if region_id >= img.region_count { return empty_region(); }
+  let regions: MutSlice(ImageRegion) = r_regions(img);
+  return regions[region_id];
+};
+
+pub let vm_inst_meta = func(img: Ref(VmImage), region_id: u64, pos: u64) -> InstMeta {
+  let rec: ImageRegion = vm_region(img, region_id);
+  let insts: MutSlice(InstMeta) = r_insts(img);
+  if pos >= rec.inst_count { return empty_inst(); }
+  return insts[rec.meta_base + pos];
+};
+
+pub let vm_operand_ref = func(img: Ref(VmImage), region_id: u64, pos: u64,
+                              i: u64) -> OperandRef {
+  let meta: InstMeta = vm_inst_meta(img, region_id, pos);
+  let operands: MutSlice(OperandRef) = r_operands(img);
+  if i >= meta.operand_count { return zero_ref(); }
+  return operands[meta.operand_base + i];
+};
+
+pub let vm_result_slot = func(img: Ref(VmImage), region_id: u64, pos: u64,
+                              i: u64) -> u64 {
+  let meta: InstMeta = vm_inst_meta(img, region_id, pos);
+  let results: MutSlice(u64) = r_results(img);
+  if i >= meta.result_count { return NO_INDEX(); }
+  return results[meta.result_base + i];
+};
+
+// 循环参数的初值在父帧求值；当前 LAINIR 的 #loop 不带初值操作数，所以默认是
+// 字面量 0，与 C99 后端对区域参数的零初始化一致。
+pub let vm_param_init = func(img: Ref(VmImage), region_id: u64,
+                             param_index: u64) -> ParamInit {
+  let rec: ImageRegion = vm_region(img, region_id);
+  if param_index >= rec.param_count {
+    return ParamInit { init_ref: zero_ref(), bits: 0 };
+  }
+  return ParamInit { init_ref: literal_ref(), bits: 0 };
+};
+
+pub let vm_case = func(img: Ref(VmImage), index: u64) -> CaseInfo {
+  let cases: MutSlice(CaseInfo) = r_cases(img);
+  if index >= img.case_count {
+    return CaseInfo { value: 0, owner: NO_INDEX(), region: NO_REGION() };
+  }
+  return cases[index];
+};
+
+pub let vm_symbol_addr = func(img: Ref(VmImage), symbol_index: u64) -> u64 {
+  return 0;
+};
+
+pub let vm_sub = func(img: Ref(VmImage), sub_index: u64) -> SubInfo {
+  if sub_index >= img.proc_count { return empty_sub(); }
+  let procs: MutSlice(SubInfo) = r_procs(img);
+  return procs[sub_index];
+};
+
+pub let vm_sub_count = func(img: Ref(VmImage)) -> u64 {
+  return img.proc_count;
+};
+
+pub let vm_sub_addr = func(img: Ref(VmImage), sub_index: u64) -> u64 {
+  if sub_index >= img.proc_count { return 0; }
+  let procs: MutSlice(SubInfo) = r_procs(img);
+  let p: SubInfo = procs[sub_index];
+  return p.entry_addr;
+};
+
+pub let vm_sub_at = func(img: Ref(VmImage), where: u64) -> u64 {
+  let base: u64 = CODE_BASE();
+  if where < base { return NO_INDEX(); }
+  let off: u64 = where - base;
+  if (off % CODE_ENTRY_SIZE()) != 0 { return NO_INDEX(); }
+  let index: u64 = off / CODE_ENTRY_SIZE();
+  if index >= img.proc_count { return NO_INDEX(); }
+  return index;
+};
+
+pub let vm_sub_index_by_body = func(img: Ref(VmImage), name: u64) -> u64 {
+  let procs: MutSlice(SubInfo) = r_procs(img);
+  let i: u64 = loop i(i: u64 = 0) while i < img.proc_count {
+    let p: SubInfo = procs[i];
+    if p.name == name {
+      if p.body_region != NO_REGION() { return i; }
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+pub let vm_max_region_depth = func(img: Ref(VmImage)) -> u64 {
+  return img.max_depth;
+};
+
+pub let vm_max_slots = func(img: Ref(VmImage)) -> u64 {
+  return img.max_slots;
+};
+
+// 直接按表下标取一个分支，O(1)。
+pub let case_at = func(img: Ref(VmImage), base: u64, i: u64) -> CaseInfo {
+  let cases: MutSlice(CaseInfo) = r_cases(img);
+  if (base + i) >= img.case_count {
+    return CaseInfo { value: 0, owner: NO_INDEX(), region: NO_REGION() };
+  }
+  return cases[base + i];
+};
+
+// 运行期 #switch 分派：一次散列后线性探测，装载期已把负载控制在 1/2 以下。
+pub let switch_region = func(img: Ref(VmImage), inst_index: u64, selector: u64) -> u64 {
+  if inst_index >= img.inst_count { return NO_REGION(); }
+  let insts: MutSlice(InstMeta) = r_insts(img);
+  let meta: InstMeta = insts[inst_index];
+  if meta.case_count == 0 { return meta.default_region; }
+  let table: MutSlice(u64) = r_case_index(img);
+  if table.len == 0 { return meta.default_region; }
+  let cases: MutSlice(CaseInfo) = r_cases(img);
+  let mask: u64 = img.case_mask;
+  let start: u64 = case_hash(inst_index, selector) & mask;
+  let hit: u64 = loop probe(i: u64 = start, steps: u64 = 0, found: u64 = NO_REGION())
+      while (steps <= mask) and (found == NO_REGION()) {
+    let at: u64 = table[i];
+    if at == 0 {
+      steps = mask + 1;
+    } else {
+      let e: CaseInfo = cases[at - 1];
+      let same: u64 = if (e.value == selector) and (e.owner == inst_index) { 1 } else { 0 };
+      if same == 1 {
+        found = e.region;
+      } else {
+        i = (i + 1) & mask;
+        steps = steps + 1;
+      }
+    }
+  };
+  if hit == NO_REGION() { return meta.default_region; }
+  return hit;
+};
+
+pub let vm_inst = func(img: Ref(VmImage), region_id: u64, pos: u64) -> vf.IrInst {
+  let rec: ImageRegion = vm_region(img, region_id);
+  let m: Ref(vf.IrModule) = img.ir;
+  if pos >= rec.inst_count { return vf.inst_new(codes.INST_UNREACHABLE()); }
+  let r: vf.IrRegion = vf.region_at_ref(m.regions, rec.module_region);
+  let ii: u64 = region_inst(r, pos);
+  return vf.inst_at_ref(m.insts, ii);
+};

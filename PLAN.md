@@ -39,6 +39,18 @@
 | **Phase 2：宿主 I/O 与标准库 MVP** | 打通 VM / C99 6 个 `lain_io_*` / `lain_perf_*` 原语、`std::` 路径解析、`std/io,test,bench.lain` 与 `stdout` 差分 | `36a1ee0` |
 | **Phase 3：统一 `let` 与极速迭代** | 归档 `lain0`/`stage1`（验证从 92.8s 降至 22.6s），实现 `let Name = struct/enum/func` 与编译期 `return struct {}`，全仓迁移并禁止旧顶层声明 | `2292b71`, `dca162b` |
 
+### 1.1 后续阶段完成状态
+
+| 阶段 | 状态 | 已验证交付 |
+| :--- | :--- | :--- |
+| **Phase 4：一等模块系统** | 已完成 | `pub let` 可见性、`module { ... }`、多级路径、`sig` 签名视图、函子与 `use` 见证合成；`given` 关键字已删除；`tests/meta/` 正负用例与 `examples/modular_telemetry_engine.lain` 通过 |
+| **Phase 5.1：AstOut 事务与 Expand 管线** | 已完成 | `AstOut` 的 `tx_begin / tx_commit / tx_rollback` 与独立 Expand 遍次接入，`tests/meta/ast_out_expand.lain` 通过 |
+| **Phase 5.2：标准语法脱糖** | 已完成 | UFCS、`f"..."` 零堆分配格式化、`match` 决策树与穷尽性核验；`ufcs_*`、`fmt_interp.lain`、`match_enum.lain` 通过 |
+| **Phase 5.3：单次代数效应** | 已完成 | `effect` / `perform` / `!` / `!{}` 效应集检查与 `handle ... with`；中止性、可恢复、效应行多态用例通过 |
+| **Phase 6.1：纯 Lain LAINIR 校验器与 C99 后端** | 已完成 | `src/ir/verify.lain`、`src/backend/c99.lain`，`tests/meta/phase6_ir_c99.lain` 覆盖合法模块与四类畸形模块 |
+| **Phase 6.2：纯 Lain Reader 与 AstOut** | 已完成 | `src/frontend/reader.lain`、`src/meta/ast_out.lain`，`tests/meta/phase6_reader_astout.lain` 覆盖词法/跨行位置/事务回滚 |
+| **Phase 6.3：纯 Lain 确定性沙箱执行引擎** | 已完成 | `src/vm/vspace.lain`、`src/vm/image.lain`、`src/vm/engine.lain`；`tests/meta/phase6_vm_sandbox.lain` 覆盖多过程映像执行与五类确定 Trap；`examples/self_hosted_pipeline.lain` 串起 Reader、事务化 AstOut、LAINIR 校验、VM 执行与 C99 发射，并在 VM 与 C99 上给出逐字节一致的报告
+
 ---
 
 ## Phase 4：一等模块系统（`module` / `pub let` / `sig` / 函子）与 `given` 退场

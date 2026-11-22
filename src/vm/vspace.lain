@@ -1,0 +1,556 @@
+// 确定性的地址空间：虚拟地址是调用方给的编号，底层存储是一段 MutSlice(u8)。
+//
+// 一次访存只有两种结局：拿到值，或者拿到一个确定的 Trap 码。虚拟地址与宿主
+// 地址无关，所以同一份输入在任何机器上给出同一份窗口表与同一串结果。
+//
+// 两条独立的边界：
+//   [base, base + len)         窗口登记的容量，重叠判定看它；
+//   [base, base + accessible)  当前有效访问窗口，每次访存看它。
+//
+// 物理偏移由 bump 指针在底层切片里顺序分配，从不回收；撤销窗口只撤销授权，
+// 不改变已经发出去的偏移，所以旧结果不会因为别的窗口被撤销而改变。
+//
+// 底层切片必须由提供方预先清零；`init_window` 只写传入的那一段前缀，剩下
+// 的字节保持原样。
+//
+// 引擎侧的名字是 `VmSpace`；`StackLease` 是执行流向空间借来的一份栈。
+pub let MEM_READ = func() -> u64 { return 1; };
+pub let MEM_WRITE = func() -> u64 { return 2; };
+pub let MEM_CALL = func() -> u64 { return 4; };
+
+pub let PERM_READ = func() -> u64 { return 1; };
+pub let PERM_WRITE = func() -> u64 { return 2; };
+pub let PERM_CALL = func() -> u64 { return 4; };
+
+pub let TRAP_NONE = func() -> u64 { return 0; };
+pub let TRAP_MEM_BOUNDS = func() -> u64 { return 1; };
+pub let TRAP_MEM_PROT = func() -> u64 { return 2; };
+pub let TRAP_MEM_ALIGN = func() -> u64 { return 3; };
+pub let TRAP_MEM_MAP = func() -> u64 { return 4; };
+pub let TRAP_BAD_HANDLE = func() -> u64 { return 5; };
+
+// 下标、区域号与符号号共用的"没有"哨兵。
+pub let NO_INDEX = func() -> u64 { return 4294967295; };
+
+// 底层偏移按 16 字节推进：u64 与聚合的常见对齐都在这一步之内。
+let OFFSET_ALIGN = func() -> u64 { return 16; };
+
+// 栈窗口的虚拟地址从 4 GiB 起，按 16 字节推进，和数据段的低地址互不重叠。
+let STACK_BASE = func() -> u64 { return 4294967296; };
+
+pub let Window = struct {
+  base: u64,
+  offset: u64,
+  len: u64,
+  accessible: u64,
+  perms: u64,
+  owner: u64,
+  borrow_count: u64,
+  generation: u64,
+  alive: u64,
+};
+
+// 句柄引用身份而不是位置：槽号加代数。撤销之后代数加一，旧句柄立刻失效。
+pub let Handle = struct {
+  index: u64,
+  generation: u64,
+};
+
+// 两段底层存储按 (指针, 长度) 平铺：嵌套的 MutSlice 字段经由调用方指针写入时
+// 当前前端会多解一层引用，平铺成标量就不会经过那条路径。
+pub let VmSpace = struct {
+  mem_ptr: Mut(u8),
+  mem_len: u64,
+  win_ptr: Mut(Window),
+  win_len: u64,
+  live: u64,
+  used: u64,
+  next_base: u64,
+};
+
+pub let space_mem = func(space: Mut(VmSpace)) -> MutSlice(u8) {
+  return make_slice(MutSlice(u8), space.mem_ptr, space.mem_len);
+};
+
+pub let space_windows = func(space: Mut(VmSpace)) -> MutSlice(Window) {
+  return make_slice(MutSlice(Window), space.win_ptr, space.win_len);
+};
+
+// 租约按值传递，所以字段是平铺的两个字；嵌套的 Handle 会在按值返回时被
+// 当前编译器复制坏，这里不依赖它。
+pub let StackLease = struct {
+  index: u64,
+  generation: u64,
+};
+
+pub let MemResult = struct {
+  value: u64,
+  trap: u64,
+};
+
+pub let no_handle = func() -> Handle {
+  return Handle { index: NO_INDEX(), generation: 0 };
+};
+
+pub let handle_none = func(h: Handle) -> u64 {
+  if h.index == NO_INDEX() { return 1; }
+  return 0;
+};
+
+let empty_window = func() -> Window {
+  return Window {
+    base: 0,
+    offset: 0,
+    len: 0,
+    accessible: 0,
+    perms: 0,
+    owner: 0,
+    borrow_count: 0,
+    generation: 0,
+    alive: 0,
+  };
+};
+
+// 空窗口表的初值全部显式清零，不做任何对调用方内存的假设。
+pub let vspace_new = func(mem: MutSlice(u8), windows: MutSlice(Window),
+                          out: Mut(VmSpace)) -> u64 {
+  let n: u64 = windows.len;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    windows[i] = empty_window();
+    i = i + 1;
+  };
+  out.mem_ptr = mem.ptr;
+  out.mem_len = mem.len;
+  out.win_ptr = windows.ptr;
+  out.win_len = windows.len;
+  out.live = 0;
+  out.used = 0;
+  out.next_base = STACK_BASE();
+  return TRAP_NONE();
+};
+
+// 复用一块已经给过 mem / windows 的空间：只清窗口与计数，不动底座。
+pub let vm_space_init = func(space: Mut(VmSpace)) -> u64 {
+  let windows: MutSlice(Window) = space_windows(space);
+  let n: u64 = windows.len;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    windows[i] = empty_window();
+    i = i + 1;
+  };
+  space.live = 0;
+  space.used = 0;
+  space.next_base = STACK_BASE();
+  return 1;
+};
+
+let align_up = func(v: u64, a: u64) -> u64 {
+  return (v + a - 1) / a * a;
+};
+
+// 按虚拟地址找活窗口。窗口数量由调用方按用途给出，远小于访存次数；这里线性
+// 扫描，换来的是插入与撤销都不需要维护第二条排序索引。
+let find_window = func(space: Mut(VmSpace), where: u64) -> u64 {
+  let windows: MutSlice(Window) = space_windows(space);
+  let n: u64 = windows.len;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    let w: Window = windows[i];
+    if w.alive == 1 {
+      if where >= w.base {
+        if (where - w.base) < w.len { return i; }
+      }
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+let window_at = func(space: Mut(VmSpace), index: u64) -> Window {
+  let windows: MutSlice(Window) = space_windows(space);
+  if index >= windows.len { return empty_window(); }
+  return windows[index];
+};
+
+// 句柄 -> 活槽下标。跨窗口身份、代数不符与已撤销一律视为不存在。
+pub let handle_slot = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  if h.index == NO_INDEX() { return NO_INDEX(); }
+  let windows: MutSlice(Window) = space_windows(space);
+  if h.index >= windows.len { return NO_INDEX(); }
+  let w: Window = windows[h.index];
+  if w.alive != 1 { return NO_INDEX(); }
+  if w.generation != h.generation { return NO_INDEX(); }
+  return h.index;
+};
+
+pub let handle_alive = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  if handle_slot(space, h) == NO_INDEX() { return 0; }
+  return 1;
+};
+
+pub let window_base = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return 0; }
+  let w: Window = window_at(space, slot);
+  return w.base;
+};
+
+pub let window_len = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return 0; }
+  let w: Window = window_at(space, slot);
+  return w.len;
+};
+
+pub let window_accessible = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return 0; }
+  let w: Window = window_at(space, slot);
+  return w.accessible;
+};
+
+pub let window_perms = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return 0; }
+  let w: Window = window_at(space, slot);
+  return w.perms;
+};
+
+// 找一个能用的空槽。代数到顶的槽不再重用：宁可少一个槽，也不让旧句柄复活。
+let free_slot = func(space: Mut(VmSpace)) -> u64 {
+  let windows: MutSlice(Window) = space_windows(space);
+  let n: u64 = windows.len;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    let w: Window = windows[i];
+    if w.alive == 0 {
+      if w.generation != 4294967295 { return i; }
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+// 虚拟范围必须完全落在底层切片里，且与每个活窗口的容量范围都不相交。
+let range_rejected = func(space: Mut(VmSpace), base: u64, len: u64) -> u64 {
+  if len == 0 { return 1; }
+  if (base + len) < base { return 1; }
+  let windows: MutSlice(Window) = space_windows(space);
+  let n: u64 = windows.len;
+  let end: u64 = base + len;
+  let i: u64 = loop i(i: u64 = 0) while i < n {
+    let w: Window = windows[i];
+    if w.alive == 1 {
+      let wend: u64 = w.base + w.len;
+      let hit: u64 = if ((base < wend) and (w.base < end)) { 1 } else { 0 };
+      if hit == 1 { return 1; }
+    }
+    i = i + 1;
+  };
+  return 0;
+};
+
+// 登记一段窗口。accessible 是初始有效前缀，调用方通常传 len。
+pub let map_window_prefix = func(space: Mut(VmSpace), base: u64, len: u64,
+                                 accessible: u64, perms: u64) -> Handle {
+  if accessible > len { return no_handle(); }
+  if (perms & (PERM_READ() | PERM_WRITE() | PERM_CALL())) == 0 {
+    return no_handle();
+  }
+  if range_rejected(space, base, len) == 1 { return no_handle(); }
+  let offset: u64 = align_up(space.used, OFFSET_ALIGN());
+  let mem: MutSlice(u8) = space_mem(space);
+  if offset > mem.len { return no_handle(); }
+  if len > (mem.len - offset) { return no_handle(); }
+  let slot: u64 = free_slot(space);
+  if slot == NO_INDEX() { return no_handle(); }
+  let windows: MutSlice(Window) = space_windows(space);
+  let old: Window = windows[slot];
+  let gen: u64 = old.generation + 1;
+  let w: Window = Window {
+    base: base,
+    offset: offset,
+    len: len,
+    accessible: accessible,
+    perms: perms,
+    owner: 0,
+    borrow_count: 0,
+    generation: gen,
+    alive: 1,
+  };
+  windows[slot] = w;
+  space.live = space.live + 1;
+  space.used = offset + len;
+  return Handle { index: slot, generation: gen };
+};
+
+pub let map_window = func(space: Mut(VmSpace), base: u64, len: u64,
+                          perms: u64) -> Handle {
+  return map_window_prefix(space, base, len, len, perms);
+};
+
+// 只撤销授权：底层偏移不回收，别的窗口不受影响。
+pub let unmap_window = func(space: Mut(VmSpace), h: Handle) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  let windows: MutSlice(Window) = space_windows(space);
+  let w: Window = windows[slot];
+  if w.borrow_count != 0 { return TRAP_BAD_HANDLE(); }
+  w.alive = 0;
+  windows[slot] = w;
+  space.live = space.live - 1;
+  return TRAP_NONE();
+};
+
+// 窗口只收不放：缩小之后被收回的前缀立刻访问不了。
+pub let set_accessible = func(space: Mut(VmSpace), h: Handle, accessible: u64) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  let windows: MutSlice(Window) = space_windows(space);
+  let w: Window = windows[slot];
+  if accessible > w.len { return TRAP_MEM_MAP(); }
+  w.accessible = accessible;
+  windows[slot] = w;
+  return TRAP_NONE();
+};
+
+// 装载期初始化：把一段内容写进窗口的底层存储。它只受容量约束，不经过权限
+// 判定——映射完成之前的"写入"是装载器的特权动作，运行期访存仍走下面的接口。
+pub let init_window = func(space: Mut(VmSpace), h: Handle, data: Slice(u8)) -> u64 {
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  let w: Window = window_at(space, slot);
+  if data.len > w.len { return TRAP_MEM_MAP(); }
+  let mem: MutSlice(u8) = space_mem(space);
+  let base: Mut(u8) = mem.ptr;
+  let dst: Mut(u8) = base + w.offset;
+  let i: u64 = loop i(i: u64 = 0) while i < data.len {
+    let q: Mut(u8) = dst + i;
+    deref(q) = data[i];
+    i = i + 1;
+  };
+  return TRAP_NONE();
+};
+
+// 一次访存的核心判定。成功时 value 是窗口下标，失败时 trap 说明原因。
+// size 必须是 2 的幂（1/2/4/8），它同时决定自然对齐要求。
+pub let access_window = func(space: Mut(VmSpace), where: u64, size: u64,
+                             need: u64) -> MemResult {
+  if size == 0 { return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() }; }
+  if (where % size) != 0 { return MemResult { value: 0, trap: TRAP_MEM_ALIGN() }; }
+  let index: u64 = find_window(space, where);
+  if index == NO_INDEX() { return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() }; }
+  let w: Window = window_at(space, index);
+  let mem: MutSlice(u8) = space_mem(space);
+  // 窗口自身不得越过底层存储：这是登记时的一次性约束，这里再核一次。
+  if w.offset > mem.len {
+    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+  }
+  if w.accessible > (mem.len - w.offset) {
+    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+  }
+  if (w.perms & need) != need {
+    return MemResult { value: 0, trap: TRAP_MEM_PROT() };
+  }
+  let rel: u64 = where - w.base;
+  if rel >= w.accessible {
+    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+  }
+  if (w.accessible - rel) < size {
+    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+  }
+  return MemResult { value: index, trap: TRAP_NONE() };
+};
+
+pub let check_access = func(space: Mut(VmSpace), where: u64, size: u64,
+                            need: u64) -> u64 {
+  let r: MemResult = access_window(space, where, size, need);
+  return r.trap;
+};
+
+// 裸地址逃逸校验：地址必须整段落在某一个活窗口的有效前缀里，且该窗口的
+// 物理范围没有越过底层切片。空地址（0）一律视为逃逸。
+pub let check_no_addr_escape = func(space: Mut(VmSpace), where: u64, size: u64,
+                                    need: u64) -> u64 {
+  if where == 0 { return TRAP_MEM_BOUNDS(); }
+  return check_access(space, where, size, need);
+};
+
+// 引擎侧的布尔判定：能访问返回 1，否则 0。
+pub let vm_check = func(space: Mut(VmSpace), where: u64, size: u64, need: u64) -> u64 {
+  let r: MemResult = access_window(space, where, size, need);
+  if r.trap != 0 { return 0; }
+  return 1;
+};
+
+let byte_ptr = func(space: Mut(VmSpace), w: Window, where: u64) -> Mut(u8) {
+  let mem: MutSlice(u8) = space_mem(space);
+  let base: Mut(u8) = mem.ptr;
+  return base + w.offset + (where - w.base);
+};
+
+pub let load_u64 = func(space: Mut(VmSpace), where: u64) -> MemResult {
+  let r: MemResult = access_window(space, where, 8, MEM_READ());
+  if r.trap != 0 { return r; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u64) = ptr_cast(Mut(u64), byte_ptr(space, w, where));
+  return MemResult { value: deref(p), trap: TRAP_NONE() };
+};
+
+pub let load_u32 = func(space: Mut(VmSpace), where: u64) -> MemResult {
+  let r: MemResult = access_window(space, where, 4, MEM_READ());
+  if r.trap != 0 { return r; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u32) = ptr_cast(Mut(u32), byte_ptr(space, w, where));
+  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+};
+
+pub let load_u16 = func(space: Mut(VmSpace), where: u64) -> MemResult {
+  let r: MemResult = access_window(space, where, 2, MEM_READ());
+  if r.trap != 0 { return r; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u16) = ptr_cast(Mut(u16), byte_ptr(space, w, where));
+  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+};
+
+pub let load_u8 = func(space: Mut(VmSpace), where: u64) -> MemResult {
+  let r: MemResult = access_window(space, where, 1, MEM_READ());
+  if r.trap != 0 { return r; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u8) = byte_ptr(space, w, where);
+  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+};
+
+pub let store_u64 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
+  let r: MemResult = access_window(space, where, 8, MEM_WRITE());
+  if r.trap != 0 { return r.trap; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u64) = ptr_cast(Mut(u64), byte_ptr(space, w, where));
+  deref(p) = value;
+  return TRAP_NONE();
+};
+
+pub let store_u32 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
+  let r: MemResult = access_window(space, where, 4, MEM_WRITE());
+  if r.trap != 0 { return r.trap; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u32) = ptr_cast(Mut(u32), byte_ptr(space, w, where));
+  deref(p) = value as u32;
+  return TRAP_NONE();
+};
+
+pub let store_u16 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
+  let r: MemResult = access_window(space, where, 2, MEM_WRITE());
+  if r.trap != 0 { return r.trap; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u16) = ptr_cast(Mut(u16), byte_ptr(space, w, where));
+  deref(p) = value as u16;
+  return TRAP_NONE();
+};
+
+pub let store_u8 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
+  let r: MemResult = access_window(space, where, 1, MEM_WRITE());
+  if r.trap != 0 { return r.trap; }
+  let w: Window = window_at(space, r.value);
+  let p: Mut(u8) = byte_ptr(space, w, where);
+  deref(p) = value as u8;
+  return TRAP_NONE();
+};
+
+// 引擎侧的原始字读取：调用方已经用 vm_check 过了权限，这里按位宽取低 N 字节。
+// 失败（窗口不存在或尺寸非法）返回 0，调用方不会把它当成有效值使用。
+pub let vm_load = func(space: Mut(VmSpace), where: u64, size: u64) -> u64 {
+  if size == 1 { return load_u8(space, where).value; }
+  if size == 2 { return load_u16(space, where).value; }
+  if size == 4 { return load_u32(space, where).value; }
+  if size == 8 { return load_u64(space, where).value; }
+  return 0;
+};
+
+pub let vm_store = func(space: Mut(VmSpace), where: u64, size: u64, value: u64) -> u64 {
+  if size == 1 { return store_u8(space, where, value); }
+  if size == 2 { return store_u16(space, where, value); }
+  if size == 4 { return store_u32(space, where, value); }
+  if size == 8 { return store_u64(space, where, value); }
+  return TRAP_MEM_BOUNDS();
+};
+
+// --- 栈租约 ---------------------------------------------------------------
+pub let vm_no_lease = func() -> StackLease {
+  return StackLease { index: NO_INDEX(), generation: 0 };
+};
+
+let lease_handle = func(lease: StackLease) -> Handle {
+  return Handle { index: lease.index, generation: lease.generation };
+};
+
+pub let vm_lease_none = func(lease: StackLease) -> u64 {
+  if lease.index == NO_INDEX() { return 1; }
+  return 0;
+};
+
+// 供给方给一条执行流备一份栈：owned 语义（从底层切片里切出来）、16 字节对齐、
+// 初始 accessible = 0、READ | WRITE。
+pub let vm_alloc_stack = func(space: Mut(VmSpace), bytes: u64, owner: u64) -> StackLease {
+  if bytes == 0 { return vm_no_lease(); }
+  let base: u64 = align_up(space.next_base, OFFSET_ALIGN());
+  let h: Handle = map_window_prefix(space, base, bytes, 0,
+                                    MEM_READ() | MEM_WRITE());
+  if handle_none(h) == 1 { return vm_no_lease(); }
+  let slot: u64 = handle_slot(space, h);
+  let windows: MutSlice(Window) = space_windows(space);
+  let w: Window = windows[slot];
+  w.owner = owner;
+  windows[slot] = w;
+  space.next_base = base + bytes;
+  return StackLease { index: h.index, generation: h.generation };
+};
+
+pub let vm_free_stack = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  let h: Handle = lease_handle(lease);
+  let slot: u64 = handle_slot(space, h);
+  if slot == NO_INDEX() { return 0; }
+  let w: Window = window_at(space, slot);
+  if w.borrow_count != 0 { return 0; }
+  let t: u64 = unmap_window(space, h);
+  if t != 0 { return 0; }
+  return 1;
+};
+
+pub let vm_borrow = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  let slot: u64 = handle_slot(space, lease_handle(lease));
+  if slot == NO_INDEX() { return 0; }
+  let windows: MutSlice(Window) = space_windows(space);
+  let w: Window = windows[slot];
+  if w.borrow_count == 4294967295 { return 0; }
+  w.borrow_count = w.borrow_count + 1;
+  windows[slot] = w;
+  return 1;
+};
+
+pub let vm_end_borrow = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  let slot: u64 = handle_slot(space, lease_handle(lease));
+  if slot == NO_INDEX() { return 0; }
+  let windows: MutSlice(Window) = space_windows(space);
+  let w: Window = windows[slot];
+  if w.borrow_count == 0 { return 0; }
+  w.borrow_count = w.borrow_count - 1;
+  windows[slot] = w;
+  return 1;
+};
+
+pub let vm_set_accessible = func(space: Mut(VmSpace), lease: StackLease,
+                                 n: u64) -> u64 {
+  let t: u64 = set_accessible(space, lease_handle(lease), n);
+  if t != 0 { return 0; }
+  return 1;
+};
+
+pub let vm_lease_base = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  return window_base(space, lease_handle(lease));
+};
+
+pub let vm_lease_capacity = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  return window_len(space, lease_handle(lease));
+};
+
+pub let vm_lease_rights = func(space: Mut(VmSpace), lease: StackLease) -> u64 {
+  return window_perms(space, lease_handle(lease));
+};
