@@ -3,6 +3,7 @@
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify");
 let tab = import("src::host::symtab");
+let os = import("std::os");
 
 // 符号表由调用方通过 set_syms 交进来，C99 后端只在这一个格子里保存它的堆地址。
 // 调用方没有交表时格子保持 0，名字退化成 "anon" 或句柄的十进制值。
@@ -265,7 +266,7 @@ let find_non_extern_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
   return found;
 };
 
-let find_proc_at = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
+let find_proc_linear = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
   let direct: u64 = find_non_extern_proc(m, name);
   if direct != vf.NO_REGION() { return direct; }
   let found: u64 = loop c(at: u64 = i) while 1 {
@@ -284,8 +285,104 @@ let find_proc_at = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
   return found;
 };
 
+// O(1) 过程名哈希索引：emit_value_ref 在每条指令的每个 OP_VALUE 上都要查一次
+// find_proc，线性扫描在大型模块上会退化成数十亿次结构体拷贝。
+let PIDX_CAP = func() -> u64 { return 16384; };
+let g_pidx_meta: Array(u64, 4) = [0, 0, 0, 0];
+
+let pidx_hash = func(name: u64) -> u64 {
+  let h: u64 = (name * 11400714819323198485) >> 50;
+  return h & 16383;
+};
+
+let pidx_put_if_absent = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64, idx: u64) -> u64 {
+  if name == 0 { return 0; }
+  let mask: u64 = 16383;
+  let slot: u64 = pidx_hash(name);
+  loop p(step: u64 = 0, s: u64 = slot) while step < 16384 {
+    let k: u64 = keys[s];
+    if k == 0 {
+      keys[s] = name;
+      vals[s] = idx + 1;
+      return 1;
+    }
+    if k == name { return 0; }
+    s = (s + 1) & mask;
+    step = step + 1;
+  };
+  return 0;
+};
+
+let pidx_lookup_raw = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64) -> u64 {
+  if name == 0 { return vf.NO_REGION(); }
+  let mask: u64 = 16383;
+  let slot: u64 = pidx_hash(name);
+  loop p(step: u64 = 0, s: u64 = slot) while step < 16384 {
+    let k: u64 = keys[s];
+    if k == 0 { return vf.NO_REGION(); }
+    if k == name { return vals[s] - 1; }
+    s = (s + 1) & mask;
+    step = step + 1;
+  };
+  return vf.NO_REGION();
+};
+
+let pidx_ensure = func(m: Ref(vf.IrModule)) -> u64 {
+  let meta: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(g_pidx_meta), 4);
+  let mp: u64 = m.procs as u64;
+  let mc: u64 = m.proc_count;
+  if (meta[0] == mp) and (meta[1] == mc) and (meta[2] != 0) { return 1; }
+  if mc > 8192 { return 0; }
+  if meta[2] == 0 {
+    let kraw: u64 = os.alloc_bytes(16384 * 8);
+    let vraw: u64 = os.alloc_bytes(16384 * 8);
+    if (kraw == 0) or (vraw == 0) { return 0; }
+    meta[2] = kraw;
+    meta[3] = vraw;
+  }
+  let keys: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[2]), 16384);
+  let vals: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[3]), 16384);
+  loop z(i: u64 = 0) while i < 16384 {
+    keys[i] = 0;
+    vals[i] = 0;
+    i = i + 1;
+  };
+  loop p1(at: u64 = 0) while at < mc {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.is_extern == 0 {
+      pidx_put_if_absent(keys, vals, p.name, at);
+    }
+    at = at + 1;
+  };
+  loop p2(at: u64 = 0) while at < mc {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.is_extern == 1 {
+      let target: u64 = at;
+      if p.link_name != 0 {
+        let redir: u64 = pidx_lookup_raw(keys, vals, p.link_name);
+        if redir != vf.NO_REGION() {
+          let rp: vf.IrProc = vf.proc_at_ref(m.procs, redir);
+          if rp.is_extern == 0 { target = redir; }
+        }
+      }
+      pidx_put_if_absent(keys, vals, p.name, target);
+    }
+    at = at + 1;
+  };
+  meta[0] = mp;
+  meta[1] = mc;
+  return 1;
+};
+
 pub let find_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
-  return find_proc_at(m, name, 0);
+  if name == 0 { return vf.NO_REGION(); }
+  if pidx_ensure(m) == 1 {
+    let meta: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(g_pidx_meta), 4);
+    let keys: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[2]), 16384);
+    let vals: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[3]), 16384);
+    return pidx_lookup_raw(keys, vals, name);
+  }
+  return find_proc_linear(m, name, 0);
 };
 
 let region_at = func(m: Ref(vf.IrModule), ri: u64) -> vf.IrRegion {
