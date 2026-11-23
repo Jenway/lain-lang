@@ -127,6 +127,7 @@ let ST_VECTOR_UNSUPPORTED = func() -> u64 { return 1073; };
 let ST_ATOMIC_UNSUPPORTED = func() -> u64 { return 1074; };
 let ST_ALREADY_STARTED = func() -> u64 { return 1075; };
 let ST_ASSEMBLY_FAILED = func() -> u64 { return 1076; };
+let ST_ATOMIC_ORDER = func() -> u64 { return 1077; };
 
 // --- 配额 -----------------------------------------------------------------
 // 三个上界都是 0 = 不限额（与内核 quota 的约定一致：0 不表示「一个都不许」）。
@@ -1240,10 +1241,6 @@ let op_vector_any = func(tcb: Mut(TCB)) -> u64 {
   return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_VECTOR_UNSUPPORTED());
 };
 
-let op_atomic_any = func(tcb: Mut(TCB)) -> u64 {
-  return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_ATOMIC_UNSUPPORTED());
-};
-
 // --- 地址与内存 -----------------------------------------------------------
 let op_lea = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let base: VmValue = value_zero();
@@ -1315,6 +1312,83 @@ let op_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   }
   let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
   return 0;
+};
+
+// --- 原子访问 -------------------------------------------------------------
+// 单线程 VM 里没有重排，内存序只做取值范围校验：越界或非整型字面量的序就地拒绝。
+let atomic_order_ok = func(inst: vf.IrInst, index: u64) -> u64 {
+  if index >= inst.operand_count { return 1; }
+  let op: vf.IrOperand = vf.inst_op(inst, index);
+  if op.kind != vf.OP_INT() { return 0; }
+  if op.bits > codes.ORDER_SEQ_CST() { return 0; }
+  return 1;
+};
+
+let op_atomic_load = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let order_at: u64 = 1;
+  if atomic_order_ok(inst, order_at) == 0 {
+    return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
+  }
+  let address: VmValue = value_zero();
+  let s0: u64 = op_read(tcb, inst, 0, mut_of(address));
+  if s0 != 0 { return s0; }
+  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
+  if size > 8 {
+    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
+  }
+  if is_misaligned(inst.align, address.bits) == 1 {
+    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
+  }
+  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 0 {
+    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_LOAD_FAULT());
+  }
+  let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
+  return write_result_bits(tcb, inst, 0, raw, type_width(inst.ty_kind, inst.ty_width));
+};
+
+let op_atomic_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let order_at: u64 = 2;
+  if atomic_order_ok(inst, order_at) == 0 {
+    return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
+  }
+  let value: VmValue = value_zero();
+  let s0: u64 = op_read(tcb, inst, 0, mut_of(value));
+  if s0 != 0 { return s0; }
+  let address: VmValue = value_zero();
+  let s1: u64 = op_read(tcb, inst, 1, mut_of(address));
+  if s1 != 0 { return s1; }
+  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
+  if size > 8 {
+    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
+  }
+  if is_misaligned(inst.align, address.bits) == 1 {
+    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
+  }
+  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_WRITE()) == 0 {
+    if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 1 {
+      return trap_now(tcb, TRAP_PERM_VIOLATION(), ST_READ_ONLY());
+    }
+    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_STORE_FAULT());
+  }
+  let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
+  return 0;
+};
+
+// 单线程里 fence 就是空操作：只校验那个内存序操作数。
+let op_atomic_any = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let k: u64 = inst.kind;
+  if k == codes.INST_ATOMIC_FENCE() {
+    if inst.operand_count != 1 {
+      return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
+    }
+    if atomic_order_ok(inst, 0) == 0 {
+      return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
+    }
+    return 0;
+  }
+  if k == codes.INST_ATOMIC_LOAD() { return op_atomic_load(tcb, inst); }
+  if k == codes.INST_ATOMIC_STORE() { return op_atomic_store(tcb, inst); }
+  return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_ATOMIC_UNSUPPORTED());
 };
 
 let op_alloca = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
@@ -1778,6 +1852,8 @@ let is_vector = func(k: u64) -> bool {
 };
 
 let is_atomic = func(k: u64) -> bool {
+  if (k == codes.INST_ATOMIC_LOAD()) or (k == codes.INST_ATOMIC_STORE()) { return true; }
+  if k == codes.INST_ATOMIC_FENCE() { return true; }
   if k < codes.INST_XCHG() { return false; }
   if k > codes.INST_RMW_XOR() { return false; }
   return true;
@@ -1842,7 +1918,7 @@ let dispatch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
     IntConv => op_int_conv(tcb, inst),
     Float => op_float_any(tcb),
     Vector => op_vector_any(tcb),
-    Atomic => op_atomic_any(tcb),
+    Atomic => op_atomic_any(tcb, inst),
     Lea => op_lea(tcb, inst),
     Load => op_load(tcb, inst),
     Store => op_store(tcb, inst),
