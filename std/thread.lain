@@ -1,0 +1,66 @@
+// std::thread —— Win32 线程原语。
+// 四个过程直接绑定 kernel32：句柄按 Mut(u8) 存放，执行体是接收一个参数的 C 函数。
+
+@extern(abi = "C", link = "CreateThread")
+let c_create_thread = func(sec: Mut(u8), stack: c_size, start: Fn((Mut(u8)) -> c_uint),
+                           arg: Mut(u8), flags: c_uint, tid: Mut(c_uint)) -> Mut(u8);
+
+@extern(abi = "C", link = "WaitForSingleObject")
+let c_wait_for_single_object = func(h: Mut(u8), ms: c_uint) -> c_uint;
+
+@extern(abi = "C", link = "CloseHandle")
+let c_close_handle = func(h: Mut(u8)) -> c_int;
+
+@extern(abi = "C", link = "Sleep")
+let c_sleep = func(ms: c_uint);
+
+let null_handle = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), 0 as u64);
+};
+
+pub let Thread = struct {
+  handle: Mut(u8),
+};
+
+// 等待时间取 Win32 的无限等待值。
+pub let wait_infinite = func() -> u64 { return 0xffffffff; };
+
+// 启动执行体，返回持有线程句柄的记录。宿主拒绝创建时 handle 为空。
+pub let spawn = func(start: Fn((Mut(u8)) -> c_uint), arg: Mut(u8)) -> Thread {
+  let sec: Mut(u8) = null_handle();
+  let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
+  let h: Mut(u8) = c_create_thread(sec, 0, start, arg, 0, tid);
+  return Thread { handle: h };
+};
+
+// 无限等待线程结束，随后关闭句柄。返回 WaitForSingleObject 的等待结果：
+// 0 表示线程已经结束，非 0 表示等待失败。
+let join_thread = func(h: Mut(u8)) -> u64 {
+  if is_null(h) {
+    return 1;
+  }
+  let ms: c_uint = wait_infinite() as c_uint;
+  let rc: c_uint = c_wait_for_single_object(h, ms);
+  c_close_handle(h);
+  return rc as u64;
+};
+
+let sleep_millis = func(ms: u64) -> u64 {
+  c_sleep(ms as c_uint);
+  return 0;
+};
+
+pub let join = func(t: Thread) -> u64 {
+  return join_thread(t.handle);
+};
+
+pub let sleep_ms = func(ms: u64) -> u64 {
+  return sleep_millis(ms);
+};
+
+pub let ThreadMod = module {
+  pub let Self = Thread;
+
+  pub let join = func(t: Thread) -> u64 { return join_thread(t.handle); };
+  pub let sleep_ms = func(ms: u64) -> u64 { return sleep_millis(ms); };
+};

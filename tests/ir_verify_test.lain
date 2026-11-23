@@ -7,6 +7,9 @@ let tab = import("src::host::symtab");
 let irh = import("src::host::ir_host");
 let vmh = import("src::host::vm_host");
 let eng = import("src::vm::engine");
+let vf = import("src::ir::verify");
+let vs = import("src::vm::vspace");
+let im = import("src::vm::image");
 
 // irh / vmh 宿主 API 的类型码：编译器类型种类加一，0 表示 void。
 // 这与 LainIR 文本里的 L1TypeKind（codes.TY_*，0 起算）不是同一套编号。
@@ -32,6 +35,12 @@ let build_indirect_mod = func(h: Mut(irh.HostIr), syms: Mut(tab.HostSymTab)) -> 
   let s_b: u64 = intern(syms, "b");
   let s_p: u64 = intern(syms, "p");
   let s_r: u64 = intern(syms, "r");
+  let s_run_atomic: u64 = intern(syms, "run_atomic");
+  let s_fiber_a: u64 = intern(syms, "fiber_a");
+  let s_fiber_b: u64 = intern(syms, "fiber_b");
+  let s_x: u64 = intern(syms, "x");
+  let s_y: u64 = intern(syms, "y");
+  let s_z: u64 = intern(syms, "z");
 
   // add(a: bits<64>, b: bits<64>) -> bits<64>
   irh.ir_proc_begin(h, md, s_add);
@@ -167,7 +176,223 @@ let build_indirect_mod = func(h: Mut(irh.HostIr), syms: Mut(tab.HostSymTab)) -> 
   irh.ir_region_end(h, md);
   irh.ir_proc_end(h, md);
 
+  // run_atomic() -> bits<64>：栈上一个 bits<64> 槽，原子写 7，围栏，原子读回。
+  irh.ir_proc_begin(h, md, s_run_atomic);
+  irh.ir_proc_result(h, md, HOST_TY_BITS(), 64);
+  let r_atomic: u64 = irh.ir_region_begin(h, md);
+  irh.ir_region_result(h, md, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_int(h, md, 1);
+  irh.ir_inst_mem(h, md, codes.INST_ALLOCA(), s_a, HOST_TY_BITS(), 64, 0, 0, 8);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_int(h, md, 7);
+  irh.ir_arg_ref(h, md, s_a);
+  irh.ir_arg_int(h, md, 4);
+  irh.ir_inst(h, md, codes.INST_ATOMIC_STORE(), 0, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_int(h, md, 4);
+  irh.ir_inst(h, md, codes.INST_ATOMIC_FENCE(), 0, 0, 0);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_a);
+  irh.ir_arg_int(h, md, 4);
+  irh.ir_inst(h, md, codes.INST_ATOMIC_LOAD(), s_r, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_r);
+  irh.ir_inst_jump(h, md, codes.INST_RETURN(), 0);
+  irh.ir_region_end(h, md);
+  irh.ir_proc_end(h, md);
+
+  // fiber_a() = ((1 + 2) + 3) + 4 = 10
+  irh.ir_proc_begin(h, md, s_fiber_a);
+  irh.ir_proc_result(h, md, HOST_TY_BITS(), 64);
+  let r_fa: u64 = irh.ir_region_begin(h, md);
+  irh.ir_region_result(h, md, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_int(h, md, 1);
+  irh.ir_arg_int(h, md, 2);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_x, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_x);
+  irh.ir_arg_int(h, md, 3);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_y, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_y);
+  irh.ir_arg_int(h, md, 4);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_z, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_z);
+  irh.ir_inst_jump(h, md, codes.INST_RETURN(), 0);
+  irh.ir_region_end(h, md);
+  irh.ir_proc_end(h, md);
+
+  // fiber_b() = ((10 + 20) + 30) + 40 = 100
+  irh.ir_proc_begin(h, md, s_fiber_b);
+  irh.ir_proc_result(h, md, HOST_TY_BITS(), 64);
+  let r_fb: u64 = irh.ir_region_begin(h, md);
+  irh.ir_region_result(h, md, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_int(h, md, 10);
+  irh.ir_arg_int(h, md, 20);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_x, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_x);
+  irh.ir_arg_int(h, md, 30);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_y, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_y);
+  irh.ir_arg_int(h, md, 40);
+  irh.ir_inst(h, md, codes.INST_ADD(), s_z, HOST_TY_BITS(), 64);
+  irh.ir_args_reset(h, md);
+  irh.ir_arg_ref(h, md, s_z);
+  irh.ir_inst_jump(h, md, codes.INST_RETURN(), 0);
+  irh.ir_region_end(h, md);
+  irh.ir_proc_end(h, md);
+
   return md;
+};
+
+// ir_host 的 ModState 字段是公开契约，按句柄重建一份 vf.IrModule 视图，
+// 供直接使用 Lain-VM 引擎的测试装载映像。
+let ModCell = struct { v: irh.ModState };
+
+let module_view = func(h: Mut(irh.HostIr), hd: u64) -> vf.IrModule {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), h.mods);
+  let m: Mut(irh.ModState) = ptr_cast(Mut(irh.ModState), raw + (hd - 1) * size_of(ModCell));
+  return vf.module_new(m.name,
+      ptr_cast(Ref(vf.IrProc), m.procs), m.proc_count,
+      ptr_cast(Ref(vf.IrRegion), m.regions), m.region_count,
+      ptr_cast(Ref(vf.IrInst), m.insts), m.inst_count,
+      ptr_cast(Ref(vf.IrCase), m.cases), m.case_count,
+      m.scratch);
+};
+
+// 两个 TCB 交替推进：每条指令之后停放（被后续 vm_step 看到 BLOCKED），再恢复
+// 继续。两个 TCB 都必须跑到 DONE 且交出各自的计算结果。
+let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
+                          syms: Mut(tab.HostSymTab)) -> u64 {
+  let modv: vf.IrModule = module_view(h, md);
+  let sizes: im.ImageSizes = im.image_measure(ref_of(modv));
+
+  let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), os.alloc_bytes(4096));
+  let mem: MutSlice(u8) = make_slice(MutSlice(u8),
+      ptr_cast(Mut(u8), os.alloc_bytes(262144)), 262144);
+  let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
+      ptr_cast(Mut(vs.Window), os.alloc_bytes(16384)), 64);
+  let created: u64 = vs.vspace_new(mem, wins, space);
+  t.eq_u64(st, "fiber vspace", created, vs.TRAP_NONE());
+
+  let ro_empty: Slice(u8) = make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+  let rw_empty: Slice(u8) = make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+  let regions_ptr: Mut(im.ImageRegion) =
+      ptr_cast(Mut(im.ImageRegion), os.alloc_bytes(65536));
+  let insts_ptr: Mut(im.InstMeta) =
+      ptr_cast(Mut(im.InstMeta), os.alloc_bytes(262144));
+  let operands_ptr: Mut(im.OperandRef) =
+      ptr_cast(Mut(im.OperandRef), os.alloc_bytes(262144));
+  let results_ptr: Mut(u64) = ptr_cast(Mut(u64), os.alloc_bytes(65536));
+  let cases_ptr: Mut(im.CaseInfo) =
+      ptr_cast(Mut(im.CaseInfo), os.alloc_bytes(16384));
+  let case_index_ptr: Mut(u64) = ptr_cast(Mut(u64), os.alloc_bytes(4096));
+  let procs_ptr: Mut(im.SubInfo) =
+      ptr_cast(Mut(im.SubInfo), os.alloc_bytes(16384));
+  let layout: im.ImageLayout = im.ImageLayout {
+    ro_base: 0,
+    ro: ro_empty,
+    rw_base: 0,
+    rw: rw_empty,
+    regions_ptr: regions_ptr,
+    regions_len: sizes.regions + 8,
+    insts_ptr: insts_ptr,
+    insts_len: sizes.insts + 8,
+    operands_ptr: operands_ptr,
+    operands_len: sizes.operands + 8,
+    results_ptr: results_ptr,
+    results_len: sizes.results + 8,
+    cases_ptr: cases_ptr,
+    cases_len: sizes.cases + 8,
+    case_index_ptr: case_index_ptr,
+    case_index_len: sizes.case_index,
+    procs_ptr: procs_ptr,
+    procs_len: sizes.procs + 8,
+  };
+  let img: Mut(im.VmImage) = ptr_cast(Mut(im.VmImage), os.alloc_bytes(4096));
+  let loaded: u64 = im.image_load(ref_of(modv), space, layout, img);
+  t.eq_u64(st, "fiber image_load", loaded, im.ERR_OK());
+  let image: Ref(im.VmImage) = ptr_cast(Ref(im.VmImage), img);
+
+  let caps: Mut(eng.VmCapTable) = ptr_cast(Mut(eng.VmCapTable), os.alloc_bytes(4096));
+  deref(caps) = eng.caps_new(null_ref(Mut(eng.VmCapEntry)), 0);
+  let quota: eng.VmQuota = eng.quota_new(0, 0, 8);
+  let need: u64 = eng.vm_tcb_bytes(image, quota);
+  let arena_a: MutSlice(u8) = make_slice(MutSlice(u8),
+      ptr_cast(Mut(u8), os.alloc_bytes(need)), need);
+  let arena_b: MutSlice(u8) = make_slice(MutSlice(u8),
+      ptr_cast(Mut(u8), os.alloc_bytes(need)), need);
+
+  let tcb_a: Mut(eng.TCB) = ptr_cast(Mut(eng.TCB), os.alloc_bytes(4096));
+  deref(tcb_a) = eng.vm_tcb_blank();
+  let made_a: u64 = eng.vm_tcb_new(image, space, caps, quota, vs.vm_no_lease(), 1,
+                                   arena_a, tcb_a);
+  t.eq_u64(st, "fiber tcb_a", made_a, 1);
+  let tcb_b: Mut(eng.TCB) = ptr_cast(Mut(eng.TCB), os.alloc_bytes(4096));
+  deref(tcb_b) = eng.vm_tcb_blank();
+  let made_b: u64 = eng.vm_tcb_new(image, space, caps, quota, vs.vm_no_lease(), 1,
+                                   arena_b, tcb_b);
+  t.eq_u64(st, "fiber tcb_b", made_b, 1);
+
+  let empty_args: Slice(u64) = make_slice(Slice(u64), null_ref(Ref(u64)), 0);
+  let entry_a: u64 = im.vm_sub_index_by_body(image, intern(syms, "fiber_a"));
+  let entry_b: u64 = im.vm_sub_index_by_body(image, intern(syms, "fiber_b"));
+  let started_a: u64 = eng.vm_tcb_start(tcb_a, entry_a, empty_args);
+  t.eq_u64(st, "fiber start a", started_a, eng.SLICE_RUNNABLE());
+  let started_b: u64 = eng.vm_tcb_start(tcb_b, entry_b, empty_args);
+  t.eq_u64(st, "fiber start b", started_b, eng.SLICE_RUNNABLE());
+
+  let done_a: u64 = 0;
+  let done_b: u64 = 0;
+  let bad: u64 = 0;
+  let rounds: u64 = loop spin(r: u64 = 0) while ((done_a == 0) or (done_b == 0)) and (r < 64) {
+    if done_a == 0 {
+      let sa: eng.VmResult = eng.vm_step(tcb_a);
+      if sa.status == eng.SLICE_RUNNABLE() {
+        if eng.vm_tcb_yield(tcb_a) != 0 { bad = bad + 1; }
+        let parked_a: eng.VmResult = eng.vm_step(tcb_a);
+        if parked_a.status != eng.SLICE_BLOCKED() { bad = bad + 1; }
+        if eng.vm_tcb_resume(tcb_a) != 0 { bad = bad + 1; }
+      } else if sa.status == eng.SLICE_DONE() {
+        done_a = 1;
+      } else {
+        bad = bad + 1;
+        done_a = 1;
+      }
+    }
+    if done_b == 0 {
+      let sb: eng.VmResult = eng.vm_step(tcb_b);
+      if sb.status == eng.SLICE_RUNNABLE() {
+        if eng.vm_tcb_yield(tcb_b) != 0 { bad = bad + 1; }
+        let parked_b: eng.VmResult = eng.vm_step(tcb_b);
+        if parked_b.status != eng.SLICE_BLOCKED() { bad = bad + 1; }
+        if eng.vm_tcb_resume(tcb_b) != 0 { bad = bad + 1; }
+      } else if sb.status == eng.SLICE_DONE() {
+        done_b = 1;
+      } else {
+        bad = bad + 1;
+        done_b = 1;
+      }
+    }
+    r = r + 1;
+  };
+
+  t.check(st, "fiber rounds bounded", rounds < 64);
+  t.check(st, "fiber both done", (done_a == 1) and (done_b == 1));
+  t.eq_u64(st, "fiber schedule clean", bad, 0);
+  let value_a: eng.VmValue = eng.vm_tcb_result(ptr_cast(Ref(eng.TCB), tcb_a));
+  let value_b: eng.VmValue = eng.vm_tcb_result(ptr_cast(Ref(eng.TCB), tcb_b));
+  t.eq_u64(st, "fiber a result", value_a.bits, 10);
+  t.eq_u64(st, "fiber b result", value_b.bits, 100);
+  t.eq_u64(st, "fiber a state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_a)), eng.VM_DEAD());
+  t.eq_u64(st, "fiber b state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_b)), eng.VM_DEAD());
+  return 0;
 };
 
 pub let run_suite = func() -> i64 {
@@ -209,6 +434,17 @@ pub let run_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "run_tail rc", rc2, vmh.VMH_OK());
   t.eq_u64(mut_of(st), "run_tail status", out_arr[0], 0);
   t.eq_u64(mut_of(st), "run_tail val", out_arr[1], 42);
+
+  // 原子访存指令：同一个映像里的 alloca + 原子写 + 围栏 + 原子读。
+  let rc_atomic: u64 = vmh.apply_module(vm, md, intern(syms, "run_atomic"),
+                                       empty_args, out_ptr, 16);
+  t.eq_u64(mut_of(st), "run_atomic rc", rc_atomic, vmh.VMH_OK());
+  t.eq_u64(mut_of(st), "run_atomic status", out_arr[0], 0);
+  t.eq_u64(mut_of(st), "run_atomic val", out_arr[1], 7);
+
+  // 两个 TCB 的停放与恢复必须保留各自的位置与帧链。
+  let fiber_rc: u64 = run_fiber_test(mut_of(st), h, md, syms);
+  t.eq_u64(mut_of(st), "fiber suite rc", fiber_rc, 0);
 
   let rc3: u64 = vmh.apply_module(vm, md, intern(syms, "bad_target"), empty_args, out_ptr, 16);
   t.eq_u64(mut_of(st), "bad_target rc", rc3, vmh.VMH_OK());

@@ -542,6 +542,25 @@ pub let vm_tcb_wake = func(tcb: Mut(TCB)) -> u64 {
   return 1;
 };
 
+// 把正在执行的 TCB 就地停放：只改执行状态与切片结果，当前区域、区域内位置与
+// 整条帧链保持原样，恢复后从下一条指令继续。返回 0 表示停放成功，非零表示
+// TCB 不处于 RUNNING。
+pub let vm_tcb_yield = func(tcb: Mut(TCB)) -> u64 {
+  if tcb.state != VM_RUNNING() { return 1; }
+  tcb.state = VM_BLOCKED();
+  tcb.slice = SLICE_BLOCKED();
+  return 0;
+};
+
+// 唤醒被 vm_tcb_yield 停放的 TCB。返回 0 表示恢复成功，非零表示 TCB 不处于
+// BLOCKED。
+pub let vm_tcb_resume = func(tcb: Mut(TCB)) -> u64 {
+  if tcb.state != VM_BLOCKED() { return 1; }
+  tcb.state = VM_RUNNING();
+  tcb.slice = SLICE_RUNNABLE();
+  return 0;
+};
+
 // --- 容量与切分 -----------------------------------------------------------
 // 调用深度为 0 表示不限额；此时按 256 层预备（定长存储，不允许无限增长）。
 let UNLIMITED_DEPTH_FRAMES = func() -> u64 { return 256; };
@@ -1940,6 +1959,10 @@ let dispatch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
 // --- CU -------------------------------------------------------------------
 // 推进一步。前置条件：TCB 处于 RUNNING；不满足时不动任何状态，原样返回当前切片结果。
 pub let vm_step = func(tcb: Mut(TCB)) -> VmResult {
+  if tcb.state == VM_BLOCKED() {
+    tcb.slice = SLICE_BLOCKED();
+    return result_of(tcb);
+  }
   if tcb.state != VM_RUNNING() { return result_of(tcb); }
   if (tcb.quota_steps != 0) and (tcb.steps >= tcb.quota_steps) {
     trap_now(tcb, TRAP_FUEL(), ST_FUEL_EXHAUSTED());

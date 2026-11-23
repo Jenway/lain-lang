@@ -8,6 +8,9 @@ let bld = import("std::build");
 let fmt = import("std::fmt");
 let opt = import("std::option");
 let mem = import("std::mem");
+let sync = import("std::sync");
+let thread = import("std::thread");
+let meta = import("std::meta");
 let ir_test = import("tests::ir_verify_test");
 
 use bld;
@@ -218,6 +221,52 @@ let run_meta_and_bool_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
+let thread_worker = func(arg: Mut(u8)) -> c_uint {
+  let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), arg);
+  let i: u64 = 0;
+  loop lp(k: u64 = 0) while k < 1000 {
+    sync.atomic_u64_add(ap, 1, sync.RELAXED());
+    k = k + 1;
+  };
+  return 0;
+};
+
+let run_sync_thread_meta_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::sync_thread_meta");
+  let a: sync.AtomicU64 = sync.atomic_u64_new(10);
+  t.eq_u64(mut_of(st), "atomic load init", sync.atomic_u64_load(mut_of(a), sync.ACQUIRE()), 10);
+  t.eq_u64(mut_of(st), "atomic add old", sync.atomic_u64_add(mut_of(a), 5, sync.SEQ_CST()), 10);
+  t.eq_u64(mut_of(st), "atomic load after add", sync.atomic_u64_load(mut_of(a), sync.ACQUIRE()), 15);
+  t.eq_u64(mut_of(st), "atomic cas old", sync.atomic_u64_cas(mut_of(a), 15, 42, sync.ACQ_REL()), 15);
+  t.eq_u64(mut_of(st), "atomic load after cas", sync.atomic_u64_load(mut_of(a), sync.SEQ_CST()), 42);
+  let lk: sync.SpinLock = sync.spin_new();
+  sync.spin_lock(mut_of(lk));
+  sync.spin_unlock(mut_of(lk));
+  t.check(mut_of(st), "spinlock lock/unlock", true);
+
+  let shared: sync.AtomicU64 = sync.atomic_u64_new(0);
+  let t1: thread.Thread = thread.spawn(fn_of(thread_worker), ptr_cast(Mut(u8), mut_of(shared)));
+  let t2: thread.Thread = thread.spawn(fn_of(thread_worker), ptr_cast(Mut(u8), mut_of(shared)));
+  t.eq_u64(mut_of(st), "thread1 join", thread.join(t1), 0);
+  t.eq_u64(mut_of(st), "thread2 join", thread.join(t2), 0);
+  t.eq_u64(mut_of(st), "concurrent atomic_add 2000", sync.atomic_u64_load(mut_of(shared), sync.SEQ_CST()), 2000);
+
+  let mbytes: u64 = meta.ast_out_bytes(16, 32, 256, 8);
+  let mbuf: u64 = os.alloc_bytes(mbytes);
+  let ao: meta.AstOut = meta.ast_out_init(ptr_cast(Mut(u8), mbuf), 16, 32, 256, 8);
+  let tx0: u64 = meta.ast_out_begin(mut_of(ao));
+  let tmp_tok: u64 = meta.ast_out_mk_token(mut_of(ao), 1, 0, 0, "discard");
+  meta.ast_out_rollback(mut_of(ao), tx0);
+  t.eq_u64(mut_of(st), "ast_out rollback count 0", meta.ast_out_node_count(mut_of(ao)), 0);
+  let tx1: u64 = meta.ast_out_begin(mut_of(ao));
+  let tok_id: u64 = meta.ast_out_mk_token(mut_of(ao), 2, 0, 0, "hello");
+  meta.ast_out_commit(mut_of(ao), tx1, tok_id);
+  let av: meta.AstView = meta.ast_view_of(mut_of(ao));
+  t.eq_bytes(mut_of(st), "ast_view text", meta.view_text(av, tok_id), "hello");
+  os.free_bytes(mbuf);
+  return t.finish(mut_of(st));
+};
+
 let main = func() -> i64 {
   io.println("=== Lain Library Test Runner (test.lain) ===");
   let f0: i64 = ir_test.run_suite();
@@ -226,7 +275,8 @@ let main = func() -> i64 {
   let f3: i64 = run_os_fmt_suite();
   let f4: i64 = run_option_mem_suite();
   let f5: i64 = run_meta_and_bool_suite();
-  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5;
+  let f6: i64 = run_sync_thread_meta_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5 + f6;
   if total_fail == 0 {
     io.println("ALL SUITES PASSED");
   } else {
