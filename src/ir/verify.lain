@@ -162,6 +162,11 @@ pub let IrProc = struct {
   name: u64,
   link_name: u64,
   is_extern: u64,
+  // extern 过程的调用约定属性：abi 与 lib 各自是一个下发的编号，
+  // is_variadic 置 1 表示实参个数可以多于形参个数。
+  abi: u64,
+  lib: u64,
+  is_variadic: u64,
   params: Ref(IrParam),
   param_count: u64,
   results: Ref(IrType),
@@ -302,6 +307,9 @@ pub let proc_new = func(name: u64, params: Ref(IrParam), param_count: u64,
     name: name,
     link_name: 0,
     is_extern: 0,
+    abi: 0,
+    lib: 0,
+    is_variadic: 0,
     params: params,
     param_count: param_count,
     results: results,
@@ -419,6 +427,14 @@ pub let proc_set_extern = func(p: Mut(IrProc), link: u64) -> u64 {
   p.is_extern = 1;
   p.link_name = link;
   p.body = NO_REGION();
+  return 0;
+};
+
+// 调用约定属性可以单独写在带函数体的过程上，所以这里不碰 is_extern 与 body。
+pub let proc_set_abi = func(p: Mut(IrProc), abi: u64, lib: u64, is_variadic: u64) -> u64 {
+  p.abi = abi;
+  p.lib = lib;
+  p.is_variadic = is_variadic;
   return 0;
 };
 
@@ -1418,7 +1434,13 @@ let check_call = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   let pi: u64 = find_proc(c, it.symbol);
   if pi == 0 { return set_err(c, ERR_BAD_OPCODE()); }
   let p: IrProc = proc_at(c, pi - 1);
-  if it.operand_count != p.param_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  // 变参 extern 只核前 param_count 个实参的类型，多出来的实参由被调方按
+  // 自己的约定读取；非变参过程仍然要求实参个数与形参个数完全一致。
+  if (p.is_extern == 1) and (p.is_variadic == 1) {
+    if it.operand_count < p.param_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  } else {
+    if it.operand_count != p.param_count { return set_err(c, ERR_TYPE_MISMATCH()); }
+  }
   let e: u64 = check_result_count(c, it, p.result_count);
   if e != 0 { return e; }
   return check_call_args(c, it, p.params, p.param_count, 0);

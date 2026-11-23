@@ -1380,16 +1380,22 @@ let cap_invoke = func(tcb: Mut(TCB), link_name: u64, args: Slice(u64),
 };
 
 // 把实参读进 TCB 的暂存区（VmValue 一份、原始词一份）。
+// 超出声明参数位置的实参只有可变参数过程才有，没有类型记录，按 64 位原始值读入。
 let collect_args = func(tcb: Mut(TCB), inst: vf.IrInst, params: Ref(vf.IrParam),
-                        arg_base: u64, count: u64, i: u64) -> u64 {
+                        param_count: u64, arg_base: u64, count: u64, i: u64) -> u64 {
   if i >= count { return 0; }
-  let ty: vf.IrType = param_type_at(params, i);
   let cell: Mut(VmValue) = tcb_arg_slot(tcb, i);
-  let s: u64 = op_read_typed(tcb, inst, arg_base + i, ty.kind, ty.width, cell);
+  let s: u64 = 0;
+  if i < param_count {
+    let ty: vf.IrType = param_type_at(params, i);
+    s = op_read_typed(tcb, inst, arg_base + i, ty.kind, ty.width, cell);
+  } else {
+    s = op_read_typed(tcb, inst, arg_base + i, codes.TY_ADDR(), 64, cell);
+  }
   if s != 0 { return s; }
   let w: Mut(u64) = tcb_arg_word(tcb, i);
   deref(w) = cell.bits;
-  return collect_args(tcb, inst, params, arg_base, count, i + 1);
+  return collect_args(tcb, inst, params, param_count, arg_base, count, i + 1);
 };
 
 let bind_args = func(tcb: Mut(TCB), base: u64, count: u64, i: u64) -> u64 {
@@ -1403,8 +1409,14 @@ let bind_args = func(tcb: Mut(TCB), base: u64, count: u64, i: u64) -> u64 {
 
 let enter_extern = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
                         sub: im.SubInfo, arg_base: u64, arg_count: u64) -> u64 {
-  if arg_count != sub.param_count {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
+  if sub.is_variadic == 1 {
+    if arg_count < sub.param_count {
+      return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
+    }
+  } else {
+    if arg_count != sub.param_count {
+      return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
+    }
   }
   if arg_count > MAX_OPERANDS() {
     return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
@@ -1416,7 +1428,7 @@ let enter_extern = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
       return enter_sub(tcb, inst, redirected, arg_base, arg_count, tcb.cur_position);
     }
   }
-  let collected: u64 = collect_args(tcb, inst, sub.params, arg_base, arg_count, 0);
+  let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
   if collected != 0 { return collected; }
   let words: Slice(u64) = make_slice(Slice(u64), tcb.arg_words, arg_count);
   let out: VmValue = value_zero();
@@ -1451,7 +1463,7 @@ let enter_sub = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
   if arg_count > MAX_OPERANDS() {
     return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
   }
-  let collected: u64 = collect_args(tcb, inst, sub.params, arg_base, arg_count, 0);
+  let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
   if collected != 0 { return collected; }
   let pushed: u64 = push_region(tcb, sub.body_region, parent_position, 0, 1);
   if pushed != SLICE_RUNNABLE() { return pushed; }

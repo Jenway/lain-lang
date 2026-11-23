@@ -37,6 +37,19 @@ let trap_text = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> 
   return "";
 };
 
+// --- 字符常量 -------------------------------------------------------------
+// 文本只在少数几处需要单个 ASCII 字节，给每个字节一个名字，发射函数里就
+// 不会出现裸的编号。
+let CH_NEWLINE = func() -> u8 { return 10; };
+let CH_SPACE = func() -> u8 { return 32; };
+let CH_HASH = func() -> u8 { return 35; };
+let CH_PERCENT = func() -> u8 { return 37; };
+let CH_LPAREN = func() -> u8 { return 40; };
+let CH_RPAREN = func() -> u8 { return 41; };
+let CH_DIGIT_ZERO = func() -> u8 { return 48; };
+let CH_RBRACK = func() -> u8 { return 93; };
+let CH_RANGLE = func() -> u8 { return 62; };
+
 // --- writer ---------------------------------------------------------------
 pub let TextWriter = struct {
   buf: MutSlice(u8),
@@ -76,10 +89,8 @@ pub let put_str = func(w: Mut(TextWriter), s: Slice(u8)) -> u64 {
 };
 
 pub let put_u64_dec = func(w: Mut(TextWriter), v: u64) -> u64 {
-  if v >= 10 {
-    let rc: u64 = put_u64_dec(w, v / 10);
-  }
-  let d: u8 = (48 + v - v / 10 * 10) as u8;
+  if v >= 10 { put_u64_dec(w, v / 10); }
+  let d: u8 = CH_DIGIT_ZERO() + ((v - v / 10 * 10) as u8);
   return put_byte(w, d);
 };
 
@@ -208,17 +219,17 @@ pub let emit_type = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), t: vf.Ir
   if t.kind == vf.TY_BITS() {
     let a: u64 = put_str(w, "#bits<");
     let b: u64 = put_u64_dec(w, t.width);
-    return put_byte(w, 62);
+    return put_byte(w, CH_RANGLE());
   }
   if t.kind == vf.TY_FLOAT() {
     let a: u64 = put_str(w, "#f<");
     let b: u64 = put_u64_dec(w, t.width);
-    return put_byte(w, 62);
+    return put_byte(w, CH_RANGLE());
   }
   if t.kind == vf.TY_VEC() {
     let a: u64 = put_str(w, "#vec<");
     let b: u64 = put_u64_dec(w, t.width);
-    return put_byte(w, 62);
+    return put_byte(w, CH_RANGLE());
   }
   return trap_u64(syms, "emit_text: type kind out of range", t.kind);
 };
@@ -388,7 +399,7 @@ let emit_indent = func(em: Mut(TextEmitter), n: u64) -> u64 {
 
 let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
   if op.kind == vf.OP_VALUE() {
-    let a: u64 = put_byte(em.w, 37);
+    put_byte(em.w, CH_PERCENT());
     return put_symbol(em.w, em.syms, op.name);
   }
   return put_u64_dec(em.w, op.bits);
@@ -409,11 +420,9 @@ let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
 
 let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
   if i >= it.operand_count { return 1; }
-  if i > 0 {
-    let sep: u64 = put_str(em.w, ", ");
-  }
+  if i > 0 { put_str(em.w, ", "); }
   let op: vf.IrOperand = vf.inst_op(it, i);
-  let rc: u64 = emit_operand(em, op);
+  emit_operand(em, op);
   return emit_operands(em, it, i + 1);
 };
 
@@ -427,87 +436,73 @@ let accepts_align = func(k: u64) -> u64 {
 };
 
 let emit_operand_list = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = put_byte(em.w, 40);
-  let b: u64 = emit_operands(em, it, 0);
+  put_byte(em.w, CH_LPAREN());
+  emit_operands(em, it, 0);
   if (it.align != 0) and (accepts_align(it.kind) == 1) {
-    if it.operand_count > 0 {
-      let sep: u64 = put_str(em.w, ", ");
-    }
-    let c: u64 = put_str(em.w, "align=");
-    let d: u64 = put_u64_dec(em.w, it.align);
+    if it.operand_count > 0 { put_str(em.w, ", "); }
+    put_str(em.w, "align=");
+    put_u64_dec(em.w, it.align);
   }
-  return put_byte(em.w, 41);
+  return put_byte(em.w, CH_RPAREN());
 };
 
 let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.has_ty == 0 { return 1; }
-  let a: u64 = put_byte(em.w, 91);
+  put_str(em.w, "[");
   let t: vf.IrType = vf.inst_ty(it);
-  let b: u64 = emit_type(em.w, em.syms, t);
-  return put_byte(em.w, 93);
+  emit_type(em.w, em.syms, t);
+  return put_byte(em.w, CH_RBRACK());
 };
 
 // 结果前缀：`%a, %b = `；没有结果就什么都不写。
 let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+  if it.result_count == 0 { return 1; }
   let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
-    if i > 0 {
-      let sep: u64 = put_str(em.w, ", ");
-    }
-    let a: u64 = put_byte(em.w, 37);
-    let name: u64 = vf.inst_result_name(it, i);
-    let b: u64 = put_symbol(em.w, em.syms, name);
+    if i > 0 { put_str(em.w, ", "); }
+    put_byte(em.w, CH_PERCENT());
+    put_symbol(em.w, em.syms, vf.inst_result_name(it, i));
     i = i + 1;
   };
-  if it.result_count == 0 { return 1; }
   return put_str(em.w, " = ");
 };
 
 // 区域声明的结果：` -> (T, T)`；没有就不写。
 let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
   if r.result_count == 0 { return 1; }
-  let a: u64 = put_str(em.w, " -> (");
+  put_str(em.w, " -> (");
   let i: u64 = loop c(i: u64 = 0) while i < r.result_count {
-    if i > 0 {
-      let sep: u64 = put_str(em.w, ", ");
-    }
-    let t: vf.IrType = vf.type_at_ref(r.results, i);
-    let rc: u64 = emit_type(em.w, em.syms, t);
+    if i > 0 { put_str(em.w, ", "); }
+    emit_type(em.w, em.syms, vf.type_at_ref(r.results, i));
     i = i + 1;
   };
-  return put_byte(em.w, 41);
+  return put_byte(em.w, CH_RPAREN());
 };
 
 // 过程签名的结果：单个不括号，多个括号。
 let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
   if p.result_count == 0 { return 1; }
-  let a: u64 = put_str(em.w, " -> ");
+  put_str(em.w, " -> ");
   if p.result_count == 1 {
     let t: vf.IrType = vf.type_at_ref(p.results, 0);
     return emit_type(em.w, em.syms, t);
   }
-  let b: u64 = put_byte(em.w, 40);
+  put_byte(em.w, CH_LPAREN());
   let i: u64 = loop c(i: u64 = 0) while i < p.result_count {
-    if i > 0 {
-      let sep: u64 = put_str(em.w, ", ");
-    }
-    let t: vf.IrType = vf.type_at_ref(p.results, i);
-    let rc: u64 = emit_type(em.w, em.syms, t);
+    if i > 0 { put_str(em.w, ", "); }
+    emit_type(em.w, em.syms, vf.type_at_ref(p.results, i));
     i = i + 1;
   };
-  return put_byte(em.w, 41);
+  return put_byte(em.w, CH_RPAREN());
 };
 
 let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> u64 {
   if i >= count { return 1; }
-  if i > 0 {
-    let sep: u64 = put_str(em.w, ", ");
-  }
+  if i > 0 { put_str(em.w, ", "); }
   let p: vf.IrParam = vf.param_at_ref(base, i);
-  let a: u64 = put_byte(em.w, 37);
-  let b: u64 = put_symbol(em.w, em.syms, p.name);
-  let c: u64 = put_str(em.w, ": ");
-  let t: vf.IrType = vf.param_ty(p);
-  let d: u64 = emit_type(em.w, em.syms, t);
+  put_byte(em.w, CH_PERCENT());
+  put_symbol(em.w, em.syms, p.name);
+  put_str(em.w, ": ");
+  emit_type(em.w, em.syms, vf.param_ty(p));
   return emit_params(em, base, count, i + 1);
 };
 
@@ -515,21 +510,18 @@ let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, 
 // 与 C99 后端一样按零初始化。
 let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
   if i >= r.param_count { return 1; }
-  if i > 0 {
-    let sep: u64 = put_str(em.w, ", ");
-  }
+  if i > 0 { put_str(em.w, ", "); }
   let p: vf.IrParam = vf.param_at_ref(r.params, i);
-  let a: u64 = put_byte(em.w, 37);
-  let b: u64 = put_symbol(em.w, em.syms, p.name);
-  let c: u64 = put_str(em.w, ": ");
-  let t: vf.IrType = vf.param_ty(p);
-  let d: u64 = emit_type(em.w, em.syms, t);
-  let e: u64 = put_str(em.w, " = 0");
+  put_byte(em.w, CH_PERCENT());
+  put_symbol(em.w, em.syms, p.name);
+  put_str(em.w, ": ");
+  emit_type(em.w, em.syms, vf.param_ty(p));
+  put_str(em.w, " = 0");
   return emit_loop_params(em, r, i + 1);
 };
 
 let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> u64 {
-  let a: u64 = put_byte(em.w, 35);
+  put_byte(em.w, CH_HASH());
   return put_str(em.w, opcode_name(em.syms, k));
 };
 
@@ -561,42 +553,42 @@ let emit_block = func(em: Mut(TextEmitter), ri: u64) -> u64 {
 };
 
 let emit_if = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = put_str(em.w, "#if ");
+  put_str(em.w, "#if ");
   let op: vf.IrOperand = vf.inst_op(it, 0);
-  let b: u64 = emit_operand(em, op);
+  emit_operand(em, op);
   if it.body != vf.NO_REGION() {
     let r: vf.IrRegion = region_of(em, it.body);
-    let c: u64 = emit_region_results(em, r);
+    emit_region_results(em, r);
   }
-  let d: u64 = put_str(em.w, " {\n");
+  put_str(em.w, " {\n");
   em.depth = em.depth + 1;
-  let e: u64 = emit_body(em, it.body);
+  emit_body(em, it.body);
   em.depth = em.depth - 1;
-  let f: u64 = emit_indent(em, em.depth);
+  emit_indent(em, em.depth);
   if it.else_body == vf.NO_REGION() {
     return put_str(em.w, "}\n");
   }
-  let g: u64 = put_str(em.w, "} else {\n");
+  put_str(em.w, "} else {\n");
   em.depth = em.depth + 1;
-  let h: u64 = emit_body(em, it.else_body);
+  emit_body(em, it.else_body);
   em.depth = em.depth - 1;
-  let j: u64 = emit_indent(em, em.depth);
+  emit_indent(em, em.depth);
   return put_str(em.w, "}\n");
 };
 
 let emit_loop = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = put_str(em.w, "#loop ");
-  let b: u64 = put_symbol(em.w, em.syms, it.label);
-  let c: u64 = put_byte(em.w, 40);
+  put_str(em.w, "#loop ");
+  put_symbol(em.w, em.syms, it.label);
+  put_byte(em.w, CH_LPAREN());
   let r: vf.IrRegion = region_of(em, it.body);
-  let d: u64 = emit_loop_params(em, r, 0);
-  let e: u64 = put_byte(em.w, 41);
-  let f: u64 = emit_region_results(em, r);
-  let g: u64 = put_str(em.w, " {\n");
+  emit_loop_params(em, r, 0);
+  put_byte(em.w, CH_RPAREN());
+  emit_region_results(em, r);
+  put_str(em.w, " {\n");
   em.depth = em.depth + 1;
-  let h: u64 = emit_block(em, it.body);
+  emit_block(em, it.body);
   em.depth = em.depth - 1;
-  let j: u64 = emit_indent(em, em.depth);
+  emit_indent(em, em.depth);
   return put_str(em.w, "}\n");
 };
 
@@ -604,15 +596,15 @@ let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
   if i >= it.case_count { return 1; }
   let cs: vf.IrCase = case_of(em, it.cases_at + i);
   em.depth = em.depth + 1;
-  let a: u64 = emit_indent(em, em.depth);
-  let b: u64 = put_str(em.w, "case ");
-  let c: u64 = put_u64_dec(em.w, cs.value);
-  let d: u64 = put_str(em.w, " {\n");
+  emit_indent(em, em.depth);
+  put_str(em.w, "case ");
+  put_u64_dec(em.w, cs.value);
+  put_str(em.w, " {\n");
   em.depth = em.depth + 1;
-  let e: u64 = emit_body(em, cs.body);
+  emit_body(em, cs.body);
   em.depth = em.depth - 1;
-  let f: u64 = emit_indent(em, em.depth);
-  let g: u64 = put_str(em.w, "}\n");
+  emit_indent(em, em.depth);
+  put_str(em.w, "}\n");
   em.depth = em.depth - 1;
   return emit_cases(em, it, i + 1);
 };
@@ -620,136 +612,123 @@ let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
 let emit_default_case = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.default_body == vf.NO_REGION() { return 1; }
   em.depth = em.depth + 1;
-  let a: u64 = emit_indent(em, em.depth);
-  let b: u64 = put_str(em.w, "default {\n");
+  emit_indent(em, em.depth);
+  put_str(em.w, "default {\n");
   em.depth = em.depth + 1;
-  let c: u64 = emit_body(em, it.default_body);
+  emit_body(em, it.default_body);
   em.depth = em.depth - 1;
-  let d: u64 = emit_indent(em, em.depth);
-  let e: u64 = put_str(em.w, "}\n");
+  emit_indent(em, em.depth);
+  put_str(em.w, "}\n");
   em.depth = em.depth - 1;
   return 1;
 };
 
 let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = put_str(em.w, "#switch");
-  let b: u64 = emit_type_arg(em, it);
-  let c: u64 = put_byte(em.w, 32);
+  put_str(em.w, "#switch");
+  emit_type_arg(em, it);
+  put_byte(em.w, CH_SPACE());
   let op: vf.IrOperand = vf.inst_op(it, 0);
-  let d: u64 = emit_operand(em, op);
+  emit_operand(em, op);
   if it.default_body != vf.NO_REGION() {
     let r: vf.IrRegion = region_of(em, it.default_body);
-    let e: u64 = emit_region_results(em, r);
+    emit_region_results(em, r);
   }
-  let f: u64 = put_str(em.w, " {\n");
-  let g: u64 = emit_cases(em, it, 0);
-  let h: u64 = emit_default_case(em, it);
-  let j: u64 = emit_indent(em, em.depth);
+  put_str(em.w, " {\n");
+  emit_cases(em, it, 0);
+  emit_default_case(em, it);
+  emit_indent(em, em.depth);
   return put_str(em.w, "}\n");
 };
 
 // #break / #continue：标签后面跟带括号的状态实参。
 let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = emit_opcode(em, it.kind);
-  let b: u64 = put_byte(em.w, 32);
-  let c: u64 = put_symbol(em.w, em.syms, it.label);
+  emit_opcode(em, it.kind);
+  put_byte(em.w, CH_SPACE());
+  put_symbol(em.w, em.syms, it.label);
   if it.operand_count > 0 {
-    let d: u64 = put_byte(em.w, 40);
-    let e: u64 = emit_operands(em, it, 0);
-    let f: u64 = put_byte(em.w, 41);
+    put_byte(em.w, CH_LPAREN());
+    emit_operands(em, it, 0);
+    put_byte(em.w, CH_RPAREN());
   }
-  return put_byte(em.w, 10);
+  return put_byte(em.w, CH_NEWLINE());
 };
 
 // #yield / #return / #unreachable：操作数不带括号，靠行尾界定。
 let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = emit_opcode(em, it.kind);
+  emit_opcode(em, it.kind);
   let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
     if i == 0 {
-      let sep: u64 = put_byte(em.w, 32);
+      put_byte(em.w, CH_SPACE());
     } else {
-      let sep: u64 = put_str(em.w, ", ");
+      put_str(em.w, ", ");
     }
     let op: vf.IrOperand = vf.inst_op(it, i);
-    let rc: u64 = emit_operand(em, op);
+    emit_operand(em, op);
     i = i + 1;
   };
-  return put_byte(em.w, 10);
+  return put_byte(em.w, CH_NEWLINE());
 };
 
 // 间接调用：`#call [(T, T) -> R](%fn, %a, %b)`。被调方为寄存器值，
 // 签名就是这层文本做静态核对的唯一依据。
 let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = put_str(em.w, " [(");
+  put_str(em.w, " [(");
   let i: u64 = loop c(i: u64 = 1) while i < it.operand_count {
-    if i > 1 {
-      let sep: u64 = put_str(em.w, ", ");
-    }
-    let op: vf.IrOperand = vf.inst_op(it, i);
-    let rc: u64 = emit_operand_type(em, op);
+    if i > 1 { put_str(em.w, ", "); }
+    emit_operand_type(em, vf.inst_op(it, i));
     i = i + 1;
   };
-  let b: u64 = put_byte(em.w, 41);
+  put_byte(em.w, CH_RPAREN());
   if it.has_ty == 1 {
-    let c: u64 = put_str(em.w, " -> ");
+    put_str(em.w, " -> ");
     let t: vf.IrType = vf.inst_ty(it);
-    let d: u64 = emit_type(em.w, em.syms, t);
+    emit_type(em.w, em.syms, t);
   }
-  return put_byte(em.w, 93);
+  return put_byte(em.w, CH_RBRACK());
 };
 
 let emit_call_rest = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.symbol != 0 {
-    let a: u64 = put_str(em.w, " @");
-    let b: u64 = put_symbol(em.w, em.syms, it.symbol);
+    put_str(em.w, " @");
+    put_symbol(em.w, em.syms, it.symbol);
   } else {
-    let a: u64 = emit_call_signature(em, it);
+    emit_call_signature(em, it);
   }
-  let c: u64 = emit_operand_list(em, it);
-  return put_byte(em.w, 10);
+  emit_operand_list(em, it);
+  return put_byte(em.w, CH_NEWLINE());
 };
 
 let emit_generic = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  let a: u64 = emit_opcode(em, it.kind);
+  emit_opcode(em, it.kind);
   if it.kind == codes.INST_CALL() {
     return emit_call_rest(em, it);
   }
-  let b: u64 = emit_type_arg(em, it);
-  let c: u64 = emit_operand_list(em, it);
-  return put_byte(em.w, 10);
+  emit_type_arg(em, it);
+  emit_operand_list(em, it);
+  return put_byte(em.w, CH_NEWLINE());
 };
 
 let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> u64 {
   if em.w.ok == 0 { return 0; }
   let it: vf.IrInst = inst_of(em, ii);
   let k: u64 = it.kind;
-  let a: u64 = emit_indent(em, em.depth);
-  let b: u64 = emit_results_prefix(em, it);
+  emit_indent(em, em.depth);
+  emit_results_prefix(em, it);
   if k == codes.INST_IF() {
-    let rc: u64 = emit_if(em, it);
-    return define_results(em, it, 0);
+    emit_if(em, it);
+  } else if k == codes.INST_LOOP() {
+    emit_loop(em, it);
+  } else if k == codes.INST_SWITCH() {
+    emit_switch(em, it);
+  } else if (k == codes.INST_BREAK()) or (k == codes.INST_CONTINUE()) {
+    emit_jump(em, it);
+  } else if (k == codes.INST_YIELD()) or (k == codes.INST_RETURN()) {
+    emit_terminator(em, it);
+  } else if k == codes.INST_UNREACHABLE() {
+    put_str(em.w, "#unreachable\n");
+  } else {
+    emit_generic(em, it);
   }
-  if k == codes.INST_LOOP() {
-    let rc: u64 = emit_loop(em, it);
-    return define_results(em, it, 0);
-  }
-  if k == codes.INST_SWITCH() {
-    let rc: u64 = emit_switch(em, it);
-    return define_results(em, it, 0);
-  }
-  if (k == codes.INST_BREAK()) or (k == codes.INST_CONTINUE()) {
-    let rc: u64 = emit_jump(em, it);
-    return define_results(em, it, 0);
-  }
-  if (k == codes.INST_YIELD()) or (k == codes.INST_RETURN()) {
-    let rc: u64 = emit_terminator(em, it);
-    return define_results(em, it, 0);
-  }
-  if k == codes.INST_UNREACHABLE() {
-    let rc: u64 = put_str(em.w, "#unreachable\n");
-    return define_results(em, it, 0);
-  }
-  let rc: u64 = emit_generic(em, it);
   return define_results(em, it, 0);
 };
 
@@ -760,19 +739,19 @@ let data_slot = func(base: Ref(IrDataView), i: u64) -> Ref(IrDataView) {
 };
 
 let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> u64 {
-  let a: u64 = put_str(em.w, "data ");
-  let b: u64 = put_symbol(em.w, em.syms, d.symbol);
+  put_str(em.w, "data ");
+  put_symbol(em.w, em.syms, d.symbol);
   if d.is_writable == 1 {
-    let c: u64 = put_str(em.w, " rw");
+    put_str(em.w, " rw");
   } else {
-    let c: u64 = put_str(em.w, " ro");
+    put_str(em.w, " ro");
   }
-  let d1: u64 = put_str(em.w, " {");
+  put_str(em.w, " {");
   let i: u64 = loop c(i: u64 = 0) while i < d.size {
     let p: Ref(u8) = d.bytes + i;
     let byte: u64 = deref(p) as u64;
-    let sep: u64 = put_byte(em.w, 32);
-    let rc: u64 = put_u64_dec(em.w, byte);
+    put_byte(em.w, CH_SPACE());
+    put_u64_dec(em.w, byte);
     i = i + 1;
   };
   return put_str(em.w, " }\n");
@@ -781,42 +760,71 @@ let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> u64 {
 let emit_data_all = func(em: Mut(TextEmitter), base: Ref(IrDataView), count: u64, i: u64) -> u64 {
   if i >= count { return 1; }
   let d: IrDataView = deref(data_slot(base, i));
-  let rc: u64 = emit_data(em, d);
+  emit_data(em, d);
   return emit_data_all(em, base, count, i + 1);
 };
 
+// extern 过程的调用约定属性：`#extern(abi="1", lib="2", variadic)`，
+// 只写非零项，实参之间用逗号分隔。
+let emit_extern_attrs = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
+  let first: u64 = 1;
+  put_str(em.w, " #extern(");
+  if p.abi != 0 {
+    put_str(em.w, "abi=\"");
+    put_u64_dec(em.w, p.abi);
+    put_str(em.w, "\"");
+    first = 0;
+  }
+  if p.lib != 0 {
+    if first == 0 { put_str(em.w, ", "); }
+    put_str(em.w, "lib=\"");
+    put_u64_dec(em.w, p.lib);
+    put_str(em.w, "\"");
+    first = 0;
+  }
+  if p.is_variadic != 0 {
+    if first == 0 { put_str(em.w, ", "); }
+    put_str(em.w, "variadic");
+    first = 0;
+  }
+  return put_str(em.w, ")");
+};
+
 let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
-  let a: u64 = put_str(em.w, "#proc ");
-  let b: u64 = put_symbol(em.w, em.syms, p.name);
-  let c: u64 = put_byte(em.w, 40);
-  let d: u64 = emit_params(em, p.params, p.param_count, 0);
-  let e: u64 = put_byte(em.w, 41);
-  let f: u64 = emit_proc_results(em, p);
+  put_str(em.w, "#proc ");
+  put_symbol(em.w, em.syms, p.name);
+  put_byte(em.w, CH_LPAREN());
+  emit_params(em, p.params, p.param_count, 0);
+  put_byte(em.w, CH_RPAREN());
+  emit_proc_results(em, p);
   if p.is_extern == 1 {
-    let g: u64 = put_str(em.w, " #extern \"");
-    if p.link_name != 0 {
-      let h: u64 = put_symbol(em.w, em.syms, p.link_name);
+    if (p.abi != 0) or (p.lib != 0) or (p.is_variadic != 0) {
+      emit_extern_attrs(em, p);
     } else {
-      let h: u64 = put_symbol(em.w, em.syms, p.name);
+      put_str(em.w, " #extern");
+    }
+    put_str(em.w, " \"");
+    if p.link_name != 0 {
+      put_symbol(em.w, em.syms, p.link_name);
+    } else {
+      put_symbol(em.w, em.syms, p.name);
     }
     return put_str(em.w, "\"\n");
   }
-  let g: u64 = put_str(em.w, " {\n");
+  put_str(em.w, " {\n");
   em.depth = 1;
   em.count = 0;
-  let h: u64 = bind_params(em, p.params, p.param_count, 0);
-  let j: u64 = emit_body(em, p.body);
+  bind_params(em, p.params, p.param_count, 0);
+  emit_body(em, p.body);
   em.depth = 0;
   return put_str(em.w, "}\n");
 };
 
 let emit_procs = func(em: Mut(TextEmitter), i: u64) -> u64 {
   if i >= em.m.proc_count { return 1; }
-  if i > 0 {
-    let sep: u64 = put_byte(em.w, 10);
-  }
+  if i > 0 { put_byte(em.w, CH_NEWLINE()); }
   let p: vf.IrProc = vf.proc_at_ref(em.m.procs, i);
-  let rc: u64 = emit_proc(em, p);
+  emit_proc(em, p);
   return emit_procs(em, i + 1);
 };
 
@@ -830,13 +838,11 @@ pub let emit_module_text = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
   let start: u64 = w.len;
   let e0: TextEmitter = emitter_new(w, syms, m);
   let em: Mut(TextEmitter) = mut_of(e0);
-  let a: u64 = emit_data_all(em, data, data_count, 0);
+  emit_data_all(em, data, data_count, 0);
   if data_count > 0 {
-    if m.proc_count > 0 {
-      let sep: u64 = put_byte(w, 10);
-    }
+    if m.proc_count > 0 { put_byte(w, CH_NEWLINE()); }
   }
-  let b: u64 = emit_procs(em, 0);
+  emit_procs(em, 0);
   if w.ok == 0 { return 0; }
   return w.len - start;
 };

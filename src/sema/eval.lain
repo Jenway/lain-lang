@@ -329,6 +329,138 @@ let extern_params = func(k: Mut(st.State), syms: Mut(u64), paramp: Mut(ty.Ty), i
   return extern_params(k, syms, paramp, idx + 1, np);
 };
 
+// --- 带属性的 extern -------------------------------------------------------
+// @extern(abi="C", lib="m", link="sqrt") [pub] let 名 = func(形参) -> 返回;
+// 属性允许任意子集与任意顺序。三个值按 [abi, lib, link] 铺在一个三字槽里：
+// abi 缺省是 C 调用约定，lib 缺省 0（不属于任何运行库），link 缺省取声明名。
+let abi_c = func() -> u64 { return hr.sym_intern("C", 1); };
+
+// 字符串字面量的内容登记成符号，两侧引号去掉。
+let str_sym = func(h: u64) -> u64 { return hr.sym_intern(lit_addr(h) + 1, lit_len(h) - 2); };
+
+let attr_slot = func(key: u64) -> u64 {
+  if key == s.k_abi() { return 0; }
+  if key == s.k_lib() { return 1; }
+  if key == s.k_link() { return 2; }
+  return 3;
+};
+
+let attr_slots = func(k: Mut(st.State)) -> Mut(u64) {
+  let p: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 24));
+  deref(cx.word_idx(p, 0)) = abi_c();
+  deref(cx.word_idx(p, 1)) = 0;
+  deref(cx.word_idx(p, 2)) = 0;
+  return p;
+};
+
+let attr_parse = func(k: Mut(st.State), ag: u64, i: u64, slots: Mut(u64)) -> u64 {
+  let n: u64 = n_count(ag);
+  if i >= n { return i; }
+  if is_comma(ag, i) == 1 { return attr_parse(k, ag, i + 1, slots); }
+  let key: u64 = n_sym(ag, i);
+  let sl: u64 = attr_slot(key);
+  let a: u64 = expect_sym(k, ag, i + 1, s.p_eq());
+  if (sl == 3) or (a >= n) or (tok_first(ag, a) != 34) {
+    st.st_fail(k, e_ast());
+    return n;
+  }
+  deref(cx.word_idx(slots, sl)) = str_sym(n_at(ag, a));
+  return attr_parse(k, ag, a + 1, slots);
+};
+
+// 读词把 "..." 切成 ".." 与 "."：变参标记可能是单个三点词，也可能是连续点号。
+let dot_pair = func() -> u64 { return hr.sym_intern("..", 2); };
+
+let dot_width = func(sym: u64) -> u64 {
+  if sym == s.p_ellipsis() { return 3; }
+  if sym == dot_pair() { return 2; }
+  if sym == s.p_dot() { return 1; }
+  return 0;
+};
+
+let dots_end = func(pg: u64, i: u64, n: u64, acc: u64) -> u64 {
+  if acc >= 3 { return i; }
+  if i >= n { return 0; }
+  if is_group(pg, i) == 1 { return 0; }
+  let w: u64 = dot_width(n_sym(pg, i));
+  if w == 0 { return 0; }
+  return dots_end(pg, i + 1, n, acc + w);
+};
+
+// 变参标记之后的下标；这里不是变参标记就返回 0。
+let ellipsis_end = func(pg: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  if is_group(pg, i) == 1 { return 0; }
+  let w: u64 = dot_width(n_sym(pg, i));
+  if w == 0 { return 0; }
+  return dots_end(pg, i + 1, n, w);
+};
+
+// 形参组里变参标记的下标；没有变参就是组长度。
+let ellipsis_at = func(pg: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return n; }
+  if ellipsis_end(pg, i, n) != 0 { return i; }
+  return ellipsis_at(pg, i + 1, n);
+};
+
+// 变参标记之前的形参：与 parse_params 同形，只是提前在 stop 处收手。
+let params_before = func(k: Mut(st.State), pg: u64, i: u64, stop: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 {
+  if i >= stop { return idx; }
+  let sym: u64 = n_sym(pg, i);
+  let a: u64 = expect_sym(k, pg, i + 1, s.p_colon());
+  let t: Mut(ty.Ty) = cx.ty_idx(tintbl, idx);
+  let j: u64 = parse_type(k, pg, a, t);
+  deref(cx.word_idx(symtbl, idx)) = sym;
+  let nj: u64 = if is_comma(pg, j) == 1 { j + 1 } else { j };
+  return params_before(k, pg, nj, stop, idx + 1, tintbl, symtbl);
+};
+
+let p1_extern_attr = func(k: Mut(st.State), g: u64, ag: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let slots: Mut(u64) = attr_slots(k);
+  let ap: u64 = attr_parse(k, ag, 0, slots);
+  if st.st_ok(k) != 0 { return skip_stmt(g, i, n); }
+  let is_pub: u64 = if n_sym(g, i) == s.k_pub() { 1 } else { 0 };
+  let h: u64 = if is_pub == 1 { i + 1 } else { i };
+  if (h + 2 >= n) or (n_sym(g, h) != s.k_let()) or (is_name(g, h + 1) == 0) {
+    st.st_fail(k, e_ast());
+    return skip_stmt(g, i, n);
+  }
+  let name: u64 = n_sym(g, h + 1);
+  let e: u64 = expect_sym(k, g, h + 2, s.p_eq());
+  if (st.st_ok(k) != 0) or (n_sym(g, e) != s.k_func()) or (is_group(g, e + 1) == 0) {
+    st.st_fail(k, e_ast());
+    return skip_stmt(g, i, n);
+  }
+  let pg: u64 = n_at(g, e + 1);
+  let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
+  let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
+  let cnt: u64 = n_count(pg);
+  let stop: u64 = ellipsis_at(pg, 0, cnt);
+  let is_var: u64 = if stop < cnt { 1 } else { 0 };
+  let np: u64 = params_before(k, pg, 0, stop, 0, paramp, syms);
+  let rt: Mut(ty.Ty) = new_ty(k);
+  ty.ty_none(rt);
+  let a0: u64 = e + 2;
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let q: u64 = modules.qual(k, modules.cur(k), name);
+  let abi: u64 = deref(cx.word_idx(slots, 0));
+  let lib: u64 = deref(cx.word_idx(slots, 1));
+  let link0: u64 = deref(cx.word_idx(slots, 2));
+  let link: u64 = if link0 == 0 { name } else { link0 };
+  let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_extern(), modules.cur(k), name, q, sg, 0);
+  let sp: u64 = modules.sym_set_pub(se, is_pub);
+  let sf: u64 = modules.sym_set_flag(se, is_var);
+  let fid: u64 = fn_type_id(k, sg);
+  let sfn: u64 = modules.sym_set_fnid(se, fid);
+  let b: u64 = ir.proc_extern_abi(k, q, link, abi, lib, is_var);
+  let pp: u64 = extern_params(k, syms, paramp, 0, np);
+  let pr: u64 = if ty.ty_known(rt) == 1 { ir.proc_result(k, rt) } else { 0 };
+  let pe: u64 = ir.proc_end(k);
+  return skip_semi(g, a);
+};
+
 // let M = import("..."): 编译被导入源，再登记别名。
 let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) -> u64 {
   let cur: u64 = st.st_src(k);
@@ -736,6 +868,11 @@ let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     return i + 1;
   }
   if hs == s.k_extern() { let a: u64 = p1_extern(k, g, h, is_pub); return phase1(k, g, a, n); }
+  // @extern(...) [pub] let 名 = func ...;：带 ABI 属性的外部声明。
+  if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == ax.dl_paren() {
+    let a: u64 = p1_extern_attr(k, g, n_at(g, i + 2), i + 3);
+    return phase1(k, g, a, n);
+  }
   if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1(k, g, a, n); }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1(k, g, a, n); }
@@ -817,6 +954,11 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let h: u64 = if is_pub == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }
   let hs: u64 = n_sym(g, h);
+  // @extern(...) let ...; 只有签名没有体：phase1 已登记，这里只跳到分号。
+  if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 {
+    let a: u64 = skip_stmt(g, i + 3, n);
+    return phase2(k, g, a, n);
+  }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_let() { let a: u64 = p2_let(k, g, h, n); return phase2(k, g, a, n); }
   if hs == s.k_extern() {

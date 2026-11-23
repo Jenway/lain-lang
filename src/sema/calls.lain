@@ -31,7 +31,16 @@ pub let call_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
     st.st_fail(k, ax.e_type());
     return i + 2;
   }
-  let j: u64 = call_sig(k, modules.sym_qual(e), modules.sym_sig(e), argsg, want, out);
+  let variadic: u64 = if kd == modules.sym_kind_extern() {
+    if modules.sym_flag(e) == 1 { 1 } else { 0 }
+  } else {
+    0
+  };
+  let j: u64 = if variadic == 1 {
+    call_sig_var(k, modules.sym_qual(e), modules.sym_sig(e), argsg, want, out)
+  } else {
+    call_sig(k, modules.sym_qual(e), modules.sym_sig(e), argsg, want, out)
+  };
   // call_args 的返回值是实参组内部位置，外层要跳到组之后。
   let ignored: u64 = j;
   return i + 2;
@@ -96,6 +105,76 @@ pub let call_sig = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, want:
     return j;
   }
   let ep: u64 = emit_prepared(k, q, ret, np, ab, want, out);
+  return j;
+};
+
+// MAX_OPERANDS：一条指令最多带这么多操作数。
+let max_operands = func() -> u64 { return 16; };
+
+// 变参 extern：固定形参照常按签名强制，余下的位置实参按无类型提示求值。
+// 结果槽位数取位置实参个数与固定形参个数的较大者。
+pub let call_sig_var = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  if tb.sig_types(sg) == 1 {
+    let m: Ref(u8) = "type is compile-time only";
+    let d: u64 = ir.diag(k, 0, 1, m, 25);
+    st.st_fail(k, ax.e_unsup());
+    return 0;
+  }
+  let np: u64 = cx.sig_np(sg);
+  let ret: Mut(ty.Ty) = cx.sig_ret(sg);
+  let ps: Mut(ty.Ty) = cx.sig_params(sg);
+  let na: u64 = positional_count(argsg, 0, 0);
+  let total_args: u64 = if na > np { na } else { np };
+  if total_args > max_operands() {
+    let m: Ref(u8) = "too many call args";
+    let d: u64 = ir.diag(k, total_args, 1, m, 18);
+    ty.val_none(out);
+    st.st_fail(k, ax.e_type());
+    return argsg;
+  }
+  let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, total_args * 56 + 8));
+  let zw: u64 = zero_vals(k, ab, 0, total_args);
+  let j: u64 = call_args(k, argsg, 0, 0, np, ab, ps);
+  // 固定形参必须齐全，缺的位置报出来。
+  let hole: u64 = scan_holes(k, ab, 0, np);
+  if hole != np {
+    let p: Ref(u8) = modules.sym_addr(q);
+    let n: u64 = modules.sym_len(q);
+    let d: u64 = ir.diag(k, hole, 1, p, n);
+    st.st_fail(k, ax.e_type());
+    return j;
+  }
+  let next: u64 = if np == 0 { 0 } else { skip_comma(argsg, j) };
+  let j2: u64 = if na > np { var_args(k, argsg, next, np, total_args, ab) } else { next };
+  let ep: u64 = emit_prepared(k, q, ret, total_args, ab, want, out);
+  return j2;
+};
+
+// 数实参组里的位置实参个数：顶层逗号是分隔符，不算实参。
+let positional_count = func(g: u64, i: u64, acc: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { return acc; }
+  if ax.is_comma(g, i) == 1 { return positional_count(g, i + 1, acc); }
+  return positional_count(g, i + 1, acc + 1);
+};
+
+let skip_comma = func(g: u64, j: u64) -> u64 {
+  if ax.is_comma(g, j) == 1 { return j + 1; }
+  return j;
+};
+
+// 变参部分：按无类型提示求值，字面量与字符串直接按自身类型放进槽位。
+let var_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64, ab: Mut(ty.Val)) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { return i; }
+  if idx >= arity { return i; }
+  let pt: Mut(ty.Ty) = cx.tnone(k);
+  let v: Mut(ty.Val) = ax.new_val(k);
+  let j: u64 = core_expr(k, g, i, 0, pt, v);
+  let c: Mut(ty.Val) = ax.new_val(k);
+  cx.coerce(k, v, ty.vty(v), pt, c);
+  ty.val_at(val_idx(ab, idx), c);
+  if ax.is_comma(g, j) == 1 { return var_args(k, g, j + 1, idx + 1, arity, ab); }
   return j;
 };
 
