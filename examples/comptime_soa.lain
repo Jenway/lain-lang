@@ -1,5 +1,6 @@
-// Zero-string-concatenation compile-time type factories & layout introspection
+// Compile-time type factories & layout introspection
 let io = import("std::io");
+let option = import("std::option");
 
 let Vec3 = struct { x: i64, y: i64, z: i64 };
 
@@ -22,17 +23,11 @@ let with_tag = func(T: Type) -> Type {
   return record_end(b);
 };
 
-// 3. Generic container layout: Option-like { present: u8, value: T }
-let make_opt = func(T: Type) -> Type {
-  let b = record_begin();
-  record_add(b, "present", u8);
-  record_add(b, "value", T);
-  return record_end(b);
-};
+// 3. Generic Option functor from std::option
+let Vec3Opt = option.Option(Vec3);
 
 let Vec3SoA = make_soa(Vec3, 4);
 let TaggedVec3 = with_tag(Vec3);
-let OptVec3 = make_opt(Vec3);
 
 let stamp_vec3 = func(dst: Mut(TaggedVec3), tag: u64, src: Vec3) {
   deref(dst).tag = tag;
@@ -52,20 +47,39 @@ let main = func() -> i64 {
   let tv: TaggedVec3 = TaggedVec3 { tag: 0, x: 0, y: 0, z: 0 };
   stamp_vec3(mut_of(tv), 99, v); // 99 + 3 + 4 + 5 = 111
 
-  // Memoized type identity: `make_opt(Vec3)` and `OptVec3` are the exact same Type
-  let opt: make_opt(Vec3) = OptVec3 { present: 1, value: v };
-  let opt_val: i64 = if opt.present == 1 { opt.value.x + opt.value.z } else { 0 }; // 8
+  // 单例缓存：同一份 Vec3 调用 Option 得到同一个模块与同一个 Opt 类型。
+  let opt: Vec3Opt.Opt = Vec3Opt.some(v);
+  let none: Vec3Opt.Opt = Vec3Opt.none();
+  let opt_val: i64 = match opt {
+    Some(x) => x.x + x.z,
+    None => 0,
+  }; // 8
+  let none_sum: i64 = match none {
+    Some(x) => x.x,
+    None => 0,
+  }; // 0
+  let has_some: bool = Vec3Opt.is_some(opt);
 
-  // size_of(OptVec3) == 32 (1B present + 7B padding + 24B Vec3) -> total 201
-  let total: i64 = dot + (tv.tag as i64) + tv.x + tv.y + tv.z + opt_val + (size_of(OptVec3) as i64);
+  // 布局内省：SoA 4 元素与带 tag 扩展后的结构体大小
+  let soa_size: u64 = size_of(Vec3SoA);
+  let tagged_size: u64 = size_of(TaggedVec3);
+
+  let total: i64 = dot + (tv.tag as i64) + tv.x + tv.y + tv.z + opt_val + none_sum
+    + (soa_size as i64) + (tagged_size as i64);
   io.print("dot=");
   io.println_i64(dot);
   io.print("tagged=");
   io.println_i64((tv.tag as i64) + tv.x + tv.y + tv.z);
   io.print("opt=");
   io.println_i64(opt_val);
-  io.print("size_of(OptVec3)=");
-  io.println_u64(size_of(OptVec3));
+  io.print("none=");
+  io.println_i64(none_sum);
+  io.print("is_some=");
+  io.println_u64(if has_some { 1 } else { 0 });
+  io.print("size_of(Vec3SoA)=");
+  io.println_u64(soa_size);
+  io.print("size_of(TaggedVec3)=");
+  io.println_u64(tagged_size);
   io.print("total=");
   io.println_i64(total);
   return total;

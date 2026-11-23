@@ -7,7 +7,6 @@
 //   5. std::build 声明式构建图 + Source/Interface 双哈希增量缓存判定
 //   6. f"..." 零堆插值输出（与 !{ ... } 纯净隔离）
 let io = import("std::io");
-let fmt = import("std::fmt");
 let col = import("std::collections");
 let bld = import("std::build");
 
@@ -65,30 +64,20 @@ let state_label = func(code: u64) -> Slice(u8) {
   } else {
     if code == 2 { BuildState.Rebuilt { } } else { BuildState.Failed { } }
   };
-  let tag: u64 = match st {
-    CacheHit => 1,
-    Rebuilt  => 2,
-    Failed   => 3,
+  return match st {
+    CacheHit => "HIT (skip downstream)",
+    Rebuilt  => "REBUILD (iface changed)",
+    Failed   => "RECOVERED (via effect)",
   };
-  if tag == 1 { return "HIT (skip downstream)"; }
-  if tag == 2 { return "REBUILD (iface changed)"; }
-  return "RECOVERED (via effect)";
 };
 
 // --- 3. 纯净 f"..." 零堆插值报告 -------------------------------------------
 let print_unit = func(label: Slice(u8), st_text: Slice(u8)) -> u64 {
-  io.print("  unit[");
-  io.print(label);
-  io.print("] : ");
-  io.println(st_text);
-  return 1;
+  return io.println(f"  unit[{label}] : {st_text}");
 };
 
 let print_kv = func(label: Slice(u8), val: u64) -> u64 {
-  let c0: fmt.Cursor = fmt.fmt_begin();
-  let c1: fmt.Cursor = fmt.write_str(c0, label);
-  let c2: fmt.Cursor = fmt.write_u64(c1, val);
-  return fmt.emit_line(c2);
+  return io.println(f"{label}{val}");
 };
 
 let print_banner = func(budget: u64, steps: u64, edges: u64, hit_val: u64) -> u64 {
@@ -138,12 +127,12 @@ let main = func() -> i64 {
   // 泛型 Vec + HashMapU64 + UFCS
   let q: Jobs.Vec = Jobs.new();
   let cache: Cache.Map = Cache.new();
-  let p1: u64 = Jobs.push(mut_of(q), lib_id);
-  let p2: u64 = Jobs.push(mut_of(q), app_id);
-  let c1: u64 = Cache.put(mut_of(cache), k_lib, budget);
+  let p1: u64 = q.push(lib_id);
+  let p2: u64 = q.push(app_id);
+  let c1: u64 = cache.put(k_lib, budget);
 
   let got: u64 = 0;
-  let found: u64 = Cache.get(ref_of(cache), k_lib, mut_of(got));
+  let found: u64 = cache.get(k_lib, mut_of(got));
 
   let steps: u64 = g.step_count();
   let edges: u64 = g.edge_count();

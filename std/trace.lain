@@ -1,7 +1,7 @@
-// std::trace —— 静态表里的 Chrome Trace Event / Perfetto 事件记录与 JSON 导出。
-// 事件写在固定的 2048 格静态表里，全程不申请堆内存；表写满后新事件被丢弃并计入
-// 丢弃计数，导出时只写出真正记录下来的事件。时间戳统一用微秒，自第一次取时刻
-// 起算相对时间，因此导出的 JSON 不必关心宿主时钟的起点。
+// std::trace —— Chrome Trace Event / Perfetto 事件记录与 JSON 导出。
+// 事件写在一块静态状态块指向的堆缓冲里，容量由 TraceState.cap 给定；表写满后新
+// 事件被丢弃并计入丢弃计数，导出时只写出真正记录下来的事件。时间戳统一用微秒，
+// 自第一次取时刻起算相对时间，因此导出的 JSON 不必关心宿主时钟的起点。
 //
 // 每个事件带一个线程号 tid，导出的 JSON 里按事件各自的 tid 写出，因此同一次追踪
 // 里编译器（tid 1）与虚拟机（tid 2）的区间可以落在 Perfetto 的两条泳道上；
@@ -13,10 +13,8 @@ let os = import("std::os");
 extern trace_clock_ns() -> u64 = lain_perf_nanos;
 
 pub let TraceEvent = struct {
-  name_ptr: Ref(u8),
-  name_len: u64,
-  cat_ptr: Ref(u8),
-  cat_len: u64,
+  name: Slice(u8),
+  cat: Slice(u8),
   ph: u8,
   ts_us: u64,
   dur_us: u64,
@@ -26,41 +24,38 @@ pub let TraceEvent = struct {
 
 // 常量写成过程：顶层值符号在结构体字段与实参位置上会有物理类型偏差。
 pub let capacity = func() -> u64 { return 4096; };
-let state_words = func() -> u64 { return 8; };
-let state_enabled = func() -> u64 { return 0; };
-let state_count = func() -> u64 { return 1; };
-let state_first = func() -> u64 { return 2; };
-let state_started = func() -> u64 { return 3; };
-let state_dropped = func() -> u64 { return 4; };
-let state_buf = func() -> u64 { return 5; };
 
-let blank = func() -> TraceEvent {
-  return TraceEvent {
-    name_ptr: null_ref(Ref(u8)),
-    name_len: 0,
-    cat_ptr: null_ref(Ref(u8)),
-    cat_len: 0,
-    ph: 0 as u8,
-    ts_us: 0,
-    dur_us: 0,
-    arg_val: 0,
-    tid: 1,
-  };
+// 事件表的全部可变状态：开关、时间起点、已记录条数、丢弃条数、容量与缓冲指针。
+pub let TraceState = struct {
+  enabled: bool,
+  started: bool,
+  count: u64,
+  dropped: u64,
+  cap: u64,
+  t0_us: u64,
+  buf: Mut(TraceEvent),
 };
 
+// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储；
+// 容量在首次访问时装上，其余字段的零值就是它们的初值。
+let trace_state: TraceState = TraceState { };
 
-let state: Array(u64, 8) = [0, 0, 0, 0, 0, 0, 0, 0];
-
-let events = func() -> MutSlice(TraceEvent) {
-  let w: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(state), state_words());
-  if w[state_buf()] == 0 {
-    w[state_buf()] = os.alloc_bytes(capacity() * size_of(TraceEvent));
+let state = func() -> Mut(TraceState) {
+  let s: Mut(TraceState) = mut_of(trace_state);
+  if deref(s).cap == 0 {
+    deref(s).cap = capacity();
   }
-  return make_slice(MutSlice(TraceEvent), ptr_cast(Mut(TraceEvent), w[state_buf()]), capacity());
+  return s;
 };
 
-let flags = func() -> MutSlice(u64) {
-  return make_slice(MutSlice(u64), mut_of(state), state_words());
+// 事件缓冲按需向宿主申请一次，之后一直复用。
+let events = func() -> MutSlice(TraceEvent) {
+  let s: Mut(TraceState) = state();
+  if is_null(deref(s).buf) {
+    let raw: u64 = os.alloc_bytes(deref(s).cap * size_of(TraceEvent));
+    deref(s).buf = ptr_cast(Mut(TraceEvent), raw);
+  }
+  return make_slice(MutSlice(TraceEvent), deref(s).buf, deref(s).cap);
 };
 
 let now_us = func() -> u64 {
@@ -69,24 +64,26 @@ let now_us = func() -> u64 {
 
 // 相对微秒：第一次取时刻时定下起点，之后都相对这个起点。
 let relative_us = func() -> u64 {
+  let s: Mut(TraceState) = state();
   let us: u64 = now_us();
-  let w: MutSlice(u64) = flags();
-  if w[state_started()] == 0 {
-    w[state_first()] = us;
-    w[state_started()] = 1;
+  if deref(s).started == false {
+    deref(s).t0_us = us;
+    deref(s).started = true;
   }
-  return us - w[state_first()];
+  return us - deref(s).t0_us;
 };
 
 pub let trace_enable = func(flag: u64) -> u64 {
-  let w: MutSlice(u64) = flags();
-  w[state_enabled()] = flag;
-  return w[state_enabled()];
+  let s: Mut(TraceState) = state();
+  deref(s).enabled = flag != 0;
+  if deref(s).enabled { return 1; }
+  return 0;
 };
 
 pub let trace_is_enabled = func() -> u64 {
-  let w: MutSlice(u64) = flags();
-  return w[state_enabled()];
+  let s: Mut(TraceState) = state();
+  if deref(s).enabled { return 1; }
+  return 0;
 };
 
 pub let span_begin_tid = func() -> u64 {
@@ -102,32 +99,30 @@ pub let tid_compiler = func() -> u64 { return 1; };
 pub let tid_vm = func() -> u64 { return 2; };
 
 let record = func(name: Slice(u8), cat: Slice(u8), ph: u64, ts: u64, dur: u64, arg: u64, tid: u64) -> u64 {
-  let w: MutSlice(u64) = flags();
-  if w[state_enabled()] == 0 { return 0; }
-  let n: u64 = w[state_count()];
-  if n >= capacity() {
-    w[state_dropped()] = w[state_dropped()] + 1;
+  let s: Mut(TraceState) = state();
+  if deref(s).enabled == false { return 0; }
+  let n: u64 = deref(s).count;
+  if n >= deref(s).cap {
+    deref(s).dropped = deref(s).dropped + 1;
     return 0;
   }
   let t: MutSlice(TraceEvent) = events();
   t[n] = TraceEvent {
-    name_ptr: name.ptr,
-    name_len: name.len,
-    cat_ptr: cat.ptr,
-    cat_len: cat.len,
+    name: name,
+    cat: cat,
     ph: ph as u8,
     ts_us: ts,
     dur_us: dur,
     arg_val: arg,
     tid: tid,
   };
-  w[state_count()] = n + 1;
+  deref(s).count = n + 1;
   return n + 1;
 };
 
 pub let span_end_tid = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val: u64, tid: u64) -> u64 {
-  let w: MutSlice(u64) = flags();
-  if w[state_enabled()] == 0 { return 0; }
+  let s: Mut(TraceState) = state();
+  if deref(s).enabled == false { return 0; }
   let now: u64 = relative_us();
   let dur: u64 = if now >= start_us { now - start_us } else { 0 };
   return record(name, cat, 88, start_us, dur, arg_val, tid);
@@ -138,8 +133,8 @@ pub let span_end = func(name: Slice(u8), cat: Slice(u8), start_us: u64, arg_val:
 };
 
 pub let counter_tid = func(name: Slice(u8), val: u64, tid: u64) -> u64 {
-  let w: MutSlice(u64) = flags();
-  if w[state_enabled()] == 0 { return 0; }
+  let s: Mut(TraceState) = state();
+  if deref(s).enabled == false { return 0; }
   let cat: Slice(u8) = "";
   return record(name, cat, 67, relative_us(), 0, val, tid);
 };
@@ -149,23 +144,23 @@ pub let counter = func(name: Slice(u8), val: u64) -> u64 {
 };
 
 pub let event_count = func() -> u64 {
-  let w: MutSlice(u64) = flags();
-  return w[state_count()];
+  let s: Mut(TraceState) = state();
+  return deref(s).count;
 };
 
 pub let dropped_count = func() -> u64 {
-  let w: MutSlice(u64) = flags();
-  return w[state_dropped()];
+  let s: Mut(TraceState) = state();
+  return deref(s).dropped;
 };
 
-// 清空事件表与时间起点，开关状态保持不变；返回被清掉的事件数。
+// 清空事件表与时间起点，开关状态与已申请的缓冲保持不变；返回被清掉的事件数。
 pub let trace_reset = func() -> u64 {
-  let w: MutSlice(u64) = flags();
-  let prev: u64 = w[state_count()];
-  w[state_count()] = 0;
-  w[state_first()] = 0;
-  w[state_started()] = 0;
-  w[state_dropped()] = 0;
+  let s: Mut(TraceState) = state();
+  let prev: u64 = deref(s).count;
+  deref(s).count = 0;
+  deref(s).t0_us = 0;
+  deref(s).started = false;
+  deref(s).dropped = 0;
   return prev;
 };
 
@@ -232,12 +227,10 @@ let put_json_str = func(o: Out, s: Slice(u8)) -> Out {
 };
 
 let put_head = func(o: Out, e: TraceEvent) -> Out {
-  let ns: Slice(u8) = make_slice(Slice(u8), e.name_ptr, e.name_len);
-  let cs: Slice(u8) = make_slice(Slice(u8), e.cat_ptr, e.cat_len);
   let a: Out = put_text(o, "{\"name\":");
-  let b: Out = put_json_str(a, ns);
+  let b: Out = put_json_str(a, e.name);
   let c: Out = put_text(b, ",\"cat\":");
-  return put_json_str(c, cs);
+  return put_json_str(c, e.cat);
 };
 
 let put_span = func(o: Out, e: TraceEvent) -> Out {
@@ -287,13 +280,18 @@ let put_meta = func(o: Out, n: u64) -> Out {
 };
 
 pub let dump_json = func(buf: MutSlice(u8)) -> u64 {
-  let w: MutSlice(u64) = flags();
+  let s: Mut(TraceState) = state();
   let t: MutSlice(TraceEvent) = events();
   let start: Out = Out { base: buf.ptr, p: buf.ptr, left: buf.len };
   let head: Out = put_text(start, "{\"traceEvents\":[");
-  let n: u64 = w[state_count()];
+  let n: u64 = deref(s).count;
   let body: Out = put_events(head, t, 0, n);
   let meta: Out = put_meta(body, n);
   let done: Out = put_text(meta, "]}");
   return buf.len - done.left;
+};
+
+// 导出入口的别名。
+pub let trace_dump = func(buf: MutSlice(u8)) -> u64 {
+  return dump_json(buf);
 };

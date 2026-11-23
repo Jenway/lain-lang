@@ -6,37 +6,68 @@
 let io = import("std::io");
 let os = import("std::os");
 let bld = import("std::build");
+let fmt = import("std::fmt");
+let option = import("std::option");
 
 use bld;
 
+let OptSlice = option.Option(MutSlice(u8));
+
+// 两侧等长且逐字节相同才回 true。
 let bytes_equal = func(a: Slice(u8), b: Slice(u8)) -> bool {
   if a.len != b.len { return false; }
-  let ok: u64 = loop c(i: u64 = 0, eq: u64 = 1) while (i < a.len) and (eq == 1) {
-    if a[i] != b[i] { eq = 0; }
+  let ok: bool = loop c(i: u64 = 0, eq: bool = true) while (i < a.len) and eq {
+    if a[i] != b[i] { eq = false; }
     i = i + 1;
   };
-  return ok == 1;
+  return ok;
+};
+
+// 可选值里的切片：Some 就归还它的缓冲，None 什么也不做。
+let release_slice = func(o: OptSlice.Opt) -> u64 {
+  return match o {
+    None => 0,
+    Some(s) => os.free_bytes(s.ptr as u64),
+  };
+};
+
+// 读取两文件并比较；任一侧读取失败都视为不相等，已读到的缓冲当场归还。
+let files_equal = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  let ra: OptSlice.Opt = os.read_file_slice(a);
+  let rb: OptSlice.Opt = os.read_file_slice(b);
+  return match ra {
+    None => {
+      release_slice(rb);
+      false
+    },
+    Some(sa) => match rb {
+      None => {
+        os.free_bytes(sa.ptr as u64);
+        false
+      },
+      Some(sb) => {
+        let same: bool = bytes_equal(sa, sb);
+        os.free_bytes(sa.ptr as u64);
+        os.free_bytes(sb.ptr as u64);
+        same
+      },
+    },
+  };
 };
 
 // 执行一步并播报；非零退出码另外打一行 [FAIL]。
 let step = func(label: Slice(u8), cmd: Slice(u8)) -> u64 {
-  io.print("[build] ");
-  io.println(label);
+  io.println(f"[build] {label}");
   let rc: u64 = os.exec(cmd);
   if rc != 0 {
-    io.print("[FAIL] ");
-    io.print(label);
-    io.print(" (exit=");
-    io.print_u64(rc);
-    io.println(")");
+    io.println(f"[FAIL] {label} (exit={rc})");
   }
   return rc;
 };
 
 // 只播报阶段标题、不解释退出码：用于期望非零退出的冒烟步骤。
 let note = func(label: Slice(u8)) -> u64 {
-  io.print("[build] ");
-  return io.println(label);
+  return io.println(f"[build] {label}");
 };
 
 let is_windows = func() -> bool {
@@ -129,9 +160,7 @@ let run_bootstrap = func(win: bool) -> u64 {
     io.println("[FAIL] Stage-2 != Stage-3 fixed point mismatch");
     return 1;
   }
-  io.print("[PASS] Fixed point verified (stage2.l1 == stage3.l1, bytes=");
-  io.print_u64(n2);
-  io.println(")");
+  io.println(f"[PASS] Fixed point verified (stage2.l1 == stage3.l1, bytes={n2})");
   return 0;
 };
 
@@ -165,9 +194,7 @@ let run_suites = func(win: bool, use_stage2: bool) -> u64 {
   let sc_rc: u64 = os.exec(sc_run_cmd);
   if (win == false) and (sc_rc >= 256) { sc_rc = sc_rc / 256; }
   if sc_rc != 126 {
-    io.print("[FAIL] showcase exit=");
-    io.print_u64(sc_rc);
-    io.println(", expected 126");
+    io.println(f"[FAIL] showcase exit={sc_rc}, expected 126");
     return 1;
   }
   io.println("[PASS] showcase exit=126");
@@ -202,11 +229,9 @@ let main = func() -> i64 {
   let c_id: u64 = g.add_executable("lainc", "src/driver/entry.lain", "src", "entry");
   let t_id: u64 = g.add_test("all_tests", "test.lain", "test", "test");
   g.link(t_id, c_id);
-  io.print("[build.lain] graph steps=");
-  io.print_u64(g.step_count());
-  io.print(", edges=");
-  io.print_u64(g.edge_count());
-  io.newline();
+  let steps: u64 = g.step_count();
+  let edges: u64 = g.edge_count();
+  io.println(f"[build.lain] graph steps={steps}, edges={edges}");
 
   let mk_cmd: Slice(u8) = "mkdir -p build";
   if win { mk_cmd = "cmd /c if not exist build mkdir build"; }
