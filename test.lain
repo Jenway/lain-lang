@@ -10,6 +10,7 @@ let opt = import("std::option");
 let mem = import("std::mem");
 let sync = import("std::sync");
 let thread = import("std::thread");
+let pool = import("std::pool");
 let meta = import("std::meta");
 let ir_test = import("tests::ir_verify_test");
 
@@ -231,6 +232,12 @@ let thread_worker = func(arg: Mut(u8)) -> c_uint {
   return 0;
 };
 
+let pool_task_inc = func(arg: Mut(u8)) -> u64 {
+  let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), arg);
+  sync.atomic_u64_add(ap, 1, sync.RELAXED());
+  return 0;
+};
+
 let run_sync_thread_meta_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::sync_thread_meta");
   let a: sync.AtomicU64 = sync.atomic_u64_new(10);
@@ -250,6 +257,20 @@ let run_sync_thread_meta_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "thread1 join", thread.join(t1), 0);
   t.eq_u64(mut_of(st), "thread2 join", thread.join(t2), 0);
   t.eq_u64(mut_of(st), "concurrent atomic_add 2000", sync.atomic_u64_load(mut_of(shared), sync.SEQ_CST()), 2000);
+
+  let pshared: sync.AtomicU64 = sync.atomic_u64_new(0);
+  let tp: Mut(pool.ThreadPool) = pool.pool_new(4, 128);
+  let p_ok: u64 = 1;
+  loop sub(pi: u64 = 0) while pi < 100 {
+    if pool.pool_submit(tp, fn_of(pool_task_inc), ptr_cast(Mut(u8), mut_of(pshared))) == false {
+      p_ok = 0;
+    }
+    pi = pi + 1;
+  };
+  pool.pool_wait_all(tp);
+  t.eq_u64(mut_of(st), "pool 100 submits accepted", p_ok, 1);
+  t.eq_u64(mut_of(st), "pool 100 tasks executed", sync.atomic_u64_load(mut_of(pshared), sync.SEQ_CST()), 100);
+  t.eq_u64(mut_of(st), "pool shutdown", pool.pool_shutdown(tp), 0);
 
   let mbytes: u64 = meta.ast_out_bytes(16, 32, 256, 8);
   let mbuf: u64 = os.alloc_bytes(mbytes);

@@ -16,6 +16,7 @@ let s = import("src::driver::sym");
 let ir = import("src::ir::ir");
 let ct = import("src::comptime::comptime");
 let hr = import("src::driver::host_rt");
+let io = import("std::io");
 
 // --- 输出段的孩子缓冲 ---------------------------------------------------
 // 一个组的孩子在输出段里按紧排的 32 位句柄给出，所以先在暂存区攒一串
@@ -415,6 +416,78 @@ pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
   }
   let rc: u64 = ax.tx_commit(out);
   return out;
+};
+
+// --- 展开结果打印 -------------------------------------------------------
+// --dump-expand：把展开遍次交出的 RawAst 按源代码形状打到标准输出。
+// 括号与方括号里的孩子单行平铺、以空格相隔；花括号组按分号与逗号断行，
+// 根组按分号断行，每层嵌套缩进两格。词结点直接打印原文。
+let dump_indent = func(n: u64) -> u64 {
+  if n == 0 { return 0; }
+  let w: u64 = io.print("  ");
+  return dump_indent(n - 1);
+};
+
+let dump_line = func(n: u64) -> u64 {
+  let nl: u64 = io.newline();
+  return dump_indent(n);
+};
+
+let dump_text = func(h: u64) -> u64 {
+  let n: u64 = ax.lit_len(h);
+  if n == 0 { return 0; }
+  let p: Ref(u8) = ax.lit_addr(h);
+  if is_null(p) { return 0; }
+  return io.print(make_slice(Slice(u8), p, n));
+};
+
+let dump_open = func(d: u64) -> u64 {
+  if d == ax.dl_paren() { return io.print("("); }
+  if d == ax.dl_bracket() { return io.print("["); }
+  if d == ax.dl_brace() { return io.print("{"); }
+  return 0;
+};
+
+let dump_close = func(d: u64) -> u64 {
+  if d == ax.dl_paren() { return io.print(")"); }
+  if d == ax.dl_bracket() { return io.print("]"); }
+  if d == ax.dl_brace() { return io.print("}"); }
+  return 0;
+};
+
+// 前一个孩子是分号就换行缩进；花括号组里逗号后也换行；其余孩子之间隔一个空格。
+let dump_gap = func(g: u64, depth: u64, i: u64) -> u64 {
+  if i == 0 { return 0; }
+  if ax.is_semi(g, i - 1) == 1 { return dump_line(depth); }
+  if (ax.delim(g) == ax.dl_brace()) and (ax.is_comma(g, i - 1) == 1) { return dump_line(depth); }
+  return io.print(" ");
+};
+
+// 打印组 g 从第 i 个孩子起的全部内容；嵌套的组在这里就地展开，
+// 花括号组自成缩进块，其余组在行内平铺。
+let dump_seq = func(g: u64, depth: u64, i: u64) -> u64 {
+  if i >= ax.n_count(g) { return 0; }
+  let gap: u64 = dump_gap(g, depth, i);
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 0 {
+    let t: u64 = dump_text(h);
+    return dump_seq(g, depth, i + 1);
+  }
+  let d: u64 = ax.delim(h);
+  let inner: u64 = depth + 1;
+  let cnt: u64 = ax.n_count(h);
+  let o: u64 = dump_open(d);
+  let head: u64 = if (cnt > 0) and (d == ax.dl_brace()) { dump_line(inner) } else { 0 };
+  let body: u64 = dump_seq(h, inner, 0);
+  let tail: u64 = if (cnt > 0) and (d == ax.dl_brace()) { dump_line(depth) } else { 0 };
+  let c: u64 = dump_close(d);
+  return dump_seq(g, depth, i + 1);
+};
+
+pub let dump_ast = func(root: u64) -> u64 {
+  if root == 0 { return 0; }
+  let body: u64 = dump_seq(root, 0, 0);
+  return io.newline();
 };
 
 

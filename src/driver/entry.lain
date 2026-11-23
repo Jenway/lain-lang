@@ -3,6 +3,7 @@
 let os = import("std::os");
 let st = import("src::driver::state");
 let ev = import("src::sema::eval");
+let ex = import("src::syntax::expand");
 let ir = import("src::ir::ir");
 let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
@@ -13,6 +14,7 @@ let err = import("src::driver::err");
 let CliOpts = struct {
   c99: u64,
   print_result: u64,
+  dump_expand: u64,
   has_out: u64,
   out_path: Slice(u8),
   has_trace: u64,
@@ -54,7 +56,7 @@ let arg = func(i: u64) -> Slice(u8) {
 };
 
 let usage = func() -> u64 {
-  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--entry <name>] [--trace <trace.json>] [--print-result]\n";
+  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--entry <name>] [--trace <trace.json>] [--print-result] [--dump-expand]\n";
   return os.eprint(msg);
 };
 
@@ -82,6 +84,10 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
   }
   if same(s, "--print-result") == 1 {
     o.print_result = 1;
+    return parse(o, i + 1, n);
+  }
+  if same(s, "--dump-expand") == 1 {
+    o.dump_expand = 1;
     return parse(o, i + 1, n);
   }
   if (same(s, "--out") == 1) or (same(s, "--entry") == 1) or (same(s, "--trace") == 1) {
@@ -187,6 +193,7 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   let o0: CliOpts = CliOpts {
     c99: 0,
     print_result: 0,
+    dump_expand: 0,
     has_out: 0,
     out_path: "",
     has_trace: 0,
@@ -221,6 +228,20 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   let k: Mut(st.State) = st.st_new(65536);
   let mname: u64 = hr.source_name(added);
   let md: u64 = ir.mod_new(k, mname);
+  // --dump-expand：只跑展开遍次，把展开后的树打到标准输出就收工。
+  if o.dump_expand != 0 {
+    let root: u64 = hr.source_root(added);
+    let exp: u64 = ex.expand_root(k, root);
+    let code: u64 = st.st_ok(k);
+    if code != 0 {
+      hr.print_diags();
+      trace_finish(code);
+      return err.fail_info(kind_of(code), code, added, 0, 0,
+                           "expand pass failed")!;
+    }
+    let dumped: u64 = ex.dump_ast(exp);
+    return trace_finish(0);
+  }
   let built: u64 = build(k, 0, 1)!;
   let v: u64 = ir.verify(k);
   if v != 0 {

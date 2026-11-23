@@ -1,0 +1,196 @@
+// std::pool —— 有界环形缓冲的多线程任务池。
+// 任务槽由 os.alloc_bytes 分配，头尾指针与计数全部在自旋锁内推进；
+// pending 与 stop 是原子字，因此等待与停止判定不需要持锁。
+// 空闲的工作线程每次睡 1 毫秒后重新取任务，池关闭时由 pool_shutdown 逐个 join。
+//
+// 自旋锁与原子字各自单独分配，池里存的是指向它们的 Mut 指针：
+// 编译器无法对结构体内部的标量字段取地址，字段指针是这类共享单元的惯用写法。
+
+let sync = import("std::sync");
+let thread = import("std::thread");
+let os = import("std::os");
+
+pub let Task = struct {
+  work: Fn((Mut(u8)) -> u64),
+  arg: Mut(u8),
+};
+
+pub let ThreadPool = struct {
+  tasks: Mut(Task),
+  cap: u64,
+  head: u64,
+  tail: u64,
+  count: u64,
+  lock: Mut(sync.SpinLock),
+  pending: Mut(sync.AtomicU64),
+  stop: Mut(sync.AtomicU64),
+  threads: Mut(thread.Thread),
+  num_threads: u64,
+};
+
+// 导入的结构类型不能直接出现在 size_of 的实参里，用同布局的本地单元包一层。
+let ThreadCell = struct {
+  handle: Mut(u8),
+};
+
+let WordCell = struct {
+  val: u64,
+};
+
+let noop_work = func(arg: Mut(u8)) -> u64 {
+  return 0;
+};
+
+let null_bytes = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), 0 as u64);
+};
+
+// 单字单元：自旋锁与原子字的唯一字段都位于偏移 0，按 u64 分配并清零即可。
+let new_word_cell = func() -> Mut(u64) {
+  let cell: Mut(u64) = ptr_cast(Mut(u64), os.alloc_bytes(size_of(WordCell)));
+  deref(cell) = 0;
+  return cell;
+};
+
+let task_at = func(p: Mut(ThreadPool), at: u64) -> Mut(Task) {
+  return p.tasks + at * size_of(Task);
+};
+
+let thread_at = func(p: Mut(ThreadPool), at: u64) -> Mut(thread.Thread) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), p.threads);
+  return ptr_cast(Mut(thread.Thread), raw + at * size_of(ThreadCell));
+};
+
+let advance = func(p: Mut(ThreadPool), at: u64) -> u64 {
+  let next: u64 = at + 1;
+  if next >= p.cap {
+    return 0;
+  }
+  return next;
+};
+
+let pending_dec = func(p: Mut(ThreadPool)) -> u64 {
+  let zero: u64 = 0;
+  let one: u64 = 1;
+  let delta: u64 = zero - one;
+  return sync.atomic_u64_add(p.pending, delta, sync.ACQ_REL());
+};
+
+// 工作线程：持锁取出一个任务，解锁后执行，随后把 pending 减一。
+// 队列为空且 stop 已经置 1 时退出，否则睡 1 毫秒再试。
+let pool_worker = func(arg: Mut(u8)) -> c_uint {
+  let p: Mut(ThreadPool) = ptr_cast(Mut(ThreadPool), arg);
+  let work: Fn((Mut(u8)) -> u64) = noop_work;
+  let warg: Mut(u8) = null_bytes();
+  let has: u64 = 0;
+  loop w(done: u64 = 0) while done == 0 {
+    has = 0;
+    sync.spin_lock(p.lock);
+    if p.count > 0 {
+      let at: u64 = p.head;
+      let slot: Mut(Task) = task_at(p, at);
+      work = slot.work;
+      warg = slot.arg;
+      p.head = advance(p, at);
+      p.count = p.count - 1;
+      has = 1;
+    }
+    sync.spin_unlock(p.lock);
+    if has == 1 {
+      work(warg);
+      pending_dec(p);
+    } else {
+      let stopping: u64 = sync.atomic_u64_load(p.stop, sync.ACQUIRE());
+      if stopping == 1 {
+        sync.spin_lock(p.lock);
+        let left: u64 = p.count;
+        sync.spin_unlock(p.lock);
+        if left == 0 {
+          done = 1;
+        } else {
+          thread.sleep_ms(1);
+        }
+      } else {
+        thread.sleep_ms(1);
+      }
+    }
+  };
+  return 0 as c_uint;
+};
+
+pub let pool_new = func(num_threads: u64, queue_cap: u64) -> Mut(ThreadPool) {
+  let tn: u64 = if num_threads == 0 { 1 } else { num_threads };
+  let cap: u64 = if queue_cap == 0 { 1 } else { queue_cap };
+  let raw_tasks: u64 = os.alloc_bytes(cap * size_of(Task));
+  let raw_threads: u64 = os.alloc_bytes(tn * size_of(ThreadCell));
+  let raw_pool: u64 = os.alloc_bytes(size_of(ThreadPool));
+  let lock_word: Mut(u64) = new_word_cell();
+  let pending_word: Mut(u64) = new_word_cell();
+  let stop_word: Mut(u64) = new_word_cell();
+  let p: Mut(ThreadPool) = ptr_cast(Mut(ThreadPool), raw_pool);
+  p.tasks = ptr_cast(Mut(Task), raw_tasks);
+  p.cap = cap;
+  p.head = 0;
+  p.tail = 0;
+  p.count = 0;
+  p.lock = ptr_cast(Mut(sync.SpinLock), lock_word);
+  p.pending = ptr_cast(Mut(sync.AtomicU64), pending_word);
+  p.stop = ptr_cast(Mut(sync.AtomicU64), stop_word);
+  p.threads = ptr_cast(Mut(thread.Thread), raw_threads);
+  p.num_threads = tn;
+  let boot: Mut(u8) = ptr_cast(Mut(u8), p);
+  let i: u64 = loop c(i: u64 = 0) while i < tn {
+    let slot: Mut(thread.Thread) = thread_at(p, i);
+    let t: thread.Thread = thread.spawn(pool_worker, boot);
+    deref(slot) = t;
+    i = i + 1;
+  };
+  return p;
+};
+
+pub let pool_submit = func(p: Mut(ThreadPool), work: Fn((Mut(u8)) -> u64), arg: Mut(u8)) -> bool {
+  let ok: u64 = 0;
+  sync.spin_lock(p.lock);
+  if p.count < p.cap {
+    let at: u64 = p.tail;
+    let slot: Mut(Task) = task_at(p, at);
+    slot.work = work;
+    slot.arg = arg;
+    p.tail = advance(p, at);
+    p.count = p.count + 1;
+    sync.atomic_u64_add(p.pending, 1, sync.ACQ_REL());
+    ok = 1;
+  }
+  sync.spin_unlock(p.lock);
+  return ok == 1;
+};
+
+pub let pool_wait_all = func(p: Mut(ThreadPool)) -> u64 {
+  loop c(done: u64 = 0) while done == 0 {
+    let n: u64 = sync.atomic_u64_load(p.pending, sync.ACQUIRE());
+    if n == 0 {
+      done = 1;
+    } else {
+      thread.sleep_ms(1);
+    }
+  };
+  return 0;
+};
+
+pub let pool_shutdown = func(p: Mut(ThreadPool)) -> u64 {
+  pool_wait_all(p);
+  sync.atomic_u64_store(p.stop, 1, sync.RELEASE());
+  let i: u64 = loop c(i: u64 = 0) while i < p.num_threads {
+    let slot: Mut(thread.Thread) = thread_at(p, i);
+    let t: thread.Thread = deref(slot);
+    thread.join(t);
+    i = i + 1;
+  };
+  os.free_bytes(p.lock as u64);
+  os.free_bytes(p.pending as u64);
+  os.free_bytes(p.stop as u64);
+  os.free_bytes(p.threads as u64);
+  os.free_bytes(p.tasks as u64);
+  os.free_bytes(p as u64);
+  return 0;
+};
