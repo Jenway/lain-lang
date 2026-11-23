@@ -1,5 +1,5 @@
 // std::trace —— 静态表里的 Chrome Trace Event / Perfetto 事件记录与 JSON 导出。
-// 事件写在固定的 512 格静态表里，全程不申请堆内存；表写满后新事件被丢弃并计入
+// 事件写在固定的 2048 格静态表里，全程不申请堆内存；表写满后新事件被丢弃并计入
 // 丢弃计数，导出时只写出真正记录下来的事件。时间戳统一用微秒，自第一次取时刻
 // 起算相对时间，因此导出的 JSON 不必关心宿主时钟的起点。
 //
@@ -8,6 +8,8 @@
 // dump_json 在存在事件时补两条 thread_name 元数据事件，给两条泳道起名字。
 // 导出的缓冲由调用方提供：dump_json 往 MutSlice(u8) 里写，返回写入的字节数。
 // 缓冲不足以容纳整份 JSON 时以除零陷阱终止程序，绝不写出被截断的 JSON。
+let os = import("std::os");
+
 extern trace_clock_ns() -> u64 = lain_perf_nanos;
 
 pub let TraceEvent = struct {
@@ -23,13 +25,14 @@ pub let TraceEvent = struct {
 };
 
 // 常量写成过程：顶层值符号在结构体字段与实参位置上会有物理类型偏差。
-pub let capacity = func() -> u64 { return 512; };
+pub let capacity = func() -> u64 { return 4096; };
 let state_words = func() -> u64 { return 8; };
 let state_enabled = func() -> u64 { return 0; };
 let state_count = func() -> u64 { return 1; };
 let state_first = func() -> u64 { return 2; };
 let state_started = func() -> u64 { return 3; };
 let state_dropped = func() -> u64 { return 4; };
+let state_buf = func() -> u64 { return 5; };
 
 let blank = func() -> TraceEvent {
   return TraceEvent {
@@ -45,74 +48,15 @@ let blank = func() -> TraceEvent {
   };
 };
 
-let table: Array(TraceEvent, 512) = [blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank(),
-  blank(), blank(), blank(), blank(), blank(), blank(), blank(), blank()];
 
 let state: Array(u64, 8) = [0, 0, 0, 0, 0, 0, 0, 0];
 
 let events = func() -> MutSlice(TraceEvent) {
-  return make_slice(MutSlice(TraceEvent), mut_of(table), capacity());
+  let w: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(state), state_words());
+  if w[state_buf()] == 0 {
+    w[state_buf()] = os.alloc_bytes(capacity() * size_of(TraceEvent));
+  }
+  return make_slice(MutSlice(TraceEvent), ptr_cast(Mut(TraceEvent), w[state_buf()]), capacity());
 };
 
 let flags = func() -> MutSlice(u64) {

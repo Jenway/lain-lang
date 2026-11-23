@@ -1,0 +1,403 @@
+// LAINIR 优化器（MVP）：区域内纯整数常量折叠与过程内无用户纯指令删除。
+//
+// 两趟都只改写模块自身的记录。折叠把后续指令里指向折叠结果的 OP_VALUE
+// 操作数就地换成 OP_INT；删除把区域指令序列的下标前移并调小
+// region.inst_count。模块级 insts 数组里被删掉的记录保持原样：验证器只按
+// 区域序列行走，不会读到它们。
+//
+// 折叠只改写那些所有操作数位置都接受整数字面量的指令；结果被控制流使用
+// （#if 条件、#switch 选择子、#return 实参等）时，那一处操作数保持
+// OP_VALUE，指令因此仍然是活的，由删除趟按使用情况决定去留。
+let codes = import("src::ir::ir_codes");
+let vf = import("src::ir::verify");
+
+pub let OptStats = struct {
+  folded: u64,
+  dce_removed: u64,
+};
+
+// 导入的结构类型不能直接出现在 size_of 的实参里，用本地单元结构包一层，
+// 字段仍在偏移 0。
+let IrInstCell = struct { v: vf.IrInst };
+let IrRegionCell = struct { v: vf.IrRegion };
+let IrCaseCell = struct { v: vf.IrCase };
+
+// 折叠结果：ok 为 0 表示这条指令不是两个整数常量的可折叠运算。
+let Fold = struct {
+  ok: u64,
+  value: u64,
+};
+
+// 优化器在一组平坦记录上工作：指令、区域与分支都按下标引用。
+let Ctx = struct {
+  insts: Mut(vf.IrInst),
+  regions: Mut(vf.IrRegion),
+  cases: Mut(vf.IrCase),
+  inst_count: u64,
+  region_count: u64,
+};
+
+let no_fold = func() -> Fold {
+  return Fold { ok: 0, value: 0 };
+};
+
+let fold_of = func(value: u64) -> Fold {
+  return Fold { ok: 1, value: value };
+};
+
+// --- 记录访问 -------------------------------------------------------------
+let inst_slot = func(c: Mut(Ctx), i: u64) -> Mut(vf.IrInst) {
+  let base: Mut(u8) = ptr_cast(Mut(u8), c.insts);
+  return ptr_cast(Mut(vf.IrInst), base + i * size_of(IrInstCell));
+};
+
+let region_slot = func(c: Mut(Ctx), i: u64) -> Mut(vf.IrRegion) {
+  let base: Mut(u8) = ptr_cast(Mut(u8), c.regions);
+  return ptr_cast(Mut(vf.IrRegion), base + i * size_of(IrRegionCell));
+};
+
+let inst_read = func(c: Mut(Ctx), i: u64) -> vf.IrInst {
+  return deref(inst_slot(c, i));
+};
+
+let region_read = func(c: Mut(Ctx), i: u64) -> vf.IrRegion {
+  return deref(region_slot(c, i));
+};
+
+let case_read = func(c: Mut(Ctx), i: u64) -> vf.IrCase {
+  let base: Mut(u8) = ptr_cast(Mut(u8), c.cases);
+  let slot: Mut(vf.IrCase) = ptr_cast(Mut(vf.IrCase), base + i * size_of(IrCaseCell));
+  return deref(slot);
+};
+
+// 区域指令序列是模块里的一串 u64，每个元素是模块级指令下标。
+let region_index = func(r: vf.IrRegion, i: u64) -> u64 {
+  let base: Mut(u8) = ptr_cast(Mut(u8), r.insts);
+  let at: Ref(u64) = ptr_cast(Ref(u64), base + i * size_of(u64));
+  return deref(at);
+};
+
+let region_set = func(r: Mut(vf.IrRegion), i: u64, value: u64) -> u64 {
+  let base: Mut(u8) = ptr_cast(Mut(u8), r.insts);
+  let at: Mut(u64) = ptr_cast(Mut(u64), base + i * size_of(u64));
+  deref(at) = value;
+  return 0;
+};
+
+// --- 常数运算 -------------------------------------------------------------
+// #bits<N> 的运算结果只保留低 N 位。
+let mask_width = func(value: u64, width: u64) -> u64 {
+  if width == 0 { return value; }
+  if width >= 64 { return value; }
+  let unit: u64 = 1;
+  let mask: u64 = (unit << width) - 1;
+  return value & mask;
+};
+
+// 有符号比较之前按操作数宽度做符号扩展。
+let sign_fill = func(value: u64, width: u64) -> i64 {
+  if width == 0 { return value as i64; }
+  if width >= 64 { return value as i64; }
+  let kept: u64 = mask_width(value, width);
+  let shift: u64 = 64 - width;
+  let top: i64 = (kept << shift) as i64;
+  let back: i64 = shift as i64;
+  return top >> back;
+};
+
+// 可折叠的整数运算：两个 OP_INT 操作数、一条指令结果。
+let fold_inst = func(it: vf.IrInst) -> Fold {
+  if it.has_ty == 0 { return no_fold(); }
+  if it.result_count != 1 { return no_fold(); }
+  if it.operand_count != 2 { return no_fold(); }
+  if it.op0_kind != vf.OP_INT() { return no_fold(); }
+  if it.op1_kind != vf.OP_INT() { return no_fold(); }
+  let a: u64 = it.op0_bits;
+  let b: u64 = it.op1_bits;
+  let w: u64 = it.ty_width;
+  let k: u64 = it.kind;
+  if k == codes.INST_ADD() { return fold_of(mask_width(a + b, w)); }
+  if k == codes.INST_SUB() { return fold_of(mask_width(a - b, w)); }
+  if k == codes.INST_MUL() { return fold_of(mask_width(a * b, w)); }
+  if k == codes.INST_AND() { return fold_of(mask_width(a & b, w)); }
+  if k == codes.INST_OR() { return fold_of(mask_width(a | b, w)); }
+  if k == codes.INST_XOR() { return fold_of(mask_width(a ^ b, w)); }
+  if k == codes.INST_EQ() {
+    if a == b { return fold_of(1); }
+    return fold_of(0);
+  }
+  if k == codes.INST_NE() {
+    if a != b { return fold_of(1); }
+    return fold_of(0);
+  }
+  if k == codes.INST_SLT() {
+    let sa: i64 = sign_fill(a, w);
+    let sb: i64 = sign_fill(b, w);
+    if sa < sb { return fold_of(1); }
+    return fold_of(0);
+  }
+  if k == codes.INST_SGT() {
+    let sa: i64 = sign_fill(a, w);
+    let sb: i64 = sign_fill(b, w);
+    if sa > sb { return fold_of(1); }
+    return fold_of(0);
+  }
+  if k == codes.INST_ULT() {
+    let ua: u64 = mask_width(a, w);
+    let ub: u64 = mask_width(b, w);
+    if ua < ub { return fold_of(1); }
+    return fold_of(0);
+  }
+  if k == codes.INST_UGT() {
+    let ua: u64 = mask_width(a, w);
+    let ub: u64 = mask_width(b, w);
+    if ua > ub { return fold_of(1); }
+    return fold_of(0);
+  }
+  return no_fold();
+};
+
+// 这些指令的所有操作数位置都接受 OP_INT 常量：整数运算、整数比较与整数
+// 转换。其余位置（#if 条件、#switch 选择子、#return 实参、地址操作数、
+// 调用目标）必须保持 OP_VALUE。
+let subst_ok = func(k: u64) -> u64 {
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_ASHR()) { return 1; }
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return 1; }
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return 1; }
+  return 0;
+};
+
+let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
+  let kind: u64 = vf.OP_INT();
+  if i == 0 { it.op0_kind = kind; it.op0_name = 0; it.op0_bits = value; return 0; }
+  if i == 1 { it.op1_kind = kind; it.op1_name = 0; it.op1_bits = value; return 0; }
+  if i == 2 { it.op2_kind = kind; it.op2_name = 0; it.op2_bits = value; return 0; }
+  if i == 3 { it.op3_kind = kind; it.op3_name = 0; it.op3_bits = value; return 0; }
+  if i == 4 { it.op4_kind = kind; it.op4_name = 0; it.op4_bits = value; return 0; }
+  if i == 5 { it.op5_kind = kind; it.op5_name = 0; it.op5_bits = value; return 0; }
+  if i == 6 { it.op6_kind = kind; it.op6_name = 0; it.op6_bits = value; return 0; }
+  if i == 7 { it.op7_kind = kind; it.op7_name = 0; it.op7_bits = value; return 0; }
+  if i == 8 { it.op8_kind = kind; it.op8_name = 0; it.op8_bits = value; return 0; }
+  if i == 9 { it.op9_kind = kind; it.op9_name = 0; it.op9_bits = value; return 0; }
+  if i == 10 { it.op10_kind = kind; it.op10_name = 0; it.op10_bits = value; return 0; }
+  if i == 11 { it.op11_kind = kind; it.op11_name = 0; it.op11_bits = value; return 0; }
+  if i == 12 { it.op12_kind = kind; it.op12_name = 0; it.op12_bits = value; return 0; }
+  if i == 13 { it.op13_kind = kind; it.op13_name = 0; it.op13_bits = value; return 0; }
+  if i == 14 { it.op14_kind = kind; it.op14_name = 0; it.op14_bits = value; return 0; }
+  if i == 15 { it.op15_kind = kind; it.op15_name = 0; it.op15_bits = value; return 0; }
+  return 0;
+};
+
+// 把一条指令里指向 name 的 OP_VALUE 操作数换成 OP_INT(value)。
+let subst_operand = func(it: Mut(vf.IrInst), name: u64, value: u64) -> u64 {
+  let copy: vf.IrInst = deref(it);
+  if subst_ok(copy.kind) == 0 { return 0; }
+  let n: u64 = copy.operand_count;
+  let changed: u64 = loop lp(i: u64 = 0, acc: u64 = 0) while i < n {
+    let op: vf.IrOperand = vf.inst_op(copy, i);
+    if (op.kind == vf.OP_VALUE()) and (op.name == name) {
+      acc = acc + set_op_int(it, i, value) + 1;
+    }
+    i = i + 1;
+  };
+  return changed;
+};
+
+// --- 第一趟：区域内常量折叠 -----------------------------------------------
+let fold_region = func(c: Mut(Ctx), ri: u64, st: Mut(OptStats)) -> u64 {
+  if ri >= c.region_count { return 0; }
+  let r: Mut(vf.IrRegion) = region_slot(c, ri);
+  let n: u64 = r.inst_count;
+  let walk: u64 = loop lp(i: u64 = 0) while i < n {
+    let ii: u64 = region_index(deref(r), i);
+    if ii < c.inst_count {
+      let it: Mut(vf.IrInst) = inst_slot(c, ii);
+      let f: Fold = fold_inst(deref(it));
+      if f.ok == 1 {
+        st.folded = st.folded + 1;
+        let name: u64 = it.r0;
+        let forward: u64 = loop lq(j: u64 = i + 1) while j < n {
+          let jj: u64 = region_index(deref(r), j);
+          if jj < c.inst_count {
+            let jt: Mut(vf.IrInst) = inst_slot(c, jj);
+            let sub: u64 = subst_operand(jt, name, f.value);
+          }
+          j = j + 1;
+        };
+      }
+      let inner: u64 = fold_children(c, deref(it), st);
+    }
+    i = i + 1;
+  };
+  return 0;
+};
+
+// 区域内的子区域各自折叠：子区域里的使用点不改成常量，它们保持 OP_VALUE。
+let fold_children = func(c: Mut(Ctx), it: vf.IrInst, st: Mut(OptStats)) -> u64 {
+  if it.body != vf.NO_REGION() {
+    let a: u64 = fold_region(c, it.body, st);
+  }
+  if it.else_body != vf.NO_REGION() {
+    let b: u64 = fold_region(c, it.else_body, st);
+  }
+  if it.default_body != vf.NO_REGION() {
+    let d: u64 = fold_region(c, it.default_body, st);
+  }
+  let cases: u64 = loop lp(i: u64 = 0) while i < it.case_count {
+    let cs: vf.IrCase = case_read(c, it.cases_at + i);
+    let e: u64 = fold_region(c, cs.body, st);
+    i = i + 1;
+  };
+  return 0;
+};
+
+// --- 第二趟：过程内无用户纯指令删除 ---------------------------------------
+let is_pure = func(k: u64) -> u64 {
+  if k <= codes.INST_VCMPGT() { return 1; }
+  if k == codes.INST_LEA() { return 1; }
+  return 0;
+};
+
+let inst_uses = func(it: vf.IrInst, name: u64) -> u64 {
+  let n: u64 = it.operand_count;
+  let hit: u64 = loop lp(i: u64 = 0, found: u64 = 0) while (i < n) and (found == 0) {
+    let op: vf.IrOperand = vf.inst_op(it, i);
+    if (op.kind == vf.OP_VALUE()) and (op.name == name) { found = 1; }
+    i = i + 1;
+  };
+  return hit;
+};
+
+let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> u64 {
+  if it.body != vf.NO_REGION() {
+    if region_uses(c, it.body, name) == 1 { return 1; }
+  }
+  if it.else_body != vf.NO_REGION() {
+    if region_uses(c, it.else_body, name) == 1 { return 1; }
+  }
+  if it.default_body != vf.NO_REGION() {
+    if region_uses(c, it.default_body, name) == 1 { return 1; }
+  }
+  let hit: u64 = loop lp(i: u64 = 0, found: u64 = 0) while (i < it.case_count) and (found == 0) {
+    let cs: vf.IrCase = case_read(c, it.cases_at + i);
+    found = region_uses(c, cs.body, name);
+    i = i + 1;
+  };
+  return hit;
+};
+
+// 名字是否在该区域及其子区域里作为 OP_VALUE 操作数出现。判定按名字做，
+// 兄弟区域里同名的另一种定义也让它显示为活的：这是保守判定。
+let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
+  if ri >= c.region_count { return 0; }
+  let r: vf.IrRegion = region_read(c, ri);
+  let n: u64 = r.inst_count;
+  let hit: u64 = loop lp(k: u64 = 0, found: u64 = 0) while (k < n) and (found == 0) {
+    let ii: u64 = region_index(r, k);
+    if ii < c.inst_count {
+      let it: vf.IrInst = inst_read(c, ii);
+      if inst_uses(it, name) == 1 {
+        found = 1;
+      } else {
+        found = sub_regions_use(c, it, name);
+      }
+    }
+    k = k + 1;
+  };
+  return hit;
+};
+
+// 把一个区域的指令序列就地压紧，返回本区域删掉的条数。删除判定按整个
+// 过程（proc_body 可达的全部区域）做，因此被删指令的操作数在别处没有
+// 使用者。
+let compact_region = func(c: Mut(Ctx), ri: u64, proc_body: u64) -> u64 {
+  if ri >= c.region_count { return 0; }
+  let r: Mut(vf.IrRegion) = region_slot(c, ri);
+  let n: u64 = r.inst_count;
+  let kept: u64 = loop lp(i: u64 = 0, w: u64 = 0) while i < n {
+    let ii: u64 = region_index(deref(r), i);
+    let keep: u64 = 1;
+    if ii < c.inst_count {
+      let it: vf.IrInst = inst_read(c, ii);
+      if (is_pure(it.kind) == 1) and (it.result_count == 1) and (it.r0 != 0) {
+        if region_uses(c, proc_body, it.r0) == 0 { keep = 0; }
+      }
+    }
+    if keep == 1 {
+      let put: u64 = region_set(r, w, ii);
+      w = w + 1;
+    }
+    i = i + 1;
+  };
+  r.inst_count = kept;
+  return n - kept;
+};
+
+let dce_children = func(c: Mut(Ctx), it: vf.IrInst, proc_body: u64, st: Mut(OptStats)) -> u64 {
+  let acc: u64 = 0;
+  if it.body != vf.NO_REGION() {
+    acc = acc + dce_walk(c, it.body, proc_body, st);
+  }
+  if it.else_body != vf.NO_REGION() {
+    acc = acc + dce_walk(c, it.else_body, proc_body, st);
+  }
+  if it.default_body != vf.NO_REGION() {
+    acc = acc + dce_walk(c, it.default_body, proc_body, st);
+  }
+  let hit: u64 = loop lp(i: u64 = 0, sum: u64 = acc) while i < it.case_count {
+    let cs: vf.IrCase = case_read(c, it.cases_at + i);
+    sum = sum + dce_walk(c, cs.body, proc_body, st);
+    i = i + 1;
+  };
+  return hit;
+};
+
+let dce_walk = func(c: Mut(Ctx), ri: u64, proc_body: u64, st: Mut(OptStats)) -> u64 {
+  let gone: u64 = compact_region(c, ri, proc_body);
+  st.dce_removed = st.dce_removed + gone;
+  let r: vf.IrRegion = region_read(c, ri);
+  let n: u64 = r.inst_count;
+  let inner: u64 = loop lp(k: u64 = 0, sum: u64 = 0) while k < n {
+    let ii: u64 = region_index(r, k);
+    if ii < c.inst_count {
+      let it: vf.IrInst = inst_read(c, ii);
+      sum = sum + dce_children(c, it, proc_body, st);
+    }
+    k = k + 1;
+  };
+  return gone + inner;
+};
+
+// 删除趟反复执行：一条指令被删掉以后，只被它使用的纯指令就变成了死代码。
+let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
+  let first: u64 = fold_region(c, body, st);
+  let rounds: u64 = loop lp(round: u64 = 0, done: u64 = 0) while done == 0 {
+    let gone: u64 = dce_walk(c, body, body, st);
+    if gone == 0 { done = 1; }
+    round = round + 1;
+  };
+  return rounds;
+};
+
+pub let opt_module = func(m: Mut(vf.IrModule)) -> OptStats {
+  let ctx: Ctx = Ctx {
+    insts: ptr_cast(Mut(vf.IrInst), m.insts),
+    regions: ptr_cast(Mut(vf.IrRegion), m.regions),
+    cases: ptr_cast(Mut(vf.IrCase), m.cases),
+    inst_count: m.inst_count,
+    region_count: m.region_count,
+  };
+  let c: Mut(Ctx) = mut_of(ctx);
+  let stats: OptStats = OptStats { folded: 0, dce_removed: 0 };
+  let st: Mut(OptStats) = mut_of(stats);
+  let scan: u64 = loop lp(pi: u64 = 0) while pi < m.proc_count {
+    let p: vf.IrProc = vf.proc_at_ref(ptr_cast(Ref(vf.IrProc), m.procs), pi);
+    if p.is_extern == 0 {
+      if p.body != vf.NO_REGION() {
+        let rc: u64 = opt_proc(c, p.body, st);
+      }
+    }
+    pi = pi + 1;
+  };
+  return deref(st);
+};

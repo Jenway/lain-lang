@@ -8,15 +8,15 @@ READ THE FXXKING DOCS
 
 ## Rolling Bootstrap Discipline (`Step A -> Step B`)
 - Any change to `src/` syntax, keywords, or module visibility MUST split into two commits:
-  1. **Step A**: Add compiler support while keeping `src/` compilable by the current `seed/bootstrap/lainc_boot.c`, verify fixed point, refresh `lainc_boot.c` via `.\.pi\py\.venv\Scripts\python.exe scripts/verify_all.py --update-bootstrap`, and commit.
-  2. **Step B**: Migrate `src/`, `std/`, `examples/`, and `tests/meta/`, remove legacy compatibility, verify fixed point, refresh `lainc_boot.c`, and commit.
+  1. **Step A**: Add compiler support while keeping `src/` compilable by the current `bootstrap/lainc_boot.c`, verify fixed point (`.\build\build_runner.exe --bootstrap`), refresh `bootstrap/lainc_boot.c` via `.\build\lainc_stage2.exe src/driver/entry.lain --entry main --out bootstrap/lainc_boot.c`, and commit.
+  2. **Step B**: Migrate `src/`, `std/`, `examples/`, and `test.lain`, remove legacy compatibility, verify fixed point, refresh `bootstrap/lainc_boot.c`, and commit.
 
 ## Modern Lain & Compiler Invariants
 - **Zero bare `addr`**: Use `Ref(T)`, `Mut(T)`, `Slice(T)`, `MutSlice(T)`, `ptr_cast`, `make_slice`, `null_ref`, `is_null`, `deref`.
 - **Unified `let` syntax & no `given`**: Always use `let Name = struct/enum/func ...;` (with `pub let` for exports) and `sig` + `module { pub let Self = ...; }` + `use` / `?{ m: ... }`.
-- **`@root` / `extern` cross-module bridges**: Never introduce circular imports in `src/`. When bridging via `@root let lainc_<target> = ...;`, the caller's `extern <local_name>(...) = lainc_<target>;` MUST use a `<local_name>` distinct from `lainc_<target>`, or `lainir-verify` will fail with `duplicate subroutine`.
+- **`@extern` FFI & `@root` / `extern` cross-module bridges**: Prefer `@extern(abi = "C", link = "...")` for external C ABI bindings. Never introduce circular imports in `src/`. When bridging via `@root let lainc_<target> = ...;`, the caller's `extern <local_name>(...) = lainc_<target>;` MUST use a `<local_name>` distinct from `lainc_<target>`, or `verify.lain` will fail with `duplicate subroutine`.
 - **Current frontend parser quirks**:
   - Do NOT chain `.field` directly onto a call result (`foo().bar`); bind `let x = foo();` first.
   - Parenthesize comparisons combined with `and`/`or`: `(a.x == b.x) and (a.y == b.y)`.
   - Avoid `is_null(p) == 0` where `bool` vs integer comparison is strict; prefer `if is_null(p)` or `(p as u64) != 0`.
-- **ABI Sync**: Whenever modifying `src/ir_codes.lain`, update `scripts/gen_v2_abi.py` so `gen_v2_abi.py --check` stays green.
+- **IR Opcode Sync**: Whenever modifying `src/ir/ir_codes.lain`, keep `src/ir/verify.lain`, `src/ir/emit_text.lain`, `src/backend/c99.lain`, and `src/vm/engine.lain` in sync, and verify via `.\build\build_runner.exe --bootstrap`.

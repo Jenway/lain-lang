@@ -298,6 +298,61 @@ pub let off_of = func(k: Mut(st.State), obj: u64, off: u64) -> u64 {
   return res;
 };
 
+// 值聚合形状：struct / enum / 数组 / 切片在内联位置上按整块字节存放。
+// Ref / Mut / Fn 物理上只是一个指针字，不属于值聚合。
+pub let is_value_shape = func(sh: u64) -> u64 {
+  if sh == 0 { return 0; }
+  let kd: u64 = shp_kind(sh);
+  if kd == kind_struct() { return 1; }
+  if kd == kind_enum() { return 1; }
+  if kd == kind_array() { return 1; }
+  if kd == kind_slice() { return 1; }
+  if kd == kind_mutslice() { return 1; }
+  return 0;
+};
+
+// tp 描述的是内联块（而不是一个机器字）。
+pub let is_value_agg = func(tp: Mut(ty.Ty)) -> u64 {
+  if ty.tk(tp) != codes.TY_ADDR() { return 0; }
+  return is_value_shape(ty.tsh(tp));
+};
+
+// 把 src_ptr 起 size 字节搬到 dst_obj + dst_off：先按 8 字节字搬，尾部逐字节搬。
+pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_ptr: u64,
+                size: u64) -> u64 {
+  let t64: Mut(ty.Ty) = ir.tbits(k, 64);
+  let words: u64 = size / 8;
+  let wdone: u64 = loop w(j: u64 = 0) while j < words {
+    let dp: u64 = off_of(k, dst_obj, dst_off + j * 8);
+    let sp: u64 = off_of(k, src_ptr, j * 8);
+    let wv: u64 = ir.fresh_t(k);
+    let rc0: u64 = ir.args_reset(k);
+    let a0: u64 = ir.arg_ref(k, sp);
+    let l0: u64 = ir.emit_mem(k, codes.INST_LOAD(), wv, t64, 0);
+    let rc1: u64 = ir.args_reset(k);
+    let a1: u64 = ir.arg_ref(k, wv);
+    let a2: u64 = ir.arg_ref(k, dp);
+    let s0: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t64, 0);
+    j = j + 1;
+  };
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  let rest: u64 = size - words * 8;
+  let bdone: u64 = loop b(j: u64 = 0) while j < rest {
+    let dp: u64 = off_of(k, dst_obj, dst_off + words * 8 + j);
+    let sp: u64 = off_of(k, src_ptr, words * 8 + j);
+    let bv: u64 = ir.fresh_t(k);
+    let rc2: u64 = ir.args_reset(k);
+    let a3: u64 = ir.arg_ref(k, sp);
+    let l1: u64 = ir.emit_mem(k, codes.INST_LOAD(), bv, t8, 0);
+    let rc3: u64 = ir.args_reset(k);
+    let a4: u64 = ir.arg_ref(k, bv);
+    let a5: u64 = ir.arg_ref(k, dp);
+    let s1: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    j = j + 1;
+  };
+  return size;
+};
+
 // bool 这类位宽不足一字节的整数类型，在内存里统一按 1 字节存（排除 TY_ADDR 等 w==0 类型）。
 let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
   if ty.tk(tp) != codes.TY_BITS() { return 0; }
@@ -327,8 +382,13 @@ let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
   return res;
 };
 
-// 把 val（已按 tp 解释）写到 obj + off。
+// 把 val（已按 tp 解释）写到 obj + off。值聚合的 val 里装的是源字节的地址，
+// 必须整块搬到 obj + off，不能只搬一个指针字。
 pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 {
+  if is_value_agg(tp) == 1 {
+    let sh: u64 = ty.tsh(tp);
+    return copy_bytes_at(k, obj, off, ty.vn(val), shp_size(sh));
+  }
   let p: u64 = off_of(k, obj, off);
   if is_subbyte_bits(tp) == 1 {
     let t8: Mut(ty.Ty) = byte_t(k);
@@ -345,9 +405,12 @@ pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), 
   return ir.emit_mem(k, codes.INST_STORE(), 0, tp, 0);
 };
 
-// 从 obj + off 读一个 tp，结果放进 out。
+// 从 obj + off 读一个 tp，结果放进 out。值聚合直接给那块的地址（内联视图）。
 pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let p: u64 = off_of(k, obj, off);
+  if is_value_agg(tp) == 1 {
+    return ty.val_ref(out, p, tp);
+  }
   if is_subbyte_bits(tp) == 1 {
     let t8: Mut(ty.Ty) = byte_t(k);
     let raw: u64 = ir.fresh_t(k);
@@ -438,19 +501,7 @@ let proj_zero = func(k: Mut(st.State), res_ty: Mut(ty.Ty)) -> u64 {
 // --- 值聚合与 sret -------------------------------------------------------
 // struct / enum / Array / Slice / MutSlice 在 LAINIR 里是多字节块，按值返回必须
 // 由调用方给出目标块（sret）。Ref / Mut / Fn 物理上只是一个指针字，绝不走 sret。
-let sret_kind = func(kd: u64) -> u64 {
-  if kd == kind_struct() { return 1; }
-  if kd == kind_enum() { return 1; }
-  if kd == kind_array() { return 1; }
-  if kd == kind_slice() { return 1; }
-  if kd == kind_mutslice() { return 1; }
-  return 0;
-};
-
-let sret_shape = func(sh: u64) -> u64 {
-  if sh == 0 { return 0; }
-  return sret_kind(shp_kind(sh));
-};
+let sret_shape = func(sh: u64) -> u64 { return is_value_shape(sh); };
 
 pub let sret_ty = func(t: Mut(ty.Ty)) -> u64 { return sret_shape(ty.tsh(t)); };
 

@@ -114,3 +114,70 @@ pub let wait_idle = func(s: Mut(S))
 {
   return sc.wait_all(s);
 };
+
+// ---------------------------------------------------------------------------
+// 结构化并发：Spawn 效应。
+//
+// 效应的操作只携带一个负载，work 与 ctx 因此装进 SpawnRequest。
+// run_pool_scope 是 Spawn 的处理器：建立作用域、跑完 body，等到池中全部工作
+// 结束后才返回。作用域退出时作用域内派生的工作全部完成，这就是结构化并发的
+// 收尾保证。spawn_work 把工作交给当前作用域的池；没有作用域时以除零陷阱
+// 终止，绝不在无作用域的情况下静默丢弃工作。
+//
+// 处理器为什么是普通过程：编译器只为词法上包住 perform 的 handle 生成可恢复
+// 续体，跨过程的可恢复处理器没有实现（跨过程的 perform 只把状态标签写到全局
+// 状态后返回零值）。作用域因此落在模块内的静态槽上，body 的签名仍以
+// !{ Spawn } 如实记录它能发起什么，并通过 run_pool_scope 的形参类型传递。
+// ---------------------------------------------------------------------------
+pub let SpawnRequest = struct {
+  work: Fn((Mut(u8)) -> u64),
+  ctx: Mut(u8),
+};
+
+pub let Spawn = effect {
+  op spawn(req: SpawnRequest) -> bool;
+};
+
+// 当前作用域的池，0 表示没有作用域。嵌套的 run_pool_scope 用局部量还原上一层。
+let scope_slot: Array(u64, 1) = [0];
+
+let current_pool = func() -> Mut(pool.ThreadPool) {
+  let w: Mut(u64) = mut_of(scope_slot);
+  return ptr_cast(Mut(pool.ThreadPool), deref(w));
+};
+
+let set_current_pool = func(p: Mut(pool.ThreadPool)) -> Mut(pool.ThreadPool) {
+  let w: Mut(u64) = mut_of(scope_slot);
+  let prev: Mut(pool.ThreadPool) = ptr_cast(Mut(pool.ThreadPool), deref(w));
+  deref(w) = p as u64;
+  return prev;
+};
+
+// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
+let ScopeHalt = struct { zero: u64 };
+
+let scope_halt_at = func(h: ScopeHalt) -> u64 {
+  return 1 / h.zero;
+};
+
+let scope_halt = func(cause: u64) -> u64 {
+  let h: ScopeHalt = ScopeHalt { zero: cause - cause };
+  return scope_halt_at(h);
+};
+
+pub let spawn_work = func(work: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> bool !{ Spawn } {
+  let p: Mut(pool.ThreadPool) = current_pool();
+  if is_null(p) {
+    let dead: u64 = scope_halt(1);
+    return dead == 1;
+  }
+  return pool.pool_submit(p, work, ctx);
+};
+
+pub let run_pool_scope = func(p: Mut(pool.ThreadPool), body: Fn(() -> u64 !{ Spawn })) -> u64 {
+  let prev: Mut(pool.ThreadPool) = set_current_pool(p);
+  let done: u64 = body()!;
+  pool.pool_wait_all(p);
+  set_current_pool(prev);
+  return done;
+};

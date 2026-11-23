@@ -30,3 +30,7 @@
 | [stdlib/concepts.md](stdlib/concepts.md) | **泛型与 Concept 规范**：三区函数签名 `func(...) ?{...} !{...} -> Ret`、一等 `Type` 与类型工厂、基于 `module` 的 Witness 合成与覆盖 |
 | [stdlib/effects.md](stdlib/effects.md) | **单次代数效应规范**：`!{ ... }` 效应集、`perform` / `!` 传播、`handle ... with` 单次续体契约、效应行多态与底层降解 |
 | [stdlib/desugaring.md](stdlib/desugaring.md) | **标准语法脱糖协议**：基于 `AstOut` 展开阶段的 UFCS 方法重写、`f"..."` 零分配惰性格式化与 `match` 决策树编译 |
+
+### 3. 自举构建、标准库与工具链现状
+- **单文件冷启动与纯 Lain 构建**：仓库通过根目录 [build.lain](../build.lain)（默认快速模式 + `--bootstrap` 全量 Stage-1/2/3 不动点）与 [test.lain](../test.lain) 驱动自举和全量回归，仅依赖单文件 `bootstrap/lainc_boot.c` 与 C99 编译器。
+- **标准库（`std/`）**：涵盖 `option`、`mem`、`collections`、`fmt`、`io`、`os`（`@extern` C ABI）、`json`（Arena DOM + `comptime for`）、`sync`（显式内存序原子原语与 `SpinLock`）、`thread`、`pool`、`sched`（`Scheduler` `sig` + `!{ Spawn }`）、`meta`（`AstOut` / `AstView`）、`build`、`test`、`bench`、`trace`（Perfetto JSON）。
