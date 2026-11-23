@@ -7,7 +7,6 @@
 //   * parse / stringify：JsonVal 节点、键、字符串全部从调用方给的
 //     std::mem.BumpArena 切出，节点之间以绝对地址串成兄弟链表，因此一块
 //     arena 可以整体释放，不会留下碎片。解析器用显式栈迭代，不递归。
-//     节点里的字符串用 (ptr, len) 两个 u64 保存，不对 arena 指针做切片字段存入。
 let mem = import("std::mem");
 
 // ---------------------------------------------------------------------------
@@ -213,7 +212,7 @@ pub let write_struct = func(val: Ref(T), buf: MutSlice(u8), pos: Mut(u64)) ?{ T:
 // ---------------------------------------------------------------------------
 // DOM：节点从 BumpArena 切出，兄弟节点以绝对地址串成单向链表。
 // child / next / tail 为 0 表示没有；arena 的块起点非零，0 不会与真节点撞车。
-// 文本与键用 (ptr, len) 保存，不做切片字段写入。
+// 文本与键直接以 Slice(u8) 字段保存，切片内容本身仍在 arena 里。
 // ---------------------------------------------------------------------------
 pub let JsonKind = module {
   pub let Null = func() -> u64 { return 0; };
@@ -228,10 +227,8 @@ pub let JsonKind = module {
 pub let JsonVal = struct {
   kind: u64,
   num: i64,
-  text_ptr: u64,
-  text_len: u64,
-  key_ptr: u64,
-  key_len: u64,
+  str_val: Slice(u8),
+  key: Slice(u8),
   child: u64,
   next: u64,
   tail: u64,
@@ -242,17 +239,13 @@ pub let Frame = struct {
   node: u64,
   kind: u64,
   sep: u64,
-  key_ptr: u64,
-  key_len: u64,
 };
 
 let init_node = func(out: Mut(JsonVal)) {
   deref(out).kind = JsonKind.Null();
   deref(out).num = 0;
-  deref(out).text_ptr = 0;
-  deref(out).text_len = 0;
-  deref(out).key_ptr = 0;
-  deref(out).key_len = 0;
+  deref(out).str_val = "";
+  deref(out).key = "";
   deref(out).child = 0;
   deref(out).next = 0;
   deref(out).tail = 0;
@@ -381,8 +374,8 @@ let decode_escape = func(ch: u8, out: Mut(u8)) -> bool {
 };
 
 // 先扫到收尾引号并算出解码后长度，再从 arena 切出恰好大小的缓冲写入。
-// 结果用 ptr / len 两个 u64 交出。
-let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out_ptr: Mut(u64), out_len: Mut(u64)) -> bool {
+// 结果以 Slice(u8) 交出。
+let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out: Mut(Slice(u8))) -> bool {
   deref(pos) = deref(pos) + 1;
   let end: u64 = 0;
   let dec: u64 = 0;
@@ -443,8 +436,7 @@ let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: 
   if dec_ok == 0 {
     return false;
   }
-  deref(out_ptr) = dst as u64;
-  deref(out_len) = dec;
+  deref(out) = make_slice(Slice(u8), ptr_cast(Ref(u8), dst as u64), dec);
   deref(pos) = end + 1;
   return true;
 };
@@ -468,14 +460,11 @@ let parse_scalar = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: 
     return true;
   }
   if ch == 34 {
-    let tp0: u64 = 0;
-    let tl0: u64 = 0;
-    let tp: Mut(u64) = mut_of(tp0);
-    let tl: Mut(u64) = mut_of(tl0);
-    if parse_string(arena, input, pos, tp, tl) == false { return false; }
+    let s0: Slice(u8) = "";
+    let sp: Mut(Slice(u8)) = mut_of(s0);
+    if parse_string(arena, input, pos, sp) == false { return false; }
     deref(out).kind = JsonKind.Str();
-    deref(out).text_ptr = tp0;
-    deref(out).text_len = tl0;
+    deref(out).str_val = s0;
     return true;
   }
   let num: i64 = 0;
@@ -507,7 +496,7 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
   }
   let frames_ptr: Mut(Frame) = ptr_cast(Mut(Frame), frames_addr);
   let frames: MutSlice(Frame) = make_slice(MutSlice(Frame), frames_ptr, 64);
-  frames[0] = Frame { node: out as u64, kind: kind, sep: 0, key_ptr: 0, key_len: 0 };
+  frames[0] = Frame { node: out as u64, kind: kind, sep: 0 };
   let depth: u64 = 1;
   deref(p) = deref(p) + 1;
 
@@ -524,7 +513,7 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
       if top.sep == 1 {
         if cch == 44 {
           deref(p) = deref(p) + 1;
-          frames[idx] = Frame { node: top.node, kind: top.kind, sep: 0, key_ptr: 0, key_len: 0 };
+          frames[idx] = Frame { node: top.node, kind: top.kind, sep: 0 };
         } else {
           if cch == close {
             deref(p) = deref(p) + 1;
@@ -544,15 +533,13 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
           }
         } else {
           let is_obj: u64 = if top.kind == JsonKind.Obj() { 1 } else { 0 };
-          let kp0: u64 = 0;
-          let kl0: u64 = 0;
+          let key_slice: Slice(u8) = "";
           if is_obj == 1 {
             if cch != 34 {
               ok = 0;
             } else {
-              let kp: Mut(u64) = mut_of(kp0);
-              let kl: Mut(u64) = mut_of(kl0);
-              if parse_string(arena, input, p, kp, kl) == false {
+              let kp: Mut(Slice(u8)) = mut_of(key_slice);
+              if parse_string(arena, input, p, kp) == false {
                 ok = 0;
               } else {
                 let ws2: u64 = skip_ws(input, p);
@@ -572,8 +559,7 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
             } else {
               let child: Mut(JsonVal) = ptr_cast(Mut(JsonVal), child_addr);
               if is_obj == 1 {
-                deref(child).key_ptr = kp0;
-                deref(child).key_len = kl0;
+                deref(child).key = key_slice;
               }
               let vch: u8 = peek(input, p);
               if (vch == 123) or (vch == 91) {
@@ -581,11 +567,11 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
                 init_container(child, ck);
                 link_child(parent, child_addr);
                 deref(p) = deref(p) + 1;
-                frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1, key_ptr: 0, key_len: 0 };
+                frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1 };
                 if depth >= 64 {
                   ok = 0;
                 } else {
-                  frames[depth] = Frame { node: child_addr, kind: ck, sep: 0, key_ptr: 0, key_len: 0 };
+                  frames[depth] = Frame { node: child_addr, kind: ck, sep: 0 };
                   depth = depth + 1;
                 }
               } else {
@@ -593,7 +579,7 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
                   ok = 0;
                 } else {
                   link_child(parent, child_addr);
-                  frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1, key_ptr: 0, key_len: 0 };
+                  frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1 };
                 }
               }
             }
@@ -630,8 +616,7 @@ let stringify_val = func(v: Ref(JsonVal), buf: MutSlice(u8), pos: Mut(u64)) -> b
     return put_i64(buf, pos, deref(v).num);
   }
   if kind == JsonKind.Str() {
-    let s: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), deref(v).text_ptr), deref(v).text_len);
-    return put_string(buf, pos, s);
+    return put_string(buf, pos, deref(v).str_val);
   }
   if kind == JsonKind.Arr() {
     if put_byte(buf, pos, 91) == false {
@@ -661,8 +646,7 @@ let stringify_val = func(v: Ref(JsonVal), buf: MutSlice(u8), pos: Mut(u64)) -> b
       if put_byte(buf, pos, 44) == false { ok2 = 0; }
     }
     let node: Ref(JsonVal) = ptr_cast(Ref(JsonVal), cur);
-    let ks: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), deref(node).key_ptr), deref(node).key_len);
-    if put_string(buf, pos, ks) == false { ok2 = 0; }
+    if put_string(buf, pos, deref(node).key) == false { ok2 = 0; }
     if put_byte(buf, pos, 58) == false { ok2 = 0; }
     if stringify_val(node, buf, pos) == false { ok2 = 0; }
     cur = deref(node).next;
