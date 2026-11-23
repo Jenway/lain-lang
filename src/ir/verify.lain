@@ -473,59 +473,67 @@ pub let param_ty = func(p: IrParam) -> IrType {
   return IrType { kind: p.ty_kind, width: p.ty_width };
 };
 
-// 记录按自身大小做字节偏移，避免依赖数组下标的元素步长。
+// 每块记录区都是一张定长元素表：先按元素类型造一个下标视图，再取元素地址。
+// 视图的元素个数只写进类型元数据并决定下标步长，不分配存储；65536 是覆盖
+// 所有调用方容量的视图上限，真实容量由调用方的计数把关。
 pub let inst_slot = func(base: Ref(IrInst), i: u64) -> Mut(IrInst) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Mut(IrInst), raw + i * size_of(IrInst));
+  let view: Mut(Array(IrInst, 65536)) = ptr_cast(Mut(Array(IrInst, 65536)), base);
+  return mut_of(deref(view)[i]);
 };
 
 pub let region_slot = func(base: Ref(IrRegion), i: u64) -> Mut(IrRegion) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Mut(IrRegion), raw + i * size_of(IrRegion));
+  let view: Mut(Array(IrRegion, 65536)) = ptr_cast(Mut(Array(IrRegion, 65536)), base);
+  return mut_of(deref(view)[i]);
 };
 
 pub let proc_slot = func(base: Ref(IrProc), i: u64) -> Mut(IrProc) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Mut(IrProc), raw + i * size_of(IrProc));
+  let view: Mut(Array(IrProc, 65536)) = ptr_cast(Mut(Array(IrProc, 65536)), base);
+  return mut_of(deref(view)[i]);
 };
 
 pub let param_slot = func(base: Ref(IrParam), i: u64) -> Ref(IrParam) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Ref(IrParam), raw + i * size_of(IrParam));
+  let view: Ref(Array(IrParam, 65536)) = ptr_cast(Ref(Array(IrParam, 65536)), base);
+  return ref_of(deref(view)[i]);
 };
 
 pub let type_slot = func(base: Ref(IrType), i: u64) -> Ref(IrType) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Ref(IrType), raw + i * size_of(IrType));
+  let view: Ref(Array(IrType, 65536)) = ptr_cast(Ref(Array(IrType, 65536)), base);
+  return ref_of(deref(view)[i]);
 };
 
 pub let case_slot = func(base: Ref(IrCase), i: u64) -> Ref(IrCase) {
-  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
-  return ptr_cast(Ref(IrCase), raw + i * size_of(IrCase));
+  let view: Ref(Array(IrCase, 65536)) = ptr_cast(Ref(Array(IrCase, 65536)), base);
+  return ref_of(deref(view)[i]);
 };
 
 pub let inst_at_ref = func(base: Ref(IrInst), i: u64) -> IrInst {
-  return deref(inst_slot(base, i));
+  let s: Slice(IrInst) = make_slice(Slice(IrInst), base, i + 1);
+  return s[i];
 };
 
 pub let region_at_ref = func(base: Ref(IrRegion), i: u64) -> IrRegion {
-  return deref(region_slot(base, i));
+  let s: Slice(IrRegion) = make_slice(Slice(IrRegion), base, i + 1);
+  return s[i];
 };
 
 pub let proc_at_ref = func(base: Ref(IrProc), i: u64) -> IrProc {
-  return deref(proc_slot(base, i));
+  let s: Slice(IrProc) = make_slice(Slice(IrProc), base, i + 1);
+  return s[i];
 };
 
 pub let param_at_ref = func(base: Ref(IrParam), i: u64) -> IrParam {
-  return deref(param_slot(base, i));
+  let s: Slice(IrParam) = make_slice(Slice(IrParam), base, i + 1);
+  return s[i];
 };
 
 pub let type_at_ref = func(base: Ref(IrType), i: u64) -> IrType {
-  return deref(type_slot(base, i));
+  let s: Slice(IrType) = make_slice(Slice(IrType), base, i + 1);
+  return s[i];
 };
 
 pub let case_at_ref = func(base: Ref(IrCase), i: u64) -> IrCase {
-  return deref(case_slot(base, i));
+  let s: Slice(IrCase) = make_slice(Slice(IrCase), base, i + 1);
+  return s[i];
 };
 
 // --- 构造器（顺序追加到原始字节区）---------------------------------------
@@ -614,29 +622,26 @@ pub let add_proc = func(b: Mut(IrBuilder), name: u64,
 
 pub let add_param = func(b: Mut(IrBuilder), name: u64, ty: IrType) -> Ref(IrParam) {
   let i: u64 = b.param_count;
-  let p: Ref(IrParam) = param_slot(b.params, i);
-  let raw: Mut(IrParam) = ptr_cast(Mut(IrParam), p);
-  deref(raw) = param_new(name, ty);
+  let s: MutSlice(IrParam) = make_slice(MutSlice(IrParam), b.params, i + 1);
+  s[i] = param_new(name, ty);
   b.param_count = i + 1;
-  return p;
+  return param_slot(b.params, i);
 };
 
 pub let add_type = func(b: Mut(IrBuilder), ty: IrType) -> Ref(IrType) {
   let i: u64 = b.type_count;
-  let p: Ref(IrType) = type_slot(b.types, i);
-  let raw: Mut(IrType) = ptr_cast(Mut(IrType), p);
-  deref(raw) = ty;
+  let s: MutSlice(IrType) = make_slice(MutSlice(IrType), b.types, i + 1);
+  s[i] = ty;
   b.type_count = i + 1;
-  return p;
+  return type_slot(b.types, i);
 };
 
 pub let add_case = func(b: Mut(IrBuilder), value: u64, body: u64) -> Ref(IrCase) {
   let i: u64 = b.case_count;
-  let p: Ref(IrCase) = case_slot(b.cases, i);
-  let raw: Mut(IrCase) = ptr_cast(Mut(IrCase), p);
-  deref(raw) = case_new(value, body);
+  let s: MutSlice(IrCase) = make_slice(MutSlice(IrCase), b.cases, i + 1);
+  s[i] = case_new(value, body);
   b.case_count = i + 1;
-  return p;
+  return case_slot(b.cases, i);
 };
 
 pub let builder_module = func(b: Mut(IrBuilder), name: u64) -> IrModule {
@@ -649,37 +654,37 @@ pub let builder_module = func(b: Mut(IrBuilder), name: u64) -> IrModule {
 };
 
 // --- 验证上下文 -----------------------------------------------------------
-// 绑定表与循环标签表都是调用方或本模块静态区提供的原始数组；上下文自身只
-// 存指针与槽数。bind_cap 决定用哪张绑定表：小模块走模块 scratch（MAX_BINDINGS
+// 绑定表与循环标签表都是调用方或本模块静态区提供的一块字表；上下文存这块
+// 字表的视图与槽数。bind_cap 决定用哪块表：小模块走模块 scratch（MAX_BINDINGS
 // 槽），真实模块走本文件的静态大表（LARGE_BINDINGS 槽）。
 pub let VfCtx = struct {
   m: Ref(IrModule),
   // 模块级静态数据块的符号表（名字数组）；验证静态数据符号时用。
-  data_syms: Ref(u64),
-  data_count: u64,
+  data_words: Slice(u64),
   proc: u64,
   count: u64,
   bind_cap: u64,
   depth: u64,
   err: u64,
-  names: Mut(u64),
-  kinds: Mut(u64),
-  widths: Mut(u64),
+  // 名字、类别、宽度三张绑定表各占 bind_cap 个槽，循环标签与循环区域
+  // 接在后面（槽位划分见 vf_build 的注释）。
+  words: MutSlice(u64),
   loop_depth: u64,
-  loop_labels: Mut(u64),
-  loop_regions: Mut(u64),
 };
 
-// 模块 scratch 的布局：小模块验证器的三张定长表（名字、类别、宽度）占前
-// 3 * MAX_BINDINGS 个字，验证器的循环标签与循环区域接在后面。文本发射器用
-// 的是下面的静态大表，不碰模块 scratch。
+// 字表大小：三张 bind_cap 槽的绑定表加上循环标签与循环区域。
 pub let VF_SCRATCH = func() -> u64 {
   return MAX_BINDINGS() * 3 + MAX_LOOPS() * 2;
 };
 
-// 大绑定表：名字、类别、宽度三张表连在一片静态区上，每张 LARGE_BINDINGS()
-// 个槽，按 512 个槽一块铺开，全零字面量只写一次。它不占模块 scratch，所以小
-// arena 的切割测试仍然只分配 96 槽那块 scratch。
+let bank_words = func(bind_cap: u64) -> u64 {
+  return bind_cap * 3 + MAX_LOOPS() * 2;
+};
+
+// 大字表：名字、类别、宽度三张表连在一片静态区上，每张 LARGE_BINDINGS()
+// 个槽，循环标签与循环区域接在第三张表之后；按 512 个槽一块铺开，全零字面量
+// 只写一次。它不占模块 scratch，所以小 arena 的切割测试仍然只分配 96 槽那块
+// scratch。
 let bind_block: Array(u64, 512) = [
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -715,10 +720,11 @@ let bind_block: Array(u64, 512) = [
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
-let large_store: Array(Array(u64, 512), 12) = [
+let large_store: Array(Array(u64, 512), 13) = [
   bind_block, bind_block, bind_block, bind_block,
   bind_block, bind_block, bind_block, bind_block,
-  bind_block, bind_block, bind_block, bind_block];
+  bind_block, bind_block, bind_block, bind_block,
+  bind_block];
 
 let large_store_ptr = func() -> Mut(u64) {
   return ptr_cast(Mut(u64), mut_of(large_store));
@@ -730,56 +736,31 @@ pub let large_bind_base = func() -> Mut(u64) {
   return large_store_ptr();
 };
 
-// 绑定记录与循环标签都是 u64 数组；指针算术按字节推进，所以下标必须乘上元素宽度。
-let word_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
-  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), base) + i * size_of(u64));
-};
-
-let word_at = func(base: Ref(u64), i: u64) -> u64 {
-  return deref(ptr_cast(Ref(u64), ptr_cast(Mut(u8), base) + i * size_of(u64)));
-};
-
-// 循环标签表始终来自模块 scratch，它排在 3 * MAX_BINDINGS 个字之后。
+// 字表按元素类型造成一个可变视图：名字、类别、宽度各占 bind_cap 个槽，
+// 循环标签与循环区域接在 3 * bind_cap 之后。
 let vf_build = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64,
-                    names_at: Mut(u64), kinds_at: Mut(u64), widths_at: Mut(u64),
-                    bind_cap: u64) -> VfCtx {
-  let scratch: Mut(u64) = m.scratch;
-  let labels_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS() * 3);
-  let regions_at: Mut(u64) = word_slot(scratch, MAX_BINDINGS() * 3 + MAX_LOOPS());
+                    bank: Mut(u64), bind_cap: u64) -> VfCtx {
+  let words: MutSlice(u64) = make_slice(MutSlice(u64), bank, bank_words(bind_cap));
+  let data_words: Slice(u64) = make_slice(Slice(u64), data_syms, data_count);
   return VfCtx {
     m: m,
-    data_syms: data_syms,
-    data_count: data_count,
+    data_words: data_words,
     proc: 0,
     count: 0,
     bind_cap: bind_cap,
     depth: 0,
     err: 0,
-    names: names_at,
-    kinds: kinds_at,
-    widths: widths_at,
+    words: words,
     loop_depth: 0,
-    loop_labels: labels_at,
-    loop_regions: regions_at,
   };
 };
 
 pub let vf_new_with_data = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64) -> VfCtx {
-  let scratch: Mut(u64) = m.scratch;
-  return vf_build(m, data_syms, data_count,
-                  scratch,
-                  word_slot(scratch, MAX_BINDINGS()),
-                  word_slot(scratch, MAX_BINDINGS() * 2),
-                  MAX_BINDINGS());
+  return vf_build(m, data_syms, data_count, m.scratch, MAX_BINDINGS());
 };
 
 let vf_new_large = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64) -> VfCtx {
-  let base: Mut(u64) = large_store_ptr();
-  return vf_build(m, data_syms, data_count,
-                  base,
-                  word_slot(base, LARGE_BINDINGS()),
-                  word_slot(base, LARGE_BINDINGS() * 2),
-                  LARGE_BINDINGS());
+  return vf_build(m, data_syms, data_count, large_store_ptr(), LARGE_BINDINGS());
 };
 
 // --- 基础判定 -------------------------------------------------------------
@@ -926,7 +907,7 @@ let is_terminator = func(k: u64) -> u64 {
 // 增长，递归深度不能跟着它们走。
 let scan_name = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
   let hit: u64 = loop sc(k: u64 = i, found: u64 = 0) while (k < c.count) and (found == 0) {
-    if deref(word_slot(c.names, k)) == name { found = k + 1; }
+    if c.words[k] == name { found = k + 1; }
     k = k + 1;
   };
   return hit;
@@ -942,9 +923,9 @@ let bind = func(c: Mut(VfCtx), name: u64, t: IrType) -> u64 {
   if binding_pos(c, name) != 0 { return set_err(c, ERR_DUP_DEF()); }
   if c.count >= c.bind_cap { return set_err(c, ERR_BIND_CAP()); }
   let at: u64 = c.count;
-  deref(word_slot(c.names, at)) = name;
-  deref(word_slot(c.kinds, at)) = t.kind;
-  deref(word_slot(c.widths, at)) = t.width;
+  c.words[at] = name;
+  c.words[c.bind_cap + at] = t.kind;
+  c.words[c.bind_cap * 2 + at] = t.width;
   c.count = at + 1;
   return 0;
 };
@@ -967,8 +948,8 @@ let bind_params = func(c: Mut(VfCtx), base: Ref(IrParam), count: u64, i: u64) ->
 // 值形式的调用直接引用它们）。它们不进绑定表，要留给参数与指令结果；模块级
 // 名字直接按名字扫模块自身的数组解析。
 let scan_data_sym = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
-  let hit: u64 = loop sc(k: u64 = i, found: u64 = 0) while (k < c.data_count) and (found == 0) {
-    if word_at(c.data_syms, k) == name { found = 1; }
+  let hit: u64 = loop sc(k: u64 = i, found: u64 = 0) while (k < c.data_words.len) and (found == 0) {
+    if c.data_words[k] == name { found = 1; }
     k = k + 1;
   };
   return hit;
@@ -1002,13 +983,13 @@ let name_kind_plus = func(c: Mut(VfCtx), name: u64) -> u64 {
     if module_addr_name(c, name) == 1 { return TY_ADDR() + 1; }
     return 0;
   }
-  return deref(word_slot(c.kinds, p - 1)) + 1;
+  return c.words[c.bind_cap + (p - 1)] + 1;
 };
 
 let name_width = func(c: Mut(VfCtx), name: u64) -> u64 {
   let p: u64 = binding_pos(c, name);
   if p == 0 { return 0; }
-  return deref(word_slot(c.widths, p - 1));
+  return c.words[c.bind_cap * 2 + (p - 1)];
 };
 
 let check_type_array = func(c: Mut(VfCtx), base: Ref(IrType), count: u64, i: u64) -> u64 {
@@ -1107,7 +1088,8 @@ let case_at = func(c: Mut(VfCtx), ci: u64) -> IrCase {
 };
 
 let region_inst = func(r: IrRegion, i: u64) -> u64 {
-  return deref(ptr_cast(Ref(u64), ptr_cast(Mut(u8), r.insts) + i * size_of(u64)));
+  let s: Slice(u64) = make_slice(Slice(u64), r.insts, i + 1);
+  return s[i];
 };
 
 let scan_proc = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
@@ -1127,7 +1109,9 @@ let find_proc = func(c: Mut(VfCtx), name: u64) -> u64 {
 let scan_loop = func(c: Mut(VfCtx), label: u64, i: u64) -> u64 {
   if i >= c.loop_depth { return 0; }
   let at: u64 = c.loop_depth - 1 - i;
-  if deref(word_slot(c.loop_labels, at)) == label { return deref(word_slot(c.loop_regions, at)) + 1; }
+  if c.words[c.bind_cap * 3 + at] == label {
+    return c.words[c.bind_cap * 3 + MAX_LOOPS() + at] + 1;
+  }
   return scan_loop(c, label, i + 1);
 };
 
@@ -1517,8 +1501,8 @@ let check_loop = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   if it.result_count != r.result_count { return set_err(c, ERR_TYPE_MISMATCH()); }
   if c.loop_depth >= MAX_LOOPS() { return set_err(c, ERR_BAD_OPCODE()); }
   let at: u64 = c.loop_depth;
-  deref(word_slot(c.loop_labels, at)) = it.label;
-  deref(word_slot(c.loop_regions, at)) = it.body;
+  c.words[c.bind_cap * 3 + at] = it.label;
+  c.words[c.bind_cap * 3 + MAX_LOOPS() + at] = it.body;
   c.loop_depth = at + 1;
   let e: u64 = verify_region(c, it.body);
   c.loop_depth = at;

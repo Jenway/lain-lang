@@ -44,13 +44,33 @@ let Facts = struct {
   count: u64,
 };
 
-// 优化器在一组平坦记录上工作：指令、区域与分支都按下标引用。
+// 存放记录：addrs 是目标槽的地址值名，keys 把类型种类与宽度压成一个整数，
+// vkinds/vals 是写进去的值，vkind 为 1 表示整数常量、为 2 表示值名。
+let MemFacts = struct {
+  addrs: Array(u64, 32),
+  keys: Array(u64, 32),
+  vkinds: Array(u64, 32),
+  vals: Array(u64, 32),
+  count: u64,
+};
+
+// 本过程里所有 #alloca 的结果名。槽名 _v<n> 只在一个过程内唯一，因此这套
+// 集合按过程重建，不能跨过程共用。
+let Slots = struct {
+  names: Array(u64, 128),
+  count: u64,
+};
+
+// 优化器在一组平坦记录上工作：指令、区域与分支都按下标引用。slots 指向
+// 当前过程全部的 #alloca 结果名，mem 指向当前这条直行路径上的存放记录。
 let Ctx = struct {
   insts: Mut(vf.IrInst),
   regions: Mut(vf.IrRegion),
   cases: Mut(vf.IrCase),
   inst_count: u64,
   region_count: u64,
+  slots: Mut(Slots),
+  mem: Mut(MemFacts),
 };
 
 let no_fold = func() -> Fold {
@@ -206,6 +226,215 @@ let sign_fill = func(value: u64, width: u64) -> i64 {
   let top: i64 = (kept << shift) as i64;
   let back: i64 = shift as i64;
   return top >> back;
+};
+
+// --- 局部存放转发 ---------------------------------------------------------
+// 存放记录只登记目标地址恰好是本过程 #alloca 结果的那些写入。两条 #alloca
+// 得到的是互不重叠的存储，所以精确地址匹配不会漏掉别名写入：任何透过其它
+// 指针（取自 #lea、取自别的槽里的指针、模块数据符号）的写入都先整表清空再
+// 处理，走到表外的写入因此不可能留下过期的记录。调用、原子操作与读写改能
+// 透过任意指针改动内存，也整表清空。记录条数有上限，满了就不再登记新记录，
+// 查找不到只是不转发。记录只在一条直行区域序列内有效，进出的清空见
+// fold_region。
+let MEM_CAP = func() -> u64 { return 32; };
+let SLOT_CAP = func() -> u64 { return 128; };
+
+let mem_new = func() -> MemFacts {
+  return MemFacts {
+    addrs: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    keys: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    vkinds: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    vals: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    count: 0,
+  };
+};
+
+let slots_new = func() -> Slots {
+  return Slots {
+    names: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    count: 0,
+  };
+};
+
+// 键把类型种类与宽度压成一个整数：种类在高位，宽度在低位。宽度与种类都
+// 相同的 #load 与 #store 才视为同一次读写。
+let mem_key = func(it: vf.IrInst) -> u64 {
+  return it.ty_kind * 256 + it.ty_width;
+};
+
+let mem_clear = func(mf: Mut(MemFacts)) -> u64 {
+  mf.count = 0;
+  return 0;
+};
+
+// 同一地址上的旧记录必须先失效：宽度不同的部分覆盖同样改变了这条地址的
+// 内容，不能留下旧记录。
+let mem_drop = func(mf: Mut(MemFacts), addr: u64) -> u64 {
+  let n: u64 = mf.count;
+  let kept: u64 = loop lp(i: u64 = 0, w: u64 = 0) while i < n {
+    if mf.addrs[i] != addr {
+      mf.addrs[w] = mf.addrs[i];
+      mf.keys[w] = mf.keys[i];
+      mf.vkinds[w] = mf.vkinds[i];
+      mf.vals[w] = mf.vals[i];
+      w = w + 1;
+    }
+    i = i + 1;
+  };
+  mf.count = kept;
+  return 0;
+};
+
+let mem_find = func(mf: Mut(MemFacts), addr: u64, key: u64) -> u64 {
+  let n: u64 = mf.count;
+  return loop lp(i: u64 = 0, at: u64 = 0) while (i < n) and (at == 0) {
+    if (mf.addrs[i] == addr) and (mf.keys[i] == key) { at = i + 1; }
+    i = i + 1;
+  };
+};
+
+let mem_set = func(mf: Mut(MemFacts), addr: u64, key: u64, vkind: u64, val: u64) -> u64 {
+  let drop: u64 = mem_drop(mf, addr);
+  let n: u64 = mf.count;
+  if n >= MEM_CAP() { return 0; }
+  mf.addrs[n] = addr;
+  mf.keys[n] = key;
+  mf.vkinds[n] = vkind;
+  mf.vals[n] = val;
+  mf.count = n + 1;
+  return 0;
+};
+
+let slots_reset = func(s: Mut(Slots)) -> u64 {
+  s.count = 0;
+  return 0;
+};
+
+let slots_add = func(s: Mut(Slots), name: u64) -> u64 {
+  if name == 0 { return 0; }
+  let n: u64 = s.count;
+  if n >= SLOT_CAP() { return 0; }
+  s.names[n] = name;
+  s.count = n + 1;
+  return 0;
+};
+
+let slots_has = func(c: Mut(Ctx), name: u64) -> u64 {
+  let s: Mut(Slots) = c.slots;
+  let n: u64 = s.count;
+  return loop lp(i: u64 = 0, hit: u64 = 0) while (i < n) and (hit == 0) {
+    if s.names[i] == name { hit = 1; }
+    i = i + 1;
+  };
+};
+
+// 扫一遍本过程的全部区域，收集 #alloca 的结果名。
+let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
+  if depth > vf.MAX_DEPTH() { return 0; }
+  if ri >= c.region_count { return 0; }
+  let r: vf.IrRegion = region_read(c, ri);
+  let n: u64 = r.inst_count;
+  let walk: u64 = loop lp(i: u64 = 0) while i < n {
+    let ii: u64 = region_index(r, i);
+    if ii < c.inst_count {
+      let it: vf.IrInst = inst_read(c, ii);
+      if it.kind == codes.INST_ALLOCA() {
+        let put: u64 = slots_add(c.slots, it.r0);
+      }
+      if it.body != vf.NO_REGION() {
+        let b: u64 = slots_scan(c, it.body, depth + 1);
+      }
+      if it.else_body != vf.NO_REGION() {
+        let e: u64 = slots_scan(c, it.else_body, depth + 1);
+      }
+      if it.default_body != vf.NO_REGION() {
+        let d: u64 = slots_scan(c, it.default_body, depth + 1);
+      }
+      let cs: u64 = loop lq(j: u64 = 0) while j < it.case_count {
+        let cc: vf.IrCase = case_read(c, it.cases_at + j);
+        let sb: u64 = slots_scan(c, cc.body, depth + 1);
+        j = j + 1;
+      };
+    }
+    i = i + 1;
+  };
+  return 0;
+};
+
+// 可能会透过任意指针改动内存的指令。
+let mem_escape = func(k: u64) -> u64 {
+  if k == codes.INST_CALL() { return 1; }
+  if (k >= codes.INST_XCHG()) and (k <= codes.INST_RMW_XOR()) { return 1; }
+  if (k >= codes.INST_ATOMIC_LOAD()) and (k <= codes.INST_ATOMIC_FENCE()) { return 1; }
+  return 0;
+};
+
+// 一条指令对存放记录的作用：写入本过程已知的槽就登记，写入其它任何地址、
+// 可能穿透内存的指令都整表清空；从已知槽读出且宽度与类型种类都对得上时，
+// 把 #load 的结果名记成写入的那个值，后续使用者因此绕过这条 #load，没有
+// 使用者的 #load 由删除趟去掉。子区域的界限由 fold_region 负责。
+let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+  let it: vf.IrInst = inst_read(c, ii);
+  let mf: Mut(MemFacts) = c.mem;
+  if mem_escape(it.kind) == 1 { return mem_clear(mf); }
+  if it.kind == codes.INST_STORE() {
+    if it.operand_count < 2 { return mem_clear(mf); }
+    let value: vf.IrOperand = vf.inst_op(it, 0);
+    let dest: vf.IrOperand = vf.inst_op(it, 1);
+    if dest.kind != vf.OP_VALUE() { return mem_clear(mf); }
+    if dest.name == 0 { return mem_clear(mf); }
+    if slots_has(c, dest.name) == 0 { return mem_clear(mf); }
+    let key: u64 = mem_key(it);
+    if value.kind == vf.OP_INT() {
+      if it.ty_kind == vf.TY_BITS() {
+        let bits: u64 = mask_width(value.bits, it.ty_width);
+        return mem_set(mf, dest.name, key, 1, bits);
+      }
+      let drop_int: u64 = mem_drop(mf, dest.name);
+      return 0;
+    }
+    if value.kind == vf.OP_VALUE() {
+      if value.name != 0 { return mem_set(mf, dest.name, key, 2, value.name); }
+    }
+    let drop_other: u64 = mem_drop(mf, dest.name);
+    return 0;
+  }
+  if it.kind == codes.INST_LOAD() {
+    if it.operand_count != 1 { return 0; }
+    if it.result_count != 1 { return 0; }
+    if it.r0 == 0 { return 0; }
+    let src: vf.IrOperand = vf.inst_op(it, 0);
+    if src.kind != vf.OP_VALUE() { return 0; }
+    if src.name == 0 { return 0; }
+    let at: u64 = mem_find(mf, src.name, mem_key(it));
+    if at == 0 { return 0; }
+    if f.count >= FACT_CAP() { return 0; }
+    let idx: u64 = at - 1;
+    let pushed: u64 = facts_push(f, it.r0, mf.vkinds[idx], mf.vals[idx]);
+    st.folded = st.folded + 1;
+  }
+  return 0;
 };
 
 // 可折叠的整数运算：两个 OP_INT 操作数、一条指令结果。
@@ -499,17 +728,24 @@ let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptS
   return 0;
 };
 
-// 当前指令：先按事实表改写操作数，再尝试折叠，最后走进它的子区域。
+// 当前指令：先按事实表改写操作数，再尝试折叠，再更新存放记录（这里能把
+// 刚写入的值接到 #load 的结果名上），最后走进它的子区域。
 let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   let applied: u64 = apply_facts(c, ii, f, st);
   let folded: u64 = fold_own(c, ii, f, st);
+  let mem: u64 = mem_step(c, ii, f, st);
   let it: vf.IrInst = inst_read(c, ii);
   return fold_children(c, it, f, st, depth);
 };
 
+// 区域的存放记录不跟进来也不漏出去：进入子区域先清空，#if 的两支与各兄弟
+// 区域之间因此互不影响，子区域里学到的东西也不会漏到外层。
 let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   if depth > vf.MAX_DEPTH() { return 0; }
   if ri >= c.region_count { return 0; }
+  if depth > 0 {
+    let enter: u64 = mem_clear(c.mem);
+  }
   let r: Mut(vf.IrRegion) = region_slot(c, ri);
   let n: u64 = r.inst_count;
   let walk: u64 = loop lp(i: u64 = 0) while i < n {
@@ -519,6 +755,9 @@ let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), d
     }
     i = i + 1;
   };
+  if depth > 0 {
+    let leave: u64 = mem_clear(c.mem);
+  }
   return 0;
 };
 
@@ -578,6 +817,16 @@ let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
   return hit;
 };
 
+// 从本过程已知局部槽读出的 #load 不会碰到无效地址，结果没有使用者时
+// 可以整条去掉；读写其它地址的指令保留。
+let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> u64 {
+  if it.kind != codes.INST_LOAD() { return 0; }
+  if it.operand_count != 1 { return 0; }
+  let src: vf.IrOperand = vf.inst_op(it, 0);
+  if src.kind != vf.OP_VALUE() { return 0; }
+  return slots_has(c, src.name);
+};
+
 // 把一个区域的指令序列就地压紧，返回本区域删掉的条数。删除判定按整个
 // 过程（proc_body 可达的全部区域）做，因此被删指令的操作数在别处没有
 // 使用者。
@@ -590,7 +839,9 @@ let compact_region = func(c: Mut(Ctx), ri: u64, proc_body: u64) -> u64 {
     let keep: u64 = 1;
     if ii < c.inst_count {
       let it: vf.IrInst = inst_read(c, ii);
-      if (is_pure(it.kind) == 1) and (it.result_count == 1) and (it.r0 != 0) {
+      let removable: u64 = is_pure(it.kind);
+      if removable == 0 { removable = dead_load_ok(c, it); }
+      if (removable == 1) and (it.result_count == 1) and (it.r0 != 0) {
         if region_uses(c, proc_body, it.r0) == 0 { keep = 0; }
       }
     }
@@ -646,6 +897,11 @@ let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
     let before: u64 = st.folded + st.dce_removed;
     let facts: Facts = facts_new();
     let f: Mut(Facts) = mut_of(facts);
+    let mems: MemFacts = mem_new();
+    let mf: Mut(MemFacts) = mut_of(mems);
+    c.mem = mf;
+    let reset: u64 = slots_reset(c.slots);
+    let scanned: u64 = slots_scan(c, body, 0);
     let folded: u64 = fold_region(c, body, f, st, 0);
     let sweeps: u64 = loop lq(round: u64 = 0, done: u64 = 0) while done == 0 {
       let gone: u64 = dce_walk(c, body, body, st);
@@ -660,12 +916,16 @@ let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
 };
 
 pub let opt_module = func(m: Mut(vf.IrModule)) -> OptStats {
+  let slots: Slots = slots_new();
+  let mems: MemFacts = mem_new();
   let ctx: Ctx = Ctx {
     insts: ptr_cast(Mut(vf.IrInst), m.insts),
     regions: ptr_cast(Mut(vf.IrRegion), m.regions),
     cases: ptr_cast(Mut(vf.IrCase), m.cases),
     inst_count: m.inst_count,
     region_count: m.region_count,
+    slots: mut_of(slots),
+    mem: mut_of(mems),
   };
   let c: Mut(Ctx) = mut_of(ctx);
   let stats: OptStats = OptStats { folded: 0, dce_removed: 0 };
