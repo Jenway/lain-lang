@@ -906,6 +906,9 @@ let is_vector = func(k: u64) -> u64 {
 
 let is_atomic = func(k: u64) -> u64 {
   if (k >= codes.INST_XCHG()) and (k <= codes.INST_RMW_XOR()) { return 1; }
+  if k == codes.INST_ATOMIC_LOAD() { return 1; }
+  if k == codes.INST_ATOMIC_STORE() { return 1; }
+  if k == codes.INST_ATOMIC_FENCE() { return 1; }
   return 0;
 };
 
@@ -1353,9 +1356,35 @@ let check_vector = func(c: Mut(VfCtx), it: IrInst) -> u64 {
 };
 
 let check_atomic = func(c: Mut(VfCtx), it: IrInst) -> u64 {
+  let k: u64 = it.kind;
+  if k == codes.INST_ATOMIC_FENCE() {
+    if it.operand_count != 1 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    return check_result_count(c, it, 0);
+  }
   if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
   if type_ok(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
-  return check_result_count(c, it, 1);
+  if k == codes.INST_ATOMIC_LOAD() {
+    if byte_addressable(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if it.operand_count != 2 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    let e: u64 = check_result_count(c, it, 1);
+    if e != 0 { return e; }
+    if op_is_addr(c, inst_op(it, 0)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    return 0;
+  }
+  if k == codes.INST_ATOMIC_STORE() {
+    if byte_addressable(inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    if it.operand_count != 3 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    let e: u64 = check_result_count(c, it, 0);
+    if e != 0 { return e; }
+    if op_is_addr(c, inst_op(it, 1)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+    return 0;
+  }
+  let e: u64 = check_result_count(c, it, 1);
+  if e != 0 { return e; }
+  if it.operand_count >= 2 {
+    if op_is_addr(c, inst_op(it, 0)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
+  }
+  return 0;
 };
 
 let check_lea = func(c: Mut(VfCtx), it: IrInst) -> u64 {

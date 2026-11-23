@@ -541,6 +541,12 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
   if k == codes.INST_BITCAST() { return emit_bitcast(em, it); }
   if (k >= codes.INST_FPEXT()) and (k <= codes.INST_UITOFP()) { return emit_float_convert(em, it, k); }
   if k == codes.INST_LEA() { return emit_lea(em, it); }
+  if k == codes.INST_ATOMIC_FENCE() { return emit_atomic_fence(em, it); }
+  if k == codes.INST_ATOMIC_LOAD() { return emit_atomic_load(em, it); }
+  if k == codes.INST_ATOMIC_STORE() { return emit_atomic_store(em, it); }
+  if k == codes.INST_XCHG() { return emit_atomic_xchg(em, it); }
+  if k == codes.INST_CMPXCHG() { return emit_atomic_cmpxchg(em, it, ii); }
+  if (k >= codes.INST_RMW_ADD()) and (k <= codes.INST_RMW_XOR()) { return emit_atomic_rmw(em, it, k); }
   if k == codes.INST_LOAD() { return emit_load(em, it); }
   if k == codes.INST_STORE() { return emit_store(em, it); }
   if k == codes.INST_ALLOCA() { return emit_alloca(em, it); }
@@ -1197,6 +1203,209 @@ let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return 1;
 };
 
+// --- 原子操作 -------------------------------------------------------------
+// IR 的内存序取值按 ORDER_* 排序，C 内建函数用的是 __ATOMIC_* 常量。
+let c_memorder = func(order: u64) -> Slice(u8) {
+  if order == 0 { return "__ATOMIC_RELAXED"; }
+  if order == 1 { return "__ATOMIC_ACQUIRE"; }
+  if order == 2 { return "__ATOMIC_RELEASE"; }
+  if order == 3 { return "__ATOMIC_ACQ_REL"; }
+  if order == 4 { return "__ATOMIC_SEQ_CST"; }
+  return "__ATOMIC_SEQ_CST";
+};
+
+// 内存序操作数是常量时直接发射常量，是局部值时交给前导文本里的 lain_memorder
+// 在运行期换算，避免同一个表达式被求值多次。
+let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
+  if op.kind == vf.OP_INT() {
+    return put_str(em.w, c_memorder(op.bits));
+  }
+  let a: u64 = put_str(em.w, "lain_memorder((uint64_t)(");
+  let b: u64 = emit_value_ref(em, op.name);
+  let c: u64 = put_str(em.w, "))");
+  return 1;
+};
+
+// __atomic_* 只接受整数与指针类型，浮点按同宽的位模式参与。
+let atomic_c_type = func(t: vf.IrType) -> Slice(u8) {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return "uint32_t"; }
+    return "uint64_t";
+  }
+  return c_type_name(t);
+};
+
+let emit_atomic_ptr = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  let a: u64 = put_byte(em.w, 40);
+  let b: u64 = put_str(em.w, atomic_c_type(t));
+  let c: u64 = put_str(em.w, " *)");
+  return emit_operand(em, op, vf.type_addr());
+};
+
+let emit_atomic_value = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let a: u64 = put_str(em.w, "lain_bitcast_f32_u32((float)(");
+      let b: u64 = emit_operand(em, op, vf.type_float(32));
+      let c: u64 = put_str(em.w, "))");
+      return 1;
+    }
+    let a: u64 = put_str(em.w, "lain_bitcast_f64_u64((double)(");
+    let b: u64 = emit_operand(em, op, vf.type_float(64));
+    let c: u64 = put_str(em.w, "))");
+    return 1;
+  }
+  let a: u64 = put_byte(em.w, 40);
+  let b: u64 = put_str(em.w, atomic_c_type(t));
+  let c: u64 = put_str(em.w, ")(");
+  let d: u64 = emit_operand(em, op, t);
+  let e: u64 = put_byte(em.w, 41);
+  return 1;
+};
+
+// 指针类型的读改写加数在 C 里必须写成整数。
+let emit_atomic_addend = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() {
+    let a: u64 = put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_operand(em, op, vf.type_addr());
+    let c: u64 = put_byte(em.w, 41);
+    return 1;
+  }
+  return emit_atomic_value(em, op, t);
+};
+
+let emit_atomic_result_open = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return put_str(em.w, "lain_bitcast_u32_f32((uint32_t)"); }
+    return put_str(em.w, "lain_bitcast_u64_f64((uint64_t)");
+  }
+  return 1;
+};
+
+let emit_atomic_result_close = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() { return put_byte(em.w, 41); }
+  return 1;
+};
+
+let emit_atomic_pair_head = func(em: Mut(C99Emitter), it: vf.IrInst, t: vf.IrType) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = emit_type(em.w, t);
+  let c: u64 = put_str(em.w, " ");
+  let d: u64 = emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = put_str(em.w, " = ");
+  let f: u64 = emit_atomic_result_open(em, t);
+  return 1;
+};
+
+let emit_atomic_fence = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "__atomic_thread_fence(");
+  let c: u64 = emit_memorder(em, vf.inst_op(it, 0));
+  let d: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_atomic_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = put_str(em.w, "__atomic_load_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let d: u64 = put_str(em.w, ", ");
+  let e: u64 = emit_memorder(em, vf.inst_op(it, 1));
+  let f: u64 = put_byte(em.w, 41);
+  let g: u64 = emit_atomic_result_close(em, t);
+  let h: u64 = put_str(em.w, ";\n");
+  return 1;
+};
+
+let emit_atomic_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, "__atomic_store_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 1), t);
+  let d: u64 = put_str(em.w, ", ");
+  let e: u64 = emit_atomic_value(em, vf.inst_op(it, 0), t);
+  let f: u64 = put_str(em.w, ", ");
+  let g: u64 = emit_memorder(em, vf.inst_op(it, 2));
+  let h: u64 = put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_atomic_order_tail = func(em: Mut(C99Emitter), it: vf.IrInst, idx: u64) -> u64 {
+  if it.operand_count <= idx { return put_str(em.w, "__ATOMIC_SEQ_CST"); }
+  return emit_memorder(em, vf.inst_op(it, idx));
+};
+
+let emit_atomic_xchg = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = put_str(em.w, "__atomic_exchange_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let d: u64 = put_str(em.w, ", ");
+  let e: u64 = emit_atomic_value(em, vf.inst_op(it, 1), t);
+  let f: u64 = put_str(em.w, ", ");
+  let g: u64 = emit_atomic_order_tail(em, it, 2);
+  let h: u64 = put_byte(em.w, 41);
+  let i: u64 = emit_atomic_result_close(em, t);
+  let j: u64 = put_str(em.w, ";\n");
+  return 1;
+};
+
+// 比较交换把旧值留在临时量里，再按结果类型搬进结果变量。
+let emit_atomic_cmpxchg = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let tmp: u64 = next_temp(em);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = put_str(em.w, atomic_c_type(t));
+  let c: u64 = put_str(em.w, " _cx");
+  let d: u64 = put_u64_dec(em.w, tmp);
+  let e: u64 = put_str(em.w, " = ");
+  let f: u64 = emit_atomic_value(em, vf.inst_op(it, 1), t);
+  let g: u64 = put_str(em.w, ";\n");
+  let h: u64 = emit_indent(em, em.depth);
+  let i: u64 = put_str(em.w, "__atomic_compare_exchange_n(");
+  let j: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let k: u64 = put_str(em.w, ", &_cx");
+  let l: u64 = put_u64_dec(em.w, tmp);
+  let m: u64 = put_str(em.w, ", ");
+  let n: u64 = emit_atomic_value(em, vf.inst_op(it, 2), t);
+  let o: u64 = put_str(em.w, ", 0, ");
+  let p: u64 = emit_atomic_order_tail(em, it, 3);
+  let q: u64 = put_str(em.w, ", __ATOMIC_RELAXED);\n");
+  let r: u64 = emit_atomic_pair_head(em, it, t);
+  let s: u64 = put_str(em.w, "_cx");
+  let u: u64 = put_u64_dec(em.w, tmp);
+  let v: u64 = emit_atomic_result_close(em, t);
+  let x: u64 = put_str(em.w, ";\n");
+  return 1;
+};
+
+let rmw_op_name = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_RMW_ADD() { return "add"; }
+  if k == codes.INST_RMW_SUB() { return "sub"; }
+  if k == codes.INST_RMW_AND() { return "and"; }
+  if k == codes.INST_RMW_OR() { return "or"; }
+  if k == codes.INST_RMW_XOR() { return "xor"; }
+  return "add";
+};
+
+let emit_atomic_rmw = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = put_str(em.w, "__atomic_fetch_");
+  let c: u64 = put_str(em.w, rmw_op_name(k));
+  let d: u64 = put_str(em.w, "(");
+  let e: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let f: u64 = put_str(em.w, ", ");
+  let g: u64 = emit_atomic_addend(em, vf.inst_op(it, 1), t);
+  let h: u64 = put_str(em.w, ", ");
+  let i: u64 = emit_atomic_order_tail(em, it, 2);
+  let j: u64 = put_byte(em.w, 41);
+  let l: u64 = emit_atomic_result_close(em, t);
+  let m: u64 = put_str(em.w, ";\n");
+  return 1;
+};
+
 // --- 调用 -----------------------------------------------------------------
 let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
                           p: vf.IrProc, i: u64) -> u64 {
@@ -1768,7 +1977,7 @@ pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) ->
 
 // --- 前导文本 -------------------------------------------------------------
 let preamble_helpers = func() -> Slice(u8) {
-  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#if defined(_WIN32)\n#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS\n#endif\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode {\n  struct LainAllocaNode *next;\n  uint64_t align;\n#if !defined(NDEBUG)\n  size_t bytes;\n#endif\n} LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
+  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#if defined(_WIN32)\n#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS\n#endif\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\n#if !defined(__ATOMIC_RELAXED)\n#define __ATOMIC_RELAXED 0\n#define __ATOMIC_CONSUME 1\n#define __ATOMIC_ACQUIRE 2\n#define __ATOMIC_RELEASE 3\n#define __ATOMIC_ACQ_REL 4\n#define __ATOMIC_SEQ_CST 5\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode {\n  struct LainAllocaNode *next;\n  uint64_t align;\n#if !defined(NDEBUG)\n  size_t bytes;\n#endif\n} LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int lain_memorder(uint64_t o) {\n  switch (o) {\n    case 0: return __ATOMIC_RELAXED;\n    case 1: return __ATOMIC_ACQUIRE;\n    case 2: return __ATOMIC_RELEASE;\n    case 3: return __ATOMIC_ACQ_REL;\n    case 4: return __ATOMIC_SEQ_CST;\n    default: return __ATOMIC_SEQ_CST;\n  }\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
 };
 
 let preamble_memory = func() -> Slice(u8) {
