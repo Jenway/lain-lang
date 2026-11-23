@@ -261,12 +261,45 @@ pub let is_builtin = func(name: u64) -> u64 {
 
 // 读的内存宽度由上下文期望类型决定，没有期望时按机器字。
 let load_ty = func(k: Mut(st.State), want: Mut(ty.Ty)) -> Mut(ty.Ty) {
-  if ty.ty_known(want) == 1 and ty.tw(want) != 1 { return want; }
+  if ty.ty_known(want) == 1 { return want; }
   return ir.tbits(k, 64);
+};
+
+// 位宽不足一字节的整数类型（bool 只有 1 位，排除 TY_ADDR）在内存里占 1 字节：
+// 读回来先截到 tp，写出去先零扩满 1 字节。
+let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
+  if ty.tk(tp) != codes.TY_BITS() { return 0; }
+  return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
+};
+
+let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, raw);
+  let ins: u64 = ir.emit(k, codes.INST_TRUNC(), res, tp);
+  return res;
+};
+
+let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  if ty.vlit(v) == 1 { return ty.val_lit(out, ty.vbits(v), t8); }
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, ty.vn(v));
+  let ins: u64 = ir.emit(k, codes.INST_ZEXT(), res, t8);
+  return ty.val_ref(out, res, t8);
 };
 
 let do_load = func(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = load_ty(k, want);
+  if is_subbyte_bits(t) == 1 {
+    let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+    let raw: u64 = ir.fresh_t(k);
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.op_val(k, v0);
+    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), raw, t8, 0);
+    let res: u64 = narrow_byte(k, raw, t);
+    return ty.val_ref(out, res, t);
+  }
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
@@ -274,10 +307,12 @@ let do_load = func(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut
   return ty.val_ref(out, res, t);
 };
 
-// store 的宽度取右值的类型；右值是裸字面量时按 64 位。
+// store 的宽度取右值的类型；右值是裸字面量时按 64 位，字面量的类型已知
+// 且位宽不足一字节（bool）时按它的真实类型（写内存时零扩到 1 字节）。
 let store_ty = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Ty) {
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let vt: Mut(ty.Ty) = ty.vty(v);
+  if ty.ty_known(vt) == 1 and is_subbyte_bits(vt) == 1 { let cp0: u64 = ty.ty_at(t, vt); return t; }
   if ty.vlit(v) == 1 { let rc: u64 = ty.ty_bits(t, 64, 0); return t; }
   if ty.ty_known(vt) == 0 { let rc: u64 = ty.ty_bits(t, 64, 0); return t; }
   let cp: u64 = ty.ty_at(t, vt);
@@ -286,6 +321,15 @@ let store_ty = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Ty) {
 
 let do_store = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = store_ty(k, v1);
+  if is_subbyte_bits(t) == 1 {
+    let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+    let w: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
+    let wv: u64 = widen_byte(k, v1, t8, w);
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.op_val(k, w);
+    let b: u64 = ir.op_val(k, v0);
+    return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+  }
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v1);
   let b: u64 = ir.op_val(k, v0);

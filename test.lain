@@ -164,6 +164,50 @@ let run_option_mem_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
+let MetaBoolRec = struct {
+  ok: bool,
+  tag: u8,
+  active: bool,
+};
+
+let MetaFieldPrinter = func(T: Type) -> Module {
+  return module {
+    pub let Self = T;
+    pub let join_names = func(v: T) -> Slice(u8) {
+      let c: fmt.Cursor = fmt.fmt_begin();
+      let first: u64 = 1;
+      comptime for f in fields_of(T) {
+        if first == 0 { c = fmt.write_str(c, ","); }
+        c = fmt.write_str(c, f.name);
+        first = 0;
+      }
+      return fmt.fmt_done(c);
+    };
+  };
+};
+
+let MetaBoolPrinter = MetaFieldPrinter(MetaBoolRec);
+
+let run_meta_and_bool_suite = func() -> i64 {
+  let st: t.Suite = t.suite("meta::bool_and_fields");
+  let r: MetaBoolRec = MetaBoolRec { ok: true, tag: 42, active: false };
+  t.eq_bool(mut_of(st), "struct bool ok", r.ok, true);
+  t.eq_u64(mut_of(st), "struct u8 tag", r.tag as u64, 42);
+  t.eq_bool(mut_of(st), "struct bool active", r.active, false);
+  let mp: Mut(MetaBoolRec) = mut_of(r);
+  mp.ok = false;
+  mp.active = true;
+  t.eq_bool(mut_of(st), "mut bool ok", r.ok, false);
+  t.eq_bool(mut_of(st), "mut bool active", r.active, true);
+  t.eq_u64(mut_of(st), "u8 tag intact", r.tag as u64, 42);
+  let b: bool = true;
+  let bp: Ref(bool) = ref_of(b);
+  t.eq_bool(mut_of(st), "ref bool deref", deref(bp), true);
+  let names: Slice(u8) = MetaBoolPrinter.join_names(r);
+  t.eq_bytes(mut_of(st), "fields_of(T).name Slice(u8)", names, "ok,tag,active");
+  return t.finish(mut_of(st));
+};
+
 let main = func() -> i64 {
   io.println("=== Lain Library Test Runner (test.lain) ===");
   let f0: i64 = ir_test.run_suite();
@@ -171,7 +215,8 @@ let main = func() -> i64 {
   let f2: i64 = run_build_suite();
   let f3: i64 = run_os_fmt_suite();
   let f4: i64 = run_option_mem_suite();
-  let total_fail: i64 = f0 + f1 + f2 + f3 + f4;
+  let f5: i64 = run_meta_and_bool_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5;
   if total_fail == 0 {
     io.println("ALL SUITES PASSED");
   } else {

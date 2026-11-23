@@ -298,9 +298,47 @@ pub let off_of = func(k: Mut(st.State), obj: u64, off: u64) -> u64 {
   return res;
 };
 
+// bool 这类位宽不足一字节的整数类型，在内存里统一按 1 字节存（排除 TY_ADDR 等 w==0 类型）。
+let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
+  if ty.tk(tp) != codes.TY_BITS() { return 0; }
+  return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
+};
+
+let byte_t = func(k: Mut(st.State)) -> Mut(ty.Ty) {
+  return ir.tbits(k, 8);
+};
+
+// 把 val 零扩到 1 字节的 t8 后放进 out（字面量直接按 8 位重写）。
+let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  if ty.vlit(v) == 1 { return ty.val_lit(out, ty.vbits(v), t8); }
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, ty.vn(v));
+  let ins: u64 = ir.emit(k, codes.INST_ZEXT(), res, t8);
+  return ty.val_ref(out, res, t8);
+};
+
+// 把读回的 1 字节值截到 tp 的位宽。
+let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
+  let res: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, raw);
+  let ins: u64 = ir.emit(k, codes.INST_TRUNC(), res, tp);
+  return res;
+};
+
 // 把 val（已按 tp 解释）写到 obj + off。
 pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 {
   let p: u64 = off_of(k, obj, off);
+  if is_subbyte_bits(tp) == 1 {
+    let t8: Mut(ty.Ty) = byte_t(k);
+    let w: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
+    let wv: u64 = widen_byte(k, val, t8, w);
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.op_val(k, w);
+    let b: u64 = ir.arg_ref(k, p);
+    return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+  }
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, val);
   let b: u64 = ir.arg_ref(k, p);
@@ -310,6 +348,15 @@ pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), 
 // 从 obj + off 读一个 tp，结果放进 out。
 pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let p: u64 = off_of(k, obj, off);
+  if is_subbyte_bits(tp) == 1 {
+    let t8: Mut(ty.Ty) = byte_t(k);
+    let raw: u64 = ir.fresh_t(k);
+    let rc: u64 = ir.args_reset(k);
+    let a: u64 = ir.arg_ref(k, p);
+    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), raw, t8, 0);
+    let res: u64 = narrow_byte(k, raw, tp);
+    return ty.val_ref(out, res, tp);
+  }
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, p);
@@ -366,13 +413,10 @@ let proj_then = func(k: Mut(st.State), m: Mut(Member), obj: u64, res_ty: Mut(ty.
   let rr: u64 = ir.region_result(k, res_ty);
   let has: u64 = mem_has(m);
   if has == 1 {
-    let p: u64 = off_of(k, obj, mem_off(m));
-    let lv: u64 = ir.fresh_t(k);
-    let rc: u64 = ir.args_reset(k);
-    let a: u64 = ir.arg_ref(k, p);
-    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), lv, mt, 0);
+    let lv: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
+    let l: u64 = load_at(k, obj, mem_off(m), mt, lv);
     let rc2: u64 = ir.args_reset(k);
-    let b: u64 = ir.arg_ref(k, lv);
+    let b: u64 = ir.op_val(k, lv);
     let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
   } else {
     let rc: u64 = ir.args_reset(k);
