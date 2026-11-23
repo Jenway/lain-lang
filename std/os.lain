@@ -1,17 +1,60 @@
 // std::os —— 宿主操作系统原语：命令行参数、堆内存、文件读写与标准错误输出。
-// 八个宿主原语由 C99 前导代码用同一组符号名兑现。
+// 命令行参数与标准错误由 C99 前导代码用 lain_os_* 符号兑现；
+// 其余原语直接绑定 C99 <stdlib.h> / <stdio.h> / <string.h>。
 
 extern os_argc() -> u64 = lain_os_argc;
 extern os_argv_len(idx: u64) -> u64 = lain_os_argv_len;
 extern os_argv_copy(idx: u64, buf: Mut(u8), cap: u64) -> u64 = lain_os_argv_copy;
-extern os_alloc(bytes: u64) -> u64 = lain_os_alloc;
-extern os_free(ptr: u64) -> u64 = lain_os_free;
-extern os_read_file(path_ptr: Ref(u8), path_len: u64, out_ptr: Mut(u64), out_len: Mut(u64)) -> u64 = lain_os_read_file;
-extern os_write_file(path_ptr: Ref(u8), path_len: u64, data_ptr: Ref(u8), data_len: u64) -> u64 = lain_os_write_file;
 extern os_eprint(ptr: Ref(u8), len: u64) -> u64 = lain_os_eprint;
-extern os_exec(cmd_ptr: Ref(u8), cmd_len: u64) -> u64 = lain_os_exec;
-extern os_file_exists(path_ptr: Ref(u8), path_len: u64) -> u64 = lain_os_file_exists;
-extern os_remove_file(path_ptr: Ref(u8), path_len: u64) -> u64 = lain_os_remove_file;
+
+@extern(abi = "C", link = "calloc")
+let c_calloc = func(nmemb: c_size, size: c_size) -> Mut(u8);
+
+@extern(abi = "C", link = "malloc")
+let c_malloc = func(size: c_size) -> Mut(u8);
+
+@extern(abi = "C", link = "free")
+let c_free = func(ptr: Mut(u8));
+
+@extern(abi = "C", link = "memcpy")
+let c_memcpy = func(dst: Mut(u8), src: Ref(u8), n: c_size) -> Mut(u8);
+
+@extern(abi = "C", link = "fopen")
+let c_fopen = func(path: Ref(u8), mode: Ref(u8)) -> Mut(u8);
+
+@extern(abi = "C", link = "fclose")
+let c_fclose = func(f: Mut(u8)) -> c_int;
+
+@extern(abi = "C", link = "fseek")
+let c_fseek = func(f: Mut(u8), offset: c_long, whence: c_int) -> c_int;
+
+@extern(abi = "C", link = "ftell")
+let c_ftell = func(f: Mut(u8)) -> c_long;
+
+@extern(abi = "C", link = "fread")
+let c_fread = func(buf: Mut(u8), size: c_size, count: c_size, f: Mut(u8)) -> c_size;
+
+@extern(abi = "C", link = "fwrite")
+let c_fwrite = func(buf: Ref(u8), size: c_size, count: c_size, f: Mut(u8)) -> c_size;
+
+@extern(abi = "C", link = "remove")
+let c_remove = func(path: Ref(u8)) -> c_int;
+
+@extern(abi = "C", link = "system")
+let c_system = func(cmd: Ref(u8)) -> c_int;
+
+// 把切片复制到一块 calloc 出来的、以 0 结尾的缓冲。
+let alloc_cstr = func(s: Slice(u8)) -> Mut(u8) {
+  let n: c_size = s.len + 1;
+  let p: Mut(u8) = c_calloc(1, n);
+  if is_null(p) {
+    return p;
+  }
+  if s.len > 0 {
+    let copied: Mut(u8) = c_memcpy(p, s.ptr, s.len);
+  }
+  return p;
+};
 
 pub let argc = func() -> u64 {
   return os_argc();
@@ -26,19 +69,94 @@ pub let argv_copy = func(idx: u64, dst: MutSlice(u8)) -> u64 {
 };
 
 pub let alloc_bytes = func(bytes: u64) -> u64 {
-  return os_alloc(bytes);
+  let n: c_size = if bytes == 0 { 1 } else { bytes };
+  let p: Mut(u8) = c_calloc(1, n);
+  return p;
 };
 
 pub let free_bytes = func(ptr: u64) -> u64 {
-  return os_free(ptr);
+  if ptr != 0 {
+    c_free(ptr_cast(Mut(u8), ptr));
+  }
+  return 0;
 };
 
 pub let read_file = func(path: Slice(u8), out_ptr: Mut(u64), out_len: Mut(u64)) -> u64 {
-  return os_read_file(path.ptr, path.len, out_ptr, out_len);
+  deref(out_ptr) = 0;
+  deref(out_len) = 0;
+  let mode: Slice(u8) = "rb";
+  let cpath: Mut(u8) = alloc_cstr(path);
+  if is_null(cpath) {
+    return 1;
+  }
+  let cmode: Mut(u8) = alloc_cstr(mode);
+  if is_null(cmode) {
+    c_free(cpath);
+    return 1;
+  }
+  let f: Mut(u8) = c_fopen(cpath, cmode);
+  c_free(cmode);
+  c_free(cpath);
+  if is_null(f) {
+    return 1;
+  }
+  if c_fseek(f, 0, 2) != 0 {
+    c_fclose(f);
+    return 1;
+  }
+  let sz: c_long = c_ftell(f);
+  if sz < 0 {
+    c_fclose(f);
+    return 1;
+  }
+  if c_fseek(f, 0, 0) != 0 {
+    c_fclose(f);
+    return 1;
+  }
+  let want: u64 = sz as u64;
+  let buf: Mut(u8) = c_malloc(want + 1);
+  if is_null(buf) {
+    c_fclose(f);
+    return 1;
+  }
+  let got: c_size = c_fread(buf, 1, want, f);
+  c_fclose(f);
+  if got != want {
+    c_free(buf);
+    return 1;
+  }
+  let tail: Mut(u8) = ptr_cast(Mut(u8), buf + got);
+  deref(tail) = 0;
+  deref(out_ptr) = buf;
+  deref(out_len) = got;
+  return 0;
 };
 
 pub let write_file = func(path: Slice(u8), data: Slice(u8)) -> u64 {
-  return os_write_file(path.ptr, path.len, data.ptr, data.len);
+  let mode: Slice(u8) = "wb";
+  let cpath: Mut(u8) = alloc_cstr(path);
+  if is_null(cpath) {
+    return 1;
+  }
+  let cmode: Mut(u8) = alloc_cstr(mode);
+  if is_null(cmode) {
+    c_free(cpath);
+    return 1;
+  }
+  let f: Mut(u8) = c_fopen(cpath, cmode);
+  c_free(cmode);
+  c_free(cpath);
+  if is_null(f) {
+    return 1;
+  }
+  let wrote: c_size = if data.len > 0 { c_fwrite(data.ptr, 1, data.len, f) } else { 0 };
+  if c_fclose(f) != 0 {
+    return 1;
+  }
+  if wrote != data.len {
+    return 1;
+  }
+  return 0;
 };
 
 pub let eprint = func(msg: Slice(u8)) -> u64 {
@@ -46,13 +164,57 @@ pub let eprint = func(msg: Slice(u8)) -> u64 {
 };
 
 pub let exec = func(cmd: Slice(u8)) -> u64 {
-  return os_exec(cmd.ptr, cmd.len);
+  let ccmd: Mut(u8) = alloc_cstr(cmd);
+  if is_null(ccmd) {
+    return 127;
+  }
+  let rc: c_int = c_system(ccmd);
+  c_free(ccmd);
+  if rc < 0 {
+    return 127;
+  }
+  let raw: u64 = rc as u64;
+  // POSIX 的 system 返回 waitpid 状态：退出码在 256 以上，需要右移八位取回。
+  // Windows 的 system 直接返回退出码，通常小于 256，原样返回。
+  if raw >= 256 {
+    if (rc & 0x7f) == 0 {
+      return ((rc >> 8) & 0xff) as u64;
+    }
+    return (128 + (rc & 0x7f)) as u64;
+  }
+  return raw;
 };
 
 pub let file_exists = func(path: Slice(u8)) -> bool {
-  return os_file_exists(path.ptr, path.len) != 0;
+  let mode: Slice(u8) = "rb";
+  let cpath: Mut(u8) = alloc_cstr(path);
+  if is_null(cpath) {
+    return false;
+  }
+  let cmode: Mut(u8) = alloc_cstr(mode);
+  if is_null(cmode) {
+    c_free(cpath);
+    return false;
+  }
+  let f: Mut(u8) = c_fopen(cpath, cmode);
+  c_free(cmode);
+  c_free(cpath);
+  if is_null(f) {
+    return false;
+  }
+  c_fclose(f);
+  return true;
 };
 
 pub let remove_file = func(path: Slice(u8)) -> u64 {
-  return os_remove_file(path.ptr, path.len);
+  let cpath: Mut(u8) = alloc_cstr(path);
+  if is_null(cpath) {
+    return 1;
+  }
+  let rc: c_int = c_remove(cpath);
+  c_free(cpath);
+  if rc == 0 {
+    return 0;
+  }
+  return 1;
 };
