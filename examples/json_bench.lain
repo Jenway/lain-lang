@@ -1,0 +1,186 @@
+// examples/json_bench.lain
+// std::json 的双路径基准：
+//   1. DOM 路径：parse 把嵌套 JSON 解析进 BumpArena，stringify 写回并逐字节核对；
+//   2. comptime 路径：write_struct 用 fields_of(T) 展开结构体字段直接写出。
+// 计时只包住热循环，报告毫秒与吞吐。
+let io = import("std::io");
+let mem = import("std::mem");
+let bench = import("std::bench");
+let json = import("std::json");
+
+let ArenaBacking = struct { bytes: Array(u8, 65536) };
+let arena_backing: ArenaBacking = ArenaBacking { };
+
+let OutBacking = struct { bytes: Array(u8, 8192) };
+let out_backing: OutBacking = OutBacking { };
+
+let StructBacking = struct { bytes: Array(u8, 1024) };
+let struct_backing: StructBacking = StructBacking { };
+
+let Record = struct {
+  id: u64,
+  score: i64,
+  name: Slice(u8),
+  tag: Slice(u8),
+};
+
+let bytes_eq = func(a: Slice(u8), b: Slice(u8), i: u64) -> bool {
+  if i >= a.len {
+    return true;
+  }
+  if a[i] != b[i] {
+    return false;
+  }
+  return bytes_eq(a, b, i + 1);
+};
+
+let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  if a.len != b.len {
+    return false;
+  }
+  return bytes_eq(a, b, 0);
+};
+
+let out_slice = func() -> MutSlice(u8) {
+  return make_slice(MutSlice(u8), ptr_cast(Mut(u8), ptr_of(out_backing)), 8192);
+};
+
+let struct_slice = func() -> MutSlice(u8) {
+  return make_slice(MutSlice(u8), ptr_cast(Mut(u8), ptr_of(struct_backing)), 1024);
+};
+
+let new_root = func() -> json.JsonVal {
+  return json.JsonVal {
+    kind: 0,
+    num: 0,
+    text_ptr: 0,
+    text_len: 0,
+    key_ptr: 0,
+    key_len: 0,
+    child: 0,
+    next: 0,
+    tail: 0,
+    count: 0,
+  };
+};
+
+let main = func() -> i64 {
+  let payload: Slice(u8) = "{\"id\":42,\"name\":\"la\\nin\",\"tags\":[\"json\",\"dom\",\"arena\"],\"nested\":{\"ok\":true,\"n\":-7,\"label\":\"compiler\"}}";
+  let expected_struct: Slice(u8) = "{\"id\":7,\"score\":-91,\"name\":\"lain\",\"tag\":\"bench\"}";
+  let keys: Slice(u8) = "id\nscore\nname\ntag\n";
+
+  let record: Record = Record { id: 7, score: -91, name: "lain", tag: "bench" };
+  let arena_base: u64 = ptr_of(arena_backing);
+  let arena_val: mem.BumpArena.Arena = mem.BumpArena.over(arena_base, 65536);
+  let arena: Mut(mem.BumpArena.Arena) = mut_of(arena_val);
+  let root0: json.JsonVal = new_root();
+  let root: Mut(json.JsonVal) = mut_of(root0);
+  let out: MutSlice(u8) = out_slice();
+  let struct_buf: MutSlice(u8) = struct_slice();
+
+  // bool 叶子直接写出，确认 JsonBool 见证可用。
+  let bool_buf: MutSlice(u8) = struct_slice();
+  let bp0: u64 = 0;
+  let bp: Mut(u64) = mut_of(bp0);
+  if json.JsonBool.write(true, bool_buf, bp) == false {
+    io.println("bool write failed");
+    return 11;
+  }
+  let bool_out: Slice(u8) = make_slice(Slice(u8), bool_buf.ptr, bp0);
+  if same(bool_out, "true") == false {
+    io.println("bool bytes mismatch");
+    return 12;
+  }
+
+  // 预热一次并核对两条路径。
+  let warm_reset: u64 = mem.BumpArena.reset(arena);
+  let wp0: u64 = 0;
+  let wp: Mut(u64) = mut_of(wp0);
+  if json.parse(arena, payload, root) == false {
+    io.println("parse failed");
+    return 21;
+  }
+  if json.stringify(root, out, wp) == false {
+    io.println("warm stringify failed");
+    return 22;
+  }
+  let warm_dom: Slice(u8) = make_slice(Slice(u8), out.ptr, wp0);
+  if same(warm_dom, payload) == false {
+    io.println("dom round-trip mismatch");
+    return 23;
+  }
+
+  let wsp0: u64 = 0;
+  let wsp: Mut(u64) = mut_of(wsp0);
+  if json.write_struct(ref_of(record), keys, struct_buf, wsp) ?{ c: json.StructCodec(Record) } == false {
+    io.println("warm write_struct failed");
+    return 24;
+  }
+  let warm_struct: Slice(u8) = make_slice(Slice(u8), struct_buf.ptr, wsp0);
+  if same(warm_struct, expected_struct) == false {
+    io.println("struct serialization mismatch");
+    return 25;
+  }
+
+  let iterations: u64 = 10000;
+  let parse_fail: u64 = 0;
+  let dom_fail: u64 = 0;
+  let struct_fail: u64 = 0;
+
+  let t0: u64 = bench.nanos();
+  loop c(it: u64 = 0) while it < iterations {
+    let reset: u64 = mem.BumpArena.reset(arena);
+    if json.parse(arena, payload, root) == false {
+      parse_fail = parse_fail + 1;
+    } else {
+      let p0: u64 = 0;
+      let p: Mut(u64) = mut_of(p0);
+      if json.stringify(root, out, p) == false {
+        dom_fail = dom_fail + 1;
+      } else {
+        let got: Slice(u8) = make_slice(Slice(u8), out.ptr, p0);
+        if same(got, payload) == false {
+          dom_fail = dom_fail + 1;
+        }
+      }
+    }
+    let s0: u64 = 0;
+    let sp: Mut(u64) = mut_of(s0);
+    if json.write_struct(ref_of(record), keys, struct_buf, sp) ?{ c: json.StructCodec(Record) } == false {
+      struct_fail = struct_fail + 1;
+    } else {
+      let sg: Slice(u8) = make_slice(Slice(u8), struct_buf.ptr, s0);
+      if same(sg, expected_struct) == false {
+        struct_fail = struct_fail + 1;
+      }
+    }
+    it = it + 1;
+  };
+  let elapsed: u64 = bench.nanos() - t0;
+
+  let total_bytes: u64 = (payload.len + expected_struct.len) * iterations;
+  let elapsed_ms: u64 = elapsed / 1000000;
+  let mbps: u64 = (total_bytes * 1000) / elapsed;
+
+  io.println("=== json bench ===");
+  io.print("iterations     : ");
+  io.println_u64(iterations);
+  io.print("bytes per iter : ");
+  io.println_u64(payload.len + expected_struct.len);
+  io.print("elapsed ms     : ");
+  io.println_u64(elapsed_ms);
+  io.print("throughput MB/s: ");
+  io.println_u64(mbps);
+  io.print("parse failures : ");
+  io.println_u64(parse_fail);
+  io.print("dom failures   : ");
+  io.println_u64(dom_fail);
+  io.print("struct failures: ");
+  io.println_u64(struct_fail);
+
+  if (parse_fail + dom_fail + struct_fail) != 0 {
+    return 1;
+  }
+  io.println("PASS");
+  return 0;
+};

@@ -1,0 +1,697 @@
+// std::json —— 编译期结构体序列化、JSON DOM 与解析器。
+//
+// 两条互不依赖的路径：
+//   * write_struct / StructCodec：编译期展开 fields_of(T)，把字段值直接写进
+//     调用方的 MutSlice(u8)；叶子字段（u64 / i64 / bool / Slice(u8)）由见证
+//     模块分派，全程没有运行期反射表。JSON 键由调用方按字段声明顺序给出。
+//   * parse / stringify：JsonVal 节点、键、字符串全部从调用方给的
+//     std::mem.BumpArena 切出，节点之间以绝对地址串成兄弟链表，因此一块
+//     arena 可以整体释放，不会留下碎片。解析器用显式栈迭代，不递归。
+//     节点里的字符串用 (ptr, len) 两个 u64 保存，不对 arena 指针做切片字段存入。
+let mem = import("std::mem");
+
+// ---------------------------------------------------------------------------
+// 写出原语：所有写入都先核对缓冲剩余长度，越界回 false，绝不静默截断。
+// ---------------------------------------------------------------------------
+pub let put_byte = func(buf: MutSlice(u8), pos: Mut(u64), b: u8) -> bool {
+  if deref(pos) >= buf.len {
+    return false;
+  }
+  buf[deref(pos)] = b;
+  deref(pos) = deref(pos) + 1;
+  return true;
+};
+
+pub let put_slice = func(buf: MutSlice(u8), pos: Mut(u64), s: Slice(u8)) -> bool {
+  let ok: u64 = 1;
+  loop c(i: u64 = 0) while (i < s.len) and (ok == 1) {
+    if put_byte(buf, pos, s[i]) == false {
+      ok = 0;
+    }
+    i = i + 1;
+  };
+  return ok == 1;
+};
+
+pub let put_u64 = func(buf: MutSlice(u8), pos: Mut(u64), v: u64) -> bool {
+  if v >= 10 {
+    if put_u64(buf, pos, v / 10) == false {
+      return false;
+    }
+    return put_byte(buf, pos, (48 + (v % 10)) as u8);
+  }
+  return put_byte(buf, pos, (48 + v) as u8);
+};
+
+pub let put_i64 = func(buf: MutSlice(u8), pos: Mut(u64), v: i64) -> bool {
+  if v < 0 {
+    if put_byte(buf, pos, 45) == false {
+      return false;
+    }
+    let mag: u64 = 0 - (v as u64);
+    return put_u64(buf, pos, mag);
+  }
+  return put_u64(buf, pos, v as u64);
+};
+
+let hex_digit = func(v: u64) -> u8 {
+  let d: u64 = v % 16;
+  if d < 10 {
+    return (48 + d) as u8;
+  }
+  return (97 + (d - 10)) as u8;
+};
+
+let put_control = func(buf: MutSlice(u8), pos: Mut(u64), c: u8) -> bool {
+  if put_slice(buf, pos, "\\u00") == false {
+    return false;
+  }
+  let hi: u64 = (c as u64) / 16;
+  let lo: u64 = (c as u64) % 16;
+  if put_byte(buf, pos, hex_digit(hi)) == false {
+    return false;
+  }
+  return put_byte(buf, pos, hex_digit(lo));
+};
+
+// 带引号的 JSON 字符串：转义 \" \\ \n \t \r 与其余控制字符。
+pub let put_string = func(buf: MutSlice(u8), pos: Mut(u64), s: Slice(u8)) -> bool {
+  if put_byte(buf, pos, 34) == false {
+    return false;
+  }
+  let ok: u64 = 1;
+  loop c(i: u64 = 0) while (i < s.len) and (ok == 1) {
+    let ch: u8 = s[i];
+    if ch == 34 {
+      if put_slice(buf, pos, "\\\"") == false { ok = 0; }
+    } else {
+      if ch == 92 {
+        if put_slice(buf, pos, "\\\\") == false { ok = 0; }
+      } else {
+        if ch == 10 {
+          if put_slice(buf, pos, "\\n") == false { ok = 0; }
+        } else {
+          if ch == 9 {
+            if put_slice(buf, pos, "\\t") == false { ok = 0; }
+          } else {
+            if ch == 13 {
+              if put_slice(buf, pos, "\\r") == false { ok = 0; }
+            } else {
+              if ch < 32 {
+                if put_control(buf, pos, ch) == false { ok = 0; }
+              } else {
+                if put_byte(buf, pos, ch) == false { ok = 0; }
+              }
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  };
+  if ok == 0 {
+    return false;
+  }
+  return put_byte(buf, pos, 34);
+};
+
+pub let put_key = func(buf: MutSlice(u8), pos: Mut(u64), name: Slice(u8)) -> bool {
+  if put_string(buf, pos, name) == false {
+    return false;
+  }
+  return put_byte(buf, pos, 58);
+};
+
+// ---------------------------------------------------------------------------
+// 叶子见证：每种标量把自己的写法规约成同一条 write 签名。
+// 值按值传递，避免对 bool 取地址。
+// ---------------------------------------------------------------------------
+pub let JsonLeaf = sig {
+  pub let Self: Type;
+  pub let write: Fn((Self, MutSlice(u8), Mut(u64)) -> bool);
+};
+
+pub let JsonU64: JsonLeaf = module {
+  pub let Self = u64;
+  pub let write = func(v: u64, buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+    return put_u64(buf, pos, v);
+  };
+};
+
+pub let JsonI64: JsonLeaf = module {
+  pub let Self = i64;
+  pub let write = func(v: i64, buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+    return put_i64(buf, pos, v);
+  };
+};
+
+pub let JsonBool: JsonLeaf = module {
+  pub let Self = bool;
+  pub let write = func(v: bool, buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+    if v {
+      return put_slice(buf, pos, "true");
+    }
+    return put_slice(buf, pos, "false");
+  };
+};
+
+pub let JsonStr: JsonLeaf = module {
+  pub let Self = Slice(u8);
+  pub let write = func(v: Slice(u8), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+    return put_string(buf, pos, v);
+  };
+};
+
+use JsonU64;
+use JsonI64;
+use JsonBool;
+use JsonStr;
+
+pub let write_leaf = func(v: T, buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, l: JsonLeaf } -> bool {
+  return l.write(v, buf, pos);
+};
+
+// ---------------------------------------------------------------------------
+// 编译期结构体序列化：一个函子把 fields_of(T) 展开成字段写入序列。
+// 键按字段声明顺序从 keys 取；调用方用 ?{ c: StructCodec(T) } 直接实例化。
+// ---------------------------------------------------------------------------
+pub let JsonStructCodec = sig {
+  pub let Self: Type;
+  pub let encode: Fn((Self, Slice(u8), MutSlice(u8), Mut(u64)) -> bool);
+};
+
+pub let StructCodec = func(T: Type) -> Module {
+  return module {
+    pub let Self = T;
+    pub let encode = func(v: T, keys: Slice(u8), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+      let ok: u64 = 1;
+      let first: u64 = 1;
+      let kcur: u64 = 0;
+      if put_byte(buf, pos, 123) == false { ok = 0; }
+      comptime for f in fields_of(T) {
+        if ok == 1 {
+          if first == 0 {
+            if put_byte(buf, pos, 44) == false { ok = 0; }
+          }
+          let kstart: u64 = kcur;
+          let kend: u64 = keys.len;
+          loop c(ki: u64 = kstart) while ki < keys.len {
+            if keys[ki] == 10 {
+              kend = ki;
+              ki = keys.len;
+            } else {
+              ki = ki + 1;
+            }
+          };
+          if kstart > keys.len {
+            ok = 0;
+          } else {
+            let klen: u64 = kend - kstart;
+            let ks: Slice(u8) = make_slice(Slice(u8), keys.ptr + kstart, klen);
+            if put_key(buf, pos, ks) == false { ok = 0; }
+            kcur = kend + 1;
+          }
+          let w: bool = write_leaf(v.[:f.name], buf, pos);
+          if w == false { ok = 0; }
+          first = 0;
+        }
+      }
+      if ok == 0 {
+        return false;
+      }
+      return put_byte(buf, pos, 125);
+    };
+  };
+};
+
+pub let write_struct = func(val: Ref(T), keys: Slice(u8), buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, c: JsonStructCodec } -> bool {
+  return c.encode(deref(val), keys, buf, pos);
+};
+
+// ---------------------------------------------------------------------------
+// DOM：节点从 BumpArena 切出，兄弟节点以绝对地址串成单向链表。
+// child / next / tail 为 0 表示没有；arena 的块起点非零，0 不会与真节点撞车。
+// 文本与键用 (ptr, len) 保存，不做切片字段写入。
+// ---------------------------------------------------------------------------
+pub let JsonKind = module {
+  pub let Null = func() -> u64 { return 0; };
+  pub let True = func() -> u64 { return 1; };
+  pub let False = func() -> u64 { return 2; };
+  pub let Int = func() -> u64 { return 3; };
+  pub let Str = func() -> u64 { return 4; };
+  pub let Arr = func() -> u64 { return 5; };
+  pub let Obj = func() -> u64 { return 6; };
+};
+
+pub let JsonVal = struct {
+  kind: u64,
+  num: i64,
+  text_ptr: u64,
+  text_len: u64,
+  key_ptr: u64,
+  key_len: u64,
+  child: u64,
+  next: u64,
+  tail: u64,
+  count: u64,
+};
+
+pub let Frame = struct {
+  node: u64,
+  kind: u64,
+  sep: u64,
+  key_ptr: u64,
+  key_len: u64,
+};
+
+let init_node = func(out: Mut(JsonVal)) {
+  deref(out).kind = JsonKind.Null();
+  deref(out).num = 0;
+  deref(out).text_ptr = 0;
+  deref(out).text_len = 0;
+  deref(out).key_ptr = 0;
+  deref(out).key_len = 0;
+  deref(out).child = 0;
+  deref(out).next = 0;
+  deref(out).tail = 0;
+  deref(out).count = 0;
+};
+
+let init_container = func(node: Mut(JsonVal), kind: u64) {
+  deref(node).kind = kind;
+  deref(node).child = 0;
+  deref(node).next = 0;
+  deref(node).tail = 0;
+  deref(node).count = 0;
+};
+
+let alloc_node = func(arena: Mut(mem.BumpArena.Arena)) -> u64 {
+  let spot: u64 = mem.BumpArena.alloc(arena, size_of(JsonVal));
+  if spot == 0 {
+    return 0;
+  }
+  let node: Mut(JsonVal) = ptr_cast(Mut(JsonVal), spot);
+  init_node(node);
+  return spot;
+};
+
+let link_child = func(parent: Mut(JsonVal), spot: u64) {
+  if deref(parent).count == 0 {
+    deref(parent).child = spot;
+  } else {
+    let tail: Mut(JsonVal) = ptr_cast(Mut(JsonVal), deref(parent).tail);
+    deref(tail).next = spot;
+  }
+  deref(parent).tail = spot;
+  deref(parent).count = deref(parent).count + 1;
+};
+
+pub let skip_ws = func(input: Slice(u8), pos: Mut(u64)) -> u64 {
+  loop c(i: u64 = deref(pos), done: u64 = 0) while done == 0 {
+    if i >= input.len {
+      done = 1;
+    } else {
+      let ch: u8 = input[i];
+      if (ch == 32) or (ch == 9) or (ch == 10) or (ch == 13) {
+        i = i + 1;
+      } else {
+        done = 1;
+      }
+    }
+  };
+  let out: u64 = 0;
+  return out;
+};
+
+let peek = func(input: Slice(u8), pos: Mut(u64)) -> u8 {
+  if deref(pos) >= input.len {
+    return 0;
+  }
+  return input[deref(pos)];
+};
+
+let expect_lit = func(input: Slice(u8), pos: Mut(u64), lit: Slice(u8)) -> bool {
+  if deref(pos) + lit.len > input.len {
+    return false;
+  }
+  let ok: u64 = 1;
+  loop c(i: u64 = 0) while i < lit.len {
+    if input[deref(pos) + i] != lit[i] {
+      ok = 0;
+    }
+    i = i + 1;
+  };
+  if ok == 0 {
+    return false;
+  }
+  deref(pos) = deref(pos) + lit.len;
+  return true;
+};
+
+let is_digit = func(ch: u8) -> bool {
+  if ch >= 48 {
+    if ch <= 57 {
+      return true;
+    }
+  }
+  return false;
+};
+
+let parse_int = func(input: Slice(u8), pos: Mut(u64), out: Mut(i64)) -> bool {
+  let neg: u64 = 0;
+  if peek(input, pos) == 45 {
+    neg = 1;
+    deref(pos) = deref(pos) + 1;
+  }
+  let acc: u64 = 0;
+  let digits: u64 = 0;
+  loop c(i: u64 = 0) while i == 0 {
+    let ch: u8 = peek(input, pos);
+    if is_digit(ch) {
+      acc = acc * 10 + ((ch - 48) as u64);
+      deref(pos) = deref(pos) + 1;
+      digits = digits + 1;
+    } else {
+      i = 1;
+    }
+  };
+  if digits == 0 {
+    return false;
+  }
+  if neg == 1 {
+    deref(out) = 0 - (acc as i64);
+  } else {
+    deref(out) = acc as i64;
+  }
+  return true;
+};
+
+let decode_escape = func(ch: u8, out: Mut(u8)) -> bool {
+  if ch == 34 { deref(out) = 34; return true; }
+  if ch == 92 { deref(out) = 92; return true; }
+  if ch == 47 { deref(out) = 47; return true; }
+  if ch == 98 { deref(out) = 8; return true; }
+  if ch == 102 { deref(out) = 12; return true; }
+  if ch == 110 { deref(out) = 10; return true; }
+  if ch == 114 { deref(out) = 13; return true; }
+  if ch == 116 { deref(out) = 9; return true; }
+  return false;
+};
+
+// 先扫到收尾引号并算出解码后长度，再从 arena 切出恰好大小的缓冲写入。
+// 结果用 ptr / len 两个 u64 交出。
+let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out_ptr: Mut(u64), out_len: Mut(u64)) -> bool {
+  deref(pos) = deref(pos) + 1;
+  let end: u64 = 0;
+  let dec: u64 = 0;
+  let state: u64 = 1;
+  loop c(i: u64 = deref(pos)) while state == 1 {
+    if i >= input.len {
+      state = 0;
+    } else {
+      let ch: u8 = input[i];
+      if ch == 92 {
+        if i + 1 >= input.len {
+          state = 0;
+        } else {
+          i = i + 2;
+          dec = dec + 1;
+        }
+      } else {
+        if ch == 34 {
+          end = i;
+          state = 2;
+        } else {
+          i = i + 1;
+          dec = dec + 1;
+        }
+      }
+    }
+  };
+  if state != 2 {
+    return false;
+  }
+  let dst: Mut(u8) = ptr_cast(Mut(u8), 0 as u64);
+  if dec > 0 {
+    let spot: u64 = mem.BumpArena.alloc(arena, dec);
+    if spot == 0 {
+      return false;
+    }
+    dst = ptr_cast(Mut(u8), spot);
+  }
+  let src: u64 = deref(pos);
+  let written: u64 = 0;
+  let dec_ok: u64 = 1;
+  loop c(i: u64 = src) while i < end {
+    let ch: u8 = input[i];
+    if ch == 92 {
+      let target: Mut(u8) = dst + written;
+      let escaped: u8 = input[i + 1];
+      if decode_escape(escaped, target) == false {
+        dec_ok = 0;
+      }
+      i = i + 2;
+    } else {
+      let target2: Mut(u8) = dst + written;
+      deref(target2) = ch;
+      i = i + 1;
+    }
+    written = written + 1;
+  };
+  if dec_ok == 0 {
+    return false;
+  }
+  deref(out_ptr) = dst as u64;
+  deref(out_len) = dec;
+  deref(pos) = end + 1;
+  return true;
+};
+
+// 标量：null / true / false / 字符串 / 整数。容器由 parse 的显式栈处理。
+let parse_scalar = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out: Mut(JsonVal)) -> bool {
+  let ch: u8 = peek(input, pos);
+  if ch == 110 {
+    if expect_lit(input, pos, "null") == false { return false; }
+    deref(out).kind = JsonKind.Null();
+    return true;
+  }
+  if ch == 116 {
+    if expect_lit(input, pos, "true") == false { return false; }
+    deref(out).kind = JsonKind.True();
+    return true;
+  }
+  if ch == 102 {
+    if expect_lit(input, pos, "false") == false { return false; }
+    deref(out).kind = JsonKind.False();
+    return true;
+  }
+  if ch == 34 {
+    let tp0: u64 = 0;
+    let tl0: u64 = 0;
+    let tp: Mut(u64) = mut_of(tp0);
+    let tl: Mut(u64) = mut_of(tl0);
+    if parse_string(arena, input, pos, tp, tl) == false { return false; }
+    deref(out).kind = JsonKind.Str();
+    deref(out).text_ptr = tp0;
+    deref(out).text_len = tl0;
+    return true;
+  }
+  let num: i64 = 0;
+  if parse_int(input, pos, mut_of(num)) == false { return false; }
+  deref(out).kind = JsonKind.Int();
+  deref(out).num = num;
+  return true;
+};
+
+pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut(JsonVal)) -> bool {
+  init_node(out);
+  let pos: u64 = 0;
+  let p: Mut(u64) = mut_of(pos);
+  let ws0: u64 = skip_ws(input, p);
+  let ch: u8 = peek(input, p);
+  if (ch != 123) and (ch != 91) {
+    if parse_scalar(arena, input, p, out) == false {
+      return false;
+    }
+    let ws1: u64 = skip_ws(input, p);
+    return pos == input.len;
+  }
+
+  let kind: u64 = if ch == 123 { JsonKind.Obj() } else { JsonKind.Arr() };
+  init_container(out, kind);
+  let frames_addr: u64 = mem.BumpArena.alloc(arena, 64 * size_of(Frame));
+  if frames_addr == 0 {
+    return false;
+  }
+  let frames_ptr: Mut(Frame) = ptr_cast(Mut(Frame), frames_addr);
+  let frames: MutSlice(Frame) = make_slice(MutSlice(Frame), frames_ptr, 64);
+  frames[0] = Frame { node: out as u64, kind: kind, sep: 0, key_ptr: 0, key_len: 0 };
+  let depth: u64 = 1;
+  deref(p) = deref(p) + 1;
+
+  let ok: u64 = 1;
+  loop c(guard: u64 = 0) while (depth > 0) and (ok == 1) {
+    let idx: u64 = depth - 1;
+    let top: Frame = frames[idx];
+    let ws: u64 = skip_ws(input, p);
+    let cch: u8 = peek(input, p);
+    let close: u8 = if top.kind == JsonKind.Obj() { 125 } else { 93 };
+    if cch == 0 {
+      ok = 0;
+    } else {
+      if top.sep == 1 {
+        if cch == 44 {
+          deref(p) = deref(p) + 1;
+          frames[idx] = Frame { node: top.node, kind: top.kind, sep: 0, key_ptr: 0, key_len: 0 };
+        } else {
+          if cch == close {
+            deref(p) = deref(p) + 1;
+            depth = depth - 1;
+          } else {
+            ok = 0;
+          }
+        }
+      } else {
+        let parent: Mut(JsonVal) = ptr_cast(Mut(JsonVal), top.node);
+        if cch == close {
+          if deref(parent).count == 0 {
+            deref(p) = deref(p) + 1;
+            depth = depth - 1;
+          } else {
+            ok = 0;
+          }
+        } else {
+          let is_obj: u64 = if top.kind == JsonKind.Obj() { 1 } else { 0 };
+          let kp0: u64 = 0;
+          let kl0: u64 = 0;
+          if is_obj == 1 {
+            if cch != 34 {
+              ok = 0;
+            } else {
+              let kp: Mut(u64) = mut_of(kp0);
+              let kl: Mut(u64) = mut_of(kl0);
+              if parse_string(arena, input, p, kp, kl) == false {
+                ok = 0;
+              } else {
+                let ws2: u64 = skip_ws(input, p);
+                if peek(input, p) != 58 {
+                  ok = 0;
+                } else {
+                  deref(p) = deref(p) + 1;
+                  let ws3: u64 = skip_ws(input, p);
+                }
+              }
+            }
+          }
+          if ok == 1 {
+            let child_addr: u64 = alloc_node(arena);
+            if child_addr == 0 {
+              ok = 0;
+            } else {
+              let child: Mut(JsonVal) = ptr_cast(Mut(JsonVal), child_addr);
+              if is_obj == 1 {
+                deref(child).key_ptr = kp0;
+                deref(child).key_len = kl0;
+              }
+              let vch: u8 = peek(input, p);
+              if (vch == 123) or (vch == 91) {
+                let ck: u64 = if vch == 123 { JsonKind.Obj() } else { JsonKind.Arr() };
+                init_container(child, ck);
+                link_child(parent, child_addr);
+                deref(p) = deref(p) + 1;
+                frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1, key_ptr: 0, key_len: 0 };
+                if depth >= 64 {
+                  ok = 0;
+                } else {
+                  frames[depth] = Frame { node: child_addr, kind: ck, sep: 0, key_ptr: 0, key_len: 0 };
+                  depth = depth + 1;
+                }
+              } else {
+                if parse_scalar(arena, input, p, child) == false {
+                  ok = 0;
+                } else {
+                  link_child(parent, child_addr);
+                  frames[idx] = Frame { node: top.node, kind: top.kind, sep: 1, key_ptr: 0, key_len: 0 };
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  if ok == 0 {
+    return false;
+  }
+  if depth != 0 {
+    return false;
+  }
+  let ws4: u64 = skip_ws(input, p);
+  return pos == input.len;
+};
+
+// ---------------------------------------------------------------------------
+// stringify：逐节点递归写出；数组与对象都沿 next 链表遍历。
+// ---------------------------------------------------------------------------
+let stringify_val = func(v: Ref(JsonVal), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+  let kind: u64 = deref(v).kind;
+  if kind == JsonKind.Null() {
+    return put_slice(buf, pos, "null");
+  }
+  if kind == JsonKind.True() {
+    return put_slice(buf, pos, "true");
+  }
+  if kind == JsonKind.False() {
+    return put_slice(buf, pos, "false");
+  }
+  if kind == JsonKind.Int() {
+    return put_i64(buf, pos, deref(v).num);
+  }
+  if kind == JsonKind.Str() {
+    let s: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), deref(v).text_ptr), deref(v).text_len);
+    return put_string(buf, pos, s);
+  }
+  if kind == JsonKind.Arr() {
+    if put_byte(buf, pos, 91) == false {
+      return false;
+    }
+    let ok: u64 = 1;
+    loop c(cur: u64 = deref(v).child, first: u64 = 1) while cur != 0 {
+      if first == 0 {
+        if put_byte(buf, pos, 44) == false { ok = 0; }
+      }
+      let node: Ref(JsonVal) = ptr_cast(Ref(JsonVal), cur);
+      if stringify_val(node, buf, pos) == false { ok = 0; }
+      cur = deref(node).next;
+      first = 0;
+    };
+    if ok == 0 {
+      return false;
+    }
+    return put_byte(buf, pos, 93);
+  }
+  if put_byte(buf, pos, 123) == false {
+    return false;
+  }
+  let ok2: u64 = 1;
+  loop c(cur: u64 = deref(v).child, first: u64 = 1) while cur != 0 {
+    if first == 0 {
+      if put_byte(buf, pos, 44) == false { ok2 = 0; }
+    }
+    let node: Ref(JsonVal) = ptr_cast(Ref(JsonVal), cur);
+    let ks: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), deref(node).key_ptr), deref(node).key_len);
+    if put_string(buf, pos, ks) == false { ok2 = 0; }
+    if put_byte(buf, pos, 58) == false { ok2 = 0; }
+    if stringify_val(node, buf, pos) == false { ok2 = 0; }
+    cur = deref(node).next;
+    first = 0;
+  };
+  if ok2 == 0 {
+    return false;
+  }
+  return put_byte(buf, pos, 125);
+};
+
+pub let stringify = func(v: Ref(JsonVal), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+  return stringify_val(v, buf, pos);
+};
