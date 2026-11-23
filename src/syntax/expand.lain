@@ -10,6 +10,9 @@
 // 折叠由内向外求值，求值次序就是模板的书写次序；每个槽各自单态化出对应
 // 类型的写入过程。std::fmt 只往静态字符池写字节，全程没有堆分配。源里出现
 // f"..." 时，文件顶部补上 std::fmt 的导入、公开面与四种基础见证。
+// 本遍次同时识别语法宏调用 @name(实参) 与 @name { 实参 }：内建的 AstOut 宏
+// @stringify 与 @concat_ident 直接读出实参原文，就地换成一个记号节点。
+// @extern(...)、@root 与 @macro 声明归别的遍次，判定时排除，原样交回。
 let st = import("src::driver::state");
 let ax = import("src::syntax::ast");
 let s = import("src::driver::sym");
@@ -283,9 +286,169 @@ let emit_fstring = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return fold_segs(k, lit, base, next, cnt, snip, head, 0);
 };
 
+// --- 语法宏与内建 AstOut 宏 ---------------------------------------------
+// @name(实参) 与 @name { 实参 } 是 Expand 遍次的语法宏调用。内建的
+// @stringify 与 @concat_ident 只读实参原文，产出一个记号节点；其余名字
+// 在这里就地报错，不把 @ 漏给后续遍次当成表达式。
+let put_byte = func(dst: Mut(u8), at: u64, code: u64) -> u64 {
+  let q: Mut(u8) = dst + at;
+  deref(q) = code as u8;
+  return at + 1;
+};
+
+let close_byte = func(d: u64) -> u64 {
+  if d == ax.dl_paren() { return 41; }
+  if d == ax.dl_bracket() { return 93; }
+  if d == ax.dl_brace() { return 125; }
+  return d;
+};
+
+let bytes_eq = func(a: Ref(u8), b: Ref(u8), n: u64) -> u64 {
+  if n == 0 { return 1; }
+  if deref(a) != deref(b) { return 0; }
+  return bytes_eq(a + 1, b + 1, n - 1);
+};
+
+// 记号 h 的原文是否等于给定字节串。
+let text_is = func(h: u64, want: Ref(u8), n: u64) -> u64 {
+  if ax.lit_len(h) != n { return 0; }
+  let p: Ref(u8) = ax.lit_addr(h);
+  if is_null(p) { return 0; }
+  return bytes_eq(p, want, n);
+};
+
+// 节点 h 按源代码书写形式占用的字节数：相邻孩子之间一个空格，组多出两侧分隔符。
+let text_span = func(h: u64) -> u64 {
+  if ax.is_group_node(h) == 1 {
+    let n: u64 = ax.n_count(h);
+    if n == 0 { return 2; }
+    return text_span_seq(h, 0, 2);
+  }
+  return ax.lit_len(h);
+};
+
+let text_span_seq = func(g: u64, i: u64, acc: u64) -> u64 {
+  if i >= ax.n_count(g) { return acc; }
+  let sep: u64 = if i == 0 { 0 } else { 1 };
+  return text_span_seq(g, i + 1, acc + sep + text_span(ax.n_at(g, i)));
+};
+
+// 把组 g 的全部孩子按书写次序重发进 dst，回新的写入位置。
+let text_write = func(g: u64, i: u64, dst: Mut(u8), at: u64) -> u64 {
+  if i >= ax.n_count(g) { return at; }
+  let sep: u64 = if i == 0 { at } else { put_byte(dst, at, 32) };
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    let d: u64 = ax.delim(h);
+    let n: u64 = ax.n_count(h);
+    let a1: u64 = put_byte(dst, sep, d);
+    if n == 0 { return text_write(g, i + 1, dst, put_byte(dst, a1, close_byte(d))); }
+    let a2: u64 = text_write(h, 0, dst, a1);
+    return text_write(g, i + 1, dst, put_byte(dst, a2, close_byte(d)));
+  }
+  let p: Ref(u8) = ax.lit_addr(h);
+  let n: u64 = ax.lit_len(h);
+  if (n == 0) or is_null(p) { return text_write(g, i + 1, dst, sep); }
+  return text_write(g, i + 1, dst, put_bytes(dst, sep, p, n));
+};
+
+// 括号组里第 want 个实参，逗号只是分隔符。
+let arg_at = func(grp: u64, i: u64, want: u64) -> u64 {
+  if i >= ax.n_count(grp) { return 0; }
+  if ax.is_comma(grp, i) == 1 { return arg_at(grp, i + 1, want); }
+  if want == 0 { return ax.n_at(grp, i); }
+  return arg_at(grp, i + 1, want - 1);
+};
+
+// 记号是不是名字：非组节点，且首字节是字母或下划线。
+let tok_is_name = func(h: u64) -> u64 {
+  if h == 0 { return 0; }
+  if ax.is_group_node(h) == 1 { return 0; }
+  if ax.lit_len(h) == 0 { return 0; }
+  let p: Ref(u8) = ax.lit_addr(h);
+  if is_null(p) { return 0; }
+  let b: u64 = deref(p) as u64;
+  if b == 95 { return 1; }
+  if b >= 65 and b <= 90 { return 1; }
+  if b >= 97 and b <= 122 { return 1; }
+  return 0;
+};
+
+let macro_fail = func(k: Mut(st.State), m: Ref(u8), n: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, n);
+  st.st_fail(k, ax.e_ast());
+  return 0;
+};
+
+// @stringify(实参)：实参原文原样变成一个字符串字面量记号。
+let emit_stringify = func(k: Mut(st.State), grp: u64) -> u64 {
+  let sz: u64 = text_span_seq(grp, 0, 0);
+  let buf: Mut(u8) = st.st_alloc(k, sz + 8);
+  let at0: u64 = put_byte(buf, 0, 34);
+  let at1: u64 = text_write(grp, 0, buf, at0);
+  let at2: u64 = put_byte(buf, at1, 34);
+  return word(0, ptr_cast(Ref(u8), buf), at2);
+};
+
+// @concat_ident(a, b)：两个名字记号的原文接成一个名字记号。
+let emit_concat_ident = func(k: Mut(st.State), grp: u64) -> u64 {
+  let a: u64 = arg_at(grp, 0, 0);
+  let b: u64 = arg_at(grp, 0, 1);
+  if (a == 0) or (b == 0) { return macro_fail(k, "@concat_ident needs two name tokens", 35); }
+  if (tok_is_name(a) == 0) or (tok_is_name(b) == 0) {
+    return macro_fail(k, "@concat_ident needs two name tokens", 35);
+  }
+  let pa: Ref(u8) = ax.lit_addr(a);
+  let la: u64 = ax.lit_len(a);
+  let pb: Ref(u8) = ax.lit_addr(b);
+  let lb: u64 = ax.lit_len(b);
+  let buf: Mut(u8) = st.st_alloc(k, la + lb + 8);
+  let at1: u64 = put_bytes(buf, 0, pa, la);
+  let at2: u64 = put_bytes(buf, at1, pb, lb);
+  let p: Ref(u8) = ptr_cast(Ref(u8), buf);
+  let sym: u64 = s.intern(p, at2);
+  return word(sym, p, at2);
+};
+
+// 第 i 个记号是不是语法宏调用之首：单独的 @ 后面跟名字记号与实参组。
+// @extern / @root / @macro 的源法归别的遍次，这里全部放行。
+let is_macro = func(g: u64, i: u64) -> u64 {
+  let h: u64 = ax.n_at(g, i);
+  if h == 0 { return 0; }
+  if ax.lit_len(h) != 1 { return 0; }
+  if ax.tok_first(g, i) != 64 { return 0; }
+  if ax.is_name(g, i + 1) == 0 { return 0; }
+  let d: u64 = ax.delim_of(g, i + 2);
+  if (d != ax.dl_paren()) and (d != ax.dl_brace()) { return 0; }
+  let nm: u64 = ax.n_at(g, i + 1);
+  if text_is(nm, "extern", 6) == 1 { return 0; }
+  if text_is(nm, "root", 4) == 1 { return 0; }
+  if ax.node_sym(nm) == s.k_macro() { return 0; }
+  return 1;
+};
+
+let emit_macro = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let nm: u64 = ax.n_at(g, i + 1);
+  let grp: u64 = ax.n_at(g, i + 2);
+  if text_is(nm, "stringify", 9) == 1 { return emit_stringify(k, grp); }
+  if text_is(nm, "concat_ident", 12) == 1 { return emit_concat_ident(k, grp); }
+  return macro_fail(k, "unknown syntactic macro", 23);
+};
+
+let has_macro = func(g: u64, i: u64, cnt: u64) -> u64 {
+  if i >= cnt { return 0; }
+  if is_macro(g, i) == 1 { return 1; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if has_macro(h, 0, ax.node_count(h)) == 1 { return 1; }
+  }
+  return has_macro(g, i + 1, cnt);
+};
+
 // --- 树的复制 -----------------------------------------------------------
-// 组按孩子顺序重发；f"..." 在这里就地换成折叠拼接。孩子数受宿主的 mk_group
-// 容量限制（一次最多 256 个），超出就明确报错而不是让宿主拒绝整趟编译。
+// 组按孩子顺序重发；f"..." 与语法宏调用在这里就地换成展开结果。孩子数受
+// 宿主的 mk_group 容量限制（一次最多 256 个），超出就明确报错而不是让宿主
+// 拒绝整趟编译。
 let emit_kids = func(k: Mut(st.State), g: u64, i: u64, cnt: u64, b: Builder) -> Builder {
   if i >= cnt { return b; }
   if st.st_ok(k) != 0 { return b; }
@@ -294,6 +457,11 @@ let emit_kids = func(k: Mut(st.State), g: u64, i: u64, cnt: u64, b: Builder) -> 
     let c: u64 = emit_group(k, h);
     if st.st_ok(k) != 0 { return b; }
     return emit_kids(k, g, i + 1, cnt, bpush(b, c));
+  }
+  if is_macro(g, i) == 1 {
+    let c: u64 = emit_macro(k, g, i);
+    if st.st_ok(k) != 0 { return b; }
+    return emit_kids(k, g, i + 3, cnt, bpush(b, c));
   }
   if is_fstring(g, i) == 1 {
     let c: u64 = emit_fstring(k, g, i);
@@ -305,7 +473,7 @@ let emit_kids = func(k: Mut(st.State), g: u64, i: u64, cnt: u64, b: Builder) -> 
 
 let emit_group = func(k: Mut(st.State), g: u64) -> u64 {
   let cnt: u64 = ax.node_count(g);
-  if cnt > 250 {
+  if cnt > 16384 {
     let m: Ref(u8) = "f-string source group has too many children";
     let d: u64 = ir.diag(k, 0, 1, m, 43);
     st.st_fail(k, ax.e_ast());
@@ -379,8 +547,8 @@ let pre_use = func(k: Mut(st.State), b: Builder, name: u64, text: Ref(u8), n: u6
   return bpush(b4, semi_tok());
 };
 
-let prelude = func(k: Mut(st.State)) -> Builder {
-  let b0: Builder = new_builder(k, 48);
+let prelude = func(k: Mut(st.State), cap: u64) -> Builder {
+  let b0: Builder = new_builder(k, cap + 48);
   let b1: Builder = pre_import(k, b0);
   let b2: Builder = pre_use(k, b1, 0, "", 0);
   let b3: Builder = pre_use(k, b2, s.intern("FmtI64", 6), "FmtI64", 6);
@@ -390,20 +558,23 @@ let prelude = func(k: Mut(st.State)) -> Builder {
 };
 
 // --- 遍次入口 -----------------------------------------------------------
-// 没有模板时原样返交，一个节点也不分配，也不开事务。
+// 没有模板也没有语法宏时原样交回，一个节点也不分配，也不开事务。
+// 只有出现 f"..." 才需要补上 std::fmt 的预置声明。
 pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
   if root == 0 { return 0; }
   if ax.is_group_node(root) == 0 { return root; }
   let cnt: u64 = ax.node_count(root);
-  if has_fs(root, 0, cnt) == 0 { return root; }
-  if cnt > 227 {
+  let fs: u64 = has_fs(root, 0, cnt);
+  let mc: u64 = has_macro(root, 0, cnt);
+  if (fs == 0) and (mc == 0) { return root; }
+  if cnt > 16384 {
     let m: Ref(u8) = "f-string source root has too many children";
     let d: u64 = ir.diag(k, 0, 1, m, 42);
     st.st_fail(k, ax.e_ast());
     return root;
   }
   let tid: u64 = ax.tx_begin();
-  let b0: Builder = prelude(k);
+  let b0: Builder = if fs == 1 { prelude(k, cnt) } else { new_builder(k, cnt + 4) };
   let b1: Builder = emit_kids(k, root, 0, cnt, b0);
   if st.st_ok(k) != 0 {
     let rb: u64 = ax.tx_rollback();

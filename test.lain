@@ -11,6 +11,7 @@ let mem = import("std::mem");
 let sync = import("std::sync");
 let thread = import("std::thread");
 let pool = import("std::pool");
+let sched = import("std::sched");
 let meta = import("std::meta");
 let ir_test = import("tests::ir_verify_test");
 
@@ -238,6 +239,12 @@ let pool_task_inc = func(arg: Mut(u8)) -> u64 {
   return 0;
 };
 
+let sched_task_inc = func(ctx: Mut(u8)) -> u64 {
+  let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), ctx);
+  sync.atomic_u64_add(ap, 1, sync.RELAXED());
+  return 0;
+};
+
 let run_sync_thread_meta_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::sync_thread_meta");
   let a: sync.AtomicU64 = sync.atomic_u64_new(10);
@@ -271,6 +278,28 @@ let run_sync_thread_meta_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "pool 100 submits accepted", p_ok, 1);
   t.eq_u64(mut_of(st), "pool 100 tasks executed", sync.atomic_u64_load(mut_of(pshared), sync.SEQ_CST()), 100);
   t.eq_u64(mut_of(st), "pool shutdown", pool.pool_shutdown(tp), 0);
+
+  let is_cnt: sync.AtomicU64 = sync.atomic_u64_new(0);
+  let isched: sched.InlineSched = sched.InlineScheduler.new();
+  sched.dispatch(mut_of(isched), fn_of(sched_task_inc), ptr_cast(Mut(u8), mut_of(is_cnt))) ?{ sc: sched.InlineScheduler };
+  sched.dispatch(mut_of(isched), fn_of(sched_task_inc), ptr_cast(Mut(u8), mut_of(is_cnt))) ?{ sc: sched.InlineScheduler };
+  t.eq_u64(mut_of(st), "inline sched wait_idle", sched.wait_idle(mut_of(isched)) ?{ sc: sched.InlineScheduler }, 2);
+  t.eq_u64(mut_of(st), "inline sched counter", sync.atomic_u64_load(mut_of(is_cnt), sync.SEQ_CST()), 2);
+
+  let ps_cnt: sync.AtomicU64 = sync.atomic_u64_new(0);
+  let tp2: Mut(pool.ThreadPool) = pool.pool_new(2, 32);
+  let psched: sched.PoolSched = sched.PoolScheduler.new(tp2);
+  loop ps_lp(psi: u64 = 0) while psi < 8 {
+    sched.dispatch(mut_of(psched), fn_of(sched_task_inc), ptr_cast(Mut(u8), mut_of(ps_cnt))) ?{ sc: sched.PoolScheduler };
+    psi = psi + 1;
+  };
+  sched.wait_idle(mut_of(psched)) ?{ sc: sched.PoolScheduler };
+  t.eq_u64(mut_of(st), "pool sched counter", sync.atomic_u64_load(mut_of(ps_cnt), sync.SEQ_CST()), 8);
+  pool.pool_shutdown(tp2);
+
+  let @concat_ident(macro_, val): u64 = 77;
+  t.eq_u64(mut_of(st), "macro @concat_ident", macro_val, 77);
+  t.eq_bytes(mut_of(st), "macro @stringify", @stringify(alpha + beta), "alpha + beta");
 
   let mbytes: u64 = meta.ast_out_bytes(16, 32, 256, 8);
   let mbuf: u64 = os.alloc_bytes(mbytes);
