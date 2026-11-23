@@ -2,8 +2,8 @@
 // 格式化只往一块静态字符池里写字节，整个过程不申请任何堆内存。池头一格是
 // 轮转分块号，其后是 16 个 256 字节的消息区：一条消息领一块，用完不归还，
 // 下一块接着用，写到池尾再从第一块绕回。所以顺序调用与循环里的调用都不会
-// 耗尽池子，同时还能容纳若干条并存的消息。一条消息写满仍未结束时立即以
-// 除零陷阱终止程序，绝不静默截断。
+// 耗尽池子，同时还能容纳若干条并存的消息。一条消息写满仍未结束时由
+// mem.halt_now 立即中止，绝不静默截断。
 //
 // 两种用法：
 //   * 游标显式传递 —— fmt_begin 领一块，write_* 逐个写，fmt_done/emit 收尾；
@@ -11,6 +11,7 @@
 //     接成新的一条消息，回现成的 Slice(u8)。以槽结尾的模板补一段空文本，
 //     所以实参形状总是 (头, 值, 尾)。
 let io = import("std::io");
+let mem = import("std::mem");
 
 // 格式化游标：base 是本条消息的起点，p 是下一个待写字节，left 是剩余字节数。
 pub let Cursor = struct {
@@ -61,14 +62,12 @@ let bytes = func() -> Mut(u8) {
   return ptr_cast(Mut(u8), mut_of(pool));
 };
 
-// 缓冲用尽：整除零在 VM 与 C99 后端都是确定性陷阱。
-let overflow = func(c: Cursor) -> Cursor {
-  let boom: u64 = 1 / c.left;
-  return Cursor { base: c.base, p: c.p, left: c.left + boom };
-};
-
+// 缓冲用尽：池子写满属于调用方的不变量被破坏，交给 mem 的确定性陷阱。
 let put_byte = func(c: Cursor, b: u8) -> Cursor {
-  if c.left == 0 { return overflow(c); }
+  if c.left == 0 {
+    let dead: u64 = mem.halt_now(capacity());
+    return Cursor { base: c.base, p: c.p, left: dead };
+  }
   let q: Mut(u8) = c.p;
   deref(q) = b;
   return Cursor { base: c.base, p: q + 1, left: c.left - 1 };

@@ -14,6 +14,7 @@ let pool = import("std::pool");
 let sched = import("std::sched");
 let meta = import("std::meta");
 let ir_test = import("tests::ir_verify_test");
+let coro = import("std::coro");
 
 use bld;
 open mem;
@@ -22,6 +23,11 @@ use mem.SystemAlloc;
 let Vec64 = col.ArenaVec(u64, 16);
 let Map64 = col.HashMapU64(u64, 32);
 let OptI64 = opt.Option(i64);
+
+use Vec64;
+use Map64;
+use mem.BumpArena;
+use mem.BudgetTracker;
 
 // --- 语言核心覆盖：match 穷尽性、定长数组与切片、字符串转义、UFCS ---
 let LangOpt = enum {
@@ -153,24 +159,24 @@ let lang_yield_run = func() -> i64 {
 let run_collections_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::collections");
   let v: Vec64.Vec = Vec64.new();
-  Vec64.push(mut_of(v), 10);
-  Vec64.push(mut_of(v), 20);
-  Vec64.push(mut_of(v), 30);
-  t.eq_u64(mut_of(st), "vec count", Vec64.count(ref_of(v)), 3);
-  t.eq_u64(mut_of(st), "vec get[1]", Vec64.get(ref_of(v), 1), 20);
-  Vec64.set(mut_of(v), 1, 99);
-  t.eq_u64(mut_of(st), "vec set[1]", Vec64.get(ref_of(v), 1), 99);
-  Vec64.clear(mut_of(v));
-  t.eq_u64(mut_of(st), "vec clear", Vec64.count(ref_of(v)), 0);
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  t.eq_u64(mut_of(st), "vec count", v.count(), 3);
+  t.eq_u64(mut_of(st), "vec get[1]", v.get(1), 20);
+  v.set(1, 99);
+  t.eq_u64(mut_of(st), "vec set[1]", v.get(1), 99);
+  v.clear();
+  t.eq_u64(mut_of(st), "vec clear", v.count(), 0);
 
   let m: Map64.Map = Map64.new();
-  Map64.put(mut_of(m), 101, 42);
-  Map64.put(mut_of(m), 202, 84);
-  t.eq_u64(mut_of(st), "map count", Map64.count(ref_of(m)), 2);
-  t.eq_u64(mut_of(st), "map has 101", Map64.has(ref_of(m), 101), 1);
-  t.eq_u64(mut_of(st), "map has 999", Map64.has(ref_of(m), 999), 0);
+  m.put(101, 42);
+  m.put(202, 84);
+  t.eq_u64(mut_of(st), "map count", m.count(), 2);
+  t.eq_u64(mut_of(st), "map has 101", m.has(101), 1);
+  t.eq_u64(mut_of(st), "map has 999", m.has(999), 0);
   let out_arr: Array(u64, 1) = [0];
-  let ok: u64 = Map64.get(ref_of(m), 202, ptr_cast(Mut(u64), mut_of(out_arr)));
+  let ok: u64 = m.get(202, ptr_cast(Mut(u64), mut_of(out_arr)));
   t.eq_u64(mut_of(st), "map get ok", ok, 1);
   t.eq_u64(mut_of(st), "map get val", out_arr[0], 84);
   return t.finish(mut_of(st));
@@ -215,15 +221,18 @@ let run_os_fmt_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "write_file", wrc, 0);
   t.eq_bool(mut_of(st), "file_exists true", os.file_exists(tmp), true);
 
-  let rptr_arr: Array(u64, 1) = [0];
-  let rlen_arr: Array(u64, 1) = [0];
-  let rrc: u64 = os.read_file(tmp, ptr_cast(Mut(u64), mut_of(rptr_arr)), ptr_cast(Mut(u64), mut_of(rlen_arr)));
-  t.eq_u64(mut_of(st), "read_file", rrc, 0);
-  let rptr: u64 = rptr_arr[0];
-  let rlen: u64 = rlen_arr[0];
-  let got: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), rptr), rlen);
-  t.eq_bytes(mut_of(st), "read_file bytes", got, "lain-7");
-  if rptr != 0 { os.free_bytes(rptr); }
+  let rrc: u64 = 0;
+  match os.read_file_slice(tmp) {
+    Some(buf) => {
+      t.eq_u64(mut_of(st), "read_file_slice len", buf.len, 6);
+      t.eq_bytes(mut_of(st), "read_file_slice bytes", buf, "lain-7");
+      os.free_bytes(buf.ptr as u64);
+    },
+    None => {
+      rrc = 1;
+    },
+  };
+  t.eq_u64(mut_of(st), "read_file_slice ok", rrc, 0);
 
   let drc: u64 = os.remove_file(tmp);
   t.eq_u64(mut_of(st), "remove_file", drc, 0);
@@ -246,53 +255,53 @@ let run_option_mem_suite = func() -> i64 {
 
   // --- std::mem.BumpArena ---
   let arena: mem.BumpArena.Arena = mem.BumpArena.new();
-  t.eq_u64(mut_of(st), "arena capacity", mem.BumpArena.capacity(ref_of(arena)), 8192);
-  t.eq_u64(mut_of(st), "arena remaining empty", mem.BumpArena.remaining(ref_of(arena)), 8192);
-  let a0: u64 = mem.BumpArena.alloc(mut_of(arena), 64);
+  t.eq_u64(mut_of(st), "arena capacity", arena.capacity(), 8192);
+  t.eq_u64(mut_of(st), "arena remaining empty", arena.remaining(), 8192);
+  let a0: u64 = arena.alloc(64);
   t.check(mut_of(st), "arena alloc nonzero", a0 != 0);
-  t.eq_u64(mut_of(st), "arena remaining after 64", mem.BumpArena.remaining(ref_of(arena)), 8128);
-  let a1: u64 = mem.BumpArena.alloc(mut_of(arena), 8);
+  t.eq_u64(mut_of(st), "arena remaining after 64", arena.remaining(), 8128);
+  let a1: u64 = arena.alloc(8);
   t.check(mut_of(st), "arena alloc second", a1 == a0 + 64);
-  t.eq_u64(mut_of(st), "arena remaining after 72", mem.BumpArena.remaining(ref_of(arena)), 8120);
-  t.eq_u64(mut_of(st), "arena free inside", mem.BumpArena.free(mut_of(arena), a0), 1);
-  t.eq_u64(mut_of(st), "arena free outside", mem.BumpArena.free(mut_of(arena), a0 + 8192), 0);
+  t.eq_u64(mut_of(st), "arena remaining after 72", arena.remaining(), 8120);
+  t.eq_u64(mut_of(st), "arena free inside", arena.free(a0), 1);
+  t.eq_u64(mut_of(st), "arena free outside", arena.free(a0 + 8192), 0);
   let fb: u64 = 4096;
   let oom_addr: u64 = mem.bump_alloc_or(mut_of(arena), 9000, fb);
   t.eq_u64(mut_of(st), "arena oom fallback", oom_addr, 4096);
-  t.eq_u64(mut_of(st), "arena reset", mem.BumpArena.reset(mut_of(arena)), 1);
-  t.eq_u64(mut_of(st), "arena remaining reset", mem.BumpArena.remaining(ref_of(arena)), 8192);
+  t.eq_u64(mut_of(st), "arena reset", arena.reset(), 1);
+  t.eq_u64(mut_of(st), "arena remaining reset", arena.remaining(), 8192);
 
   // --- std::mem.BudgetTracker ---
   let tr: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(64);
-  let p0: u64 = mem.BudgetTracker.alloc(mut_of(tr), 16);
+  let p0: u64 = tr.alloc(16);
   t.check(mut_of(st), "budget alloc1 nonzero", p0 != 0);
-  t.eq_u64(mut_of(st), "budget live 24", mem.BudgetTracker.live(ref_of(tr)), 24);
-  let p1: u64 = mem.BudgetTracker.alloc(mut_of(tr), 16);
+  t.eq_u64(mut_of(st), "budget live 24", tr.live(), 24);
+  let p1: u64 = tr.alloc(16);
   t.check(mut_of(st), "budget alloc2 nonzero", p1 != 0);
-  t.eq_u64(mut_of(st), "budget live 48", mem.BudgetTracker.live(ref_of(tr)), 48);
-  t.eq_u64(mut_of(st), "budget peak 48", mem.BudgetTracker.peak(ref_of(tr)), 48);
-  let pd: u64 = mem.BudgetTracker.alloc(mut_of(tr), 40);
+  t.eq_u64(mut_of(st), "budget live 48", tr.live(), 48);
+  t.eq_u64(mut_of(st), "budget peak 48", tr.peak(), 48);
+  let pd: u64 = tr.alloc(40);
   t.eq_u64(mut_of(st), "budget deny over limit", pd, 0);
-  t.eq_u64(mut_of(st), "budget denied 1", mem.BudgetTracker.denied(ref_of(tr)), 1);
+  t.eq_u64(mut_of(st), "budget denied 1", tr.denied(), 1);
   let fbk: u64 = 777;
   let budget_oom: u64 = mem.budget_alloc_or(mut_of(tr), 40, fbk);
   t.eq_u64(mut_of(st), "budget oom fallback", budget_oom, 777);
-  t.eq_u64(mut_of(st), "budget denied 2", mem.BudgetTracker.denied(ref_of(tr)), 2);
-  t.eq_bool(mut_of(st), "budget has_leaks before free", mem.BudgetTracker.has_leaks(ref_of(tr)), true);
-  t.eq_u64(mut_of(st), "budget free p0", mem.BudgetTracker.free(mut_of(tr), p0), 0);
-  t.eq_u64(mut_of(st), "budget live 24 after free", mem.BudgetTracker.live(ref_of(tr)), 24);
-  t.eq_u64(mut_of(st), "budget free p1", mem.BudgetTracker.free(mut_of(tr), p1), 0);
-  t.eq_u64(mut_of(st), "budget live 0", mem.BudgetTracker.live(ref_of(tr)), 0);
-  t.eq_bool(mut_of(st), "budget has_leaks after free", mem.BudgetTracker.has_leaks(ref_of(tr)), false);
+  t.eq_u64(mut_of(st), "budget denied 2", tr.denied(), 2);
+  t.eq_bool(mut_of(st), "budget has_leaks before free", tr.has_leaks(), true);
+  t.eq_u64(mut_of(st), "budget free p0", tr.free(p0), 0);
+  t.eq_u64(mut_of(st), "budget live 24 after free", tr.live(), 24);
+  t.eq_u64(mut_of(st), "budget free p1", tr.free(p1), 0);
+  t.eq_u64(mut_of(st), "budget live 0", tr.live(), 0);
+  t.eq_bool(mut_of(st), "budget has_leaks after free", tr.has_leaks(), false);
 
   // --- std::mem.SystemAlloc ---
   let sa: mem.SystemHandle = mem.SystemAlloc.new();
-  let sp: u64 = mem.SystemAlloc.alloc(mut_of(sa), 128);
+  let sp: u64 = sa.alloc(128);
   t.check(mut_of(st), "system alloc nonzero", sp != 0);
-  t.eq_u64(mut_of(st), "system free", mem.SystemAlloc.free(mut_of(sa), sp), 0);
+  t.eq_u64(mut_of(st), "system free", sa.free(sp), 0);
   let sp2: u64 = mem.alloc_with(mut_of(sa), 32);
   t.check(mut_of(st), "system alloc_with nonzero", sp2 != 0);
-  t.eq_u64(mut_of(st), "system free alloc_with", mem.SystemAlloc.free(mut_of(sa), sp2), 0);
+  t.eq_u64(mut_of(st), "system free alloc_with", sa.free(sp2), 0);
   return t.finish(mut_of(st));
 };
 
@@ -459,6 +468,149 @@ let run_sync_thread_meta_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
+// --- std::coro：生成器、局部调度与合作式通道 ---
+let CoroBox = struct {
+  fiber_a: u64,
+  fiber_b: u64,
+  sent: u64,
+};
+
+let coro_null_ctx = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), 0 as u64);
+};
+
+let coro_gen_entry = func(ctx: Mut(u8)) -> u64 {
+  coro.GenU64.yield_val(0);
+  coro.GenU64.yield_val(10);
+  coro.GenU64.yield_val(20);
+  return 30;
+};
+
+let coro_fiber_a = func(ctx: Mut(u8)) -> u64 {
+  coro.yield_now();
+  coro.sleep_ms(1);
+  coro.yield_now();
+  return 7;
+};
+
+let coro_fiber_b = func(ctx: Mut(u8)) -> u64 {
+  coro.yield_now();
+  coro.sleep_ms(1);
+  coro.yield_now();
+  return 9;
+};
+
+let coro_sched_root = func(ctx: Mut(u8)) -> u64 {
+  let box: Mut(CoroBox) = ptr_cast(Mut(CoroBox), ctx);
+  let a: u64 = coro.spawn(coro_fiber_a, coro_null_ctx());
+  let b: u64 = coro.spawn(coro_fiber_b, coro_null_ctx());
+  let ra: u64 = coro.join(a);
+  let rb: u64 = coro.join(b);
+  box.fiber_a = ra;
+  box.fiber_b = rb;
+  return ra + rb;
+};
+
+let coro_producer_entry = func(ctx: Mut(u8)) -> u64 {
+  let ch: Mut(coro.ChanU64.Self) = ptr_cast(Mut(coro.ChanU64.Self), ctx);
+  let sent: u64 = loop cp_push(i: u64 = 1, n: u64 = 0) while i <= 5 {
+    let ok: bool = coro.ChanU64.send(ch, i);
+    if ok {
+      n = n + 1;
+    }
+    i = i + 1;
+  };
+  coro.ChanU64.close(ch);
+  return sent;
+};
+
+let coro_consumer_entry = func(ctx: Mut(u8)) -> u64 {
+  let ch: Mut(coro.ChanU64.Self) = ptr_cast(Mut(coro.ChanU64.Self), ctx);
+  let total: u64 = 0;
+  loop cp_pull(done: u64 = 0) while done == 0 {
+    let step: coro.ChanU64.Opt = coro.ChanU64.recv(ch);
+    match step {
+      Some(v) => {
+        total = total + v;
+      },
+      None => {
+        done = 1;
+      },
+    }
+  };
+  return total;
+};
+
+let coro_chan_root = func(ctx: Mut(u8)) -> u64 {
+  let box: Mut(CoroBox) = ptr_cast(Mut(CoroBox), ctx);
+  let ch: coro.ChanU64.Self = coro.ChanU64.new(2);
+  let raw: Mut(u8) = ptr_cast(Mut(u8), mut_of(ch));
+  let p: u64 = coro.spawn(coro_producer_entry, raw);
+  let c: u64 = coro.spawn(coro_consumer_entry, raw);
+  let sent: u64 = coro.join(p);
+  let total: u64 = coro.join(c);
+  box.sent = sent;
+  coro.ChanU64.drop(mut_of(ch));
+  return total;
+};
+
+let run_coro_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::coro");
+
+  // --- 生成器：依次发出 0、10、20，末尾回 None ---
+  let g: Mut(coro.GenU64.Self) = coro.GenU64.gen(coro_gen_entry, coro_null_ctx());
+  let gen_sum: u64 = 0;
+  let gen_count: u64 = 0;
+  let seen0: u64 = 0;
+  let seen10: u64 = 0;
+  let seen20: u64 = 0;
+  loop cg(done: u64 = 0) while done == 0 {
+    let step: coro.GenU64.Opt = coro.GenU64.next(g);
+    match step {
+      Some(v) => {
+        gen_sum = gen_sum + v;
+        gen_count = gen_count + 1;
+        if v == 0 { seen0 = 1; }
+        if v == 10 { seen10 = 1; }
+        if v == 20 { seen20 = 1; }
+      },
+      None => {
+        done = 1;
+      },
+    }
+  };
+  t.eq_u64(mut_of(st), "gen Some count", gen_count, 3);
+  t.eq_u64(mut_of(st), "gen yielded 0", seen0, 1);
+  t.eq_u64(mut_of(st), "gen yielded 10", seen10, 1);
+  t.eq_u64(mut_of(st), "gen yielded 20", seen20, 1);
+  t.eq_u64(mut_of(st), "gen sum 30", gen_sum, 30);
+  let end_none: u64 = match coro.GenU64.next(g) {
+    Some(v) => 0,
+    None => 1,
+  };
+  t.eq_u64(mut_of(st), "gen None at end", end_none, 1);
+  t.eq_u64(mut_of(st), "gen drop", coro.GenU64.drop(g), 1);
+
+  // --- 局部调度器：两个协作任务通过 yield_now / sleep_ms 交替 ---
+  let box_raw: u64 = os.alloc_bytes(size_of(CoroBox));
+  let box: Mut(CoroBox) = ptr_cast(Mut(CoroBox), box_raw);
+  box.fiber_a = 0;
+  box.fiber_b = 0;
+  box.sent = 0;
+  let fiber_ctx: Mut(u8) = ptr_cast(Mut(u8), box);
+  let fiber_sum: u64 = coro.run_fiber_local(coro_sched_root, fiber_ctx);
+  t.eq_u64(mut_of(st), "fiber task A result", box.fiber_a, 7);
+  t.eq_u64(mut_of(st), "fiber task B result", box.fiber_b, 9);
+  t.eq_u64(mut_of(st), "fiber total 16", fiber_sum, 16);
+
+  // --- 有界通道：生产者发 1..=5，消费者累加得 15 ---
+  let chan_sum: u64 = coro.run_fiber_local(coro_chan_root, fiber_ctx);
+  t.eq_u64(mut_of(st), "chan sent 5", box.sent, 5);
+  t.eq_u64(mut_of(st), "chan total 15", chan_sum, 15);
+  os.free_bytes(box_raw);
+  return t.finish(mut_of(st));
+};
+
 let run_lang_core_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::core");
 
@@ -533,7 +685,8 @@ let main = func() -> i64 {
   let f6: i64 = run_sync_thread_meta_suite();
   let f7: i64 = run_lang_core_suite();
   let f8: i64 = run_effects_suite();
-  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8;
+  let f9: i64 = run_coro_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9;
   if total_fail == 0 {
     io.println("ALL SUITES PASSED");
   } else {

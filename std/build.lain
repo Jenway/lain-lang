@@ -1,10 +1,12 @@
 // std::build —— 声明式构建图与双哈希增量缓存。
 //
-// 只依赖语言核心（enum / struct / Slice / Array / loop / 引用族），不触碰 std::os，
-// 因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
+// 只依赖语言核心（enum / struct / Slice / Array / loop / 引用族）与 std::mem
+// 的静态 arena 切块原语，因此同一份源码在 lainir-run 虚拟机与 C99 后端上有
+// 完全一致的行为。
 //
 // 增量规则见 docs/04-compilation-and-build.md：
 // 源码哈希只决定本单元是否需要重编，接口哈希只决定下游依赖是否需要重编。
+let mem = import("std::mem");
 
 pub let Os = enum { Windows, Linux, MacOS };
 
@@ -57,31 +59,9 @@ let GraphArena = struct {
 // 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
 let arena_backing: GraphArena = GraphArena { };
 
-let ArenaHalt = struct { zero: u64 };
-
-let arena_halt_at = func(h: ArenaHalt) -> u64 {
-  return 1 / h.zero;
-};
-
-// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
-let arena_halt = func(cause: u64) -> u64 {
-  let h: ArenaHalt = ArenaHalt { zero: cause - cause };
-  return arena_halt_at(h);
-};
-
-// 从静态 arena 切出 bytes 字节，回块起点的原始地址。
+// 从静态 arena 切出 bytes 字节，块起点由 mem.carve 回。
 let arena_take = func(bytes: u64) -> u64 {
-  let base: u64 = ptr_of(arena_backing);
-  let head: Mut(u64) = ptr_cast(Mut(u64), base);
-  let used: u64 = deref(head);
-  let start: u64 = ((used + 7) / 8) * 8;
-  let end: u64 = start + ((bytes + 7) / 8) * 8;
-  if end + 8 > 16384 {
-    let dead: u64 = arena_halt(end);
-    return dead;
-  }
-  deref(head) = end;
-  return base + 8 + start;
+  return mem.carve(ptr_of(arena_backing), 16384, bytes);
 };
 
 // ---------------------------------------------------------------------------

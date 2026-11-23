@@ -8,41 +8,41 @@ let ir = import("src::ir::ir");
 let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
 let err = import("src::driver::err");
+let option = import("std::option");
 
 // --- 命令行参数 ---------------------------------------------------------
-// 解析结果的字段与各个开关一一对应，路径字段是零长度的空切片表示未给出。
+// 路径字段用 Option 表达「未给出」，开关字段用 bool 表达「给出与否」。
+let OptSlice = option.Option(Slice(u8));
+
 let CliOpts = struct {
-  c99: u64,
-  opt: u64,
-  print_result: u64,
-  dump_expand: u64,
-  has_out: u64,
-  out_path: Slice(u8),
-  has_trace: u64,
-  trace_path: Slice(u8),
-  has_entry: u64,
-  entry_name: Slice(u8),
-  has_src: u64,
-  src_path: Slice(u8),
-  bad_args: u64,
+  help: bool,
+  c99: bool,
+  opt: bool,
+  print_result: bool,
+  dump_expand: bool,
+  out_path: OptSlice.Opt,
+  trace_path: OptSlice.Opt,
+  entry_name: OptSlice.Opt,
+  src_path: OptSlice.Opt,
+  bad_args: bool,
 };
 
-let same_range = func(a: Slice(u8), b: Slice(u8), i: u64) -> u64 {
-  if i >= a.len { return 1; }
-  if a[i] != b[i] { return 0; }
+let same_range = func(a: Slice(u8), b: Slice(u8), i: u64) -> bool {
+  if i >= a.len { return true; }
+  if a[i] != b[i] { return false; }
   return same_range(a, b, i + 1);
 };
 
-let same = func(a: Slice(u8), b: Slice(u8)) -> u64 {
-  if a.len != b.len { return 0; }
+let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  if a.len != b.len { return false; }
   return same_range(a, b, 0);
 };
 
-let ends_c = func(s: Slice(u8)) -> u64 {
-  if s.len < 2 { return 0; }
-  if s[s.len - 2] != 46 { return 0; }
-  if s[s.len - 1] != 99 { return 0; }
-  return 1;
+let ends_c = func(s: Slice(u8)) -> bool {
+  if s.len < 2 { return false; }
+  if s[s.len - 2] != 46 { return false; }
+  if s[s.len - 1] != 99 { return false; }
+  return true;
 };
 
 // 第 i 个命令行参数：长度向宿主问一次，再复制进一块新分配的缓冲。
@@ -57,60 +57,64 @@ let arg = func(i: u64) -> Slice(u8) {
 };
 
 let usage = func() -> u64 {
-  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--opt] [--entry <name>] [--trace <trace.json>] [--print-result] [--dump-expand]\n";
+  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--opt] [--entry <name>] [--trace <trace.json>] [--print-result] [--dump-expand] [--help]\n";
   return os.eprint(msg);
 };
 
 let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let s: Slice(u8) = arg(i);
-  if (same(s, "--out") == 1) and (i + 1 < n) {
-    o.has_out = 1;
-    o.out_path = arg(i + 1);
+  if same(s, "--out") and (i + 1 < n) {
+    o.out_path = OptSlice.some(arg(i + 1));
     return parse(o, i + 2, n);
   }
-  if (same(s, "--entry") == 1) and (i + 1 < n) {
-    o.has_entry = 1;
-    o.entry_name = arg(i + 1);
+  if same(s, "--entry") and (i + 1 < n) {
+    o.entry_name = OptSlice.some(arg(i + 1));
     return parse(o, i + 2, n);
   }
-  if (same(s, "--trace") == 1) and (i + 1 < n) {
-    o.has_trace = 1;
-    o.trace_path = arg(i + 1);
+  if same(s, "--trace") and (i + 1 < n) {
+    o.trace_path = OptSlice.some(arg(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--c99") == 1 {
-    o.c99 = 1;
+  if same(s, "--help") or same(s, "-h") {
+    o.help = true;
+    return 0;
+  }
+  if same(s, "--c99") {
+    o.c99 = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--opt") == 1 {
-    o.opt = 1;
+  if same(s, "--opt") {
+    o.opt = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--print-result") == 1 {
-    o.print_result = 1;
+  if same(s, "--print-result") {
+    o.print_result = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--dump-expand") == 1 {
-    o.dump_expand = 1;
+  if same(s, "--dump-expand") {
+    o.dump_expand = true;
     return parse(o, i + 1, n);
   }
-  if (same(s, "--out") == 1) or (same(s, "--entry") == 1) or (same(s, "--trace") == 1) {
-    o.bad_args = 1;
+  if same(s, "--out") or same(s, "--entry") or same(s, "--trace") {
+    o.bad_args = true;
     return 1;
   }
-  if o.has_src == 0 {
-    o.has_src = 1;
-    o.src_path = s;
+  let src: OptSlice.Opt = o.src_path;
+  if OptSlice.is_none(src) {
+    o.src_path = OptSlice.some(s);
     return parse(o, i + 1, n);
   }
-  o.bad_args = 1;
+  o.bad_args = true;
   return 1;
 };
 
 let entry_name = func(o: Mut(CliOpts)) -> Slice(u8) {
-  if o.has_entry == 0 { return "s0__main"; }
-  return o.entry_name;
+  let en: OptSlice.Opt = o.entry_name;
+  return match en {
+    None => "s0__main",
+    Some(name) => name,
+  };
 };
 
 // 把事件表写成 JSON 写进临时缓冲并交给宿主落盘；没开追踪就原样返回结果码。
@@ -196,19 +200,16 @@ let lain_meta_v2_entry = func(count: u64) -> u64 {
 let run_cli = func() -> u64 !{ err.CompileErr } {
   hr.rt_init();
   let o0: CliOpts = CliOpts {
-    c99: 0,
-    opt: 0,
-    print_result: 0,
-    dump_expand: 0,
-    has_out: 0,
-    out_path: "",
-    has_trace: 0,
-    trace_path: "",
-    has_entry: 0,
-    entry_name: "",
-    has_src: 0,
-    src_path: "",
-    bad_args: 0,
+    help: false,
+    c99: false,
+    opt: false,
+    print_result: false,
+    dump_expand: false,
+    out_path: OptSlice.none(),
+    trace_path: OptSlice.none(),
+    entry_name: OptSlice.none(),
+    src_path: OptSlice.none(),
+    bad_args: false,
   };
   let o: Mut(CliOpts) = mut_of(o0);
   let argc: u64 = os.argc();
@@ -217,14 +218,27 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     return 2;
   }
   parse(o, 1, argc);
-  if o.bad_args != 0 {
+  if o.help {
+    usage();
+    return 0;
+  }
+  if o.bad_args {
     usage();
     return 2;
   }
-  let src: Slice(u8) = o.src_path;
-  if o.has_trace != 0 {
-    hr.trace_set_path(o.trace_path);
-    tr.trace_enable(1);
+  let src_opt: OptSlice.Opt = o.src_path;
+  let src: Slice(u8) = match src_opt {
+    None => "",
+    Some(p) => p,
+  };
+  let trace_opt: OptSlice.Opt = o.trace_path;
+  match trace_opt {
+    None => 0,
+    Some(p) => {
+      hr.trace_set_path(p);
+      tr.trace_enable(1);
+      0
+    },
   }
   let added: u64 = hr.source_add_file(src);
   if added == hr.NO_SOURCE() {
@@ -235,7 +249,7 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   let mname: u64 = hr.source_name(added);
   let md: u64 = ir.mod_new(k, mname);
   // --dump-expand：只跑展开遍次，把展开后的树打到标准输出就收工。
-  if o.dump_expand != 0 {
+  if o.dump_expand {
     let root: u64 = hr.source_root(added);
     let exp: u64 = ex.expand_root(k, root);
     let code: u64 = st.st_ok(k);
@@ -251,7 +265,7 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   let t_build: u64 = tr.span_begin();
   let built: u64 = build(k, 0, 1)!;
   let ev_build: u64 = tr.span_end("cli_build", "lainc", t_build, 1);
-  if o.opt != 0 {
+  if o.opt {
     let t_opt: u64 = tr.span_begin();
     let changed: u64 = ir.opt(k);
     let ev_opt: u64 = tr.span_end("cli_opt", "lainc", t_opt, changed);
@@ -265,26 +279,31 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     return err.fail_info(err.ErrKind.CompileVerify { }, v, added, 0, 0,
                          "LAINIR verification failed")!;
   }
-  if o.has_out != 0 {
-    let out_path: Slice(u8) = o.out_path;
-    if (o.c99 != 0) or (ends_c(out_path) == 1) {
-      let en: Slice(u8) = entry_name(o);
-      let t_c99: u64 = tr.span_begin();
-      let rc: u64 = hr.emit_c99_file(st.st_mod(k), out_path, en, o.print_result);
-      let ev_c99: u64 = tr.span_end("cli_emit_c99", "lainc", t_c99, rc);
-      if rc != 0 {
-        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
-                             "failed to write C99 output")!;
+  let out_opt: OptSlice.Opt = o.out_path;
+  match out_opt {
+    None => 0,
+    Some(out_path) => {
+      if o.c99 or ends_c(out_path) {
+        let en: Slice(u8) = entry_name(o);
+        let pr: u64 = if o.print_result { 1 } else { 0 };
+        let t_c99: u64 = tr.span_begin();
+        let rc: u64 = hr.emit_c99_file(st.st_mod(k), out_path, en, pr);
+        let ev_c99: u64 = tr.span_end("cli_emit_c99", "lainc", t_c99, rc);
+        if rc != 0 {
+          return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
+                               "failed to write C99 output")!;
+        }
+      } else {
+        let t_l1: u64 = tr.span_begin();
+        let rc: u64 = hr.emit_l1_file(st.st_mod(k), out_path);
+        let ev_l1: u64 = tr.span_end("cli_emit_l1", "lainc", t_l1, rc);
+        if rc != 0 {
+          return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
+                               "failed to write LAINIR text output")!;
+        }
       }
-    } else {
-      let t_l1: u64 = tr.span_begin();
-      let rc: u64 = hr.emit_l1_file(st.st_mod(k), out_path);
-      let ev_l1: u64 = tr.span_end("cli_emit_l1", "lainc", t_l1, rc);
-      if rc != 0 {
-        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
-                             "failed to write LAINIR text output")!;
-      }
-    }
+      0
+    },
   }
   return trace_finish(0);
 };

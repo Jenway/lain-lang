@@ -1,12 +1,14 @@
 // std::collections —— 定长容量的泛型容器函子。
 //
-// 两个函子只依赖语言核心（Array / loop / 引用族），不触碰 std::os，
-// 因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
+// 两个函子只依赖语言核心（Array / loop / 引用族）与 std::mem 的静态 arena
+// 切块原语，因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
 //
 // 存储：LAINIR 里的 Array 与 struct 都是「指向块的指针」，函数返回时只拷指针字，
 // 被调过程调用帧里的块随返回失效。因此容器块统一从本模块的静态 arena 切分，
 // 每调用一次 new 就占用一段互不重叠的块，块的生命期与进程相同。
-// arena 容量固定，耗尽时以整除零陷阱立即中止。
+// arena 容量固定，耗尽时由 mem.carve 立即中止。
+let mem = import("std::mem");
+let option = import("std::option");
 
 let ArenaBacking = struct {
   bytes: Array(u8, 16384),
@@ -16,32 +18,9 @@ let ArenaBacking = struct {
 // 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
 let arena_backing: ArenaBacking = ArenaBacking { };
 
-let ArenaHalt = struct { zero: u64 };
-
-let arena_halt_at = func(h: ArenaHalt) -> u64 {
-  return 1 / h.zero;
-};
-
-// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
-let arena_halt = func(cause: u64) -> u64 {
-  let h: ArenaHalt = ArenaHalt { zero: cause - cause };
-  return arena_halt_at(h);
-};
-
-// 从静态 arena 切出 bytes 字节，回块起点的原始地址。
-// 起点与长度都补成 8 字节的整数倍；游标在前 8 字节，载荷从第 8 字节开始。
+// 从静态 arena 切出 bytes 字节，块起点由 mem.carve 回。
 let arena_take = func(bytes: u64) -> u64 {
-  let base: u64 = ptr_of(arena_backing);
-  let head: Mut(u64) = ptr_cast(Mut(u64), base);
-  let used: u64 = deref(head);
-  let start: u64 = ((used + 7) / 8) * 8;
-  let end: u64 = start + ((bytes + 7) / 8) * 8;
-  if end + 8 > 16384 {
-    let dead: u64 = arena_halt(end);
-    return dead;
-  }
-  deref(head) = end;
-  return base + 8 + start;
+  return mem.carve(ptr_of(arena_backing), 16384, bytes);
 };
 
 // ---------------------------------------------------------------------------
@@ -107,10 +86,13 @@ pub let ArenaVec = func(T: Type, Cap: u64) -> Module {
 // HashMapU64：u64 键的开放寻址哈希表（线性探测）。
 // ---------------------------------------------------------------------------
 pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
+  let opt = option.Option(V);
   return module {
+    pub let Opt = opt.Opt;
+
     pub let Map = struct {
       keys: Array(u64, Cap),
-      used: Array(u8, Cap),
+      used: Array(bool, Cap),
       vals: Array(V, Cap),
       len: u64,
     };
@@ -132,7 +114,7 @@ pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
       let start: u64 = slot_of(key);
       let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
         let idx: u64 = (start + i) % Cap;
-        if deref(m).used[idx] == 1 {
+        if deref(m).used[idx] {
           if deref(m).keys[idx] == key {
             slot = idx;
             i = Cap;
@@ -151,7 +133,7 @@ pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
       let start: u64 = slot_of(key);
       let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
         let idx: u64 = (start + i) % Cap;
-        if deref(m).used[idx] == 1 {
+        if deref(m).used[idx] {
           i = i + 1;
         } else {
           slot = idx;
@@ -170,7 +152,7 @@ pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
       }
       m.len = 0;
       comptime for i in 0..Cap {
-        m.used[i] = 0;
+        m.used[i] = false;
       }
       return m;
     };
@@ -192,28 +174,39 @@ pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
         return 0;
       }
       deref(m).keys[spot] = key;
-      deref(m).used[spot] = 1;
+      deref(m).used[spot] = true;
       deref(m).vals[spot] = val;
       deref(m).len = deref(m).len + 1;
       return 1;
     };
 
     pub let has = func(m: Ref(Map), key: u64) -> u64 {
-      let hit: u64 = find_used(m, key);
-      if hit >= Cap {
-        return 0;
+      let found: bool = find_used(m, key) < Cap;
+      if found {
+        return 1;
       }
-      return 1;
+      return 0;
     };
 
     // 命中时把值写进 out 并返回 1，否则返回 0。
     pub let get = func(m: Ref(Map), key: u64, out: Mut(V)) -> u64 {
       let hit: u64 = find_used(m, key);
-      if hit >= Cap {
-        return 0;
+      let found: bool = hit < Cap;
+      if found {
+        deref(out) = deref(m).vals[hit];
+        return 1;
       }
-      deref(out) = deref(m).vals[hit];
-      return 1;
+      return 0;
+    };
+
+    // 命中时直接回载荷，未命中回 None；调用方不需要自备输出槽。
+    pub let get_opt = func(m: Ref(Map), key: u64) -> opt.Opt {
+      let hit: u64 = find_used(m, key);
+      let found: bool = hit < Cap;
+      if found {
+        return opt.some(deref(m).vals[hit]);
+      }
+      return opt.none();
     };
   };
 };

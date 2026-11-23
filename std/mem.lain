@@ -43,18 +43,47 @@ let require_oom = func(ptr: u64, bytes: u64) -> u64 !{ OomErr } {
   return ptr;
 };
 
-// 预算下溢（释放的字节多于已登记的字节）属于调用方的记账错误，
-// 与别处耗尽后端块一样用整除零陷阱就地中止。
-let HaltCell = struct { zero: u64 };
+// ---------------------------------------------------------------------------
+// 中止原语：不可恢复的失败在这里终止程序。
+//
+// 标准库里的定向陷阱（预算下溢、arena 装不下、格式化池写满）都是调用方的
+// 不变量被破坏，没有可恢复的语义，因此只提供两条中止路径：
+//   * trap_abort 走 Trap 效应，控制流交给最近的处理器，处理器拿到原因码；
+//   * halt_now 在没有处理器可交时用整除零陷阱就地终止，VM 与 C99 后端都是
+//     确定性的，且它不是效应，调用方无需在效应行里声明。
+// 各模块只调用这两条原语，不再各自复制一份陷阱单元。
+pub let Trap = effect {
+  op trap(code: u64) -> Never;
+};
 
-let halt_at = func(h: HaltCell) -> u64 {
-  return 1 / h.zero;
+// 中止性操作：perform 之后控制流交给最近的 Trap 处理器，永不回到调用点。
+pub let trap_abort = func(code: u64) !{ Trap } -> Never {
+  perform Trap.trap(code);
 };
 
 // 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
-let halt_now = func(cause: u64) -> u64 {
-  let h: HaltCell = HaltCell { zero: cause - cause };
-  return halt_at(h);
+pub let halt_now = func(cause: u64) -> u64 {
+  let zero: u64 = cause - cause;
+  return 1 / zero;
+};
+
+// ---------------------------------------------------------------------------
+// carve：静态 arena 的切块原语。
+//
+// 后端块由调用方提供：base 是块起点，cap 是块字节数。块的首字是游标，
+// 载荷从第 8 字节起；起点与长度都补成 8 字节的整数倍，因此返回地址始终
+// 8 字节对齐。切不出时立即中止：调用方没有可继续的路径。
+pub let carve = func(base: u64, cap: u64, bytes: u64) -> u64 {
+  let head: Mut(u64) = ptr_cast(Mut(u64), base);
+  let used: u64 = deref(head);
+  let start: u64 = ((used + 7) / 8) * 8;
+  let end: u64 = start + ((bytes + 7) / 8) * 8;
+  if end + 8 > cap {
+    let dead: u64 = halt_now(end);
+    return dead;
+  }
+  deref(head) = end;
+  return base + 8 + start;
 };
 
 // ---------------------------------------------------------------------------
