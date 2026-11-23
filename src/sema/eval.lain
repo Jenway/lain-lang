@@ -995,6 +995,13 @@ let compile_as = func(k: Mut(st.State), src: u64, root: u64) -> u64 {
   let ev_exp: u64 = tr.span_end("expand", "lainc", t_exp, src);
   st.st_set_root(k, exp_root);
   if st.st_ok(k) != 0 { return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod); }
+  // 展开换过根以后，符号登记的节点下标属于新树；把新根记回源记录，后续所有
+  // 按源码号取根的查询（泛型实例化、声明回查、效应行）才落在同一棵树上。
+  let rooted: u64 = hr.set_source_root(src, exp_root);
+  if rooted == hr.NO_SOURCE() {
+    st.st_fail(k, ax.e_ast());
+    return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod);
+  }
   let n: u64 = n_count(exp_root);
   let t_p1: u64 = tr.span_begin();
   let a: u64 = phase1(k, exp_root, 0, n);
@@ -1138,6 +1145,9 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let cc: u64 = compile_as(k, saved_src, root2);
   st.st_set_src(k, saved_src);
   st.st_set_root(k, saved_root);
+  // 片段是当成注入点的源号编的，源记录在片段编译期间指向片段的新根；返回外层
+  // 以后要把根换回外层那棵树，外层后续的查询才对得上外层的下标。
+  let rroot: u64 = hr.set_source_root(saved_src, saved_root);
   return skip_semi(g, i + 2);
 };
 

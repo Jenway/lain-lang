@@ -1,0 +1,135 @@
+// coro_demo —— 生成器、局部纤程调度器与有界通道的联合示例。
+let io = import("std::io");
+let coro = import("std::coro");
+
+let null_ctx = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), 0 as u64);
+};
+
+// ---------------------------------------------------------------------------
+// 一、生成器：依次交出 0、10、20，调用方求和得到 30。
+// ---------------------------------------------------------------------------
+let gen_entry = func(ctx: Mut(u8)) -> u64 {
+  coro.GenU64.yield_val(0);
+  coro.GenU64.yield_val(10);
+  coro.GenU64.yield_val(20);
+  return 30;
+};
+
+let demo_generator = func() -> u64 {
+  let g: Mut(coro.GenU64.Self) = coro.GenU64.gen(gen_entry, null_ctx());
+  let total: u64 = 0;
+  loop pull(done: u64 = 0) while done == 0 {
+    let step: coro.GenU64.Opt = coro.GenU64.next(g);
+    match step {
+      Some(v) => {
+        io.println(f"generator yielded {v}");
+        total = total + v;
+      },
+      None => {
+        done = 1;
+      },
+    }
+  };
+  coro.GenU64.drop(g);
+  io.println(f"generator total={total}");
+  return total;
+};
+
+// ---------------------------------------------------------------------------
+// 二、局部轮转调度器：两个任务通过 yield_now 交替，并各自 sleep_ms(5)。
+// ---------------------------------------------------------------------------
+let interleave_a = func(ctx: Mut(u8)) -> u64 {
+  io.println("fiber A step 1");
+  coro.yield_now();
+  io.println("fiber A step 2");
+  coro.sleep_ms(5);
+  io.println("fiber A step 3");
+  return 7;
+};
+
+let interleave_b = func(ctx: Mut(u8)) -> u64 {
+  io.println("fiber B step 1");
+  coro.yield_now();
+  io.println("fiber B step 2");
+  coro.sleep_ms(5);
+  io.println("fiber B step 3");
+  return 9;
+};
+
+let sched_root = func(ctx: Mut(u8)) -> u64 {
+  let a: u64 = coro.spawn(interleave_a, null_ctx());
+  let b: u64 = coro.spawn(interleave_b, null_ctx());
+  let ra: u64 = coro.join(a);
+  let rb: u64 = coro.join(b);
+  io.println(f"fiber results a={ra}, b={rb}");
+  return ra + rb;
+};
+
+// ---------------------------------------------------------------------------
+// 三、有界通道：生产者发送 1 到 5，消费者累加得到 15。
+// ---------------------------------------------------------------------------
+let producer_entry = func(ctx: Mut(u8)) -> u64 {
+  let ch: Mut(coro.ChanU64.Self) = ptr_cast(Mut(coro.ChanU64.Self), ctx);
+  let sent: u64 = loop push(i: u64 = 1, n: u64 = 0) while i <= 5 {
+    let ok: bool = coro.ChanU64.send(ch, i);
+    if ok {
+      io.println(f"producer sent {i}");
+      n = n + 1;
+    }
+    i = i + 1;
+  };
+  coro.ChanU64.close(ch);
+  return sent;
+};
+
+let consumer_entry = func(ctx: Mut(u8)) -> u64 {
+  let ch: Mut(coro.ChanU64.Self) = ptr_cast(Mut(coro.ChanU64.Self), ctx);
+  let total: u64 = 0;
+  loop pull(done: u64 = 0) while done == 0 {
+    let step: coro.ChanU64.Opt = coro.ChanU64.recv(ch);
+    match step {
+      Some(v) => {
+        io.println(f"consumer got {v}");
+        total = total + v;
+      },
+      None => {
+        done = 1;
+      },
+    }
+  };
+  return total;
+};
+
+let chan_root = func(ctx: Mut(u8)) -> u64 {
+  let ch: coro.ChanU64.Self = coro.ChanU64.new(2);
+  let raw: Mut(u8) = ptr_cast(Mut(u8), mut_of(ch));
+  let p: u64 = coro.spawn(producer_entry, raw);
+  let c: u64 = coro.spawn(consumer_entry, raw);
+  coro.join(p);
+  let total: u64 = coro.join(c);
+  coro.ChanU64.drop(mut_of(ch));
+  io.println(f"channel total={total}");
+  return total;
+};
+
+let main = func() -> i64 {
+  let gen_sum: u64 = demo_generator();
+  let sched_sum: u64 = coro.run_fiber_local(sched_root, null_ctx());
+  let chan_sum: u64 = coro.run_fiber_local(chan_root, null_ctx());
+  io.println(f"summary generator={gen_sum}, fibers={sched_sum}, channel={chan_sum}");
+  if gen_sum != 30 {
+    io.println("FAIL generator sum");
+    return 1;
+  }
+  if sched_sum != 16 {
+    io.println("FAIL fiber join sum");
+    return 2;
+  }
+  if chan_sum != 15 {
+    io.println("FAIL channel sum");
+    return 3;
+  }
+  io.println("coro demo PASS");
+  return 0;
+};

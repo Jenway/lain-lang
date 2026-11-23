@@ -1,0 +1,601 @@
+// std::coro —— 协作式协程：生成器、局部调度器与有界通道。
+//
+// 运行期把每个任务放在独立的宿主执行体里，用一对原子字做让出与恢复的会合：
+// 调用方写入 turn=1 后等待 turn=0，任务在让出点写入 turn=0 后等待 turn=1。
+// 同一时刻只有一个任务在运行，其余任务停在会合点，调度语义是单线程协作式。
+let os = import("std::os");
+let option = import("std::option");
+let sync = import("std::sync");
+
+pub let Yield = func(T: Type) -> Effect {
+  return effect { op yield(val: T) -> (); };
+};
+
+pub let Async = effect {
+  op yield_now() -> ();
+  op sleep_ms(ms: u64) -> ();
+  op spawn(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64;
+  op join(task_id: u64) -> u64;
+};
+
+pub let Cancel = effect {
+  op cancelled() -> Never;
+};
+
+@extern(abi = "C", link = "CreateThread")
+let c_create_thread = func(sec: Mut(u8), stack: c_size, start: Fn((Mut(u8)) -> c_uint),
+                           arg: Mut(u8), flags: c_uint, tid: Mut(c_uint)) -> Mut(u8);
+
+@extern(abi = "C", link = "WaitForSingleObject")
+let c_wait_for_single_object = func(h: Mut(u8), ms: c_uint) -> c_uint;
+
+@extern(abi = "C", link = "CloseHandle")
+let c_close_handle = func(h: Mut(u8)) -> c_int;
+
+@extern(abi = "C", link = "GetTickCount64")
+let c_get_tick_count64 = func() -> u64;
+
+@extern(abi = "C", link = "Sleep")
+let c_sleep = func(ms: c_uint);
+
+pub let default_stack_size = func() -> u64 { return 131072; };
+
+let null_bytes = func() -> Mut(u8) {
+  return ptr_cast(Mut(u8), 0 as u64);
+};
+
+// 会合字固定占 8 字节，分配后立即清零。
+let new_atomic = func() -> Mut(sync.AtomicU64) {
+  let raw: u64 = os.alloc_bytes(8);
+  let p: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), raw);
+  sync.atomic_u64_store(p, 0, sync.RELEASE());
+  return p;
+};
+
+let free_atomic = func(p: Mut(sync.AtomicU64)) -> u64 {
+  os.free_bytes(p as u64);
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
+// 局部调度器。
+// ---------------------------------------------------------------------------
+pub let CoroTask = struct {
+  worker: Mut(u8),
+  turn: Mut(sync.AtomicU64),
+  abort: Mut(sync.AtomicU64),
+  entry: Fn((Mut(u8)) -> u64),
+  ctx: Mut(u8),
+  id: u64,
+  state: u64,
+  wake_at: u64,
+  join_target: u64,
+  result: u64,
+  ready_next: Mut(u8),
+  all_next: Mut(u8),
+};
+
+pub let FiberSched = struct {
+  ready_head: Mut(u8),
+  ready_tail: Mut(u8),
+  all_head: Mut(u8),
+  current: Mut(u8),
+  next_id: u64,
+  stack_size: u64,
+};
+
+let st_ready = func() -> u64 { return 0; };
+let st_running = func() -> u64 { return 1; };
+let st_sleep = func() -> u64 { return 2; };
+let st_join = func() -> u64 { return 3; };
+let st_done = func() -> u64 { return 4; };
+
+let null_task = func() -> Mut(CoroTask) {
+  return ptr_cast(Mut(CoroTask), 0 as u64);
+};
+
+let sched_slot: Array(u64, 1) = [0];
+let current_slot: Array(u64, 1) = [0];
+
+let sched_of = func() -> Mut(FiberSched) {
+  let p: Mut(u64) = mut_of(sched_slot);
+  return ptr_cast(Mut(FiberSched), deref(p));
+};
+
+let set_sched = func(s: Mut(FiberSched)) -> Mut(FiberSched) {
+  let p: Mut(u64) = mut_of(sched_slot);
+  let prev: Mut(FiberSched) = ptr_cast(Mut(FiberSched), deref(p));
+  deref(p) = s as u64;
+  return prev;
+};
+
+let current_task = func() -> Mut(CoroTask) {
+  let p: Mut(u64) = mut_of(current_slot);
+  return ptr_cast(Mut(CoroTask), deref(p));
+};
+
+let set_current_task = func(t: Mut(CoroTask)) {
+  let p: Mut(u64) = mut_of(current_slot);
+  if is_null(t) {
+    deref(p) = 0;
+    return;
+  }
+  deref(p) = t as u64;
+};
+
+let task_ready_next = func(t: Mut(CoroTask)) -> Mut(CoroTask) {
+  return ptr_cast(Mut(CoroTask), t.ready_next);
+};
+
+let task_all_next = func(t: Mut(CoroTask)) -> Mut(CoroTask) {
+  return ptr_cast(Mut(CoroTask), t.all_next);
+};
+
+let enqueue_ready = func(s: Mut(FiberSched), t: Mut(CoroTask)) -> u64 {
+  t.ready_next = null_bytes();
+  t.state = st_ready();
+  let tail: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.ready_tail);
+  if is_null(tail) {
+    s.ready_head = ptr_cast(Mut(u8), t);
+    s.ready_tail = ptr_cast(Mut(u8), t);
+  } else {
+    tail.ready_next = ptr_cast(Mut(u8), t);
+    s.ready_tail = ptr_cast(Mut(u8), t);
+  }
+  return 1;
+};
+
+let pop_ready = func(s: Mut(FiberSched)) -> Mut(CoroTask) {
+  let head: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.ready_head);
+  if is_null(head) { return head; }
+  let next: Mut(CoroTask) = task_ready_next(head);
+  s.ready_head = ptr_cast(Mut(u8), next);
+  if is_null(next) {
+    s.ready_tail = null_bytes();
+  }
+  head.ready_next = null_bytes();
+  return head;
+};
+
+let find_task = func(s: Mut(FiberSched), id: u64) -> Mut(CoroTask) {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  let hit: Mut(CoroTask) = null_task();
+  loop seek(done: u64 = 0) while done == 0 {
+    if (cur as u64) == 0 {
+      done = 1;
+    } else {
+      if cur.id == id {
+        hit = cur;
+        done = 1;
+      } else {
+        cur = task_all_next(cur);
+      }
+    }
+  };
+  return hit;
+};
+
+let pending_count = func(s: Mut(FiberSched)) -> u64 {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  return loop count(n: u64 = 0) while (cur as u64) != 0 {
+    if cur.state != st_done() {
+      n = n + 1;
+    }
+    cur = task_all_next(cur);
+  };
+};
+
+let sleeping_count = func(s: Mut(FiberSched)) -> u64 {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  return loop count(n: u64 = 0) while (cur as u64) != 0 {
+    if cur.state == st_sleep() {
+      n = n + 1;
+    }
+    cur = task_all_next(cur);
+  };
+};
+
+let sweep_sleepers = func(s: Mut(FiberSched)) -> u64 {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  return loop sweep(n: u64 = 0) while (cur as u64) != 0 {
+    if cur.state == st_sleep() {
+      let now: u64 = c_get_tick_count64();
+      if now >= cur.wake_at {
+        enqueue_ready(s, cur);
+        n = n + 1;
+      }
+    }
+    cur = task_all_next(cur);
+  };
+};
+
+let wake_joiners = func(s: Mut(FiberSched)) -> u64 {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  return loop wake(n: u64 = 0) while (cur as u64) != 0 {
+    if cur.state == st_join() {
+      let target: Mut(CoroTask) = find_task(s, cur.join_target);
+      if (target as u64) != 0 {
+        if target.state == st_done() {
+          enqueue_ready(s, cur);
+          n = n + 1;
+        }
+      }
+    }
+    cur = task_all_next(cur);
+  };
+};
+
+let wait_turn = func(turn: Mut(sync.AtomicU64), abort: Mut(sync.AtomicU64)) -> u64 {
+  loop c(done: u64 = 0) while done == 0 {
+    if sync.atomic_u64_load(abort, sync.ACQUIRE()) == 1 {
+      done = 1;
+    } else {
+      if sync.atomic_u64_load(turn, sync.ACQUIRE()) == 1 {
+        done = 1;
+      } else {
+        c_sleep(0);
+      }
+    }
+  };
+  return 1;
+};
+
+let wait_release = func(turn: Mut(sync.AtomicU64)) -> u64 {
+  loop c(done: u64 = 0) while done == 0 {
+    if sync.atomic_u64_load(turn, sync.ACQUIRE()) == 0 {
+      done = 1;
+    } else {
+      c_sleep(0);
+    }
+  };
+  return 1;
+};
+
+let park_task = func(t: Mut(CoroTask)) {
+  sync.atomic_u64_store(t.turn, 0, sync.RELEASE());
+  wait_turn(t.turn, t.abort);
+};
+
+let task_main = func(raw: Mut(u8)) -> c_uint {
+  let t: Mut(CoroTask) = ptr_cast(Mut(CoroTask), raw);
+  wait_turn(t.turn, t.abort);
+  if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 {
+    t.result = 0;
+    t.state = st_done();
+    sync.atomic_u64_store(t.turn, 0, sync.RELEASE());
+    return 0 as c_uint;
+  }
+  let entry: Fn((Mut(u8)) -> u64) = t.entry;
+  let ctx: Mut(u8) = t.ctx;
+  let r: u64 = entry(ctx);
+  t.result = r;
+  t.state = st_done();
+  sync.atomic_u64_store(t.turn, 0, sync.RELEASE());
+  return 0 as c_uint;
+};
+
+pub let spawn = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64 {
+  let s: Mut(FiberSched) = sched_of();
+  if is_null(s) { return 0; }
+  let raw: u64 = os.alloc_bytes(size_of(CoroTask));
+  let t: Mut(CoroTask) = ptr_cast(Mut(CoroTask), raw);
+  t.turn = new_atomic();
+  t.abort = new_atomic();
+  t.entry = entry;
+  t.ctx = ctx;
+  t.id = s.next_id;
+  t.state = st_ready();
+  t.wake_at = 0;
+  t.join_target = 0;
+  t.result = 0;
+  t.ready_next = null_bytes();
+  t.all_next = s.all_head;
+  s.all_head = ptr_cast(Mut(u8), t);
+  s.next_id = s.next_id + 1;
+  let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
+  t.worker = c_create_thread(null_bytes(), 0, task_main, ptr_cast(Mut(u8), t), 0, tid);
+  enqueue_ready(s, t);
+  return t.id;
+};
+
+pub let yield_now = func() {
+  let s: Mut(FiberSched) = sched_of();
+  if is_null(s) { return; }
+  let t: Mut(CoroTask) = current_task();
+  if is_null(t) { return; }
+  if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return; }
+  enqueue_ready(s, t);
+  park_task(t);
+};
+
+pub let sleep_ms = func(ms: u64) {
+  let s: Mut(FiberSched) = sched_of();
+  let t: Mut(CoroTask) = current_task();
+  if is_null(s) {
+    c_sleep(ms as c_uint);
+    return;
+  }
+  if is_null(t) {
+    c_sleep(ms as c_uint);
+    return;
+  }
+  if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return; }
+  t.wake_at = c_get_tick_count64() + ms;
+  t.state = st_sleep();
+  park_task(t);
+};
+
+pub let join = func(task_id: u64) -> u64 {
+  let s: Mut(FiberSched) = sched_of();
+  if is_null(s) { return 0; }
+  let t: Mut(CoroTask) = current_task();
+  if is_null(t) { return 0; }
+  let target: Mut(CoroTask) = find_task(s, task_id);
+  if is_null(target) { return 0; }
+  loop wait(rounds: u64 = 0) while (target.state != st_done()) and (rounds < 100000000) {
+    if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return 0; }
+    t.state = st_join();
+    t.join_target = task_id;
+    park_task(t);
+    rounds = rounds + 1;
+  };
+  return target.result;
+};
+
+let cleanup_sched = func(s: Mut(FiberSched)) -> u64 {
+  let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
+  loop drop(i: u64 = 0) while (cur as u64) != 0 {
+    let next: Mut(CoroTask) = task_all_next(cur);
+    if cur.state != st_done() {
+      sync.atomic_u64_store(cur.abort, 1, sync.RELEASE());
+      sync.atomic_u64_store(cur.turn, 1, sync.RELEASE());
+    }
+    if (cur.worker as u64) != 0 {
+      let ms: c_uint = 0xffffffff as c_uint;
+      c_wait_for_single_object(cur.worker, ms);
+      c_close_handle(cur.worker);
+    }
+    free_atomic(cur.turn);
+    free_atomic(cur.abort);
+    os.free_bytes(cur as u64);
+    cur = next;
+  };
+  os.free_bytes(s as u64);
+  return 0;
+};
+
+pub let run_fiber_local = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64 {
+  let raw: u64 = os.alloc_bytes(size_of(FiberSched));
+  let s: Mut(FiberSched) = ptr_cast(Mut(FiberSched), raw);
+  s.ready_head = null_bytes();
+  s.ready_tail = null_bytes();
+  s.all_head = null_bytes();
+  s.current = null_task();
+  s.next_id = 1;
+  s.stack_size = default_stack_size();
+  let prev: Mut(FiberSched) = set_sched(s);
+  let root_id: u64 = spawn(entry, ctx);
+  let root: Mut(CoroTask) = find_task(s, root_id);
+  loop round(spins: u64 = 0) while (pending_count(s) > 0) and (spins < 10000000) {
+    sweep_sleepers(s);
+    wake_joiners(s);
+    let t: Mut(CoroTask) = pop_ready(s);
+    if is_null(t) {
+      if sleeping_count(s) > 0 {
+        c_sleep(1);
+      } else {
+        spins = 10000000;
+      }
+    } else {
+      t.state = st_running();
+      s.current = t;
+      set_current_task(t);
+      sync.atomic_u64_store(t.turn, 1, sync.RELEASE());
+      wait_release(t.turn);
+      set_current_task(null_task());
+      s.current = null_task();
+    }
+    spins = spins + 1;
+  };
+  let result: u64 = 0;
+  if (root as u64) != 0 {
+    result = root.result;
+  }
+  cleanup_sched(s);
+  set_sched(prev);
+  return result;
+};
+
+// ---------------------------------------------------------------------------
+// 参数化生成器：每次 next 放开生成器执行到下一个 yield_val。
+// ---------------------------------------------------------------------------
+pub let Gen = func(T: Type) -> Module {
+  return module {
+    let opt = option.Option(T);
+    let active_slot: Array(u64, 1) = [0];
+
+    pub let Opt = opt.Opt;
+
+    pub let Self = struct {
+      worker: Mut(u8),
+      turn: Mut(sync.AtomicU64),
+      abort: Mut(sync.AtomicU64),
+      entry: Fn((Mut(u8)) -> u64),
+      ctx: Mut(u8),
+      value: T,
+      produced: u64,
+      finished: u64,
+    };
+
+    let active_gen = func() -> Mut(Self) {
+      let p: Mut(u64) = mut_of(active_slot);
+      return ptr_cast(Mut(Self), deref(p));
+    };
+
+    pub let yield_val = func(v: T) {
+      let g: Mut(Self) = active_gen();
+      if is_null(g) { return; }
+      if sync.atomic_u64_load(g.abort, sync.ACQUIRE()) != 0 { return; }
+      g.value = v;
+      g.produced = 1;
+      sync.atomic_u64_store(g.turn, 0, sync.RELEASE());
+      wait_turn(g.turn, g.abort);
+    };
+
+    let gen_main = func(raw: Mut(u8)) -> c_uint {
+      let g: Mut(Self) = ptr_cast(Mut(Self), raw);
+      wait_turn(g.turn, g.abort);
+      if sync.atomic_u64_load(g.abort, sync.ACQUIRE()) != 0 {
+        g.finished = 1;
+        g.produced = 0;
+        sync.atomic_u64_store(g.turn, 0, sync.RELEASE());
+        return 0 as c_uint;
+      }
+      let entry: Fn((Mut(u8)) -> u64) = g.entry;
+      let ctx: Mut(u8) = g.ctx;
+      let r: u64 = entry(ctx);
+      g.finished = 1;
+      g.produced = 0;
+      sync.atomic_u64_store(g.turn, 0, sync.RELEASE());
+      return 0 as c_uint;
+    };
+
+    pub let gen = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> Mut(Self) {
+      let raw: u64 = os.alloc_bytes(size_of(Self));
+      let g: Mut(Self) = ptr_cast(Mut(Self), raw);
+      g.turn = new_atomic();
+      g.abort = new_atomic();
+      g.entry = entry;
+      g.ctx = ctx;
+      g.produced = 0;
+      g.finished = 0;
+      let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
+      g.worker = c_create_thread(null_bytes(), 0, gen_main, ptr_cast(Mut(u8), g), 0, tid);
+      return g;
+    };
+
+    pub let next = func(g: Mut(Self)) -> opt.Opt {
+      if g.finished != 0 { return opt.none(); }
+      if sync.atomic_u64_load(g.abort, sync.ACQUIRE()) != 0 { return opt.none(); }
+      let p: Mut(u64) = mut_of(active_slot);
+      deref(p) = g as u64;
+      g.produced = 0;
+      sync.atomic_u64_store(g.turn, 1, sync.RELEASE());
+      wait_release(g.turn);
+      deref(p) = 0;
+      if g.finished != 0 { return opt.none(); }
+      if g.produced == 0 { return opt.none(); }
+      let v: T = g.value;
+      return opt.some(v);
+    };
+
+    pub let drop = func(g: Mut(Self)) -> u64 {
+      if is_null(g) { return 0; }
+      if g.finished == 0 {
+        sync.atomic_u64_store(g.abort, 1, sync.RELEASE());
+        sync.atomic_u64_store(g.turn, 1, sync.RELEASE());
+      }
+      if (g.worker as u64) != 0 {
+        let ms: c_uint = 0xffffffff as c_uint;
+        c_wait_for_single_object(g.worker, ms);
+        c_close_handle(g.worker);
+      }
+      free_atomic(g.turn);
+      free_atomic(g.abort);
+      os.free_bytes(g as u64);
+      return 1;
+    };
+  };
+};
+
+pub let GenU64 = Gen(u64);
+
+// ---------------------------------------------------------------------------
+// 参数化有界通道：满时发送方让出，空时接收方让出，关闭后接收方读到空。
+// ---------------------------------------------------------------------------
+pub let Chan = func(T: Type) -> Module {
+  return module {
+    let opt = option.Option(T);
+
+    pub let Opt = opt.Opt;
+
+    pub let Self = struct {
+      buffer: Mut(T),
+      cap: u64,
+      count: u64,
+      head: u64,
+      tail: u64,
+      closed: u64,
+    };
+
+    pub let new = func(cap: u64) -> Self {
+      let size: u64 = if cap == 0 { 1 } else { cap };
+      let raw: u64 = os.alloc_bytes(size * size_of(T));
+      return Self {
+        buffer: ptr_cast(Mut(T), raw),
+        cap: size,
+        count: 0,
+        head: 0,
+        tail: 0,
+        closed: 0,
+      };
+    };
+
+    let slot_at = func(ch: Mut(Self), at: u64) -> Mut(T) {
+      let base: Mut(T) = ch.buffer;
+      let bytes: Mut(u8) = ptr_cast(Mut(u8), base);
+      return ptr_cast(Mut(T), bytes + at * size_of(T));
+    };
+
+    pub let send = func(ch: Mut(Self), val: T) -> bool {
+      loop push(done: u64 = 0) while done == 0 {
+        if ch.closed != 0 { return false; }
+        if ch.count < ch.cap {
+          let at: u64 = ch.tail;
+          let slot: Mut(T) = slot_at(ch, at);
+          deref(slot) = val;
+          ch.tail = (at + 1) % ch.cap;
+          ch.count = ch.count + 1;
+          done = 1;
+        } else {
+          yield_now();
+        }
+      };
+      return true;
+    };
+
+    pub let recv = func(ch: Mut(Self)) -> opt.Opt {
+      loop pull(done: u64 = 0) while done == 0 {
+        if ch.count > 0 {
+          let at: u64 = ch.head;
+          let slot: Mut(T) = slot_at(ch, at);
+          let v: T = deref(slot);
+          ch.head = (at + 1) % ch.cap;
+          ch.count = ch.count - 1;
+          return opt.some(v);
+        }
+        if ch.closed != 0 {
+          return opt.none();
+        }
+        yield_now();
+      };
+      return opt.none();
+    };
+
+    pub let close = func(ch: Mut(Self)) -> u64 {
+      ch.closed = 1;
+      return 1;
+    };
+
+    pub let drop = func(ch: Mut(Self)) -> u64 {
+      let base: Mut(T) = ch.buffer;
+      if (base as u64) != 0 {
+        os.free_bytes(base as u64);
+        ch.buffer = ptr_cast(Mut(T), 0 as u64);
+      }
+      return 1;
+    };
+  };
+};
+
+pub let ChanU64 = Chan(u64);

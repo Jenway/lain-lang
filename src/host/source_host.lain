@@ -90,6 +90,8 @@ pub let Source = struct {
   ast_child_count: u64,
   ast_spans: Ref(rd.Span),
   ast_root: u64,
+  // 展开遍次重建过的源根句柄；0 表示仍在用 Reader 交出的原始根。
+  root_handle: u64,
   ast_kind: u64,
   ast_err_line: u64,
   ast_err_col: u64,
@@ -293,6 +295,7 @@ pub let source_add = func(h: Mut(HostSources), name: Slice(u8), text: Slice(u8))
   rec.ast_child_count = ast.child_count;
   rec.ast_spans = ast.spans;
   rec.ast_root = ast.root;
+  rec.root_handle = 0;
   rec.ast_kind = ast.kind;
   rec.ast_err_line = ast.err_line;
   rec.ast_err_col = ast.err_col;
@@ -334,11 +337,24 @@ let source_ast = func(rec: Mut(Source)) -> rd.RawAst {
   };
 };
 
-// 源码根组的节点句柄。
+// 源码根组的节点句柄。展开遍次把根换成 AstOut 里的新树以后，这里交回那棵
+// 新树的根，符号登记的节点下标才会落在同一棵树上。
 pub let source_root = func(h: Mut(HostSources), src: u64) -> u64 {
   let rec: Mut(Source) = source_at(h, src);
+  let cooked: u64 = rec.root_handle;
+  if cooked != 0 { return cooked; }
   let ast: rd.RawAst = source_ast(rec);
   return handle_ast_in(src, ast.root);
+};
+
+// 记下展开后的源根；后续按源码号取根都走这里换上的树。源码号越界或根句柄为
+// 空时交回 NO_SOURCE，由调用方按编译失败处理。
+pub let set_source_root = func(h: Mut(HostSources), src: u64, root: u64) -> u64 {
+  if src >= h.source_count { return NO_SOURCE(); }
+  if root == 0 { return NO_SOURCE(); }
+  let rec: Mut(Source) = h.sources + src * size_of(Source);
+  rec.root_handle = root;
+  return root;
 };
 
 // --- Reader 节点读取 --------------------------------------------------------

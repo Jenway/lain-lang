@@ -1,13 +1,16 @@
-// LAINIR 优化器（MVP）：区域内纯整数常量折叠与过程内无用户纯指令删除。
+// LAINIR 优化器：区域内常量折叠、代数恒等式化简、路径敏感事实传播、条件分支
+// 删除与过程内无用户纯指令删除。
 //
-// 两趟都只改写模块自身的记录。折叠把后续指令里指向折叠结果的 OP_VALUE
-// 操作数就地换成 OP_INT；删除把区域指令序列的下标前移并调小
-// region.inst_count。模块级 insts 数组里被删掉的记录保持原样：验证器只按
-// 区域序列行走，不会读到它们。
+// 折叠只改写模块自身的记录：能被替换的操作数就地换成 OP_INT，或把使用者
+// 改写成恒等式另一侧的值名。改写之后冗余指令自然失去使用者，由删除趟按
+// 使用情况去掉。模块级 insts 数组里被删掉的记录保持原样：验证器只按区域
+// 序列行走，不会读到它们。
 //
-// 折叠只改写那些所有操作数位置都接受整数字面量的指令；结果被控制流使用
-// （#if 条件、#switch 选择子、#return 实参等）时，那一处操作数保持
-// OP_VALUE，指令因此仍然是活的，由删除趟按使用情况决定去留。
+// 事实表记录某个值名在当前路径上等于某个整数常量，或等于另一个值名。
+// 直行区域内的事实对后续指令与子区域生效；进入分支时压入条件事实，离开
+// 分支时把事实表截回入口长度，因此分支内学到的事实不会漏到分支之外。
+// #if 的条件一旦是已知常量，未走的分支整段清空；#if 没有结果值时它只是
+// 控制流，清空未走分支不会影响任何结果值。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify");
 
@@ -22,10 +25,23 @@ let IrInstCell = struct { v: vf.IrInst };
 let IrRegionCell = struct { v: vf.IrRegion };
 let IrCaseCell = struct { v: vf.IrCase };
 
-// 折叠结果：ok 为 0 表示这条指令不是两个整数常量的可折叠运算。
+// 折叠结果：ok 为 0 表示没有折叠；kind 为 1 表示 value 是整数常量，kind 为
+// 2 表示 value 是一个值名，指令结果与它相等。
 let Fold = struct {
   ok: u64,
+  kind: u64,
   value: u64,
+};
+
+// 单条过程路径上已知的事实条数上限。事实只增不改，满了就停止记录新事实。
+let FACT_CAP = func() -> u64 { return 64; };
+
+// 事实表：names/values/kinds 按下标成对排列，count 之外的位置不作数。
+let Facts = struct {
+  names: Array(u64, 64),
+  values: Array(u64, 64),
+  kinds: Array(u64, 64),
+  count: u64,
 };
 
 // 优化器在一组平坦记录上工作：指令、区域与分支都按下标引用。
@@ -38,11 +54,51 @@ let Ctx = struct {
 };
 
 let no_fold = func() -> Fold {
-  return Fold { ok: 0, value: 0 };
+  return Fold { ok: 0, kind: 0, value: 0 };
 };
 
 let fold_of = func(value: u64) -> Fold {
-  return Fold { ok: 1, value: value };
+  return Fold { ok: 1, kind: 1, value: value };
+};
+
+let alias_of = func(name: u64) -> Fold {
+  return Fold { ok: 1, kind: 2, value: name };
+};
+
+let facts_new = func() -> Facts {
+  return Facts {
+    names: [
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    values: [
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    kinds: [
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    count: 0,
+  };
 };
 
 // --- 记录访问 -------------------------------------------------------------
@@ -82,6 +138,53 @@ let region_set = func(r: Mut(vf.IrRegion), i: u64, value: u64) -> u64 {
   let at: Mut(u64) = ptr_cast(Mut(u64), base + i * size_of(u64));
   deref(at) = value;
   return 0;
+};
+
+// --- 事实表 ---------------------------------------------------------------
+// 从最新记录往旧记录找，同名以最近一次记录为准，返回下标加一。
+let facts_find = func(f: Mut(Facts), name: u64) -> u64 {
+  let n: u64 = f.count;
+  return loop lp(i: u64 = 0, at: u64 = 0) while (i < n) and (at == 0) {
+    let back: u64 = n - 1 - i;
+    if f.names[back] == name { at = back + 1; }
+    i = i + 1;
+  };
+};
+
+let facts_lookup = func(f: Mut(Facts), name: u64) -> Fold {
+  let at: u64 = facts_find(f, name);
+  if at == 0 { return no_fold(); }
+  let idx: u64 = at - 1;
+  if f.kinds[idx] == 1 { return fold_of(f.values[idx]); }
+  return alias_of(f.values[idx]);
+};
+
+// 只追加，不覆盖：分支退出时把 count 截回入口长度就恢复了外层事实。
+let facts_push = func(f: Mut(Facts), name: u64, kind: u64, value: u64) -> u64 {
+  let n: u64 = f.count;
+  if n >= FACT_CAP() { return 0; }
+  f.names[n] = name;
+  f.kinds[n] = kind;
+  f.values[n] = value;
+  f.count = n + 1;
+  return 0;
+};
+
+// 顺着别名链找到最终的值名。
+let facts_resolve = func(f: Mut(Facts), name: u64, depth: u64) -> u64 {
+  if depth >= 32 { return name; }
+  let fd: Fold = facts_lookup(f, name);
+  if fd.ok == 0 { return name; }
+  if fd.kind == 2 { return facts_resolve(f, fd.value, depth + 1); }
+  return name;
+};
+
+// 值名当前已知的整数常量。
+let facts_const = func(f: Mut(Facts), name: u64, depth: u64) -> Fold {
+  let n: u64 = facts_resolve(f, name, depth);
+  let fd: Fold = facts_lookup(f, n);
+  if (fd.ok == 1) and (fd.kind == 1) { return fd; }
+  return no_fold();
 };
 
 // --- 常数运算 -------------------------------------------------------------
@@ -157,6 +260,74 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
   return no_fold();
 };
 
+// 操作数本身作为折叠结果：OP_INT 是常量，OP_VALUE 是别名。
+let operand_fold = func(op: vf.IrOperand) -> Fold {
+  if op.kind == vf.OP_INT() { return fold_of(op.bits); }
+  if op.kind == vf.OP_VALUE() {
+    if op.name == 0 { return no_fold(); }
+    return alias_of(op.name);
+  }
+  return no_fold();
+};
+
+// 代数恒等式：零元与幺元把运算消掉，同名操作数的自比较与自异或直接定值。
+let fold_identity = func(it: vf.IrInst) -> Fold {
+  if it.has_ty == 0 { return no_fold(); }
+  if it.result_count != 1 { return no_fold(); }
+  if it.operand_count != 2 { return no_fold(); }
+  if it.ty_kind != vf.TY_BITS() { return no_fold(); }
+  let k: u64 = it.kind;
+  let a: vf.IrOperand = vf.inst_op(it, 0);
+  let b: vf.IrOperand = vf.inst_op(it, 1);
+  let a_int: u64 = a.kind == vf.OP_INT();
+  let b_int: u64 = b.kind == vf.OP_INT();
+  let a_zero: u64 = 0;
+  let b_zero: u64 = 0;
+  if a_int == 1 { if a.bits == 0 { a_zero = 1; } }
+  if b_int == 1 { if b.bits == 0 { b_zero = 1; } }
+  let same: u64 = 0;
+  if (a.kind == vf.OP_VALUE()) and (b.kind == vf.OP_VALUE()) {
+    if (a.name != 0) and (a.name == b.name) { same = 1; }
+  }
+  if k == codes.INST_ADD() {
+    if b_zero == 1 { return operand_fold(a); }
+    if a_zero == 1 { return operand_fold(b); }
+  }
+  if k == codes.INST_SUB() {
+    if b_zero == 1 { return operand_fold(a); }
+    if same == 1 { return fold_of(0); }
+  }
+  if k == codes.INST_MUL() {
+    if a_zero == 1 { return fold_of(0); }
+    if b_zero == 1 { return fold_of(0); }
+    if (b_int == 1) and (b.bits == 1) { return operand_fold(a); }
+    if (a_int == 1) and (a.bits == 1) { return operand_fold(b); }
+  }
+  if k == codes.INST_AND() {
+    if a_zero == 1 { return fold_of(0); }
+    if b_zero == 1 { return fold_of(0); }
+  }
+  if k == codes.INST_OR() {
+    if b_zero == 1 { return operand_fold(a); }
+    if a_zero == 1 { return operand_fold(b); }
+  }
+  if k == codes.INST_XOR() {
+    if b_zero == 1 { return operand_fold(a); }
+    if a_zero == 1 { return operand_fold(b); }
+    if same == 1 { return fold_of(0); }
+  }
+  if (k == codes.INST_SHL()) or (k == codes.INST_LSHR()) or (k == codes.INST_ASHR()) {
+    if b_zero == 1 { return operand_fold(a); }
+  }
+  if k == codes.INST_EQ() {
+    if same == 1 { return fold_of(1); }
+  }
+  if k == codes.INST_NE() {
+    if same == 1 { return fold_of(0); }
+  }
+  return no_fold();
+};
+
 // 这些指令的所有操作数位置都接受 OP_INT 常量：整数运算、整数比较与整数
 // 转换。其余位置（#if 条件、#switch 选择子、#return 实参、地址操作数、
 // 调用目标）必须保持 OP_VALUE。
@@ -188,70 +359,170 @@ let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
   return 0;
 };
 
-// 把一条指令里指向 name 的 OP_VALUE 操作数换成 OP_INT(value)。
-let subst_operand = func(it: Mut(vf.IrInst), name: u64, value: u64) -> u64 {
-  let copy: vf.IrInst = deref(it);
-  if subst_ok(copy.kind) == 0 { return 0; }
+// 把第 i 个操作数改成指向另一个值名，操作数种类保持 OP_VALUE。
+let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
+  if i == 0 { it.op0_name = name; return 0; }
+  if i == 1 { it.op1_name = name; return 0; }
+  if i == 2 { it.op2_name = name; return 0; }
+  if i == 3 { it.op3_name = name; return 0; }
+  if i == 4 { it.op4_name = name; return 0; }
+  if i == 5 { it.op5_name = name; return 0; }
+  if i == 6 { it.op6_name = name; return 0; }
+  if i == 7 { it.op7_name = name; return 0; }
+  if i == 8 { it.op8_name = name; return 0; }
+  if i == 9 { it.op9_name = name; return 0; }
+  if i == 10 { it.op10_name = name; return 0; }
+  if i == 11 { it.op11_name = name; return 0; }
+  if i == 12 { it.op12_name = name; return 0; }
+  if i == 13 { it.op13_name = name; return 0; }
+  if i == 14 { it.op14_name = name; return 0; }
+  if i == 15 { it.op15_name = name; return 0; }
+  return 0;
+};
+
+// 把一条指令里的操作数按事实表就地改写：已知常量落成 OP_INT（只在接受
+// 整数字面量的位置），别名顺着链改写成最终值名。
+let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+  let copy: vf.IrInst = inst_read(c, ii);
   let n: u64 = copy.operand_count;
+  let lit: u64 = subst_ok(copy.kind);
   let changed: u64 = loop lp(i: u64 = 0, acc: u64 = 0) while i < n {
     let op: vf.IrOperand = vf.inst_op(copy, i);
-    if (op.kind == vf.OP_VALUE()) and (op.name == name) {
-      acc = acc + set_op_int(it, i, value) + 1;
+    if (op.kind == vf.OP_VALUE()) and (op.name != 0) {
+      let resolved: u64 = facts_resolve(f, op.name, 0);
+      let cf: Fold = facts_const(f, op.name, 0);
+      if (cf.ok == 1) and (lit == 1) {
+        let slot: Mut(vf.IrInst) = inst_slot(c, ii);
+        let put: u64 = set_op_int(slot, i, cf.value);
+        acc = acc + 1;
+      } else {
+        if resolved != op.name {
+          let slot2: Mut(vf.IrInst) = inst_slot(c, ii);
+          let put2: u64 = set_op_name(slot2, i, resolved);
+          acc = acc + 1;
+        }
+      }
     }
     i = i + 1;
   };
+  st.folded = st.folded + changed;
   return changed;
 };
 
-// --- 第一趟：区域内常量折叠 -----------------------------------------------
-let fold_region = func(c: Mut(Ctx), ri: u64, st: Mut(OptStats)) -> u64 {
+// 折叠当前指令并把结果记进事实表。指令本身留在原地，冗余性交给删除趟。
+let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+  let it: vf.IrInst = inst_read(c, ii);
+  let direct: Fold = fold_inst(it);
+  let res: Fold = if direct.ok == 1 { direct } else { fold_identity(it) };
+  if res.ok == 1 {
+    st.folded = st.folded + 1;
+    if it.r0 != 0 { let put: u64 = facts_push(f, it.r0, res.kind, res.value); }
+  }
+  return 0;
+};
+
+// #if 的条件已知时：没有结果值的 #if 只承担控制流，未走的分支整段清空，
+// 只折叠走的那一支；有结果值的 #if 两支都要保留区域以维持验证器的产出
+// 约束，仍然按各自路径压入条件事实分别折叠。
+let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
+  if it.body == vf.NO_REGION() { return 0; }
+  let cond: vf.IrOperand = vf.inst_op(it, 0);
+  let has: u64 = 0;
+  let truth: u64 = 0;
+  let named: u64 = 0;
+  if cond.kind == vf.OP_INT() {
+    has = 1;
+    truth = cond.bits & 1;
+  }
+  if cond.kind == vf.OP_VALUE() {
+    if cond.name != 0 {
+      let cf: Fold = facts_const(f, cond.name, 0);
+      if cf.ok == 1 {
+        has = 1;
+        truth = cf.value & 1;
+        named = cond.name;
+      }
+    }
+  }
+  if (has == 1) and (it.result_count == 0) {
+    let dead: u64 = if truth != 0 { it.else_body } else { it.body };
+    let live: u64 = if truth != 0 { it.body } else { it.else_body };
+    if dead != vf.NO_REGION() {
+      let dr: Mut(vf.IrRegion) = region_slot(c, dead);
+      let dead_count: u64 = dr.inst_count;
+      dr.inst_count = 0;
+      st.dce_removed = st.dce_removed + dead_count;
+    }
+    if live != vf.NO_REGION() {
+      let saved: u64 = f.count;
+      if named != 0 { let put: u64 = facts_push(f, named, 1, truth); }
+      let walk: u64 = fold_region(c, live, f, st, depth + 1);
+      f.count = saved;
+    }
+    return 0;
+  }
+  if it.body != vf.NO_REGION() {
+    let saved: u64 = f.count;
+    if named != 0 { let put: u64 = facts_push(f, named, 1, 1); }
+    let walk: u64 = fold_region(c, it.body, f, st, depth + 1);
+    f.count = saved;
+  }
+  if it.else_body != vf.NO_REGION() {
+    let saved2: u64 = f.count;
+    if named != 0 { let put: u64 = facts_push(f, named, 1, 0); }
+    let walk2: u64 = fold_region(c, it.else_body, f, st, depth + 1);
+    f.count = saved2;
+  }
+  return 0;
+};
+
+// 子区域各自折叠。除 #if 之外的结构（循环体、#switch 分支等）在入口处
+// 记下事实表长度，退出时截回，区域内学到的事实不会漏到结构之外。
+let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
+  if it.kind == codes.INST_IF() { return fold_if(c, it, f, st, depth); }
+  let saved: u64 = f.count;
+  if it.body != vf.NO_REGION() {
+    let a: u64 = fold_region(c, it.body, f, st, depth + 1);
+  }
+  if it.else_body != vf.NO_REGION() {
+    let b: u64 = fold_region(c, it.else_body, f, st, depth + 1);
+  }
+  if it.default_body != vf.NO_REGION() {
+    let d: u64 = fold_region(c, it.default_body, f, st, depth + 1);
+  }
+  let cases: u64 = loop lp(i: u64 = 0) while i < it.case_count {
+    let cs: vf.IrCase = case_read(c, it.cases_at + i);
+    let e: u64 = fold_region(c, cs.body, f, st, depth + 1);
+    i = i + 1;
+  };
+  f.count = saved;
+  return 0;
+};
+
+// 当前指令：先按事实表改写操作数，再尝试折叠，最后走进它的子区域。
+let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
+  let applied: u64 = apply_facts(c, ii, f, st);
+  let folded: u64 = fold_own(c, ii, f, st);
+  let it: vf.IrInst = inst_read(c, ii);
+  return fold_children(c, it, f, st, depth);
+};
+
+let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
+  if depth > vf.MAX_DEPTH() { return 0; }
   if ri >= c.region_count { return 0; }
   let r: Mut(vf.IrRegion) = region_slot(c, ri);
   let n: u64 = r.inst_count;
   let walk: u64 = loop lp(i: u64 = 0) while i < n {
     let ii: u64 = region_index(deref(r), i);
     if ii < c.inst_count {
-      let it: Mut(vf.IrInst) = inst_slot(c, ii);
-      let f: Fold = fold_inst(deref(it));
-      if f.ok == 1 {
-        st.folded = st.folded + 1;
-        let name: u64 = it.r0;
-        let forward: u64 = loop lq(j: u64 = i + 1) while j < n {
-          let jj: u64 = region_index(deref(r), j);
-          if jj < c.inst_count {
-            let jt: Mut(vf.IrInst) = inst_slot(c, jj);
-            let sub: u64 = subst_operand(jt, name, f.value);
-          }
-          j = j + 1;
-        };
-      }
-      let inner: u64 = fold_children(c, deref(it), st);
+      let step: u64 = fold_at(c, ii, f, st, depth);
     }
     i = i + 1;
   };
   return 0;
 };
 
-// 区域内的子区域各自折叠：子区域里的使用点不改成常量，它们保持 OP_VALUE。
-let fold_children = func(c: Mut(Ctx), it: vf.IrInst, st: Mut(OptStats)) -> u64 {
-  if it.body != vf.NO_REGION() {
-    let a: u64 = fold_region(c, it.body, st);
-  }
-  if it.else_body != vf.NO_REGION() {
-    let b: u64 = fold_region(c, it.else_body, st);
-  }
-  if it.default_body != vf.NO_REGION() {
-    let d: u64 = fold_region(c, it.default_body, st);
-  }
-  let cases: u64 = loop lp(i: u64 = 0) while i < it.case_count {
-    let cs: vf.IrCase = case_read(c, it.cases_at + i);
-    let e: u64 = fold_region(c, cs.body, st);
-    i = i + 1;
-  };
-  return 0;
-};
-
-// --- 第二趟：过程内无用户纯指令删除 ---------------------------------------
+// --- 删除趟：过程内无用户纯指令删除 ---------------------------------------
 let is_pure = func(k: u64) -> u64 {
   if k <= codes.INST_VCMPGT() { return 1; }
   if k == codes.INST_LEA() { return 1; }
@@ -369,12 +640,21 @@ let dce_walk = func(c: Mut(Ctx), ri: u64, proc_body: u64, st: Mut(OptStats)) -> 
 };
 
 // 删除趟反复执行：一条指令被删掉以后，只被它使用的纯指令就变成了死代码。
+// 折叠与删除交替最多两輪，第一轮的新增量为 0 时提前结束。
 let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
-  let first: u64 = fold_region(c, body, st);
-  let rounds: u64 = loop lp(round: u64 = 0, done: u64 = 0) while done == 0 {
-    let gone: u64 = dce_walk(c, body, body, st);
-    if gone == 0 { done = 1; }
-    round = round + 1;
+  let rounds: u64 = loop lp(pass: u64 = 0, active: u64 = 1) while (pass < 2) and (active == 1) {
+    let before: u64 = st.folded + st.dce_removed;
+    let facts: Facts = facts_new();
+    let f: Mut(Facts) = mut_of(facts);
+    let folded: u64 = fold_region(c, body, f, st, 0);
+    let sweeps: u64 = loop lq(round: u64 = 0, done: u64 = 0) while done == 0 {
+      let gone: u64 = dce_walk(c, body, body, st);
+      if gone == 0 { done = 1; }
+      round = round + 1;
+    };
+    let after: u64 = st.folded + st.dce_removed;
+    if after == before { active = 0; }
+    pass = pass + 1;
   };
   return rounds;
 };

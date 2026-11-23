@@ -4,6 +4,7 @@ let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify");
 let tab = import("src::host::symtab");
 let os = import("std::os");
+let tr = import("std::trace");
 
 // 符号表由调用方通过 set_syms 交进来，C99 后端只在这一个格子里保存它的堆地址。
 // 调用方没有交表时格子保持 0，名字退化成 "anon" 或句柄的十进制值。
@@ -25,17 +26,20 @@ let syms_get = func() -> Mut(tab.HostSymTab) {
 };
 
 // --- writer ---------------------------------------------------------------
+// deferred 置 1 的 writer 处在「库前导 + 独立入口」形态：过程声明与过程体必须等到
+// emit_entry_main 拿到入口符号之后再发射，否则无法判定哪些过程真的可达。
 pub let C99Writer = struct {
   buf: MutSlice(u8),
   len: u64,
   ok: u64,
+  deferred: u64,
 };
 
 // 关联类型导出：调用方可以按 UFCS 写成 w.put_str(...)。
 pub let Self = C99Writer;
 
 pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
-  return C99Writer { buf: buf, len: 0, ok: 1 };
+  return C99Writer { buf: buf, len: 0, ok: 1, deferred: 0 };
 };
 
 pub let writer_new = func(buf: MutSlice(u8)) -> C99Writer {
@@ -2052,20 +2056,179 @@ let extern_link_seen = func(m: Ref(vf.IrModule), link: u64, limit: u64) -> u64 {
   return found;
 };
 
+// --- 死过程剪除 -----------------------------------------------------------
+// 过程在 LAINIR 里只有两种引用形态：INST_CALL 的 symbol 记录的直接调用目标，以及任
+// 何指令操作数里能被解析成过程的 OP_VALUE（取函数地址、间接调用的目标）。模块级数据
+// 只有原始字节、没有重定位表，数据段无法持有过程引用，所以除入口之外不存在根。
+// 可达性用标记表加队列做广度优先扩散：标记表某格为 1 表示对应过程可达。
+// 标记表长度交回 0 表示无法判定（过程数为零或容量申请失败），此时调用方按
+// 「全部过程可达」处理。
+let reach_table = func(raw: u64, n: u64) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), n);
+};
+
+let reach_empty = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), null_ref(Mut(u64)), 0);
+};
+
+// 名字能解析成过程且尚未标记时，标记并压入队列，交回新的队尾。
+let mark_proc_ref = func(m: Ref(vf.IrModule), name: u64, mark: MutSlice(u64),
+                         queue: MutSlice(u64), tail: u64) -> u64 {
+  if name == 0 { return tail; }
+  let pi: u64 = find_proc(m, name);
+  if pi == vf.NO_REGION() { return tail; }
+  if pi >= mark.len { return tail; }
+  if mark[pi] != 0 { return tail; }
+  if tail >= queue.len { return tail; }
+  mark[pi] = 1;
+  queue[tail] = pi;
+  return tail + 1;
+};
+
+let scan_inst_procs = func(m: Ref(vf.IrModule), it: vf.IrInst, mark: MutSlice(u64),
+                           queue: MutSlice(u64), tail: u64) -> u64 {
+  let t0: u64 = mark_proc_ref(m, it.symbol, mark, queue, tail);
+  let out: u64 = loop c(i: u64 = 0, t: u64 = t0) while i < it.operand_count {
+    let op: vf.IrOperand = vf.inst_op(it, i);
+    if op.kind == vf.OP_VALUE() {
+      t = mark_proc_ref(m, op.name, mark, queue, t);
+    }
+    i = i + 1;
+  };
+  return out;
+};
+
+let scan_cases_procs = func(m: Ref(vf.IrModule), it: vf.IrInst, mark: MutSlice(u64),
+                            queue: MutSlice(u64), tail: u64) -> u64 {
+  let out: u64 = loop c(i: u64 = 0, t: u64 = tail) while i < it.case_count {
+    let cs: vf.IrCase = case_at(m, it.cases_at + i);
+    t = scan_region_procs(m, cs.body, mark, queue, t);
+    i = i + 1;
+  };
+  return out;
+};
+
+let scan_region_procs = func(m: Ref(vf.IrModule), ri: u64, mark: MutSlice(u64),
+                             queue: MutSlice(u64), tail: u64) -> u64 {
+  if ri == vf.NO_REGION() { return tail; }
+  let r: vf.IrRegion = region_at(m, ri);
+  let out: u64 = loop c(at: u64 = 0, t: u64 = tail) while at < r.inst_count {
+    let it: vf.IrInst = inst_at(m, region_inst(r, at));
+    let t1: u64 = scan_inst_procs(m, it, mark, queue, t);
+    let t2: u64 = scan_region_procs(m, it.body, mark, queue, t1);
+    let t3: u64 = scan_region_procs(m, it.else_body, mark, queue, t2);
+    let t4: u64 = scan_region_procs(m, it.default_body, mark, queue, t3);
+    t = scan_cases_procs(m, it, mark, queue, t4);
+    at = at + 1;
+  };
+  return out;
+};
+
+// 入口过程未知时把每个过程都标为可达，调用方因此发射全部过程。
+pub let compute_reachable_procs = func(m: Ref(vf.IrModule), entry_proc: u64) -> MutSlice(u64) {
+  let n: u64 = m.proc_count;
+  if n == 0 { return reach_empty(); }
+  let mark_raw: u64 = os.alloc_bytes(n * 8);
+  if mark_raw == 0 { return reach_empty(); }
+  let queue_raw: u64 = os.alloc_bytes(n * 8);
+  if queue_raw == 0 {
+    let freed: u64 = os.free_bytes(mark_raw);
+    return reach_empty();
+  }
+  let mark: MutSlice(u64) = reach_table(mark_raw, n);
+  let queue: MutSlice(u64) = reach_table(queue_raw, n);
+  let zeroed: u64 = loop c(i: u64 = 0) while i < n {
+    mark[i] = 0;
+    i = i + 1;
+  };
+  if (entry_proc == vf.NO_REGION()) or (entry_proc >= n) {
+    let all: u64 = loop c(i: u64 = 0) while i < n {
+      mark[i] = 1;
+      i = i + 1;
+    };
+    let freed_all: u64 = os.free_bytes(queue_raw);
+    return mark;
+  }
+  mark[entry_proc] = 1;
+  queue[0] = entry_proc;
+  let scanned: u64 = loop c(head: u64 = 0, tail: u64 = 1) while head < tail {
+    let pi: u64 = queue[head];
+    let p: vf.IrProc = proc_at(m, pi);
+    if p.body != vf.NO_REGION() {
+      tail = scan_region_procs(m, p.body, mark, queue, tail);
+    }
+    head = head + 1;
+  };
+  let freed_q: u64 = os.free_bytes(queue_raw);
+  return mark;
+};
+
+pub let release_reachable_procs = func(mark: MutSlice(u64)) -> u64 {
+  if mark.len == 0 { return 0; }
+  return os.free_bytes(mark.ptr as u64);
+};
+
+pub let reachable_proc_count = func(mark: MutSlice(u64)) -> u64 {
+  if mark.len == 0 { return 0; }
+  return loop c(i: u64 = 0, n: u64 = 0) while i < mark.len {
+    if mark[i] == 1 { n = n + 1; }
+    i = i + 1;
+  };
+};
+
+// extern 过程的声明只在第一次遇到它的 C 符号时发射：标准库原型已由前导文本引入，
+// 同一连接名被多个模块绑定则只保留首个。
+let proc_decl_skip = func(m: Ref(vf.IrModule), at: u64) -> u64 {
+  let p: vf.IrProc = proc_at(m, at);
+  if p.is_extern == 0 { return 0; }
+  if find_proc(m, p.name) != at { return 1; }
+  let link: u64 = extern_link_of(p);
+  if is_c_stdlib_symbol(link) == 1 { return 1; }
+  if extern_link_seen(m, link, at) == 1 { return 1; }
+  return 0;
+};
+
+let emit_one_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), at: u64) -> u64 {
+  if proc_decl_skip(m, at) == 1 { return 1; }
+  let a: u64 = emit_proc_signature(w, m, proc_at(m, at));
+  return put_str(w, ";\n");
+};
+
 pub let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
+  if w.deferred == 1 { return 1; }
   let ok: u64 = loop c(at: u64 = i) while 1 {
     if at >= m.proc_count { break c(1); }
-    let p: vf.IrProc = proc_at(m, at);
-    let skip: u64 = 0;
-    if p.is_extern == 1 {
-      if find_proc(m, p.name) != at { skip = 1; }
-      let link: u64 = extern_link_of(p);
-      if is_c_stdlib_symbol(link) == 1 { skip = 1; }
-      if extern_link_seen(m, link, at) == 1 { skip = 1; }
+    let rc: u64 = emit_one_proc_decl(w, m, at);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
+};
+
+// 标记表长度为零时按「全部过程可达」处理。
+let emit_reachable_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                    mark: MutSlice(u64)) -> u64 {
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= m.proc_count { break c(1); }
+    if (mark.len == 0) or (mark[at] == 1) {
+      let rc: u64 = emit_one_proc_decl(w, m, at);
+      if rc == 0 { break c(0); }
     }
-    if skip == 0 {
-      let a: u64 = emit_proc_signature(w, m, p);
-      let b: u64 = put_str(w, ";\n");
+    at = at + 1;
+  };
+  return ok;
+};
+
+let emit_reachable_proc_bodies = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                      mark: MutSlice(u64)) -> u64 {
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= m.proc_count { break c(1); }
+    if (mark.len == 0) or (mark[at] == 1) {
+      let p: vf.IrProc = proc_at(m, at);
+      if p.is_extern == 0 {
+        let rc: u64 = emit_proc_body_c99(w, m, at);
+        if rc == 0 { break c(0); }
+      }
     }
     at = at + 1;
   };
@@ -2108,6 +2271,7 @@ pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), 
 };
 
 pub let emit_proc_body_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  if w.deferred == 1 { return 1; }
   let start: u64 = w.len;
   if pi >= m.proc_count { return 0; }
   let p: vf.IrProc = proc_at(m, pi);
@@ -2174,12 +2338,16 @@ let emit_preamble_no_main = func(w: Mut(C99Writer)) -> u64 {
   return w.len - start;
 };
 
-// 库形态的前导文本：不含 int main，调用方自己发射入口。
+// 库形态的前导文本：不含 int main，调用方自己发射入口。入口由 emit_entry_main 提供，
+// 过程声明与过程体因此延后到那里发射，才能按入口做死过程剪除。
 pub let emit_preamble_lib = func(w: Mut(C99Writer)) -> u64 {
+  w.deferred = 1;
   return emit_preamble_no_main(w);
 };
 
+// 自带 int main 桩的前导文本：不接入口，全部过程都必须原样发射。
 pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
+  w.deferred = 0;
   let start: u64 = w.len;
   let n: u64 = emit_preamble_no_main(w);
   if n == 0 { return 0; }
@@ -2219,13 +2387,32 @@ let emit_entry_print_result = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
 };
 
 pub let emit_entry_main = func(w: Mut(C99Writer), m: Ref(vf.IrModule), entry_sym: u64, print_result: u64) -> u64 {
+  let start: u64 = w.len;
   let pi: u64 = find_proc(m, entry_sym);
+  // 库前导形态下声明与过程体一直延到这里：入口符号现在才知道，正好按它剪除。
+  if w.deferred == 1 {
+    w.deferred = 0;
+    let mark: MutSlice(u64) = compute_reachable_procs(m, pi);
+    let total: u64 = m.proc_count;
+    let kept: u64 = if mark.len == 0 { total } else { reachable_proc_count(mark) };
+    tr.counter("c99_procs_total", total);
+    tr.counter("c99_procs_emitted", kept);
+    tr.counter("c99_pruned_procs", total - kept);
+    let d: u64 = emit_reachable_proc_decls(w, m, mark);
+    let sep1: u64 = put_byte(w, 10);
+    let b: u64 = emit_reachable_proc_bodies(w, m, mark);
+    let sep2: u64 = put_byte(w, 10);
+    let rel: u64 = release_reachable_procs(mark);
+    if (d == 0) or (b == 0) {
+      w.ok = 0;
+      return 0;
+    }
+  }
   if pi == vf.NO_REGION() {
     w.ok = 0;
     return 0;
   }
   let p: vf.IrProc = proc_at(m, pi);
-  let start: u64 = w.len;
   let a: u64 = put_str(w, "int main(int argc, char **argv) {\n  g_lain_argc = argc;\n  g_lain_argv = argv;\n");
   let b: u64 = emit_entry_invoke(w, p);
   if p.result_count == 0 {
