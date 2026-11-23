@@ -3,7 +3,7 @@
 // 两条互不依赖的路径：
 //   * write_struct / StructCodec：编译期展开 fields_of(T)，把字段值直接写进
 //     调用方的 MutSlice(u8)；叶子字段（u64 / i64 / bool / Slice(u8)）由见证
-//     模块分派，全程没有运行期反射表。JSON 键由调用方按字段声明顺序给出。
+//     模块分派，全程没有运行期反射表。JSON 键取自 fields_of(T) 的字段名。
 //   * parse / stringify：JsonVal 节点、键、字符串全部从调用方给的
 //     std::mem.BumpArena 切出，节点之间以绝对地址串成兄弟链表，因此一块
 //     arena 可以整体释放，不会留下碎片。解析器用显式栈迭代，不递归。
@@ -173,44 +173,26 @@ pub let write_leaf = func(v: T, buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, l:
 
 // ---------------------------------------------------------------------------
 // 编译期结构体序列化：一个函子把 fields_of(T) 展开成字段写入序列。
-// 键按字段声明顺序从 keys 取；调用方用 ?{ c: StructCodec(T) } 直接实例化。
+// 键就是 fields_of(T) 里各字段的 name；调用方用 ?{ c: StructCodec(T) } 直接实例化。
 // ---------------------------------------------------------------------------
 pub let JsonStructCodec = sig {
   pub let Self: Type;
-  pub let encode: Fn((Self, Slice(u8), MutSlice(u8), Mut(u64)) -> bool);
+  pub let encode: Fn((Self, MutSlice(u8), Mut(u64)) -> bool);
 };
 
 pub let StructCodec = func(T: Type) -> Module {
   return module {
     pub let Self = T;
-    pub let encode = func(v: T, keys: Slice(u8), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
+    pub let encode = func(v: T, buf: MutSlice(u8), pos: Mut(u64)) -> bool {
       let ok: u64 = 1;
       let first: u64 = 1;
-      let kcur: u64 = 0;
       if put_byte(buf, pos, 123) == false { ok = 0; }
       comptime for f in fields_of(T) {
         if ok == 1 {
           if first == 0 {
             if put_byte(buf, pos, 44) == false { ok = 0; }
           }
-          let kstart: u64 = kcur;
-          let kend: u64 = keys.len;
-          loop c(ki: u64 = kstart) while ki < keys.len {
-            if keys[ki] == 10 {
-              kend = ki;
-              ki = keys.len;
-            } else {
-              ki = ki + 1;
-            }
-          };
-          if kstart > keys.len {
-            ok = 0;
-          } else {
-            let klen: u64 = kend - kstart;
-            let ks: Slice(u8) = make_slice(Slice(u8), keys.ptr + kstart, klen);
-            if put_key(buf, pos, ks) == false { ok = 0; }
-            kcur = kend + 1;
-          }
+          if put_key(buf, pos, f.name) == false { ok = 0; }
           let w: bool = write_leaf(v.[:f.name], buf, pos);
           if w == false { ok = 0; }
           first = 0;
@@ -224,8 +206,8 @@ pub let StructCodec = func(T: Type) -> Module {
   };
 };
 
-pub let write_struct = func(val: Ref(T), keys: Slice(u8), buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, c: JsonStructCodec } -> bool {
-  return c.encode(deref(val), keys, buf, pos);
+pub let write_struct = func(val: Ref(T), buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, c: JsonStructCodec } -> bool {
+  return c.encode(deref(val), buf, pos);
 };
 
 // ---------------------------------------------------------------------------
