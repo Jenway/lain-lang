@@ -852,14 +852,22 @@ let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: 
   return skip_semi(g, l.next_i);
 };
 
-let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
+// force 为 1 时当前组的每条声明都按公开登记，用于 pub { ... } 块。
+let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 {
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
-  if is_group(g, i) == 1 { return phase1(k, g, i + 1, n); }
-  if is_semi(g, i) == 1 { return phase1(k, g, i + 1, n); }
+  if is_group(g, i) == 1 { return phase1v(k, g, i + 1, n, force); }
+  if is_semi(g, i) == 1 { return phase1v(k, g, i + 1, n, force); }
   let sym: u64 = n_sym(g, i);
-  let is_pub: u64 = if sym == s.k_pub() { 1 } else { 0 };
-  let h: u64 = if is_pub == 1 { i + 1 } else { i };
+  let pub_syn: u64 = if sym == s.k_pub() { 1 } else { 0 };
+  // pub { 声明... }：块内直接声明的 let / extern 全部登记为公开。
+  if pub_syn == 1 and i + 1 < n and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
+    let body: u64 = n_at(g, i + 1);
+    let a: u64 = phase1v(k, body, 0, n_count(body), 1);
+    return phase1v(k, g, skip_semi(g, i + 2), n, force);
+  }
+  let is_pub: u64 = if force == 1 { 1 } else { pub_syn };
+  let h: u64 = if pub_syn == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }
   let hs: u64 = n_sym(g, h);
   if hs == s.k_struct() or hs == s.k_enum() or hs == s.k_func() {
@@ -868,27 +876,31 @@ let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     st.st_fail(k, e_ast());
     return i + 1;
   }
-  if hs == s.k_extern() { let a: u64 = p1_extern(k, g, h, is_pub); return phase1(k, g, a, n); }
+  if hs == s.k_extern() { let a: u64 = p1_extern(k, g, h, is_pub); return phase1v(k, g, a, n, force); }
   // @extern(...) [pub] let 名 = func ...;：带 ABI 属性的外部声明。
   if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == ax.dl_paren() {
     let a: u64 = p1_extern_attr(k, g, n_at(g, i + 2), i + 3);
-    return phase1(k, g, a, n);
+    return phase1v(k, g, a, n, force);
   }
-  if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1(k, g, a, n); }
+  if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1v(k, g, a, n, force); }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
-  if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1(k, g, a, n); }
+  if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1v(k, g, a, n, force); }
   // 顶层 comptime if：只收选中分支里的声明，未选中的分支不参与编译。
   if hs == s.k_comptime() and i + 1 < n and n_sym(g, i + 1) == s.k_if() {
     let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
     if st.st_ok(k) != 0 { return d.next_i; }
     let body: u64 = sm.ctif_body(k, g, d);
     if st.st_ok(k) != 0 { return d.next_i; }
-    if body != 0 { let a: u64 = phase1(k, body, 0, n_count(body)); }
-    return phase1(k, g, d.next_i, n);
+    if body != 0 { let a: u64 = phase1v(k, body, 0, n_count(body), force); }
+    return phase1v(k, g, d.next_i, n, force);
   }
   // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
-  if hs == s.k_inject() { let a: u64 = inject_decl(k, g, h); return phase1(k, g, a, n); }
-  return phase1(k, g, i + 1, n);
+  if hs == s.k_inject() { let a: u64 = inject_decl(k, g, h); return phase1v(k, g, a, n, force); }
+  return phase1v(k, g, i + 1, n, force);
+};
+
+let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
+  return phase1v(k, g, i, n, 0);
 };
 
 // --- phase2：过程体 ------------------------------------------------------
@@ -961,6 +973,12 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if is_semi(g, i) == 1 { return phase2(k, g, i + 1, n); }
   let sym: u64 = n_sym(g, i);
   let is_pub: u64 = if sym == s.k_pub() { 1 } else { 0 };
+  // pub { 声明... }：块内声明照常编过程体。
+  if is_pub == 1 and i + 1 < n and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
+    let body: u64 = n_at(g, i + 1);
+    let a: u64 = phase2(k, body, 0, n_count(body));
+    return phase2(k, g, skip_semi(g, i + 2), n);
+  }
   let h: u64 = if is_pub == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }
   let hs: u64 = n_sym(g, h);

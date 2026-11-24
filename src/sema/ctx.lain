@@ -205,21 +205,46 @@ pub let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 {
   return i + 1;
 };
 
-// 名字型类型：标量走 ty_of_sym，struct / enum 名走模块符号表并带上形状号，
-// 类型别名（let Self = T;）直接投影符号上记的类型号。
-let named_type = func(k: Mut(st.State), name: u64, out: Mut(ty.Ty)) -> u64 {
-  let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
-  if is_null(e) { st.st_fail(k, 21); return 0; }
+// 模块导出的公开类型名 Self：模块在类型位置与构造位置都按它透明解开。
+// 没有 pub let Self 的模块回空引用，调用方沿用原来的报错。
+pub let mod_self_entry = func(k: Mut(st.State), modv: u64, seal: u64) -> Mut(modules.SymEntry) {
+  return modules.sym_lookup_in(k, modv, seal, s.b_self_type(), modules.cur(k));
+};
+
+// 符号条目是模块时换成它导出的 Self 条目，其余原样回来。
+pub let self_entry = func(k: Mut(st.State), e: Mut(modules.SymEntry)) -> Mut(modules.SymEntry) {
+  if is_null(e) { return e; }
+  if modules.sym_kind(e) != modules.sym_kind_mod() { return e; }
+  let se: Mut(modules.SymEntry) = mod_self_entry(k, modules.sym_qual(e), modules.sym_decl(e));
+  if is_null(se) { return e; }
+  return se;
+};
+
+// 符号条目记的类型写进 out：struct / enum 带形状号，类型别名投影符号上记的类型号。
+// 回 1 表示写成功。
+let entry_type = func(k: Mut(st.State), e: Mut(modules.SymEntry), out: Mut(ty.Ty)) -> u64 {
   let kd: u64 = modules.sym_kind(e);
   if kd == modules.sym_kind_type_alias() {
     let pr: u64 = ireg.project(k, modules.sym_qual(e), out);
     return 1;
   }
-  if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() { st.st_fail(k, 22); return 0; }
+  if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() { return 0; }
   let sh: u64 = modules.sym_shape(e);
   let a: u64 = ty.ty_addr(out);
   let b: u64 = ty.ty_set_sh(out, sh);
-  return sh;
+  return 1;
+};
+
+// 名字型类型：标量走 ty_of_sym，struct / enum 名走模块符号表并带上形状号，
+// 类型别名（let Self = T;）直接投影符号上记的类型号。
+// 模块名先换成它导出的 pub let Self，再按同一套规则落定。
+let named_type = func(k: Mut(st.State), name: u64, out: Mut(ty.Ty)) -> u64 {
+  let e: Mut(modules.SymEntry) = ctf.find_sym(k, name);
+  if is_null(e) { st.st_fail(k, 21); return 0; }
+  let se: Mut(modules.SymEntry) = self_entry(k, e);
+  if entry_type(k, se, out) == 1 { return 1; }
+  st.st_fail(k, 22);
+  return 0;
 };
 
 // 从 pos 起的点号链里最后一个名字的下标（pos 本身是名字）。
@@ -268,17 +293,8 @@ let qual_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
     st.st_fail(k, e_type());
     return after;
   }
-  let kd: u64 = modules.sym_kind(e);
-  if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
-    let sh: u64 = modules.sym_shape(e);
-    let a: u64 = ty.ty_addr(out);
-    let b: u64 = ty.ty_set_sh(out, sh);
-    return after;
-  }
-  if kd == modules.sym_kind_type_alias() {
-    let pr: u64 = ireg.project(k, modules.sym_qual(e), out);
-    return after;
-  }
+  let se: Mut(modules.SymEntry) = self_entry(k, e);
+  if entry_type(k, se, out) == 1 { return after; }
   st.st_fail(k, e_type());
   return after;
 };

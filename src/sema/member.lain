@@ -378,16 +378,18 @@ pub let agg_construct_sh = func(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.
 };
 
 // Name { 字段: 表达式 ... }
+// 名字是模块时按它导出的 pub let Self 的类型落定：Box { ... } 等于 Box.Self { ... }。
 pub let agg_construct = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
   let nm: u64 = n_sym(g, i);
   let e: Mut(modules.SymEntry) = ctf.find_sym(k, nm);
   if is_null(e) { cl.fail_name(k, nm, e_unbound()); return i + 2; }
-  if modules.sym_kind(e) == modules.sym_kind_type_alias() {
-    let ash: u64 = ireg.ty_shape(k, modules.sym_qual(e));
+  let target: Mut(modules.SymEntry) = cx.self_entry(k, e);
+  if modules.sym_kind(target) == modules.sym_kind_type_alias() {
+    let ash: u64 = ireg.ty_shape(k, modules.sym_qual(target));
     agg_construct_sh(k, ash, n_at(g, i + 1), out);
     return i + 2;
   }
-  let sh: u64 = modules.sym_shape(e);
+  let sh: u64 = modules.sym_shape(target);
   if sh == 0 { st.st_fail(k, e_type()); return i + 2; }
   agg_construct_sh(k, sh, n_at(g, i + 1), out);
   return i + 2;
@@ -439,6 +441,11 @@ pub let member_entry = func(k: Mut(st.State), g: u64, i: u64, e: Mut(modules.Sym
   let kd: u64 = modules.sym_kind(e);
   let q: u64 = modules.sym_qual(e);
   let has_call: u64 = if i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_paren() { 1 } else { 0 };
+  // 模块名后跟花括号：按它导出的 pub let Self 构造，M { ... } 等于 M.Self { ... }。
+  if kd == modules.sym_kind_mod() and i + 1 < n_count(g) and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
+    let se: Mut(modules.SymEntry) = cx.self_entry(k, e);
+    if (se as u64) != (e as u64) { return member_entry(k, g, i, se, want, out); }
+  }
   if kd == modules.sym_kind_mod() or kd == modules.sym_kind_sig() {
     let mm: Ref(u8) = "module is compile-time only";
     let md: u64 = ir.diag(k, 0, 1, mm, 27);
