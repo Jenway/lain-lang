@@ -1,0 +1,154 @@
+// std::collections::map —— u64 键的定长开放寻址哈希表函子。
+//
+// 函子只依赖语言核心（Array / loop / 引用族）、std::mem 的静态 arena
+// 切块原语与 std::option，因此同一份源码在 lainir-run 虚拟机与 C99 后端上
+// 有完全一致的行为。
+//
+// 存储：LAINIR 里的 Array 与 struct 都是「指向块的指针」，函数返回时只拷指针字，
+// 被调过程调用帧里的块随返回失效。因此容器块统一从本模块的静态 arena 切分，
+// 每调用一次 new 就占用一段互不重叠的块，块的生命期与进程相同。
+// arena 容量固定，耗尽时由 mem.carve 立即中止。
+let mem = import("std::mem");
+let option = import("std::option");
+
+let ArenaBacking = struct {
+  bytes: Array(u8, 16384),
+};
+
+// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
+// 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
+let arena_backing: ArenaBacking = ArenaBacking { };
+
+// 从静态 arena 切出 bytes 字节，块起点由 mem.carve 回。
+let arena_take = func(bytes: u64) -> u64 {
+  return mem.carve(ptr_of(arena_backing), 16384, bytes);
+};
+
+// ---------------------------------------------------------------------------
+// HashMapU64：u64 键的开放寻址哈希表（线性探测）。
+// ---------------------------------------------------------------------------
+pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
+  let opt = option.Option(V);
+  return module {
+    pub let Opt = opt.Opt;
+
+    pub let Map = struct {
+      keys: Array(u64, Cap),
+      used: Array(bool, Cap),
+      vals: Array(V, Cap),
+      len: u64,
+    };
+
+    pub let Self = Map;
+
+    // splitmix64 的一轮混合：把连续键打散成近似均匀的槽位。
+    let mix = func(key: u64) -> u64 {
+      let x: u64 = key ^ (key >> 30);
+      return x * 0xbf58476d1ce4e5b9;
+    };
+
+    let slot_of = func(key: u64) -> u64 {
+      return mix(key) % Cap;
+    };
+
+    // 命中返回槽位，未命中返回 Cap。
+    let find_used = func(m: Ref(Map), key: u64) -> u64 {
+      let start: u64 = slot_of(key);
+      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
+        let idx: u64 = (start + i) % Cap;
+        if deref(m).used[idx] {
+          if deref(m).keys[idx] == key {
+            slot = idx;
+            i = Cap;
+          } else {
+            i = i + 1;
+          }
+        } else {
+          i = Cap;
+        }
+      };
+      return slot;
+    };
+
+    // 沿着探测链找第一个空槽，整张表满了返回 Cap。
+    let find_free = func(m: Ref(Map), key: u64) -> u64 {
+      let start: u64 = slot_of(key);
+      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
+        let idx: u64 = (start + i) % Cap;
+        if deref(m).used[idx] {
+          i = i + 1;
+        } else {
+          slot = idx;
+          i = Cap;
+        }
+      };
+      return slot;
+    };
+
+    // keys / used / vals 三块数据从 arena 切分；len 槽随后覆盖回 0。
+    pub let new = func() -> Map {
+      let m: Map = Map { len: 0 };
+      comptime for f in fields_of(Map) {
+        let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(m) + (f.offset as u64));
+        deref(dst) = arena_take(size_of(f.type) as u64);
+      }
+      m.len = 0;
+      comptime for i in 0..Cap {
+        m.used[i] = false;
+      }
+      return m;
+    };
+
+    pub let count = func(m: Ref(Map)) -> u64 {
+      return deref(m).len;
+    };
+
+    // 已存在则更新，否则占用探测链上的第一个空槽；满表返回 0。
+    pub let put = func(m: Mut(Map), key: u64, val: V) -> u64 {
+      let mr: Ref(Map) = m;
+      let hit: u64 = find_used(mr, key);
+      if hit < Cap {
+        deref(m).vals[hit] = val;
+        return 1;
+      }
+      let spot: u64 = find_free(mr, key);
+      if spot >= Cap {
+        return 0;
+      }
+      deref(m).keys[spot] = key;
+      deref(m).used[spot] = true;
+      deref(m).vals[spot] = val;
+      deref(m).len = deref(m).len + 1;
+      return 1;
+    };
+
+    pub let has = func(m: Ref(Map), key: u64) -> u64 {
+      let found: bool = find_used(m, key) < Cap;
+      if found {
+        return 1;
+      }
+      return 0;
+    };
+
+    // 命中时把值写进 out 并返回 1，否则返回 0。
+    pub let get = func(m: Ref(Map), key: u64, out: Mut(V)) -> u64 {
+      let hit: u64 = find_used(m, key);
+      let found: bool = hit < Cap;
+      if found {
+        deref(out) = deref(m).vals[hit];
+        return 1;
+      }
+      return 0;
+    };
+
+    // 命中时直接回载荷，未命中回 None；调用方不需要自备输出槽。
+    pub let get_opt = func(m: Ref(Map), key: u64) -> opt.Opt {
+      let hit: u64 = find_used(m, key);
+      let found: bool = hit < Cap;
+      if found {
+        return opt.some(deref(m).vals[hit]);
+      }
+      return opt.none();
+    };
+  };
+};
