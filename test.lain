@@ -984,6 +984,36 @@ let lang_fail_probe = func(x: i64) -> i64 {
   };
 };
 
+// 环境 Trap：Trap 的名字就是身份，签名与调用点都不写 !{ Trap } 或 !。
+let lang_trap_probe = func() -> i64 {
+  return handle mem.trap_abort(77) with {
+    return(v) => v,
+    trap(code) => code as i64,
+  };
+};
+
+// 私有 let 过程不写 !{ Raise }：编译器从体内的 perform 与带 ! 的向外调用
+// 推断出效应行，调用点仍然用 ! 表明效应向外传。
+let Raise = effect {
+  op fail(code: i64) -> Never;
+};
+
+let priv_raise = func(v: i64) -> i64 {
+  perform Raise.fail(v);
+  return 0;
+};
+
+let priv_forward = func() -> i64 {
+  return priv_raise(55)!;
+};
+
+let lang_priv_run = func() -> i64 {
+  return handle priv_forward() with {
+    return(v) => v,
+    fail(c) => c,
+  };
+};
+
 let run_effects_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::effects");
 
@@ -998,6 +1028,12 @@ let run_effects_suite = func() -> i64 {
   // 载荷原样绑定到 fail_val 分支。
   t.eq_i64(mut_of(st), "static abortive scalar pass-through", lang_fail_probe(7), 7);
   t.eq_i64(mut_of(st), "static abortive scalar payload", lang_fail_probe(142), 127);
+
+  // 环境 Trap：中止事件写入通道，handle 的 trap 分支拿到原因码。
+  t.eq_i64(mut_of(st), "ambient trap handler", lang_trap_probe(), 77);
+  // 私有过程的推断效应行：priv_raise / priv_forward 都没有注解，
+  // priv_forward 带 ! 调 priv_raise，handle 接住并拿回 55。
+  t.eq_i64(mut_of(st), "inferred private effect row", lang_priv_run(), 55);
 
   // 词法尾恢复：两次 emit 各自 resume，续体把加工后的值送回发起点。
   t.eq_i64(mut_of(st), "resumable emit resume", lang_yield_run(), 60);

@@ -79,7 +79,11 @@ pub let EffCtx = struct {
   inn: u64,
   inc: u64,
   in_handle: u64,
-  last_aborts: u64
+  last_aborts: u64,
+  inf: Mut(u64),
+  infn: u64,
+  infc: u64,
+  inftarget: u64
 };
 
 pub let HArm = struct {
@@ -134,9 +138,10 @@ pub let SEQ_CAP = func() -> u64 { return 128; };
 pub let FRAME_CAP = func() -> u64 { return 64; };
 pub let HANDLER_CAP = func() -> u64 { return 32; };
 pub let RESUME_CAP = func() -> u64 { return 32; };
+pub let INF_CAP = func() -> u64 { return 16; };
 
 let ctx_new = func(k: Mut(st.State)) -> Mut(EffCtx) {
-  let c: Mut(EffCtx) = ptr_cast(Mut(EffCtx), st.st_ralloc(k, 160));
+  let c: Mut(EffCtx) = ptr_cast(Mut(EffCtx), st.st_ralloc(k, 192));
   c.frames = ptr_cast(Mut(u64), st.st_ralloc(k, FRAME_CAP() * 8));
   c.fn = 0;
   c.fcap = FRAME_CAP();
@@ -157,6 +162,10 @@ let ctx_new = func(k: Mut(st.State)) -> Mut(EffCtx) {
   c.inc = 8;
   c.in_handle = 0;
   c.last_aborts = 0;
+  c.inf = ptr_cast(Mut(u64), st.st_ralloc(k, INF_CAP() * 16));
+  c.infn = 0;
+  c.infc = INF_CAP();
+  c.inftarget = 0;
   return c;
 };
 
@@ -187,6 +196,15 @@ let row_alloc = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
 };
 
 pub let row_empty = func(k: Mut(st.State)) -> Mut(EffRow) { return row_alloc(k, 64); };
+
+// 推断出来的效应行跨源存活：私有过程可能在别的源里被引用。
+let row_alloc_p = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
+  let r: Mut(EffRow) = ptr_cast(Mut(EffRow), st.st_ralloc(k, 24));
+  r.n = 0;
+  r.cap = cap;
+  r.items = ptr_cast(Mut(u64), st.st_ralloc(k, cap * 24));
+  return r;
+};
 
 // 动态结果槽：在当前位置发 #alloca，不占过程入口预排的槽池。
 let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
@@ -293,6 +311,103 @@ let current_allows = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
     i = i - 1;
   };
   return 0;
+};
+
+// --- 私有 let 过程的效应推断 -----------------------------------------------
+// 只有私有、未写 !{...} 且不是 main 的 let 过程参与推断：推断表条目 16 字节，
+// [过程符号, 推断出的效应行]。推断行住在持久分配区，跨源仍然可读。
+let inf_at = func(c: Mut(EffCtx), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.inf) + i * 16);
+};
+
+let inf_lookup = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> Mut(EffRow) {
+  if is_null(se) { return null_ref(Mut(EffRow)); }
+  let c: Mut(EffCtx) = ctx(k);
+  let hit: Mut(EffRow) = null_ref(Mut(EffRow));
+  let done: u64 = loop sc(i: u64 = 0) while i < c.infn {
+    let p: Mut(u64) = inf_at(c, i);
+    if deref(p) == (se as u64) {
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      hit = ptr_cast(Mut(EffRow), deref(pa));
+      break sc(i + 1);
+    }
+    i = i + 1;
+  };
+  return hit;
+};
+
+let inf_grow = func(k: Mut(st.State), c: Mut(EffCtx)) -> Mut(u64) {
+  let ncap: u64 = c.infc * 2;
+  let nb: Mut(u8) = st.st_ralloc(k, ncap * 16);
+  let ob: Mut(u8) = ptr_cast(Mut(u8), c.inf);
+  let cp: u64 = loop mv(i: u64 = 0) while i < c.infn {
+    let s0: Mut(u64) = ptr_cast(Mut(u64), ob + i * 16);
+    let d0: Mut(u64) = ptr_cast(Mut(u64), nb + i * 16);
+    deref(d0) = deref(s0);
+    let s1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), s0) + 8);
+    let d1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), d0) + 8);
+    deref(d1) = deref(s1);
+    i = i + 1;
+  };
+  c.inf = ptr_cast(Mut(u64), nb);
+  c.infc = ncap;
+  return c.inf;
+};
+
+// 进入一个过程体的编译：合格的过程拿到一张空的推断行，返回先前的推断目标。
+// 不合格的过程把目标清掉，它的体内不会往任何行里记账。
+pub let infer_begin = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  let prev: u64 = c.inftarget;
+  c.inftarget = 0;
+  if is_null(se) { return prev; }
+  if modules.sym_kind(se) != modules.sym_kind_func() { return prev; }
+  if modules.sym_pub(se) != 0 { return prev; }
+  if modules.sym_shape(se) != 0 { return prev; }
+  if modules.sym_name(se) == s.intern("main", 4) { return prev; }
+  let row: Mut(EffRow) = inf_lookup(k, se);
+  let target: Mut(EffRow) = row;
+  if is_null(target) == 1 {
+    target = row_alloc_p(k, 64);
+    if c.infn >= c.infc { let g: Mut(u64) = inf_grow(k, c); }
+    let p: Mut(u64) = inf_at(c, c.infn);
+    deref(p) = se as u64;
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    deref(pa) = target as u64;
+    c.infn = c.infn + 1;
+  }
+  c.inftarget = target as u64;
+  return prev;
+};
+
+pub let infer_end = func(k: Mut(st.State), prev: u64) -> u64 {
+  let c: Mut(EffCtx) = ctx(k);
+  c.inftarget = prev;
+  return prev;
+};
+
+// 当前帧栈里还活着的那张推断行就是记账目标；嵌套过程各自压自己的帧，
+// 外层的推断行不在栈顶范围内时这里返回空，效应照旧报错。
+let infer_target = func(k: Mut(st.State)) -> Mut(EffRow) {
+  let c: Mut(EffCtx) = ctx(k);
+  let want: u64 = c.inftarget;
+  let hit: Mut(EffRow) = null_ref(Mut(EffRow));
+  if want == 0 { return hit; }
+  let done: u64 = loop sc(i: u64 = c.fn) while i > 0 {
+    let r: Mut(EffRow) = frame_at(c, i - 1);
+    if (r as u64) == want {
+      hit = r;
+      break sc(i - 1);
+    }
+    i = i - 1;
+  };
+  return hit;
+};
+
+let infer_add = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let tgt: Mut(EffRow) = infer_target(k);
+  if is_null(tgt) == 1 { return 0; }
+  return row_push(k, tgt, 0, bodyg, param_tid);
 };
 
 // --- 效应声明 -------------------------------------------------------------
@@ -543,11 +658,66 @@ pub let bare_variant = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
 
 pub let callee_row = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> Mut(EffRow) {
   if is_null(se) { return row_empty(k); }
+  let inferred: Mut(EffRow) = inf_lookup(k, se);
+  if is_null(inferred) == 0 { return inferred; }
   let kd: u64 = modules.sym_kind(se);
   if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() { return row_empty(k); }
   let bidx: u64 = modules.sym_shape(se);
   if bidx == 0 { return row_empty(k); }
   return row_from_hdr(k, modules.sym_src(se), modules.sym_mod(se), bidx);
+};
+
+// --- 环境 Trap -----------------------------------------------------------
+// Trap 是环境效应：它的名字就是身份，任何声明为 Trap 的效应符号都匹配。
+pub let is_trap_effect = func(k: Mut(st.State), eff: Mut(modules.SymEntry)) -> u64 {
+  if is_null(eff) { return 0; }
+  if modules.sym_kind(eff) != kind_effect() { return 0; }
+  if modules.sym_name(eff) == s.intern("Trap", 4) { return 1; }
+  return 0;
+};
+
+// 按形状与类型实参定位效应符号：效应行项目（tag 0）存的正是这一对。
+let effect_at = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> Mut(modules.SymEntry) {
+  let cnt: u64 = modules.sym_count(k);
+  let found: Mut(modules.SymEntry) = null_ref(Mut(modules.SymEntry));
+  let done: u64 = loop sc(i: u64 = 0) while i < cnt {
+    let se: Mut(modules.SymEntry) = modules.sym_at(k, i);
+    if (modules.sym_kind(se) == kind_effect()) and (modules.sym_shape(se) == bodyg) {
+      if (modules.sym_qual(se) == param_tid) or (param_tid == 0) {
+        found = se;
+        break sc(i + 1);
+      }
+    }
+    i = i + 1;
+  };
+  return found;
+};
+
+let is_trap_shape = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let se: Mut(modules.SymEntry) = effect_at(k, bodyg, param_tid);
+  return is_trap_effect(k, se);
+};
+
+// 效应行里的一项是不是 Trap：tag 1 只存名字符号，tag 0 存形状与类型实参。
+let row_item_trap = func(k: Mut(st.State), p: Mut(u64)) -> u64 {
+  let tag: u64 = deref(p);
+  let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+  let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+  if tag == 0 { return is_trap_shape(k, deref(pa), deref(pb)); }
+  if deref(pa) == s.intern("Trap", 4) { return 1; }
+  return 0;
+};
+
+// 行里除 Trap 之外的效应仍然要求调用点写 !。
+let row_needs_bang = func(k: Mut(st.State), row: Mut(EffRow)) -> u64 {
+  if row_is_empty(row) == 1 { return 0; }
+  let need: u64 = loop it(i: u64 = 0) while i < row.n {
+    let p: Mut(u64) = item_at(row, i);
+    if row_item_trap(k, p) == 0 { break it(1); }
+    if i + 1 >= row.n { break it(0); }
+    i = i + 1;
+  };
+  return need;
 };
 
 // --- 运行期通道 -----------------------------------------------------------
@@ -618,6 +788,12 @@ let handler_frames_name = func(k: Mut(st.State)) -> u64 {
 
 let hframe_bytes = func() -> u64 { return 16384; };
 
+// Trap 处理器计数：进入带 Trap 分支的 handle 时加一，离开体时减一。
+// 中止发生时它说话：非零就说明有处理器会接，零就是没人接。
+let trap_depth_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_trap", 10);
+};
+
 let ensure_global = func(k: Mut(st.State), nm: u64, size: u64) -> u64 {
   if ir.data_find(k, nm) != 0 { return nm; }
   let buf: Mut(u8) = st.st_databuf(k) + st.st_dataused(k);
@@ -641,6 +817,54 @@ let ensure_hcur = func(k: Mut(st.State)) -> u64 {
 
 let ensure_hframes = func(k: Mut(st.State)) -> u64 {
   return ensure_global(k, handler_frames_name(k), hframe_bytes());
+};
+
+let ensure_trap_depth = func(k: Mut(st.State)) -> u64 {
+  return ensure_global(k, trap_depth_name(k), 8);
+};
+
+let trap_depth_load = func(k: Mut(st.State)) -> u64 {
+  let g: u64 = ensure_trap_depth(k);
+  return load_u64(k, g, 0);
+};
+
+// 计数增减：kind 取 INST_ADD 或 INST_SUB。
+let trap_depth_step = func(k: Mut(st.State), kind: u64, delta: u64) -> u64 {
+  let g: u64 = ensure_trap_depth(k);
+  let cur: u64 = load_u64(k, g, 0);
+  let t: Mut(ty.Ty) = t64(k);
+  let res: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, cur);
+  let b: u64 = ir.arg_int(k, delta);
+  let ins: u64 = ir.emit(k, kind, res, t);
+  let v: Mut(ty.Val) = new_val(k);
+  ty.val_ref(v, res, t);
+  let s: u64 = store_val(k, g, 0, v);
+  return res;
+};
+
+// 未接住的中止：1 / (code - code) 在 C99 与 VM 里都是确定性的算术陷阱。
+// 商写回 __eff_state 的 tag 字段，除法结果因此始终是活的，优化器删不掉。
+let emit_trap = func(k: Mut(st.State), payload: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let pv: Mut(ty.Val) = new_val(k);
+  let pc: u64 = cx.coerce(k, payload, ty.vty(payload), t, pv);
+  let zero: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let a1: u64 = ir.op_val(k, pv);
+  let a2: u64 = ir.op_val(k, pv);
+  let sub: u64 = ir.emit(k, codes.INST_SUB(), zero, t);
+  let res: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let b1: u64 = ir.arg_int(k, 1);
+  let b2: u64 = ir.arg_ref(k, zero);
+  let div: u64 = ir.emit(k, codes.INST_UDIV(), res, t);
+  let rv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(rv, res, t);
+  let base: u64 = state_addr(k);
+  let s: u64 = store_val(k, base, 0, rv);
+  return res;
 };
 
 let proc_addr = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
@@ -1124,11 +1348,17 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       st.st_fail(k, ax.e_unbound());
       return j2 + 3;
     }
-    if current_allows(k, bodyg, param_tid) == 0 {
-      let m4: Ref(u8) = "unhandled effect";
-      let d4: u64 = ir.diag(k, n_at(g, j), 1, m4, 16);
-      st.st_fail(k, ax.e_type());
-      return j2 + 3;
+    let is_trap: u64 = is_trap_shape(k, bodyg, param_tid);
+    if is_trap == 0 {
+      if current_allows(k, bodyg, param_tid) == 0 {
+        let added: u64 = infer_add(k, bodyg, param_tid);
+        if added == 0 {
+          let m4: Ref(u8) = "unhandled effect";
+          let d4: u64 = ir.diag(k, n_at(g, j), 1, m4, 16);
+          st.st_fail(k, ax.e_type());
+          return j2 + 3;
+        }
+      }
     }
     if param_tid != 0 { info.param_tid = param_tid; }
     let payload: Mut(ty.Val) = payload_bits(k, argsg, info);
@@ -1148,16 +1378,40 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       return j2 + 3;
     }
     let base: u64 = state_addr(k);
-    let tag2: u64 = tag;
-    let s0: u64 = store_lit(k, base, 0, tag);
-    let s1: u64 = store_val(k, base, 8, payload);
-    let s2: u64 = store_lit(k, base, 24, 0);
-    if in_handle(k) == 1 {
+    if is_trap == 1 {
+      // 环境 Trap：谁写不写 !{ Trap } 都一样。运行期有活跃的 Trap 处理器
+      // 就把事件写进通道交出去；没人接时正常模式就地终止，--release-fast 跳过。
+      let deep: u64 = trap_depth_load(k);
+      let active: u64 = cond_u64(k, codes.INST_NE(), deep, 0);
+      let tr: u64 = ir.region_begin(k);
+      let t0: u64 = store_lit(k, base, 0, tag);
+      let t1: u64 = store_val(k, base, 8, payload);
+      let t2: u64 = store_lit(k, base, 24, 0);
+      if in_handle(k) == 0 {
+        let t3: u64 = emit_default_return(k);
+      }
+      let tre: u64 = ir.region_end(k);
+      let er: u64 = ir.region_begin(k);
+      if st.st_release_fast(k) == 0 {
+        let e1: u64 = emit_trap(k, payload);
+      }
+      if in_handle(k) == 0 {
+        let e2: u64 = emit_default_return(k);
+      }
+      let ere: u64 = ir.region_end(k);
+      let ifi: u64 = ir.emit_if(k, 0, active, tre, ere);
       ty.val_none(out);
     } else {
-      let dr: u64 = emit_default_return(k);
-      let ma: u64 = mark_abort(k);
-      ty.val_none(out);
+      let s0: u64 = store_lit(k, base, 0, tag);
+      let s1: u64 = store_val(k, base, 8, payload);
+      let s2: u64 = store_lit(k, base, 24, 0);
+      if in_handle(k) == 1 {
+        ty.val_none(out);
+      } else {
+        let dr: u64 = emit_default_return(k);
+        let ma: u64 = mark_abort(k);
+        ty.val_none(out);
+      }
     }
     return j2 + 3;
   }
@@ -1763,6 +2017,19 @@ let row_no_abortive = func(k: Mut(st.State), row: Mut(EffRow)) -> u64 {
   return 1;
 };
 
+// 这个处理器有没有 Trap 分支：有就说明 handle 体在运行期可能接住中止。
+let has_trap_arm = func(k: Mut(st.State), h: Mut(HandlerRec)) -> u64 {
+  let found: u64 = loop a(i: u64 = 0) while i < h.n {
+    let ar: Mut(HArm) = arm_at(h, i);
+    if ar.kind == 1 {
+      if is_trap_shape(k, ar.bodyg, 0) == 1 { break a(1); }
+    }
+    if i + 1 >= h.n { break a(0); }
+    i = i + 1;
+  };
+  return found;
+};
+
 let can_inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> u64 {
   if is_null(se) { return 0; }
   if modules.sym_kind(se) != modules.sym_kind_func() { return 0; }
@@ -1883,6 +2150,8 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   let hs: u64 = if dname != 0 { push_eff_frame(k, dname) } else { no_slot() };
   let cw: u64 = if gen_first == 1 { 0 } else { push_frame(k, caught) };
   let ph: u64 = if gen_first == 1 { 0 } else { push_handler(k, hr) };
+  let trap_arm: u64 = if gen_first == 1 { 0 } else { has_trap_arm(k, hr) };
+  let td0: u64 = if trap_arm == 1 { trap_depth_step(k, codes.INST_ADD(), 1) } else { 0 };
   let prev: u64 = in_handle(k);
   let sh: u64 = set_in_handle(k, 1);
   let saved_ab: u64 = take_aborts(k);
@@ -1910,6 +2179,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     if gen_first == 0 { let pq: u64 = pop_handler(k); let pf: u64 = pop_frame(k); }
     return nx;
   }
+  let td1: u64 = if trap_arm == 1 { trap_depth_step(k, codes.INST_SUB(), 1) } else { 0 };
   if dname != 0 { let po: u64 = pop_eff_frame(k, hs); }
   let rs2: u64 = set_in_handle(k, prev);
   if gen_first == 0 { let pq2: u64 = pop_handler(k); let pf2: u64 = pop_frame(k); };
@@ -1998,7 +2268,7 @@ pub let call_guard = func(k: Mut(st.State), se: Mut(modules.SymEntry), g: u64, n
   let n: u64 = n_count(g);
   let bang: u64 = 0;
   if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
-  if bang == 0 {
+  if bang == 0 and row_needs_bang(k, row) == 1 {
     let m: Ref(u8) = "missing ! on effectful call";
     let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
     st.st_fail(k, ax.e_type());
@@ -2007,20 +2277,25 @@ pub let call_guard = func(k: Mut(st.State), se: Mut(modules.SymEntry), g: u64, n
   let i: u64 = 0;
   let ok: u64 = loop it(i: u64 = 0) while i < row.n {
     let p: Mut(u64) = item_at(row, i);
-    let tag: u64 = deref(p);
-    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
-    let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
-    if tag == 0 {
-      if current_allows(k, deref(pa), deref(pb)) == 0 {
-        let m2: Ref(u8) = "unhandled effect";
-        let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
-        st.st_fail(k, ax.e_type());
-        return 0;
+    if row_item_trap(k, p) == 0 {
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if tag == 0 {
+        if current_allows(k, deref(pa), deref(pb)) == 0 {
+          let added: u64 = infer_add(k, deref(pa), deref(pb));
+          if added == 0 {
+            let m2: Ref(u8) = "unhandled effect";
+            let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+            st.st_fail(k, ax.e_type());
+            return 0;
+          }
+        }
       }
     }
     i = i + 1;
   };
-  return 1;
+  return bang;
 };
 
 pub let call_guard_row = func(k: Mut(st.State), row: Mut(EffRow), g: u64, nxt: u64) -> u64 {
@@ -2028,7 +2303,7 @@ pub let call_guard_row = func(k: Mut(st.State), row: Mut(EffRow), g: u64, nxt: u
   let n: u64 = n_count(g);
   let bang: u64 = 0;
   if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
-  if bang == 0 {
+  if bang == 0 and row_needs_bang(k, row) == 1 {
     let m: Ref(u8) = "missing ! on effectful call";
     let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
     st.st_fail(k, ax.e_type());
@@ -2037,18 +2312,23 @@ pub let call_guard_row = func(k: Mut(st.State), row: Mut(EffRow), g: u64, nxt: u
   let i: u64 = 0;
   let ok: u64 = loop it(i: u64 = 0) while i < row.n {
     let p: Mut(u64) = item_at(row, i);
-    let tag: u64 = deref(p);
-    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
-    let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
-    if tag == 0 {
-      if current_allows(k, deref(pa), deref(pb)) == 0 {
-        let m2: Ref(u8) = "unhandled effect";
-        let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
-        st.st_fail(k, ax.e_type());
-        return 0;
+    if row_item_trap(k, p) == 0 {
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if tag == 0 {
+        if current_allows(k, deref(pa), deref(pb)) == 0 {
+          let added: u64 = infer_add(k, deref(pa), deref(pb));
+          if added == 0 {
+            let m2: Ref(u8) = "unhandled effect";
+            let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+            st.st_fail(k, ax.e_type());
+            return 0;
+          }
+        }
       }
     }
     i = i + 1;
   };
-  return 1;
+  return bang;
 };
