@@ -87,10 +87,22 @@ pub let State = struct {
   vmod: u64
 };
 
+// 按 8 字节字清零：raw 必须来自 8 字节对齐的分配。
+let zero_words = func(raw: Mut(u8), words: u64) -> u64 {
+  let ws: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), words);
+  let i: u64 = loop zeros(i: u64 = 0) while i < words {
+    ws[i] = 0;
+    i = i + 1;
+  };
+  return 0;
+};
+
 // cap：绑定栈字节数。arena 与持久分配都跨源存活：一次编译
 // 里所有源的形状、类型、符号必须同时有效。
 pub let st_new = func(cap: u64) -> Mut(State) {
-  let raw: Mut(u8) = hr.mem_alloc(552, 8);
+  let gb_bytes: u64 = 128;
+  let fq_bytes: u64 = 32768;
+  let raw: Mut(u8) = hr.mem_alloc(size_of(State), 8);
   let b: Mut(u8) = hr.mem_alloc(cap, 8);
   let s: Mut(u8) = hr.mem_alloc(256, 8);
   let f: Mut(u8) = hr.mem_alloc(1024, 8);
@@ -105,23 +117,11 @@ pub let st_new = func(cap: u64) -> Mut(State) {
   let u: Mut(u8) = hr.mem_alloc(8192, 8);
   let v: Mut(u8) = hr.mem_alloc(65536, 8);
   let x: Mut(u8) = hr.mem_alloc(32, 8);
-  let gb: Mut(u8) = hr.mem_alloc(128, 8);
-  let fq: Mut(u8) = hr.mem_alloc(32768, 8);
-  let words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), 69);
-  let w: u64 = loop w(j: u64 = 0) while j < 69 {
-    words[j] = 0;
-    j = j + 1;
-  };
-  let gb_words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), gb), 16);
-  let gz: u64 = loop gzw(j: u64 = 0) while j < 16 {
-    gb_words[j] = 0;
-    j = j + 1;
-  };
-  let fq_words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), fq), 4096);
-  let fz: u64 = loop fqz(j: u64 = 0) while j < 4096 {
-    fq_words[j] = 0;
-    j = j + 1;
-  };
+  let gb: Mut(u8) = hr.mem_alloc(gb_bytes, 8);
+  let fq: Mut(u8) = hr.mem_alloc(fq_bytes, 8);
+  let w: u64 = zero_words(raw, size_of(State) / 8);
+  let gz: u64 = zero_words(gb, gb_bytes / 8);
+  let fz: u64 = zero_words(fq, fq_bytes / 8);
   let p: Mut(State) = ptr_cast(Mut(State), raw);
   p.base = b;
   p.cap = cap;
@@ -156,7 +156,7 @@ pub let st_new = func(cap: u64) -> Mut(State) {
   p.in_proc = 0;
   p.fq_base = fq;
   p.fq_used = 0;
-  p.fq_cap = 32768;
+  p.fq_cap = fq_bytes;
   p.vmod = 0;
   return p;
 };
@@ -367,55 +367,63 @@ let mem_copy = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return i;
 };
 
+// 顺序分配器共用的游标推进：容量不足时置错误码，ok=0 由调用方转成空指针。
+let Bump = struct {
+  ok: u64,
+  at: u64
+};
+
+let bump = func(p: Mut(State), used: u64, cap: u64, n: u64) -> Bump {
+  if used + n > cap {
+    st_fail(p, 3);
+    return Bump { ok: 0, at: used };
+  }
+  return Bump { ok: 1, at: used + n };
+};
+
 // arena：编译器给自己用的顺序切分内存，回收发生在整个源文件编译结束时。
 pub let st_alloc = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.arenaused;
-  let cap: u64 = p.arenasz;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.arenaused = used + n;
-  return p.arena + used;
+  let b: Bump = bump(p, p.arenaused, p.arenasz, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.arenaused = b.at;
+  return p.arena + (b.at - n);
 };
 
 // 持久分配：跨源存活，装类型块与聚合描述符。
 pub let st_ralloc = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.rallused;
-  let cap: u64 = p.rallcap;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.rallused = used + n;
-  return p.rallbase + used;
+  let b: Bump = bump(p, p.rallused, p.rallcap, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.rallused = b.at;
+  return p.rallbase + (b.at - n);
 };
 
 // 登记表顺序追加，溢出返回空指针并置错误码。
 pub let st_shp_new = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.shpused;
-  let cap: u64 = p.shpcap;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.shpused = used + n;
-  return p.shpbase + used;
+  let b: Bump = bump(p, p.shpused, p.shpcap, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.shpused = b.at;
+  return p.shpbase + (b.at - n);
 };
 
 pub let st_mod_new = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.modused;
-  let cap: u64 = p.modcap;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.modused = used + n;
-  return p.modbase + used;
+  let b: Bump = bump(p, p.modused, p.modcap, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.modused = b.at;
+  return p.modbase + (b.at - n);
 };
 
 pub let st_sym_new = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.symused;
-  let cap: u64 = p.symcap;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.symused = used + n;
-  return p.symbase + used;
+  let b: Bump = bump(p, p.symused, p.symcap, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.symused = b.at;
+  return p.symbase + (b.at - n);
 };
 
 let st_pnd_new = func(p: Mut(State), n: u64) -> Mut(u8) {
-  let used: u64 = p.pndused;
-  let cap: u64 = p.pndcap;
-  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
-  p.pndused = used + n;
-  return p.pndbase + used;
+  let b: Bump = bump(p, p.pndused, p.pndcap, n);
+  if b.ok == 0 { return null_ref(Mut(u8)); }
+  p.pndused = b.at;
+  return p.pndbase + (b.at - n);
 };
 
 // --- 编译期绑定栈与求值结果 ---------------------------------------------
@@ -484,7 +492,7 @@ let st_reset_arena = func(p: Mut(State)) -> u64 {
 // --- 循环帧 -------------------------------------------------------------
 // 第 i 帧 64 字节：标签、结果槽、环境标记、参数个数、4 个参数槽。
 pub let st_lf = func(p: Mut(State), i: u64) -> Mut(LoopFrame) {
-  return ptr_cast(Mut(LoopFrame), p.frame + i * 64);
+  return ptr_cast(Mut(LoopFrame), p.frame + i * size_of(LoopFrame));
 };
 
 pub let st_lf_label = func(f: Mut(LoopFrame)) -> u64 { return f.label; };
