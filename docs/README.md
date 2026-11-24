@@ -32,5 +32,6 @@
 | [stdlib/desugaring.md](stdlib/desugaring.md) | **标准语法脱糖协议**：基于 `AstOut` 展开阶段的 UFCS 方法重写、`f"..."` 零分配惰性格式化与 `match` 决策树编译 |
 
 ### 3. 自举构建、标准库与工具链现状
-- **单文件冷启动与纯 Lain 构建**：仓库通过根目录 [build.lain](../build.lain)（默认快速模式 + `--bootstrap` 全量 Stage-1/2/3 不动点）与 [test.lain](../test.lain) 驱动自举和全量回归，仅依赖单文件 `bootstrap/lainc_boot.c` 与 C99 编译器。
-- **标准库（`std/`）**：涵盖 `option`、`mem`、`collections`、`fmt`、`io`、`os`（`@extern` C ABI）、`json`（Arena DOM + `comptime for`）、`sync`（显式内存序原子原语与 `SpinLock`）、`thread`、`pool`、`sched`（`Scheduler` `sig` + `!{ Spawn }`）、`meta`（`AstOut` / `AstView`）、`build`、`test`、`bench`、`trace`（Perfetto JSON）。
+- **单文件冷启动与纯 Lain 构建**：仓库通过根目录 [build.lain](../build.lain)（默认快速模式 + `--bootstrap` 全量 Stage-1/2/3 不动点）与 [test.lain](../test.lain)（11 套件 / 173 项断言）驱动自举和全量回归，仅依赖单文件 `bootstrap/lainc_boot.c` 与 C99 编译器。
+- **编译器能力与工具链**：支持 `comptime if` + `--target <windows|linux|macos>` 跨平台条件编译、`--opt` LAINIR 优化（常量/代数/分支事实/`#load` CSE/Store-to-Load 转发/DCE）、`--split-c <prefix>` 多文件并行 C99 编译、`--trace` Perfetto JSON、`path:line:col: error:` 源码 `^` 定位诊断、跨过程尾可恢复效应（`!= Never`），以及纯 Lain 格式化工具 [tools/lainfmt.lain](../tools/lainfmt.lain)。
+- **标准库（`std/`，共 18 个模块）**：涵盖 `option`、`mem`、`collections`、`fmt`、`io`、`os`（`@extern` C ABI + `Option`/`IoErr`）、`fs`、`json`（`JsonKind` 枚举 + `match` + Arena DOM + `comptime for`）、`sync`（显式内存序原子原语与 `SpinLock`）、`thread`（Windows + POSIX）、`pool`、`sched`（`Scheduler` `sig` + `!{ Spawn }`）、`coro`（`Yield`/`Async`/`Cancel`、`Gen(T)`、`Chan(T)`、`run_fiber_local`，Windows + POSIX）、`meta`（`AstOut` / `AstView`）、`build`、`test`、`bench`、`trace`（Perfetto JSON）。
