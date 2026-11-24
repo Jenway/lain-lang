@@ -171,30 +171,29 @@ let kind_of = func(code: u64) -> err.ErrKind {
   return err.ErrKind.CompileSyntax { };
 };
 
-// 错误通道的出口：先出格式化的诊断行，退出码取载荷里的错误码，0 号错误码退到 1。
-let report_fail = func(info: err.ErrInfo) -> u64 {
-  hr.report_err(info);
-  let code: u64 = info.code;
-  if code != 0 { return code; }
+// 失败出口：先打出带定位的诊断，再交回统一的失败退出码。
+let report_code = func(src: u64, span: u64, msg: Slice(u8)) -> u64 {
+  let printed: u64 = hr.report_fail_at(src, span, msg);
   return 1;
 };
 
 // 逐源编译：每步重读源数量，import 新增的源会被一并编掉。
-// 任一源失败就把诊断写完、把追踪落盘，再用 CompileErr 中止整条流水线。
-pub let build = func(k: Mut(st.State), i: u64, count: u64) -> u64 !{ err.CompileErr } {
+// 任一源失败就把诊断写完、把追踪落盘，再把错误码交回调用方。
+pub let build = func(k: Mut(st.State), i: u64, count: u64) -> u64 {
   if i >= count { return st.st_ok(k); }
   let e: u64 = ev.compile_source(k, i);
   let code: u64 = st.st_ok(k);
   if code != 0 {
     hr.print_diags();
     trace_finish(code);
-    return err.fail_info(kind_of(code), code, i, 0, 0, "source compilation failed")!;
+    return report_code(i, hr.source_err_offset(i),
+                       "source compilation failed");
   }
   let total: u64 = hr.source_count();
-  return build(k, i + 1, total)!;
+  return build(k, i + 1, total);
 };
 
-let run_meta = func(count: u64) -> u64 !{ err.CompileErr } {
+let run_meta = func(count: u64) -> u64 {
   hr.rt_init();
   if hr.trace_enabled() == 1 {
     tr.trace_enable(1);
@@ -203,16 +202,16 @@ let run_meta = func(count: u64) -> u64 !{ err.CompileErr } {
   let mname: u64 = hr.source_name(0);
   let md: u64 = ir.mod_new(k, mname);
   let t_build: u64 = tr.span_begin();
-  let built: u64 = build(k, 0, count)!;
+  let built: u64 = build(k, 0, count);
   let ev_build: u64 = tr.span_end("lainc_build", "lainc", t_build, count);
+  if built != 0 { return trace_finish(built); }
   let t_verify: u64 = tr.span_begin();
   let v: u64 = ir.verify(k);
   let ev_verify: u64 = tr.span_end("ir_verify", "lainc", t_verify, v);
   if v != 0 {
     hr.print_diags();
     trace_finish(v);
-    return err.fail_info(err.ErrKind.CompileVerify { }, v, 0, 0, 0,
-                         "LAINIR verification failed")!;
+    return report_code(0, 0, "LAINIR verification failed");
   }
   // emit_output 返回的是写出的字节数，不是错误码。
   let t_emit: u64 = tr.span_begin();
@@ -223,14 +222,12 @@ let run_meta = func(count: u64) -> u64 !{ err.CompileErr } {
 
 @root
 let lain_meta_v2_entry = func(count: u64) -> u64 {
-  return handle run_meta(count) with {
-    return(v) => v,
-    fail(info) => report_fail(info),
-  };
+  return run_meta(count);
 };
 
-// 命令行流水线：参数、读源、建模块、编译、校验、落盘；每一步的失败都走 CompileErr。
-let run_cli = func() -> u64 !{ err.CompileErr } {
+// 命令行流水线：参数、读源、建模块、编译、校验、落盘；每一步的失败都交回
+// 非零退出码。
+let run_cli = func() -> u64 {
   hr.rt_init();
   let o0: CliOpts = CliOpts {
     help: false,
@@ -282,8 +279,9 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   }
   let added: u64 = hr.source_add_file(src);
   if added == hr.NO_SOURCE() {
-    return err.fail_info(err.ErrKind.HostHandle { }, 1, 0, 0, 0,
-                         "cannot read source file")!;
+    hr.report_source_fail(src);
+    trace_finish(1);
+    return 1;
   }
   let k: Mut(st.State) = st.st_new(65536);
   let mname: u64 = hr.source_name(added);
@@ -296,15 +294,16 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     if code != 0 {
       hr.print_diags();
       trace_finish(code);
-      return err.fail_info(kind_of(code), code, added, 0, 0,
-                           "expand pass failed")!;
+      return report_code(added, hr.source_err_offset(added),
+                         "expand pass failed");
     }
     let dumped: u64 = ex.dump_ast(exp);
     return trace_finish(0);
   }
   let t_build: u64 = tr.span_begin();
-  let built: u64 = build(k, 0, 1)!;
+  let built: u64 = build(k, 0, 1);
   let ev_build: u64 = tr.span_end("cli_build", "lainc", t_build, 1);
+  if built != 0 { return built; }
   if o.opt {
     let t_opt: u64 = tr.span_begin();
     let changed: u64 = ir.opt(k);
@@ -316,8 +315,8 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
   if v != 0 {
     hr.print_diags();
     trace_finish(v);
-    return err.fail_info(err.ErrKind.CompileVerify { }, v, added, 0, 0,
-                         "LAINIR verification failed")!;
+    return report_code(added, hr.source_err_offset(added),
+                       "LAINIR verification failed");
   }
   let out_opt: OptSlice.Opt = o.out_path;
   let split_opt: OptSlice.Opt = o.split_c;
@@ -330,8 +329,8 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
       let rc: u64 = hr.emit_c99_split(st.st_mod(k), prefix, en, pr, 400);
       let ev_sp: u64 = tr.span_end("cli_emit_split_c", "lainc", t_sp, rc);
       if rc != 0 {
-        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
-                             "failed to write split C99 output")!;
+        return report_code(hr.NO_SOURCE(), 0,
+                           "failed to write split C99 output");
       }
       0
     },
@@ -346,16 +345,16 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
         let rc: u64 = hr.emit_c99_file(st.st_mod(k), out_path, en, pr);
         let ev_c99: u64 = tr.span_end("cli_emit_c99", "lainc", t_c99, rc);
         if rc != 0 {
-          return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
-                               "failed to write C99 output")!;
+          return report_code(hr.NO_SOURCE(), 0,
+                             "failed to write C99 output");
         }
       } else {
         let t_l1: u64 = tr.span_begin();
         let rc: u64 = hr.emit_l1_file(st.st_mod(k), out_path);
         let ev_l1: u64 = tr.span_end("cli_emit_l1", "lainc", t_l1, rc);
         if rc != 0 {
-          return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
-                               "failed to write LAINIR text output")!;
+          return report_code(hr.NO_SOURCE(), 0,
+                             "failed to write LAINIR text output");
         }
       }
       0
@@ -366,8 +365,5 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
 
 @root
 let main = func() -> u64 {
-  return handle run_cli() with {
-    return(v) => v,
-    fail(info) => report_fail(info),
-  };
+  return run_cli();
 };

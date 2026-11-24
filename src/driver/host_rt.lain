@@ -477,6 +477,31 @@ pub let source_name = func(src: u64) -> u64 {
   return sh.source_name(h.sources, src);
 };
 
+pub let source_text = func(src: u64) -> Slice(u8) {
+  let h: Mut(HostRt) = rt();
+  return sh.source_text_slice(h.sources, src);
+};
+
+// 源码的路径；源码号越界或匿名源码回空切片。
+pub let source_path_slice = func(src: u64) -> Slice(u8) {
+  let h: Mut(HostRt) = rt();
+  if src >= sh.source_count(h.sources) { return ""; }
+  let nm: u64 = sh.source_name(h.sources, src);
+  if nm == 0 { return ""; }
+  return make_slice(Slice(u8), symtab.sym_addr(h.syms, nm), symtab.sym_len(h.syms, nm));
+};
+
+// 解析遍次记下的行列换算成字节偏移；解析成功时两者都是 0，交回 0 也就是
+// 文件起点，语义阶段的错误因此锚定在源文件开头。
+pub let source_err_offset = func(src: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  if src >= sh.source_count(h.sources) { return 0; }
+  let line: u64 = sh.source_err_line(h.sources, src);
+  let col: u64 = sh.source_err_col(h.sources, src);
+  if line == 0 { return 0; }
+  return sh.line_col_offset(sh.source_text_slice(h.sources, src), line, col);
+};
+
 pub let source_root = func(src: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   return sh.source_root(h.sources, src);
@@ -503,10 +528,13 @@ pub let source_add_file_quiet = func(path: Slice(u8)) -> u64 {
 // 以文件路径登记源码：命令行显式给出的输入文件读不到时把路径报告给用户。
 pub let source_add_file = func(path: Slice(u8)) -> u64 {
   let h: Mut(HostRt) = rt();
+  let hs: Mut(sh.HostSources) = h.sources;
   let dst: Mut(u8) = bump_take(h, path.len + 8, 8);
   let n: u64 = put_norm(dst, 0, path.ptr, path.len);
   let got: u64 = source_add_file_quiet(path);
-  if got == NO_SOURCE() { report_missing(dst, n); }
+  if got == NO_SOURCE() {
+    if sh.last_error_kind(hs) == 0 { report_missing(dst, n); }
+  }
   return got;
 };
 
@@ -1299,10 +1327,36 @@ pub let print_diags = func() -> u64 {
 };
 
 // --- 错误报告 ---------------------------------------------------------------
-// 把一条 ErrInfo 写成一行文本交给标准错误。缓冲按消息长度算足，format_err 抄写
-// 时不会碰到边界；报告过程不占用递增区，递增区耗尽时也能输出。
+// 把一条诊断写成「路径:行:列 + 源码行 + 插入符」送给标准错误；缓冲按路径、
+// 正文与消息的长度算足，递增区耗尽时报告仍然能打出来。
+let report_at = func(path: Slice(u8), text: Slice(u8), span: u64,
+                     msg: Slice(u8)) -> u64 {
+  let cap: u64 = 512 + path.len + 2 * text.len + msg.len;
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 { return note_fail("[host_rt] error report allocation failed\n"); }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
+  let n: u64 = err.format_loc_err(ms, path, text, span, msg);
+  let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), n);
+  let rc: u64 = os.eprint(line);
+  os.free_bytes(raw);
+  return rc;
+};
+
+// 编译失败的统一出口：有源码记录时走带定位的格式，没有源码记录时只写消息。
+pub let report_fail_at = func(src: u64, span: u64, msg: Slice(u8)) -> u64 {
+  if src >= source_count() { return report_at("", "", 0, msg); }
+  return report_at(source_path_slice(src), source_text(src), span, msg);
+};
+
+// 把一条 ErrInfo 交给人看。
 pub let report_err = func(info: err.ErrInfo) -> u64 {
   let msg: Slice(u8) = info.msg;
+  let src: u64 = info.src;
+  let span: u64 = info.span;
+  if src < source_count() {
+    return report_at(source_path_slice(src), source_text(src), span, msg);
+  }
   let cap: u64 = 256 + msg.len;
   let raw: u64 = os.alloc_bytes(cap);
   if raw == 0 { return note_fail("[host_rt] error report allocation failed\n"); }
@@ -1313,6 +1367,24 @@ pub let report_err = func(info: err.ErrInfo) -> u64 {
   let rc: u64 = os.eprint(line);
   os.free_bytes(raw);
   return rc;
+};
+
+// 读源失败分两种：文件读不到由 source_add_file 自己报告；正文解析失败时用
+// 源码管理器记下的行列打印带插入符的诊断。交回 1 表示已经打印过了。
+pub let report_source_fail = func(path: Slice(u8)) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let hs: Mut(sh.HostSources) = h.sources;
+  if sh.last_error_kind(hs) == 0 { return 0; }
+  let line: u64 = sh.last_error_line(hs);
+  let col: u64 = sh.last_error_col(hs);
+  let len_slot: Mut(u64) = ptr_cast(Mut(u64), bump_take(h, 8, 8));
+  deref(len_slot) = 0;
+  let text_ptr: Mut(u8) = read_keep(h, path.ptr, path.len, len_slot);
+  let text: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), text_ptr),
+                                  deref(len_slot));
+  let span: u64 = sh.line_col_offset(text, line, col);
+  let rc: u64 = report_at(path, text, span, "source syntax error");
+  return 1;
 };
 
 // 宿主侧统一的失败出口：把类别、错误码、附加数值与说明交给 CompileErr。

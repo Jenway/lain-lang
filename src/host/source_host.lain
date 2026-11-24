@@ -319,6 +319,55 @@ pub let source_name = func(h: Mut(HostSources), src: u64) -> u64 {
   return rec.name;
 };
 
+// --- 诊断定位 ---------------------------------------------------------------
+// 源码正文的只读视图；源码号越界回空切片。
+pub let source_text_slice = func(h: Mut(HostSources), src: u64) -> Slice(u8) {
+  if src >= h.source_count { return ""; }
+  let rec: Mut(Source) = h.sources + src * size_of(Source);
+  return make_slice(Slice(u8), rec.text_ptr, rec.text_len);
+};
+
+// 解析遍次记下的出错行列；解析成功的源码两者都是 0。
+pub let source_err_line = func(h: Mut(HostSources), src: u64) -> u64 {
+  let rec: Mut(Source) = source_at(h, src);
+  return rec.ast_err_line;
+};
+
+pub let source_err_col = func(h: Mut(HostSources), src: u64) -> u64 {
+  let rec: Mut(Source) = source_at(h, src);
+  return rec.ast_err_col;
+};
+
+// 解析遍次记下的出错字节偏移；解析成功时为 0。
+pub let source_err_offset = func(h: Mut(HostSources), src: u64) -> u64 {
+  let rec: Mut(Source) = source_at(h, src);
+  return rec.ast_err_offset;
+};
+
+// 第 line 行的行首偏移；line 为 0 或 1 都落在正文起点，行号越界回正文长度。
+let line_origin = func(text: Slice(u8), line: u64) -> u64 {
+  if line <= 1 { return 0; }
+  return loop c(i: u64 = 0, want: u64 = 1, start: u64 = 0) while i <= text.len {
+    if i == text.len { break c(text.len); }
+    let b: u8 = text[i];
+    if b == 10 {
+      want = want + 1;
+      start = i + 1;
+      if want >= line { break c(i + 1); }
+    }
+    i = i + 1;
+  };
+};
+
+// 1 基的 (line, col) 换算成字节偏移。列按字节推进，与 Reader 记下的列一致。
+pub let line_col_offset = func(text: Slice(u8), line: u64, col: u64) -> u64 {
+  let start: u64 = line_origin(text, line);
+  let ahead: u64 = if col == 0 { 0 } else { col - 1 };
+  let at: u64 = start + ahead;
+  if at > text.len { return text.len; }
+  return at;
+};
+
 // 把平铺的字段拼回 Reader 的 RawAst 值。组与孩子的下标都在里面。
 let source_ast = func(rec: Mut(Source)) -> rd.RawAst {
   return rd.RawAst {

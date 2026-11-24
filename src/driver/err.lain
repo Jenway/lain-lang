@@ -104,6 +104,131 @@ let copy_at = func(dst: MutSlice(u8), src: Slice(u8), i: u64) -> u64 {
   return copy_at(dst, src, i + 1);
 };
 
+// --- 带源码定位的诊断 -------------------------------------------------------
+// 诊断只往调用方给的 MutSlice(u8) 里写字节，写出的字节数作为结果。
+let put_byte = func(dst: MutSlice(u8), at: u64, b: u8) -> u64 {
+  dst[at] = b;
+  return at + 1;
+};
+
+let put_str = func(dst: MutSlice(u8), at: u64, s: Slice(u8)) -> u64 {
+  return loop c(i: u64 = 0, o: u64 = at) while i < s.len {
+    dst[o] = s[i];
+    o = o + 1;
+    i = i + 1;
+  };
+};
+
+let put_dec = func(dst: MutSlice(u8), at: u64, v: u64) -> u64 {
+  if v >= 10 {
+    let head: u64 = put_dec(dst, at, v / 10);
+    return put_byte(dst, head, (48 + (v % 10)) as u8);
+  }
+  return put_byte(dst, at, (48 + v) as u8);
+};
+
+// 插入符之前的前缀：源码里的制表符照抄，其余位置用空格对齐。
+let put_indent = func(dst: MutSlice(u8), at: u64, text: Slice(u8), start: u64,
+                      used: u64) -> u64 {
+  return loop c(i: u64 = 0, o: u64 = at) while i < used {
+    let b: u8 = text[start + i];
+    if b == 9 { dst[o] = 9; } else { dst[o] = 32; }
+    o = o + 1;
+    i = i + 1;
+  };
+};
+
+// 第 line 行的行首偏移；行号越界时回正文长度。
+pub let line_origin = func(text: Slice(u8), line: u64) -> u64 {
+  if line <= 1 { return 0; }
+  return loop c(i: u64 = 0, want: u64 = 1, start: u64 = 0) while i <= text.len {
+    if i == text.len { break c(text.len); }
+    let b: u8 = text[i];
+    if b == 10 {
+      want = want + 1;
+      start = i + 1;
+      if want >= line { break c(i + 1); }
+    }
+    i = i + 1;
+  };
+};
+
+// 行首之前（不含行首本身）的换行个数加一，即 span 所在的行号。
+pub let line_number_at = func(text: Slice(u8), span: u64) -> u64 {
+  let stop: u64 = if span > text.len { text.len } else { span };
+  return loop c(i: u64 = 0, line: u64 = 1) while i < stop {
+    let b: u8 = text[i];
+    if b == 10 { line = line + 1; }
+    i = i + 1;
+  };
+};
+
+// span 所在行的行首偏移。
+pub let line_start_at = func(text: Slice(u8), span: u64) -> u64 {
+  let stop: u64 = if span > text.len { text.len } else { span };
+  return loop c(i: u64 = 0, start: u64 = 0) while i < stop {
+    let b: u8 = text[i];
+    if b == 10 { start = i + 1; }
+    i = i + 1;
+  };
+};
+
+// 自 start 起的单行正文长度，换行与回车都不计入。
+pub let line_bytes = func(text: Slice(u8), start: u64) -> u64 {
+  return loop c(i: u64 = start) while i < text.len {
+    let b: u8 = text[i];
+    if (b == 10) or (b == 13) { break c(i - start); }
+    i = i + 1;
+  };
+};
+
+// 行列为 1 基；line 为 0 或正文为空时只写首行，不附源码行与插入符。
+// 输出形如：
+//   src/a.lain:3:9: error: msg
+//     let x = f(1);
+//             ^
+pub let format_line_col_err = func(out: MutSlice(u8), path: Slice(u8),
+                                  text: Slice(u8), line: u64, col: u64,
+                                  msg: Slice(u8)) -> u64 {
+  let o0: u64 = put_str(out, 0, path);
+  let located: u64 = if (line == 0) or (text.len == 0) { 0 } else { 1 };
+  let head: u64 = if located == 0 {
+    let sep: Slice(u8) = if path.len == 0 { "" } else { ": " };
+    let a: u64 = put_str(out, o0, sep);
+    put_str(out, a, "error: ")
+  } else {
+    let p: u64 = if path.len == 0 { o0 } else { put_str(out, o0, ":") };
+    let b: u64 = put_dec(out, p, line);
+    let c: u64 = put_str(out, b, ":");
+    let d: u64 = put_dec(out, c, col);
+    put_str(out, d, ": error: ")
+  };
+  let o2: u64 = put_str(out, head, msg);
+  let o3: u64 = put_str(out, o2, "\n");
+  if located == 0 { return o3; }
+  let start: u64 = line_origin(text, line);
+  let len: u64 = line_bytes(text, start);
+  let o4: u64 = put_str(out, o3, "  ");
+  let o5: u64 = put_str(out, o4, make_slice(Slice(u8), text.ptr + start, len));
+  let o6: u64 = put_str(out, o5, "\n");
+  let o7: u64 = put_str(out, o6, "  ");
+  let ahead: u64 = if col == 0 { 0 } else { col - 1 };
+  let used: u64 = if ahead > len { len } else { ahead };
+  let o8: u64 = put_indent(out, o7, text, start, used);
+  let o9: u64 = put_byte(out, o8, 94);
+  return put_str(out, o9, "\n");
+};
+
+// 按字节偏移定位：先算出 1 基行列，再交给 format_line_col_err。
+pub let format_loc_err = func(out: MutSlice(u8), path: Slice(u8), text: Slice(u8),
+                              span: u64, msg: Slice(u8)) -> u64 {
+  if text.len == 0 { return format_line_col_err(out, path, text, 0, 0, msg); }
+  let stop: u64 = if span > text.len { text.len } else { span };
+  let line: u64 = line_number_at(text, stop);
+  let start: u64 = line_start_at(text, stop);
+  return format_line_col_err(out, path, text, line, (stop - start) + 1, msg);
+};
+
 // 纯函数：先在同一条 fmt 消息里拼出整行文本，再整段抄进 dst。
 // 输出形如 [compile_type] code=7 src=1 span=3 detail=0: type mismatch\n
 pub let format_err = func(info: ErrInfo, dst: MutSlice(u8)) -> u64 {

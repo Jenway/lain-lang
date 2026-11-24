@@ -1,0 +1,50 @@
+// std::fs —— 文件系统便捷入口：存在性、整文件读取、写入、删除与复制。
+// 原始原语、可选值入口与中止性效应都来自 std::os，本模块只把常用组合收成
+// 布尔结果与可选值。读取成功拿到的 MutSlice 归调用方所有，用完用
+// os.free_bytes 归还。
+let option = import("std::option");
+let os = import("std::os");
+
+let OptSlice = option.Option(MutSlice(u8));
+
+// 效应别名：IoErr 与 os.IoErr 是同一份效应声明。效应行里的名字按最后一段
+// 解析，所以导入方写 !{ fs.IoErr } 与 !{ os.IoErr } 指向同一个效应。
+use os.{ IoErr };
+
+pub let exists = func(path: Slice(u8)) -> bool {
+  return os.file_exists(path);
+};
+
+// 整文件读取：成功回 Some(可写视图)，失败回 None。视图归调用方所有。
+pub let read_bytes = func(path: Slice(u8)) -> OptSlice.Opt {
+  return os.read_file_slice(path);
+};
+
+// 效应入口：读取失败就地发起 IoErr.fail(1)，不回到调用点。
+pub let read_or_err = func(path: Slice(u8)) -> MutSlice(u8) !{ IoErr } {
+  let buf: MutSlice(u8) = os.read_file_or_err(path)!;
+  return buf;
+};
+
+pub let write_bytes = func(path: Slice(u8), data: Slice(u8)) -> bool {
+  return os.write_file_bool(path, data);
+};
+
+pub let remove = func(path: Slice(u8)) -> bool {
+  return os.remove_file(path) == 0;
+};
+
+// 复制文件：先整份读入 src，再整份写出 dst，两步都成功才回 true。
+// 读到的缓冲无论写出成败都在返回前归还。
+pub let copy_file = func(src: Slice(u8), dst: Slice(u8)) -> bool {
+  let loaded: OptSlice.Opt = os.read_file_slice(src);
+  return match loaded {
+    None => false,
+    Some(buf) => {
+      let view: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf.ptr), buf.len);
+      let wrote: bool = os.write_file_bool(dst, view);
+      let dead: u64 = os.free_bytes(buf.ptr as u64);
+      wrote
+    },
+  };
+};

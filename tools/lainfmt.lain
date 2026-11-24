@@ -1,0 +1,373 @@
+// tools/lainfmt —— Lain 源码格式化器。
+//
+// 用法：lainfmt [--check] [--stdout] <file.lain>
+//   --check   只检查：已经格式化回 0，需要改动回 1。
+//   --stdout  把格式化结果打到标准输出，不写回文件。
+//   默认把格式化结果写回原文件。参数或读写失败回 2。
+//
+// 格式化规则：
+//   * 换行统一成 \n，去掉每行末尾的水平空白；
+//   * 花括号嵌套按 2 空格缩进，以 } 开头的行先退一级；字符串与 // 行注释里的
+//     花括号不参与计数；
+//   * 跨行字符串的续行原样保留，缩进与尾部空白都不动，字符串内容逐字节不变；
+//   * 文件末尾只留一个 \n。
+// 动手之前先交给 src::frontend::reader 做一遍词法检查，括号不配对或者字符串
+// 未终止的文件不会被改写。
+let io = import("std::io");
+let os = import("std::os");
+let option = import("std::option");
+let fs = import("std::fs");
+let rd = import("src::frontend::reader");
+
+let OptSlice = option.Option(MutSlice(u8));
+
+// 输出缓冲：容量不够时向宿主重新领一块翻倍大小的，把已有字节搬过去再归还旧块。
+let Out = struct {
+  buf: MutSlice(u8),
+  len: u64,
+};
+
+let out_new = func(cap: u64) -> Out {
+  let want: u64 = if cap == 0 { 16 } else { cap };
+  let raw: u64 = os.alloc_bytes(want);
+  return Out { buf: make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), want), len: 0 };
+};
+
+let out_reserve = func(o: Mut(Out), extra: u64) {
+  let need: u64 = o.len + extra;
+  if need <= o.buf.len {
+    return;
+  }
+  let next: u64 = loop grow(c: u64 = o.buf.len) while c < need {
+    c = c * 2;
+  };
+  let raw: u64 = os.alloc_bytes(next);
+  let fresh: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), next);
+  let old: MutSlice(u8) = o.buf;
+  loop cp(i: u64 = 0) while i < o.len {
+    fresh[i] = old[i];
+    i = i + 1;
+  };
+  let dead: u64 = os.free_bytes(old.ptr as u64);
+  o.buf = fresh;
+};
+
+let out_byte = func(o: Mut(Out), b: u8) {
+  out_reserve(o, 1);
+  o.buf[o.len] = b;
+  o.len = o.len + 1;
+};
+
+let out_span = func(o: Mut(Out), s: Slice(u8), from: u64, to: u64) {
+  out_reserve(o, to - from);
+  loop cp(i: u64 = from) while i < to {
+    o.buf[o.len] = s[i];
+    o.len = o.len + 1;
+    i = i + 1;
+  };
+};
+
+// 水平空白：空格、制表、纵向制表与换页。
+let is_hspace = func(c: u64) -> bool {
+  if c == 32 {
+    return true;
+  }
+  if (c == 9) or (c == 11) or (c == 12) {
+    return true;
+  }
+  return false;
+};
+
+// 词法状态：0 普通、1 字符串内部、2 行注释内部。
+let Scan = struct {
+  state: u64,
+  depth: u64,
+};
+
+// 扫过 [from, to)：引号与反斜杠成对跳过，// 之后到行尾不再看，花括号只在普通
+// 状态里改深度。结果为扫完之后的状态与深度，由调用方通过 out 取回。
+let scan_span = func(src: Slice(u8), from: u64, to: u64, st0: u64, d0: u64, out: Mut(Scan)) {
+  out.state = st0;
+  out.depth = d0;
+  loop sc(k: u64 = from, st: u64 = st0, d: u64 = d0) while k < to {
+    let c: u64 = src[k] as u64;
+    if st == 1 {
+      if c == 92 {
+        k = k + 2;
+      } else {
+        if c == 34 {
+          st = 0;
+        }
+        k = k + 1;
+      }
+    } else if st == 2 {
+      k = to;
+    } else if (c == 47) and ((k + 1) < to) and ((src[k + 1] as u64) == 47) {
+      st = 2;
+      k = to;
+    } else if c == 34 {
+      st = 1;
+      k = k + 1;
+    } else {
+      if c == 123 {
+        d = d + 1;
+      }
+      if c == 125 {
+        if d > 0 {
+          d = d - 1;
+        }
+      }
+      k = k + 1;
+    }
+    out.state = st;
+    out.depth = d;
+  };
+};
+
+// 行尾：第一个 \n 或 \r。
+let line_end = func(src: Slice(u8), from: u64) -> u64 {
+  let n: u64 = src.len;
+  let r: u64 = loop find(k: u64 = from) while (k < n) and ((src[k] as u64) != 10) and ((src[k] as u64) != 13) {
+    k = k + 1;
+  };
+  return r;
+};
+
+// [from, to) 里开头连续水平空白的结束位置。
+let hspace_end = func(src: Slice(u8), from: u64, to: u64) -> u64 {
+  let r: u64 = loop lw(k: u64 = from) while (k < to) and is_hspace(src[k] as u64) {
+    k = k + 1;
+  };
+  return r;
+};
+
+// [from, to) 去掉尾部水平空白之后的结束位置。
+let hspace_trim = func(src: Slice(u8), from: u64, to: u64) -> u64 {
+  let r: u64 = loop tw(k: u64 = to) while (k > from) and is_hspace(src[k - 1] as u64) {
+    k = k - 1;
+  };
+  return r;
+};
+
+// 跨行游标：下一行的起点，以及进入这一行时的词法状态与花括号深度。
+let Cursor = struct {
+  pos: u64,
+  depth: u64,
+  st: u64,
+};
+
+// 处理一行：把规范化后的字节写进 o，推进游标。还有下一行回 1，结束回 0。
+let format_line = func(src: Slice(u8), o: Mut(Out), c: Mut(Cursor)) -> u64 {
+  let n: u64 = src.len;
+  let pos: u64 = c.pos;
+  if pos > n {
+    return 0;
+  }
+  let e: u64 = line_end(src, pos);
+  let next: u64 = n + 1;
+  if e < n {
+    next = e + 1;
+    if ((src[e] as u64) == 13) and ((e + 1) < n) and ((src[e + 1] as u64) == 10) {
+      next = e + 2;
+    }
+  }
+  let s0: Scan = Scan { state: c.st, depth: c.depth };
+  let s: Mut(Scan) = mut_of(s0);
+  if c.st == 1 {
+    // 跨行字符串的续行：原样写出，缩进与尾部空白都属于字符串内容。
+    out_span(o, src, pos, e);
+    out_byte(o, 10);
+    scan_span(src, pos, e, 1, c.depth, s);
+    c.depth = s.depth;
+    c.st = if s.state == 2 { 0 } else { s.state };
+  } else {
+    let ls: u64 = hspace_end(src, pos, e);
+    let te: u64 = hspace_trim(src, pos, e);
+    scan_span(src, pos, te, 0, c.depth, s);
+    if s.state == 1 {
+      // 行尾落在字符串内部：被剪掉的那段空白属于字符串内容，必须保留。
+      te = e;
+    }
+    if te <= ls {
+      out_byte(o, 10);
+    } else {
+      let lead: u64 = src[ls] as u64;
+      let before: u64 = c.depth;
+      let level: u64 = if (lead == 125) and (before > 0) { before - 1 } else { before };
+      let pad: u64 = level * 2;
+      loop sp(q: u64 = 0) while q < pad {
+        out_byte(o, 32);
+        q = q + 1;
+      };
+      out_span(o, src, ls, te);
+      out_byte(o, 10);
+      c.depth = s.depth;
+      c.st = if s.state == 2 { 0 } else { s.state };
+    }
+  }
+  c.pos = next;
+  if e >= n {
+    return 0;
+  }
+  return 1;
+};
+
+// 把源码格式化成新缓冲，所有权交给调用方，用完用 os.free_bytes 归还。
+pub let format_source = func(src: Slice(u8)) -> MutSlice(u8) {
+  let o0: Out = out_new(src.len * 2 + 16);
+  let o: Mut(Out) = mut_of(o0);
+  let c0: Cursor = Cursor { pos: 0, depth: 0, st: 0 };
+  let c: Mut(Cursor) = mut_of(c0);
+  loop lines(go: u64 = 1) while go == 1 {
+    go = format_line(src, o, c);
+  };
+  let tail: u64 = loop tr(k: u64 = o.len) while (k > 0) and ((o.buf[k - 1] as u64) == 10) {
+    k = k - 1;
+  };
+  o.len = tail;
+  out_byte(o, 10);
+  return make_slice(MutSlice(u8), o.buf.ptr, o.len);
+};
+
+let same_range = func(a: Slice(u8), b: Slice(u8), i: u64) -> bool {
+  if i >= a.len {
+    return true;
+  }
+  if a[i] != b[i] {
+    return false;
+  }
+  return same_range(a, b, i + 1);
+};
+
+let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  if a.len != b.len {
+    return false;
+  }
+  return same_range(a, b, 0);
+};
+
+// 第 i 个命令行参数：长度向宿主问一次，再复制进一块新领的缓冲。
+let arg = func(i: u64) -> Slice(u8) {
+  let n: u64 = os.argv_len(i);
+  let cap: u64 = n + 1;
+  let raw: u64 = os.alloc_bytes(cap);
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let got: u64 = os.argv_copy(i, buf);
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got);
+};
+
+let Cli = struct {
+  check: u64,
+  to_stdout: u64,
+  have: u64,
+  help: u64,
+  bad: u64,
+  path: Slice(u8),
+};
+
+let usage = func() -> u64 {
+  let msg: Slice(u8) = "usage: lainfmt [--check] [--stdout] <file.lain>\n";
+  return os.eprint(msg);
+};
+
+let is_flag = func(a: Slice(u8)) -> bool {
+  if a.len == 0 {
+    return false;
+  }
+  let lead: u64 = a[0] as u64;
+  return lead == 45;
+};
+
+let take = func(c: Mut(Cli), a: Slice(u8)) {
+  if same(a, "--check") {
+    c.check = 1;
+    return;
+  }
+  if same(a, "--stdout") {
+    c.to_stdout = 1;
+    return;
+  }
+  if (same(a, "--help")) or (same(a, "-h")) {
+    c.help = 1;
+    return;
+  }
+  if is_flag(a) {
+    c.bad = 1;
+    return;
+  }
+  if c.have == 1 {
+    c.bad = 1;
+    return;
+  }
+  c.path = a;
+  c.have = 1;
+};
+
+let main = func() -> i64 {
+  let argc: u64 = os.argc();
+  let c0: Cli = Cli { check: 0, to_stdout: 0, have: 0, help: 0, bad: 0, path: "" };
+  let c: Mut(Cli) = mut_of(c0);
+  let used: u64 = loop args(i: u64 = 1) while i < argc {
+    take(c, arg(i));
+    i = i + 1;
+  };
+  if c.help == 1 {
+    let rc: u64 = usage();
+    return 0;
+  }
+  if c.bad == 1 {
+    let rc: u64 = usage();
+    return 2;
+  }
+  if c.have == 0 {
+    let rc: u64 = usage();
+    return 2;
+  }
+  let path: Slice(u8) = c.path;
+  let loaded: OptSlice.Opt = fs.read_bytes(path);
+  if OptSlice.is_none(loaded) {
+    os.eprint(f"lainfmt: cannot read {path}\n");
+    return 2;
+  }
+  let src: MutSlice(u8) = OptSlice.unwrap_or(loaded, make_slice(MutSlice(u8), null_ref(Mut(u8)), 0));
+  let text: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), src.ptr), src.len);
+  // 词法检查：零长度 Arena 只在容量不足时回 RD_ERR_CAPACITY，那说明切词全部通过。
+  let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
+  let scan: rd.RawAst = rd.parse(text, probe);
+  if (scan.kind != rd.RD_ERR_CAPACITY()) and (scan.kind != rd.RD_OK()) {
+    let el: u64 = scan.err_line;
+    let ec: u64 = scan.err_col;
+    let ek: u64 = scan.kind;
+    os.eprint(f"lainfmt: {path}:{el}:{ec}: reader error {ek}\n");
+    let dead: u64 = os.free_bytes(src.ptr as u64);
+    return 2;
+  }
+  let out: MutSlice(u8) = format_source(text);
+  let formatted: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), out.ptr), out.len);
+  let changed: u64 = if same(formatted, text) { 0 } else { 1 };
+  if c.check == 1 {
+    if changed == 1 {
+      io.println(f"{path}: needs formatting");
+    }
+    let dead: u64 = os.free_bytes(out.ptr as u64);
+    let dead2: u64 = os.free_bytes(src.ptr as u64);
+    if changed == 1 {
+      return 1;
+    }
+    return 0;
+  }
+  if c.to_stdout == 1 {
+    let wrote: u64 = io.write_str(formatted);
+    let dead: u64 = os.free_bytes(out.ptr as u64);
+    let dead2: u64 = os.free_bytes(src.ptr as u64);
+    return 0;
+  }
+  let ok: bool = fs.write_bytes(path, formatted);
+  let dead: u64 = os.free_bytes(out.ptr as u64);
+  let dead2: u64 = os.free_bytes(src.ptr as u64);
+  if ok {
+    return 0;
+  }
+  os.eprint(f"lainfmt: cannot write {path}\n");
+  return 2;
+};
