@@ -1,4 +1,5 @@
-// LAINIR 优化器：区域内常量折叠、代数恒等式化简、路径敏感事实传播、条件分支
+// LAINIR 优化器：区域内常量折叠（整数运算、除法与取余、移位、整数转换）、
+// 代数恒等式化简、路径敏感事实传播、局部存放与重复读出的转发、条件分支
 // 删除与过程内无用户纯指令删除。
 //
 // 折叠只改写模块自身的记录：能被替换的操作数就地换成 OP_INT，或把使用者
@@ -233,9 +234,13 @@ let sign_fill = func(value: u64, width: u64) -> i64 {
 // 得到的是互不重叠的存储，所以精确地址匹配不会漏掉别名写入：任何透过其它
 // 指针（取自 #lea、取自别的槽里的指针、模块数据符号）的写入都先整表清空再
 // 处理，走到表外的写入因此不可能留下过期的记录。调用、原子操作与读写改能
-// 透过任意指针改动内存，也整表清空。记录条数有上限，满了就不再登记新记录，
-// 查找不到只是不转发。记录只在一条直行区域序列内有效，进出的清空见
-// fold_region。
+// 透过任意指针改动内存，也整表清空。
+//
+// 每条 #load 的结果也按同样的方式登记成“该地址、该宽度下当前的内容”：
+// 之后的写入会按地址与全部逃逸规则失效这些记录，因此从同一地址、同一宽度
+// 再次读出的结果可以别名到上一次读出的值名上。记录条数有上限，满了就不再
+// 登记新记录，查找不到只是不转发。记录只在一条直行区域序列内有效，进出的
+// 清空见 fold_region。
 let MEM_CAP = func() -> u64 { return 32; };
 let SLOT_CAP = func() -> u64 { return 128; };
 
@@ -391,9 +396,11 @@ let mem_escape = func(k: u64) -> u64 {
 };
 
 // 一条指令对存放记录的作用：写入本过程已知的槽就登记，写入其它任何地址、
-// 可能穿透内存的指令都整表清空；从已知槽读出且宽度与类型种类都对得上时，
-// 把 #load 的结果名记成写入的那个值，后续使用者因此绕过这条 #load，没有
-// 使用者的 #load 由删除趟去掉。子区域的界限由 fold_region 负责。
+// 可能穿透内存的指令都整表清空；读出时宽度与类型种类都对得上就按写入记录
+// 或上一次读出转发，把 #load 的结果名记成那个值，后续使用者因此绕过这条
+// #load，没有使用者的 #load 由删除趟去掉。没有旧记录的读出把自己的结果名
+// 登记成该地址当前的内容，同址同宽度的后续读出因此可以别名到它。
+// 子区域的界限由 fold_region 负责。
 let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let it: vf.IrInst = inst_read(c, ii);
   let mf: Mut(MemFacts) = c.mem;
@@ -427,8 +434,14 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
     let src: vf.IrOperand = vf.inst_op(it, 0);
     if src.kind != vf.OP_VALUE() { return 0; }
     if src.name == 0 { return 0; }
-    let at: u64 = mem_find(mf, src.name, mem_key(it));
-    if at == 0 { return 0; }
+    let key: u64 = mem_key(it);
+    let at: u64 = mem_find(mf, src.name, key);
+    if at == 0 {
+      // 同一地址、同一宽度的重复读出：把这条读出的结果登记成该地址当前
+      // 内容的记录，后续再从同一地址读出的结果就直接别名到它。
+      let rec: u64 = mem_set(mf, src.name, key, 2, it.r0);
+      return 0;
+    }
     if f.count >= FACT_CAP() { return 0; }
     let idx: u64 = at - 1;
     let pushed: u64 = facts_push(f, it.r0, mf.vkinds[idx], mf.vals[idx]);
@@ -437,7 +450,8 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
   return 0;
 };
 
-// 可折叠的整数运算：两个 OP_INT 操作数、一条指令结果。
+// 可折叠的整数运算：两个 OP_INT 操作数、一条指令结果。除数为 0 与移位量
+// 达到 64 的情况不折叠，留给运行期。
 let fold_inst = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
@@ -486,7 +500,63 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
     if ua > ub { return fold_of(1); }
     return fold_of(0);
   }
+  // 除法与取余在除数为 0 时不折叠：那是一次运行期陷阱，常量折叠不能把它
+  // 提前成编译期的未定义行为。有符号除法与取余按操作数宽度做符号扩展，
+  // 除数为 -1 时单独处理，避免最小负数取反溢出。
+  if k == codes.INST_UDIV() {
+    if b == 0 { return no_fold(); }
+    return fold_of(mask_width(a / b, w));
+  }
+  if k == codes.INST_UREM() {
+    if b == 0 { return no_fold(); }
+    return fold_of(mask_width(a % b, w));
+  }
+  if k == codes.INST_SDIV() {
+    let den: i64 = sign_fill(b, w);
+    if den == 0 { return no_fold(); }
+    if den == (0 - 1) { return fold_of(mask_width(0 - a, w)); }
+    let num: i64 = sign_fill(a, w);
+    let ratio: i64 = num / den;
+    return fold_of(mask_width(ratio as u64, w));
+  }
+  if k == codes.INST_SREM() {
+    let den2: i64 = sign_fill(b, w);
+    if den2 == 0 { return no_fold(); }
+    if den2 == (0 - 1) { return fold_of(0); }
+    let num2: i64 = sign_fill(a, w);
+    let rest: i64 = num2 % den2;
+    return fold_of(mask_width(rest as u64, w));
+  }
+  // 移位量达到 64 时不折叠，同样交给运行期；左移与逻辑右移按操作数宽度
+  // 取值，算术右移先做符号扩展再移位。
+  if (k == codes.INST_SHL()) or (k == codes.INST_LSHR()) or (k == codes.INST_ASHR()) {
+    if b >= 64 { return no_fold(); }
+    if k == codes.INST_SHL() { return fold_of(mask_width(a << b, w)); }
+    if k == codes.INST_LSHR() { return fold_of(mask_width(a, w) >> b); }
+    let wide: i64 = sign_fill(a, w);
+    let amount: i64 = b as i64;
+    let kept: i64 = wide >> amount;
+    return fold_of(mask_width(kept as u64, w));
+  }
   return no_fold();
+};
+
+// 整数转换的常量折叠：#zext 只是补零，#trunc 丢掉高位，#sext 需要知道
+// 源操作数宽度，而整数字面量不携带宽度，所以 #sext 不折叠。
+let fold_conv = func(it: vf.IrInst) -> Fold {
+  if it.has_ty == 0 { return no_fold(); }
+  if it.ty_kind != vf.TY_BITS() { return no_fold(); }
+  if it.result_count != 1 { return no_fold(); }
+  if it.operand_count != 1 { return no_fold(); }
+  if it.op0_kind != vf.OP_INT() { return no_fold(); }
+  if it.kind == codes.INST_ZEXT() { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
+  if it.kind == codes.INST_TRUNC() { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
+  return no_fold();
+};
+
+let fold_pick = func(a: Fold, b: Fold) -> Fold {
+  if a.ok == 1 { return a; }
+  return b;
 };
 
 // 操作数本身作为折叠结果：OP_INT 是常量，OP_VALUE 是别名。
@@ -535,10 +605,12 @@ let fold_identity = func(it: vf.IrInst) -> Fold {
   if k == codes.INST_AND() {
     if a_zero == 1 { return fold_of(0); }
     if b_zero == 1 { return fold_of(0); }
+    if same == 1 { return operand_fold(a); }
   }
   if k == codes.INST_OR() {
     if b_zero == 1 { return operand_fold(a); }
     if a_zero == 1 { return operand_fold(b); }
+    if same == 1 { return operand_fold(a); }
   }
   if k == codes.INST_XOR() {
     if b_zero == 1 { return operand_fold(a); }
@@ -642,7 +714,7 @@ let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -
 let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let it: vf.IrInst = inst_read(c, ii);
   let direct: Fold = fold_inst(it);
-  let res: Fold = if direct.ok == 1 { direct } else { fold_identity(it) };
+  let res: Fold = fold_pick(fold_pick(direct, fold_conv(it)), fold_identity(it));
   if res.ok == 1 {
     st.folded = st.folded + 1;
     if it.r0 != 0 { let put: u64 = facts_push(f, it.r0, res.kind, res.value); }

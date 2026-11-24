@@ -19,7 +19,9 @@ let tb = import("src::sema::tbuild");
 let gv = import("src::sema::given");
 let modules = import("src::sema::modules");
 let ctfn = import("src::comptime::ctfn");
+let ctp = import("src::comptime::ctprim");
 let ef = import("src::sema::effects");
+let hr = import("src::driver::host_rt");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern stmt_p1_group(k: Mut(st.State), g: u64) -> u64 = lainc_eval_phase1_group;
@@ -398,6 +400,189 @@ let stmt_ctfor = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   return body + 1;
 };
 
+// --- comptime if ----------------------------------------------------------
+// 条件只在编译期求值：字面量、true/false、comptime for 的循环变量、
+// size_of / align_of / field_count 查询与目标系统查询，按算符优先级折叠成整数。
+let cb_target_os = func() -> u64 { return s.intern("target_os", 9); };
+let cb_is_windows = func() -> u64 { return s.intern("is_windows", 10); };
+let cb_is_linux = func() -> u64 { return s.intern("is_linux", 8); };
+let cb_is_macos = func() -> u64 { return s.intern("is_macos", 8); };
+
+let is_os_query = func(name: u64) -> u64 {
+  if name == cb_target_os() { return 1; }
+  if name == cb_is_windows() { return 1; }
+  if name == cb_is_linux() { return 1; }
+  if name == cb_is_macos() { return 1; }
+  return 0;
+};
+
+let os_query_value = func(name: u64) -> u64 {
+  let os_id: u64 = hr.get_target_os();
+  if name == cb_is_windows() { return if os_id == hr.OS_WINDOWS() { 1 } else { 0 }; }
+  if name == cb_is_linux() { return if os_id == hr.OS_LINUX() { 1 } else { 0 }; }
+  if name == cb_is_macos() { return if os_id == hr.OS_MACOS() { 1 } else { 0 }; }
+  return os_id;
+};
+
+let cond_prec = func(g: u64, i: u64) -> u64 {
+  if is_group(g, i) == 1 { return 0; }
+  let op: u64 = n_sym(g, i);
+  if op == s.k_or() { return 1; }
+  if op == s.k_and() { return 2; }
+  let p: u64 = ctp.ct_prio(g, i);
+  if p == 0 { return 0; }
+  return p + 2;
+};
+
+let cond_bin = func(k: Mut(st.State), op: u64, a: u64, b: u64) -> u64 {
+  if op == s.k_or() { return if (a != 0) or (b != 0) { 1 } else { 0 }; }
+  if op == s.k_and() { return if (a != 0) and (b != 0) { 1 } else { 0 }; }
+  return ctp.ct_bin(k, op, a, b);
+};
+
+let cond_atom = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { ctf.fail_msg(k, "empty comptime if condition", 27, e_ast()); return i; }
+  let h: u64 = n_at(g, i);
+  if is_group_node(h) == 1 {
+    if ax.delim(h) == ax.dl_paren() {
+      let j: u64 = cond_expr(k, h, 0, 0, out);
+      if st.st_ok(k) == 0 and j != n_count(h) { ctf.fail_msg(k, "bad comptime if condition", 25, e_ast()); }
+      return i + 1;
+    }
+    ctf.fail_msg(k, "bad comptime if condition", 25, e_ast());
+    return i + 1;
+  }
+  if ax.is_digit_token(g, i) == 1 {
+    ctf.v_set(out, 0, ax.num_value(ax.lit_addr(h), ax.lit_len(h)), 0);
+    return i + 1;
+  }
+  let name: u64 = node_sym(h);
+  if name == s.k_true() or name == s.k_false() {
+    let b: u64 = if name == s.k_true() { 1 } else { 0 };
+    ctf.v_set(out, 0, b, 0);
+    return i + 1;
+  }
+  if name == 0 { ctf.fail_msg(k, "condition is not comptime-known", 31, e_type()); return i + 1; }
+  if i + 1 < n and is_group(g, i + 1) == 1 and ax.delim_of(g, i + 1) == ax.dl_paren() {
+    let ag: u64 = n_at(g, i + 1);
+    if is_os_query(name) == 1 {
+      if n_count(ag) != 0 { ctf.fail_msg(k, "os query takes no args", 22, e_ast()); return i + 2; }
+      ctf.v_set(out, 0, os_query_value(name), 0);
+      return i + 2;
+    }
+    if name == s.intern("size_of", 7) or name == s.intern("align_of", 8) or name == s.intern("field_count", 11) {
+      let rc: u64 = ctf.prim(k, name, ag, out);
+      return i + 2;
+    }
+  }
+  let bv: Mut(ctf.CtVal) = ctf.lookup(k, name);
+  if is_null(bv) == 0 {
+    ctf.v_set(out, ctf.v_kind(bv), ctf.v_a(bv), ctf.v_b(bv));
+    return i + 1;
+  }
+  ctf.fail_msg(k, "condition is not comptime-known", 31, e_type());
+  return i + 1;
+};
+
+let cond_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(ctf.CtVal)) -> u64 {
+  if i >= n_count(g) { return i; }
+  let p: u64 = cond_prec(g, i);
+  if (p == 0) or (p < minp) { return i; }
+  if ctf.v_kind(out) != 0 { ctf.fail_msg(k, "condition needs integers", 24, e_type()); return i; }
+  let op: u64 = n_sym(g, i);
+  let rhs: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = cond_atom(k, g, i + 1, rhs);
+  if st.st_ok(k) != 0 { return j; }
+  let j2: u64 = cond_tail(k, g, j, p + 1, rhs);
+  if st.st_ok(k) != 0 { return j2; }
+  if ctf.v_kind(rhs) != 0 { ctf.fail_msg(k, "condition needs integers", 24, e_type()); return j2; }
+  ctf.v_set(out, 0, cond_bin(k, op, ctf.v_a(out), ctf.v_a(rhs)), 0);
+  return cond_tail(k, g, j2, minp, out);
+};
+
+let cond_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(ctf.CtVal)) -> u64 {
+  let j: u64 = cond_atom(k, g, i, out);
+  if st.st_ok(k) != 0 { return j; }
+  return cond_tail(k, g, j, minp, out);
+};
+
+// 条件必须整条耗尽到条件与体组之间的边界，否则说明它依赖了运行期的值。
+pub let comptime_cond = func(k: Mut(st.State), g: u64, i: u64, stop: u64) -> u64 {
+  let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  let j: u64 = cond_expr(k, g, i, 0, v);
+  if st.st_ok(k) != 0 { return 0; }
+  if j != stop { ctf.fail_msg(k, "condition is not comptime-known", 31, e_ast()); return 0; }
+  if ctf.v_kind(v) != 0 { ctf.fail_msg(k, "condition needs an integer value", 32, e_type()); return 0; }
+  return if ctf.v_a(v) != 0 { 1 } else { 0 };
+};
+
+// comptime if 的结构：[comptime if <条件> { 体 } [else { 体 }]]。
+// 条件区间是 [cond_i, stop_i)，stop_i 是第一个花括号组的下标。
+pub let CtIf = struct {
+  cond_i: u64,
+  stop_i: u64,
+  yes: u64,
+  no: u64,
+  next_i: u64
+};
+
+let brace_from = func(g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  if is_group(g, i) == 1 and ax.delim_of(g, i) == dl_brace() { return i; }
+  return brace_from(g, i + 1, n);
+};
+
+pub let ctif_open = func(k: Mut(st.State), g: u64, i: u64) -> Mut(CtIf) {
+  let n: u64 = n_count(g);
+  let b: u64 = brace_from(g, i + 2, n);
+  let d: Mut(CtIf) = ptr_cast(Mut(CtIf), st.st_alloc(k, 40));
+  d.cond_i = i + 2;
+  d.stop_i = b;
+  d.yes = 0;
+  d.no = 0;
+  d.next_i = i + 2;
+  if b == 0 {
+    ctf.fail_msg(k, "expected comptime if body", 25, e_ast());
+    return d;
+  }
+  d.yes = n_at(g, b);
+  d.next_i = b + 1;
+  if b + 2 < n and is_group(g, b + 1) == 0 and n_sym(g, b + 1) == s.k_else() {
+    if is_group(g, b + 2) == 1 and ax.delim_of(g, b + 2) == dl_brace() {
+      d.no = n_at(g, b + 2);
+      d.next_i = b + 3;
+    } else {
+      ctf.fail_msg(k, "expected comptime else body", 27, e_ast());
+    }
+  }
+  return d;
+};
+
+// 选中的体组：条件为真取 then，否则取 else；没有选中的分支时回 0。
+pub let ctif_body = func(k: Mut(st.State), g: u64, d: Mut(CtIf)) -> u64 {
+  let t: u64 = comptime_cond(k, g, d.cond_i, d.stop_i);
+  if st.st_ok(k) != 0 { return 0; }
+  if t == 1 { return d.yes; }
+  return d.no;
+};
+
+// comptime if 语句：只编译选中的分支，另一分支既不做类型检查也不降级。
+let stmt_ctif = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
+  let d: Mut(CtIf) = ctif_open(k, g, i);
+  if st.st_ok(k) != 0 { return d.next_i; }
+  let body: u64 = ctif_body(k, g, d);
+  if st.st_ok(k) != 0 { return d.next_i; }
+  if body != 0 {
+    let mark: u64 = env.env_mark(k);
+    let t: Mut(u64) = box(k);
+    let j: u64 = block_mode(k, body, 0, t, slot, tp);
+    env.env_release(k, mark);
+    if box_get(t) == 1 { box_put(term, 1); }
+  }
+  return skip_semi(g, d.next_i);
+};
+
 let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
@@ -472,6 +657,7 @@ let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
   }
   if sym == s.k_comptime() {
     if i + 1 < n and n_sym(g, i + 1) == s.k_for() { return stmt_ctfor(k, g, i, term); }
+    if i + 1 < n and n_sym(g, i + 1) == s.k_if() { return stmt_ctif(k, g, i, term, slot, tp); }
     if i + 1 >= n or n_sym(g, i + 1) != s.p_dot() {
       st.st_fail(k, e_unsup());
       box_put(term, 1);

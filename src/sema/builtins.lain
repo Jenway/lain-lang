@@ -8,6 +8,7 @@ let agg = import("src::sema::agg");
 let sym = import("src::driver::sym");
 let ax = import("src::syntax::ast");
 let modules = import("src::sema::modules");
+let hr = import("src::driver::host_rt");
 
 let SigRec = struct {
   np: u64,
@@ -238,8 +239,34 @@ let icall_sret = func(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u6
   return 0;
 };
 
+// --- 目标系统内建 -----------------------------------------------------------
+// 四个名字都是零实参调用，值在编译期就折算成常量，不产生任何指令。
+let b_target_os = func() -> u64 { return sym.intern("target_os", 9); };
+let b_is_windows = func() -> u64 { return sym.intern("is_windows", 10); };
+let b_is_linux = func() -> u64 { return sym.intern("is_linux", 8); };
+let b_is_macos = func() -> u64 { return sym.intern("is_macos", 8); };
+
+// target_os() 的结果是 u64 编号，is_*() 的结果是 bool。
+let os_id_lit = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
+  let u: u64 = ty.ty_u64(t);
+  return ty.val_lit(out, hr.get_target_os(), t);
+};
+
+let os_is_lit = func(k: Mut(st.State), want: u64, out: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
+  let b: u64 = ty.ty_bool(t);
+  let got: u64 = hr.get_target_os();
+  let v: u64 = if got == want { 1 } else { 0 };
+  return ty.val_lit(out, v, t);
+};
+
 // --- 内建分派 -----------------------------------------------------------
 pub let is_builtin = func(name: u64) -> u64 {
+  if name == b_target_os() { return 1; }
+  if name == b_is_windows() { return 1; }
+  if name == b_is_linux() { return 1; }
+  if name == b_is_macos() { return 1; }
   if name == sym.b_load() { return 1; }
   if name == sym.b_store() { return 1; }
   if name == sym.b_lea() { return 1; }
@@ -422,6 +449,10 @@ pub let apply = func(k: Mut(st.State), name: u64, argv: Mut(u8), n: u64, want: M
   let v1: Mut(ty.Val) = ptr_cast(Mut(ty.Val), argv + 56);
   let v2: Mut(ty.Val) = ptr_cast(Mut(ty.Val), argv + 112);
   let v3: Mut(ty.Val) = ptr_cast(Mut(ty.Val), argv + 168);
+  if name == b_target_os() { return os_id_lit(k, out); }
+  if name == b_is_windows() { return os_is_lit(k, hr.OS_WINDOWS(), out); }
+  if name == b_is_linux() { return os_is_lit(k, hr.OS_LINUX(), out); }
+  if name == b_is_macos() { return os_is_lit(k, hr.OS_MACOS(), out); }
   if name == sym.b_load() { return do_load(k, v0, want, out); }
   if name == sym.b_store() { return do_store(k, v0, v1); }
   if name == sym.b_atomic_load() { return do_atomic_load(k, v0, v1, out); }

@@ -23,6 +23,7 @@ let CliOpts = struct {
   out_path: OptSlice.Opt,
   trace_path: OptSlice.Opt,
   entry_name: OptSlice.Opt,
+  target: OptSlice.Opt,
   src_path: OptSlice.Opt,
   bad_args: bool,
 };
@@ -57,7 +58,7 @@ let arg = func(i: u64) -> Slice(u8) {
 };
 
 let usage = func() -> u64 {
-  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--opt] [--entry <name>] [--trace <trace.json>] [--print-result] [--dump-expand] [--help]\n";
+  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--opt] [--entry <name>] [--target <windows|linux|macos>] [--trace <trace.json>] [--print-result] [--dump-expand] [--help]\n";
   return os.eprint(msg);
 };
 
@@ -74,6 +75,10 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
   }
   if same(s, "--trace") and (i + 1 < n) {
     o.trace_path = OptSlice.some(arg(i + 1));
+    return parse(o, i + 2, n);
+  }
+  if same(s, "--target") and (i + 1 < n) {
+    o.target = OptSlice.some(arg(i + 1));
     return parse(o, i + 2, n);
   }
   if same(s, "--help") or same(s, "-h") {
@@ -96,7 +101,7 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
     o.dump_expand = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--out") or same(s, "--entry") or same(s, "--trace") {
+  if same(s, "--out") or same(s, "--entry") or same(s, "--trace") or same(s, "--target") {
     o.bad_args = true;
     return 1;
   }
@@ -114,6 +119,29 @@ let entry_name = func(o: Mut(CliOpts)) -> Slice(u8) {
   return match en {
     None => "s0__main",
     Some(name) => name,
+  };
+};
+
+// --target 把目标系统名翻成编号并写进宿主；未知名字回 1，命令行据此报告用法错误。
+let target_apply = func(o: Mut(CliOpts)) -> u64 {
+  let t: OptSlice.Opt = o.target;
+  return match t {
+    None => 0,
+    Some(name) => {
+      if same(name, "windows") {
+        let s0: u64 = hr.set_target_os(hr.OS_WINDOWS());
+        return 0;
+      }
+      if same(name, "linux") {
+        let s1: u64 = hr.set_target_os(hr.OS_LINUX());
+        return 0;
+      }
+      if same(name, "macos") {
+        let s2: u64 = hr.set_target_os(hr.OS_MACOS());
+        return 0;
+      }
+      1
+    },
   };
 };
 
@@ -208,6 +236,7 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     out_path: OptSlice.none(),
     trace_path: OptSlice.none(),
     entry_name: OptSlice.none(),
+    target: OptSlice.none(),
     src_path: OptSlice.none(),
     bad_args: false,
   };
@@ -223,6 +252,11 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     return 0;
   }
   if o.bad_args {
+    usage();
+    return 2;
+  }
+  let tgt_bad: u64 = target_apply(o);
+  if tgt_bad != 0 {
     usage();
     return 2;
   }

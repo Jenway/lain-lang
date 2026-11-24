@@ -25,6 +25,7 @@ let gv = import("src::sema::given");
 let gn = import("src::sema::generics");
 let ex = import("src::syntax::expand");
 let ef = import("src::sema::effects");
+let sm = import("src::sema::stmt");
 let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
 
@@ -876,6 +877,15 @@ let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1(k, g, a, n); }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1(k, g, a, n); }
+  // 顶层 comptime if：只收选中分支里的声明，未选中的分支不参与编译。
+  if hs == s.k_comptime() and i + 1 < n and n_sym(g, i + 1) == s.k_if() {
+    let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
+    if st.st_ok(k) != 0 { return d.next_i; }
+    let body: u64 = sm.ctif_body(k, g, d);
+    if st.st_ok(k) != 0 { return d.next_i; }
+    if body != 0 { let a: u64 = phase1(k, body, 0, n_count(body)); }
+    return phase1(k, g, d.next_i, n);
+  }
   // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
   if hs == s.k_inject() { let a: u64 = inject_decl(k, g, h); return phase1(k, g, a, n); }
   return phase1(k, g, i + 1, n);
@@ -960,6 +970,15 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     return phase2(k, g, a, n);
   }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
+  // 顶层 comptime if：只编选中分支，分支选择与 phase1 完全一致。
+  if hs == s.k_comptime() and i + 1 < n and n_sym(g, i + 1) == s.k_if() {
+    let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
+    if st.st_ok(k) != 0 { return d.next_i; }
+    let body: u64 = sm.ctif_body(k, g, d);
+    if st.st_ok(k) != 0 { return d.next_i; }
+    if body != 0 { let a: u64 = phase2(k, body, 0, n_count(body)); }
+    return phase2(k, g, d.next_i, n);
+  }
   if hs == s.k_let() { let a: u64 = p2_let(k, g, h, n); return phase2(k, g, a, n); }
   if hs == s.k_extern() {
     // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
