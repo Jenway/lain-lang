@@ -1,0 +1,1959 @@
+// C99 指令与数值发射：把 LAINIR 的每条指令写成 C99 语句或可内联的表达式。
+let codes = import("src::ir::ir_codes");
+let vf = import("src::ir::verify");
+let os = import("std::os");
+let wr = import("src::backend::c99::writer");
+
+let C99Writer = wr.C99Writer;
+
+// --- 发射上下文 -----------------------------------------------------------
+pub let C99Emitter = struct {
+  w: Mut(C99Writer),
+  m: Ref(vf.IrModule),
+  proc: u64,
+  depth: u64,
+  temp: u64,
+  loop_depth: u64,
+  loop_labels: Array(u64, 32),
+  loop_ids: Array(u64, 32),
+  loop_insts: Array(u64, 32),
+  loop_regions: Array(u64, 32),
+  // 过程体内没有任何 INST_ALLOCA 时，_alloca_head 与清理调用都不发射。
+  has_alloca: u64,
+  // 单次使用纯表达式内联的开关。
+  inl_on: u64,
+};
+
+pub let emitter_new = func(w: Mut(C99Writer), m: Ref(vf.IrModule)) -> C99Emitter {
+  return C99Emitter {
+    w: w,
+    m: m,
+    proc: vf.NO_REGION(),
+    depth: 0,
+    temp: 0,
+    has_alloca: 1,
+    inl_on: 0,
+    loop_depth: 0,
+    loop_labels: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_ids: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_insts: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    loop_regions: [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+  };
+};
+
+// --- 单次使用纯表达式内联 -------------------------------------------------
+// 结果只被引用一次的纯标量指令不再单独占用临时量，直接在使用位置展开成表达式。
+// 只接受与使用点处在同一个区域、并且定义位置在前的指令，展开因此不会改变求值顺序。
+let INL_REJECT = func() -> u64 { return 18446744073709551615; };
+let INL_MAX_DEPTH = func() -> u64 { return 6; };
+let INL_MAX_INSTS = func() -> u64 { return 262144; };
+// 表内并列数组的含义：0 键 1 指令编号加一 2 定义区域 3 定义位置
+// 4 使用次数 5 使用区域 6 使用位置 7 内联深度；另有 8 表容量 9 已分配容量 10 累计内联条数。
+let g_inl_meta: Array(u64, 11) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+pub let inl_meta = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(g_inl_meta), 11);
+};
+
+let inl_table = func(slot: u64) -> MutSlice(u64) {
+  let meta: MutSlice(u64) = inl_meta();
+  return make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[slot]), meta[8]);
+};
+
+let inl_keys = func() -> MutSlice(u64) { return inl_table(0); };
+let inl_vals = func() -> MutSlice(u64) { return inl_table(1); };
+let inl_creg = func() -> MutSlice(u64) { return inl_table(2); };
+let inl_cpos = func() -> MutSlice(u64) { return inl_table(3); };
+let inl_ucnt = func() -> MutSlice(u64) { return inl_table(4); };
+let inl_ureg = func() -> MutSlice(u64) { return inl_table(5); };
+let inl_upos = func() -> MutSlice(u64) { return inl_table(6); };
+let inl_idepth = func() -> MutSlice(u64) { return inl_table(7); };
+
+let inl_cap_for = func(total: u64) -> u64 {
+  let cap: u64 = loop c(c: u64 = 64) while c < total * 2 { c = c * 2; };
+  return cap;
+};
+
+let inl_alloc = func(cap: u64) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  if meta[9] >= cap { return 1; }
+  let ok: u64 = loop c(i: u64 = 0) while i < 8 {
+    if meta[i] != 0 {
+      let freed: u64 = os.free_bytes(meta[i]);
+      meta[i] = 0;
+    }
+    let raw: u64 = os.alloc_bytes(cap * 8);
+    if raw == 0 { break c(0); }
+    meta[i] = raw;
+    i = i + 1;
+  };
+  if ok == 0 { return 0; }
+  meta[9] = cap;
+  return 1;
+};
+
+let inl_hash = func(name: u64, cap: u64) -> u64 {
+  let h: u64 = (name * 11400714819323198485) >> 20;
+  return h & (cap - 1);
+};
+
+// 结果只被引用一次的纯标量指令种类：加减乘、位运算、移位、整数比较、整数转换。
+// 除法与求余会触发陷阱，保持在原位置发射。
+let inline_cand_kind = func(k: u64) -> u64 {
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return 1; }
+  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return 1; }
+  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return 1; }
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return 1; }
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return 1; }
+  return 0;
+};
+
+let inl_put = func(name: u64, inst_idx: u64, reg_id: u64, pos: u64) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  let cap: u64 = meta[8];
+  if cap == 0 { return 0; }
+  if name == 0 { return 0; }
+  let keys: MutSlice(u64) = inl_keys();
+  let vals: MutSlice(u64) = inl_vals();
+  let creg: MutSlice(u64) = inl_creg();
+  let cpos: MutSlice(u64) = inl_cpos();
+  let ucnt: MutSlice(u64) = inl_ucnt();
+  let ureg: MutSlice(u64) = inl_ureg();
+  let upos: MutSlice(u64) = inl_upos();
+  let mask: u64 = cap - 1;
+  let slot: u64 = inl_hash(name, cap);
+  let rc: u64 = loop c(at: u64 = slot, step: u64 = 0) while 1 {
+    if step >= cap { break c(0); }
+    let k: u64 = keys[at];
+    if k == name { break c(0); }
+    if k == 0 {
+      keys[at] = name;
+      vals[at] = inst_idx + 1;
+      creg[at] = reg_id;
+      cpos[at] = pos;
+      ucnt[at] = 0;
+      ureg[at] = INL_REJECT();
+      upos[at] = 0;
+      break c(1);
+    }
+    at = (at + 1) & mask;
+    step = step + 1;
+  };
+  return rc;
+};
+
+let inl_note_use = func(name: u64, reg_id: u64, pos: u64) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  let cap: u64 = meta[8];
+  if cap == 0 { return 0; }
+  if name == 0 { return 0; }
+  let keys: MutSlice(u64) = inl_keys();
+  let vals: MutSlice(u64) = inl_vals();
+  let ucnt: MutSlice(u64) = inl_ucnt();
+  let ureg: MutSlice(u64) = inl_ureg();
+  let upos: MutSlice(u64) = inl_upos();
+  let mask: u64 = cap - 1;
+  let slot: u64 = inl_hash(name, cap);
+  let rc: u64 = loop c(at: u64 = slot, step: u64 = 0) while 1 {
+    if step >= cap { break c(0); }
+    let k: u64 = keys[at];
+    if k == 0 { break c(0); }
+    if k == name {
+      let n: u64 = ucnt[at] + 1;
+      ucnt[at] = n;
+      ureg[at] = reg_id;
+      upos[at] = pos;
+      if n > 1 { vals[at] = INL_REJECT(); }
+      break c(1);
+    }
+    at = (at + 1) & mask;
+    step = step + 1;
+  };
+  return rc;
+};
+
+// 名字对应的表内格子编号；不在表内时返回 INL_REJECT。
+let inl_slot_of = func(name: u64) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  let cap: u64 = meta[8];
+  if cap == 0 { return INL_REJECT(); }
+  if name == 0 { return INL_REJECT(); }
+  let keys: MutSlice(u64) = inl_keys();
+  let mask: u64 = cap - 1;
+  let slot: u64 = inl_hash(name, cap);
+  let found: u64 = loop c(at: u64 = slot, step: u64 = 0) while 1 {
+    if step >= cap { break c(INL_REJECT()); }
+    let k: u64 = keys[at];
+    if k == 0 { break c(INL_REJECT()); }
+    if k == name { break c(at); }
+    at = (at + 1) & mask;
+    step = step + 1;
+  };
+  return found;
+};
+
+let inl_lookup = func(name: u64) -> u64 {
+  let slot: u64 = inl_slot_of(name);
+  if slot == INL_REJECT() { return 0; }
+  let vals: MutSlice(u64) = inl_vals();
+  return vals[slot];
+};
+
+// 一条内联表达式的嵌套层数：1 加上其操作数中已接受内联语句的最大层数。
+// 保守地按全部未拒绝条目向上迭代，多算的层数只会让接受范围变窄，不会漏掉声明。
+let inl_depth_sweep = func(m: Ref(vf.IrModule)) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  let cap: u64 = meta[8];
+  let keys: MutSlice(u64) = inl_keys();
+  let vals: MutSlice(u64) = inl_vals();
+  let depth: MutSlice(u64) = inl_idepth();
+  let changed: u64 = loop c(s: u64 = 0, ch: u64 = 0) while 1 {
+    if s >= cap { break c(ch); }
+    if (keys[s] != 0) and (vals[s] != INL_REJECT()) and (vals[s] != 0) {
+      let it: vf.IrInst = wr.inst_at(m, vals[s] - 1);
+      let d: u64 = loop c(j: u64 = 0, d: u64 = 1) while 1 {
+        if j >= it.operand_count { break c(d); }
+        let op: vf.IrOperand = vf.inst_op(it, j);
+        if op.kind == vf.OP_VALUE() {
+          let q: u64 = inl_slot_of(op.name);
+          if q != INL_REJECT() {
+            if (vals[q] != INL_REJECT()) and (vals[q] != 0) {
+              if depth[q] + 1 > d { d = depth[q] + 1; }
+            }
+          }
+        }
+        j = j + 1;
+      };
+      if d != depth[s] {
+        depth[s] = d;
+        ch = 1;
+      }
+    }
+    s = s + 1;
+  };
+  return changed;
+};
+
+let inl_cases_total = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> u64 {
+  let n: u64 = loop c(at: u64 = i, n: u64 = 0) while 1 {
+    if at >= it.case_count { break c(n); }
+    let cs: vf.IrCase = wr.case_at(m, it.cases_at + at);
+    n = n + inl_region_total(m, cs.body);
+    at = at + 1;
+  };
+  return n;
+};
+
+let inl_region_total = func(m: Ref(vf.IrModule), ri: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 0; }
+  let r: vf.IrRegion = wr.region_at(m, ri);
+  let n: u64 = loop c(at: u64 = 0, n: u64 = 0) while 1 {
+    if at >= r.inst_count { break c(n); }
+    let it: vf.IrInst = wr.inst_at(m, wr.region_inst(r, at));
+    n = n + 1;
+    n = n + inl_region_total(m, it.body);
+    n = n + inl_region_total(m, it.else_body);
+    n = n + inl_region_total(m, it.default_body);
+    n = n + inl_cases_total(m, it, 0);
+    at = at + 1;
+  };
+  return n;
+};
+
+let inl_collect_cases = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.case_count { break c(1); }
+    let cs: vf.IrCase = wr.case_at(m, it.cases_at + at);
+    let rc: u64 = inl_collect_region(m, cs.body);
+    at = at + 1;
+  };
+  return ok;
+};
+
+let inl_collect_region = func(m: Ref(vf.IrModule), ri: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 1; }
+  let r: vf.IrRegion = wr.region_at(m, ri);
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= r.inst_count { break c(1); }
+    let ii: u64 = wr.region_inst(r, at);
+    let it: vf.IrInst = wr.inst_at(m, ii);
+    if (inline_cand_kind(it.kind) == 1) and (it.result_count == 1) {
+      let rc0: u64 = inl_put(vf.inst_result_name(it, 0), ii, ri, at);
+    }
+    let rc1: u64 = inl_collect_region(m, it.body);
+    let rc2: u64 = inl_collect_region(m, it.else_body);
+    let rc3: u64 = inl_collect_region(m, it.default_body);
+    let rc4: u64 = inl_collect_cases(m, it, 0);
+    at = at + 1;
+  };
+  return ok;
+};
+
+let inl_use_cases = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.case_count { break c(1); }
+    let cs: vf.IrCase = wr.case_at(m, it.cases_at + at);
+    let rc: u64 = inl_use_region(m, cs.body);
+    at = at + 1;
+  };
+  return ok;
+};
+
+let inl_use_region = func(m: Ref(vf.IrModule), ri: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 1; }
+  let r: vf.IrRegion = wr.region_at(m, ri);
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= r.inst_count { break c(1); }
+    let it: vf.IrInst = wr.inst_at(m, wr.region_inst(r, at));
+    if it.symbol != 0 {
+      let rc0: u64 = inl_note_use(it.symbol, ri, at);
+    }
+    let rc1: u64 = loop c(j: u64 = 0) while j < it.operand_count {
+      let op: vf.IrOperand = vf.inst_op(it, j);
+      if op.kind == vf.OP_VALUE() {
+        let rj: u64 = inl_note_use(op.name, ri, at);
+      }
+      j = j + 1;
+    };
+    let rc2: u64 = inl_use_region(m, it.body);
+    let rc3: u64 = inl_use_region(m, it.else_body);
+    let rc4: u64 = inl_use_region(m, it.default_body);
+    let rc5: u64 = inl_use_cases(m, it, 0);
+    at = at + 1;
+  };
+  return ok;
+};
+
+let inl_finalize = func(m: Ref(vf.IrModule)) -> u64 {
+  let meta: MutSlice(u64) = inl_meta();
+  let cap: u64 = meta[8];
+  if cap == 0 { return 0; }
+  let keys: MutSlice(u64) = inl_keys();
+  let vals: MutSlice(u64) = inl_vals();
+  let creg: MutSlice(u64) = inl_creg();
+  let cpos: MutSlice(u64) = inl_cpos();
+  let ucnt: MutSlice(u64) = inl_ucnt();
+  let ureg: MutSlice(u64) = inl_ureg();
+  let upos: MutSlice(u64) = inl_upos();
+  let depth: MutSlice(u64) = inl_idepth();
+  let z0: u64 = loop c(s: u64 = 0) while s < cap {
+    depth[s] = 1;
+    s = s + 1;
+  };
+  let prune: u64 = loop c(s: u64 = 0) while 1 {
+    if s >= cap { break c(0); }
+    if (keys[s] != 0) and (vals[s] != INL_REJECT()) {
+      if (ucnt[s] != 1) or (ureg[s] != creg[s]) or (upos[s] <= cpos[s]) {
+        vals[s] = 0;
+      }
+    }
+    s = s + 1;
+  };
+  // 迭代 INL_MAX_DEPTH 次向上传播层数，足以看清深度超出上限的整条链。
+  let sweeps: u64 = loop c(k: u64 = 0) while k < INL_MAX_DEPTH() + 1 {
+    let swept: u64 = inl_depth_sweep(m);
+    k = k + 1;
+  };
+  let hits: u64 = loop c(s: u64 = 0, n: u64 = 0) while 1 {
+    if s >= cap { break c(n); }
+    if (keys[s] != 0) and (vals[s] != INL_REJECT()) and (vals[s] != 0) {
+      if depth[s] > INL_MAX_DEPTH() {
+        vals[s] = 0;
+      } else {
+        n = n + 1;
+      }
+    }
+    s = s + 1;
+  };
+  return hits;
+};
+
+pub let inl_prepare = func(em: Mut(C99Emitter)) -> u64 {
+  em.inl_on = 0;
+  let meta: MutSlice(u64) = inl_meta();
+  meta[8] = 0;
+  let p: vf.IrProc = wr.proc_at(em.m, em.proc);
+  let total: u64 = inl_region_total(em.m, p.body);
+  if total == 0 { return 1; }
+  if total > INL_MAX_INSTS() { return 1; }
+  let cap: u64 = inl_cap_for(total);
+  if inl_alloc(cap) == 0 { return 1; }
+  meta[8] = cap;
+  let keys: MutSlice(u64) = inl_keys();
+  let z: u64 = loop c(i: u64 = 0) while i < cap {
+    keys[i] = 0;
+    i = i + 1;
+  };
+  let c1: u64 = inl_collect_region(em.m, p.body);
+  let c2: u64 = inl_use_region(em.m, p.body);
+  let hits: u64 = inl_finalize(em.m);
+  if hits == 0 {
+    meta[8] = 0;
+    return 1;
+  }
+  meta[10] = meta[10] + hits;
+  em.inl_on = 1;
+  return 1;
+};
+
+let emit_indent = func(em: Mut(C99Emitter), n: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let rc: u64 = wr.put_str(em.w, "  ");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let next_temp = func(em: Mut(C99Emitter)) -> u64 {
+  let v: u64 = em.temp;
+  em.temp = v + 1;
+  return v;
+};
+
+// OP_VALUE 的句柄可能是局部值，也可能是模块级名字：过程符号按取函数地址发射，
+// 数据符号与局部值一样直接写 v<句柄>。
+let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
+  if em.inl_on == 1 {
+    let hit: u64 = inl_lookup(h);
+    if (hit != 0) and (hit != INL_REJECT()) {
+      let a0: u64 = wr.put_byte(em.w, 40);
+      let ex: u64 = emit_inline_expr(em, hit - 1);
+      if ex == 0 { return 0; }
+      let z: u64 = wr.put_byte(em.w, 41);
+      return z;
+    }
+  }
+  let pi: u64 = wr.find_proc(em.m, h);
+  if pi != vf.NO_REGION() {
+    let p: vf.IrProc = wr.proc_at(em.m, pi);
+    let a: u64 = wr.put_str(em.w, "(void *)&");
+    return wr.emit_proc_name(em.w, p);
+  }
+  return wr.emit_value_name(em.w, h);
+};
+
+// --- 操作数 ---------------------------------------------------------------
+let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) -> u64 {
+  if op.kind == vf.OP_VALUE() {
+    if want.kind == vf.TY_ADDR() {
+      let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)");
+      return emit_value_ref(em, op.name);
+    }
+    return emit_value_ref(em, op.name);
+  }
+  if op.kind == vf.OP_FLOAT() {
+    if want.kind == vf.TY_FLOAT() {
+      if want.width <= 32 {
+        let a: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)");
+        let b: u64 = wr.put_u64_lit(em.w, op.bits);
+        return wr.put_byte(em.w, 41);
+      }
+      let a: u64 = wr.put_str(em.w, "lain_bitcast_u64_f64(");
+      let b: u64 = wr.put_u64_lit(em.w, op.bits);
+      return wr.put_byte(em.w, 41);
+    }
+    return wr.put_u64_lit(em.w, op.bits);
+  }
+  if want.kind == vf.TY_ADDR() {
+    let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)");
+    return wr.put_u64_lit(em.w, op.bits);
+  }
+  let a: u64 = wr.put_str(em.w, "(");
+  let b: u64 = wr.emit_type(em.w, want);
+  let c: u64 = wr.put_byte(em.w, 41);
+  return wr.put_u64_lit(em.w, op.bits);
+};
+
+let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
+  if op.kind == vf.OP_VALUE() {
+    let a: u64 = wr.put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_value_ref(em, op.name);
+    return wr.put_byte(em.w, 41);
+  }
+  return wr.put_u64_lit(em.w, op.bits);
+};
+
+// --- 声明辅助 -------------------------------------------------------------
+let emit_zero_value = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() { return wr.put_str(w, "(void *)0"); }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return wr.put_str(w, "0.0f"); }
+    return wr.put_str(w, "0.0");
+  }
+  return wr.put_str(w, "0");
+};
+
+let emit_result_decls = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
+    let t: vf.IrType = wr.result_type(em.m, it, i);
+    let rc0: u64 = emit_indent(em, em.depth);
+    let rc1: u64 = wr.emit_type(em.w, t);
+    let rc2: u64 = wr.put_str(em.w, " ");
+    let rc3: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, i));
+    let rc4: u64 = wr.put_str(em.w, " = ");
+    let rc5: u64 = emit_zero_value(em.w, t);
+    let rc6: u64 = wr.put_str(em.w, ";\n");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let emit_assign_cast = func(em: Mut(C99Emitter), name: u64, t: vf.IrType, op: vf.IrOperand) -> u64 {
+  let rc0: u64 = emit_indent(em, em.depth);
+  let rc1: u64 = wr.emit_value_name(em.w, name);
+  let rc2: u64 = wr.put_str(em.w, " = (");
+  let rc3: u64 = wr.emit_type(em.w, t);
+  let rc4: u64 = wr.put_str(em.w, ")(");
+  let rc5: u64 = emit_operand(em, op, t);
+  let rc6: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 区域 -----------------------------------------------------------------
+let emit_region_insts = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64,
+                             yield_inst: u64, yield_region: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.inst_count { break c(1); }
+    let ii: u64 = wr.region_inst(r, at);
+    let rc: u64 = emit_inst(em, ii, yield_inst, yield_region);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
+};
+
+pub let emit_region = func(em: Mut(C99Emitter), ri: u64, yield_inst: u64, yield_region: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 1; }
+  let r: vf.IrRegion = wr.region_at(em.m, ri);
+  return emit_region_insts(em, r, 0, yield_inst, yield_region);
+};
+
+let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region: u64) -> u64 {
+  if em.w.ok == 0 { return 0; }
+  let it: vf.IrInst = wr.inst_at(em.m, ii);
+  if em.inl_on == 1 {
+    if it.result_count == 1 {
+      if inl_lookup(vf.inst_result_name(it, 0)) == ii + 1 { return 1; }
+    }
+  }
+  let k: u64 = it.kind;
+  // 枚举顺序是加减乘、除法求余、位运算、移位四段，不能用一个连续区间判定。
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return emit_int_arith(em, it, k); }
+  if (k >= codes.INST_SDIV()) and (k <= codes.INST_UREM()) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return emit_int_arith(em, it, k); }
+  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.INST_FADD()) and (k <= codes.INST_FNEG()) { return emit_float_arith(em, it, k); }
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_int_compare(em, it, k); }
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return emit_float_compare(em, it, k); }
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return emit_int_convert(em, it, k); }
+  if k == codes.INST_BITCAST() { return emit_bitcast(em, it); }
+  if (k >= codes.INST_FPEXT()) and (k <= codes.INST_UITOFP()) { return emit_float_convert(em, it, k); }
+  if k == codes.INST_LEA() { return emit_lea(em, it); }
+  if k == codes.INST_ATOMIC_FENCE() { return emit_atomic_fence(em, it); }
+  if k == codes.INST_ATOMIC_LOAD() { return emit_atomic_load(em, it); }
+  if k == codes.INST_ATOMIC_STORE() { return emit_atomic_store(em, it); }
+  if k == codes.INST_XCHG() { return emit_atomic_xchg(em, it); }
+  if k == codes.INST_CMPXCHG() { return emit_atomic_cmpxchg(em, it, ii); }
+  if (k >= codes.INST_RMW_ADD()) and (k <= codes.INST_RMW_XOR()) { return emit_atomic_rmw(em, it, k); }
+  if k == codes.INST_LOAD() { return emit_load(em, it); }
+  if k == codes.INST_STORE() { return emit_store(em, it); }
+  if k == codes.INST_ALLOCA() { return emit_alloca(em, it); }
+  if k == codes.INST_CALL() { return emit_call(em, it); }
+  if k == codes.INST_IF() { return emit_if(em, it, ii); }
+  if k == codes.INST_LOOP() { return emit_loop(em, it, ii); }
+  if k == codes.INST_SWITCH() { return emit_switch(em, it, ii); }
+  if k == codes.INST_YIELD() { return emit_yield(em, it, yield_inst, yield_region); }
+  if k == codes.INST_BREAK() { return emit_break(em, it); }
+  if k == codes.INST_CONTINUE() { return emit_continue(em, it); }
+  if k == codes.INST_RETURN() { return emit_return(em, it); }
+  if k == codes.INST_UNREACHABLE() { return emit_unreachable(em); }
+  return 0;
+};
+
+// --- 整数与浮点运算 -------------------------------------------------------
+// 算子码到枚举的映射同样只做一次，取文本的地方对枚举做穷尽 match。
+let IntArithOp = enum {
+  Add
+  Sub
+  Mul
+  And
+  Or
+  Xor
+  Unknown
+};
+
+let int_arith_op = func(k: u64) -> IntArithOp {
+  if k == codes.INST_ADD() { return IntArithOp.Add { }; }
+  if k == codes.INST_SUB() { return IntArithOp.Sub { }; }
+  if k == codes.INST_MUL() { return IntArithOp.Mul { }; }
+  if k == codes.INST_AND() { return IntArithOp.And { }; }
+  if k == codes.INST_OR() { return IntArithOp.Or { }; }
+  if k == codes.INST_XOR() { return IntArithOp.Xor { }; }
+  return IntArithOp.Unknown { };
+};
+
+let int_op_text = func(k: u64) -> Slice(u8) {
+  let op: IntArithOp = int_arith_op(k);
+  return match op {
+    Add => "+",
+    Sub => "-",
+    Mul => "*",
+    And => "&",
+    Or => "|",
+    Xor => "^",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => "^",
+  };
+};
+
+let emit_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let ty: vf.IrType = wr.it_ty(it);
+  let w: u64 = wr.type_width(ty);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = (");
+  let f: u64 = wr.emit_type(em.w, t);
+  let g: u64 = wr.put_str(em.w, ")(((uint64_t)(");
+  let h: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let i: u64 = wr.put_str(em.w, ")) ");
+  let j: u64 = wr.put_str(em.w, int_op_text(k));
+  let l: u64 = wr.put_str(em.w, " ((uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = wr.put_str(em.w, "))) & lain_mask(");
+  let o: u64 = wr.put_u64_dec(em.w, w);
+  let p: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let DivShiftOp = enum {
+  Sdiv
+  Srem
+  Udiv
+  Urem
+  Shl
+  Lshr
+  Ashr
+  Unknown
+};
+
+let div_shift_op = func(k: u64) -> DivShiftOp {
+  if k == codes.INST_SDIV() { return DivShiftOp.Sdiv { }; }
+  if k == codes.INST_SREM() { return DivShiftOp.Srem { }; }
+  if k == codes.INST_UDIV() { return DivShiftOp.Udiv { }; }
+  if k == codes.INST_UREM() { return DivShiftOp.Urem { }; }
+  if k == codes.INST_SHL() { return DivShiftOp.Shl { }; }
+  if k == codes.INST_LSHR() { return DivShiftOp.Lshr { }; }
+  if k == codes.INST_ASHR() { return DivShiftOp.Ashr { }; }
+  return DivShiftOp.Unknown { };
+};
+
+let div_shift_name = func(k: u64) -> Slice(u8) {
+  let op: DivShiftOp = div_shift_op(k);
+  return match op {
+    Sdiv => "lain_sdiv",
+    Srem => "lain_srem",
+    Udiv => "lain_udiv",
+    Urem => "lain_urem",
+    Shl => "lain_shl",
+    Lshr => "lain_lshr",
+    Ashr => "lain_ashr",
+    // 域外算子沿用原来的兜底名字。
+    Unknown => "lain_ashr",
+  };
+};
+
+let emit_int_div_shift = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let w: u64 = wr.type_width(wr.it_ty(it));
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = (");
+  let f: u64 = wr.emit_type(em.w, t);
+  let g: u64 = wr.put_str(em.w, ")");
+  let h: u64 = wr.put_str(em.w, div_shift_name(k));
+  let i: u64 = wr.put_str(em.w, "((uint64_t)(");
+  let j: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let l: u64 = wr.put_str(em.w, "), (uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = wr.put_str(em.w, "), ");
+  let o: u64 = wr.put_u64_dec(em.w, w);
+  let p: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let FloatArithOp = enum {
+  Fadd
+  Fsub
+  Fmul
+  Fdiv
+  Fneg
+  Unknown
+};
+
+let float_arith_op = func(k: u64) -> FloatArithOp {
+  if k == codes.INST_FADD() { return FloatArithOp.Fadd { }; }
+  if k == codes.INST_FSUB() { return FloatArithOp.Fsub { }; }
+  if k == codes.INST_FMUL() { return FloatArithOp.Fmul { }; }
+  if k == codes.INST_FDIV() { return FloatArithOp.Fdiv { }; }
+  if k == codes.INST_FNEG() { return FloatArithOp.Fneg { }; }
+  return FloatArithOp.Unknown { };
+};
+
+let float_op_text = func(k: u64) -> Slice(u8) {
+  let op: FloatArithOp = float_arith_op(k);
+  return match op {
+    Fadd => "+",
+    Fsub => "-",
+    Fmul => "*",
+    Fdiv => "/",
+    // FNEG 由 emit_float_arith 的取负路径单独处理，不走二元文本。
+    Fneg => "/",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => "/",
+  };
+};
+
+let emit_float_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = ");
+  if k == codes.INST_FNEG() {
+    let f: u64 = wr.put_str(em.w, "-(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let h: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = wr.put_str(em.w, "(");
+  let g: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let h: u64 = wr.put_str(em.w, ") ");
+  let i: u64 = wr.put_str(em.w, float_op_text(k));
+  let j: u64 = wr.put_str(em.w, " (");
+  let l: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let m: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let IntCmpOp = enum {
+  Eq
+  Ne
+  Ult
+  Ule
+  Ugt
+  Uge
+  Unknown
+};
+
+let int_cmp_op = func(k: u64) -> IntCmpOp {
+  if k == codes.INST_EQ() { return IntCmpOp.Eq { }; }
+  if k == codes.INST_NE() { return IntCmpOp.Ne { }; }
+  if k == codes.INST_ULT() { return IntCmpOp.Ult { }; }
+  if k == codes.INST_ULE() { return IntCmpOp.Ule { }; }
+  if k == codes.INST_UGT() { return IntCmpOp.Ugt { }; }
+  if k == codes.INST_UGE() { return IntCmpOp.Uge { }; }
+  return IntCmpOp.Unknown { };
+};
+
+let int_cmp_text = func(k: u64) -> Slice(u8) {
+  let op: IntCmpOp = int_cmp_op(k);
+  return match op {
+    Eq => "==",
+    Ne => "!=",
+    Ult => "<",
+    Ule => "<=",
+    Ugt => ">",
+    Uge => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
+};
+
+let SignedCmpOp = enum {
+  Slt
+  Sle
+  Sgt
+  Sge
+  Unknown
+};
+
+let signed_cmp_op = func(k: u64) -> SignedCmpOp {
+  if k == codes.INST_SLT() { return SignedCmpOp.Slt { }; }
+  if k == codes.INST_SLE() { return SignedCmpOp.Sle { }; }
+  if k == codes.INST_SGT() { return SignedCmpOp.Sgt { }; }
+  if k == codes.INST_SGE() { return SignedCmpOp.Sge { }; }
+  return SignedCmpOp.Unknown { };
+};
+
+let signed_cmp_text = func(k: u64) -> Slice(u8) {
+  let op: SignedCmpOp = signed_cmp_op(k);
+  return match op {
+    Slt => "<",
+    Sle => "<=",
+    Sgt => ">",
+    Sge => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
+};
+
+let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let ty: vf.IrType = wr.it_ty(it);
+  let w: u64 = wr.type_width(ty);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "uint8_t ");
+  let c: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = wr.put_str(em.w, " = (uint8_t)(");
+  if (k >= codes.INST_SLT()) and (k <= codes.INST_SGE()) {
+    let e: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
+    let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let g: u64 = wr.put_str(em.w, "), ");
+    let h: u64 = wr.put_u64_dec(em.w, w);
+    let i: u64 = wr.put_str(em.w, ") ");
+    let j: u64 = wr.put_str(em.w, signed_cmp_text(k));
+    let l: u64 = wr.put_str(em.w, " lain_sext((uint64_t)(");
+    let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+    let n: u64 = wr.put_str(em.w, "), ");
+    let o: u64 = wr.put_u64_dec(em.w, w);
+    let p: u64 = wr.put_str(em.w, "));\n");
+    return 1;
+  }
+  if ty.kind == vf.TY_ADDR() {
+    let e: u64 = wr.put_str(em.w, "(uintptr_t)(");
+    let f: u64 = emit_operand(em, vf.inst_op(it, 0), ty);
+    let g: u64 = wr.put_str(em.w, ") ");
+    let h: u64 = wr.put_str(em.w, int_cmp_text(k));
+    let i: u64 = wr.put_str(em.w, " (uintptr_t)(");
+    let j: u64 = emit_operand(em, vf.inst_op(it, 1), ty);
+    let l: u64 = wr.put_str(em.w, "));\n");
+    return 1;
+  }
+  let e: u64 = wr.put_str(em.w, "(((uint64_t)(");
+  let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let g: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let h: u64 = wr.put_u64_dec(em.w, w);
+  let i: u64 = wr.put_str(em.w, ")) ");
+  let j: u64 = wr.put_str(em.w, int_cmp_text(k));
+  let l: u64 = wr.put_str(em.w, " ((uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let o: u64 = wr.put_u64_dec(em.w, w);
+  let p: u64 = wr.put_str(em.w, "))));\n");
+  return 1;
+};
+
+let FloatCmpOp = enum {
+  Oeq
+  One
+  Olt
+  Ole
+  Ogt
+  Oge
+  Ueq
+  Une
+  Uelt
+  Uele
+  Uegt
+  Uege
+  Unknown
+};
+
+let float_cmp_op = func(k: u64) -> FloatCmpOp {
+  if k == codes.INST_FOEQ() { return FloatCmpOp.Oeq { }; }
+  if k == codes.INST_FONE() { return FloatCmpOp.One { }; }
+  if k == codes.INST_FOLT() { return FloatCmpOp.Olt { }; }
+  if k == codes.INST_FOLE() { return FloatCmpOp.Ole { }; }
+  if k == codes.INST_FOGT() { return FloatCmpOp.Ogt { }; }
+  if k == codes.INST_FOGE() { return FloatCmpOp.Oge { }; }
+  if k == codes.INST_FUEQ() { return FloatCmpOp.Ueq { }; }
+  if k == codes.INST_FUNE() { return FloatCmpOp.Une { }; }
+  if k == codes.INST_FULT() { return FloatCmpOp.Uelt { }; }
+  if k == codes.INST_FULE() { return FloatCmpOp.Uele { }; }
+  if k == codes.INST_FUGT() { return FloatCmpOp.Uegt { }; }
+  if k == codes.INST_FUGE() { return FloatCmpOp.Uege { }; }
+  return FloatCmpOp.Unknown { };
+};
+
+let float_cmp_text = func(k: u64) -> Slice(u8) {
+  let op: FloatCmpOp = float_cmp_op(k);
+  return match op {
+    Oeq => "==",
+    Ueq => "==",
+    One => "!=",
+    Une => "!=",
+    Olt => "<",
+    Uelt => "<",
+    Ole => "<=",
+    Uele => "<=",
+    Ogt => ">",
+    Uegt => ">",
+    Oge => ">=",
+    Uege => ">=",
+    // 域外算子沿用原来的兜底文本。
+    Unknown => ">=",
+  };
+};
+
+let emit_float_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let ordered: u64 = if k <= codes.INST_FOGE() { 1 } else { 0 };
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "uint8_t ");
+  let c: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = wr.put_str(em.w, " = (uint8_t)(");
+  if ordered == 1 {
+    let e: u64 = wr.put_str(em.w, "((");
+    let f: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let g: u64 = wr.put_str(em.w, " == ");
+    let h: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let i: u64 = wr.put_str(em.w, ") && (");
+    let j: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let l: u64 = wr.put_str(em.w, " == ");
+    let m: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let n: u64 = wr.put_str(em.w, ") && ((");
+    let o: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let p: u64 = wr.put_str(em.w, ") ");
+    let q: u64 = wr.put_str(em.w, float_cmp_text(k));
+    let r: u64 = wr.put_str(em.w, " (");
+    let s: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+    let u: u64 = wr.put_str(em.w, ")));\n");
+    return 1;
+  }
+  let e: u64 = wr.put_str(em.w, "(!(((");
+  let f: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let g: u64 = wr.put_str(em.w, " == ");
+  let h: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let i: u64 = wr.put_str(em.w, ") && (");
+  let j: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let l: u64 = wr.put_str(em.w, " == ");
+  let m: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let n: u64 = wr.put_str(em.w, "))) || ((");
+  let o: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+  let p: u64 = wr.put_str(em.w, ") ");
+  let q: u64 = wr.put_str(em.w, float_cmp_text(k));
+  let r: u64 = wr.put_str(em.w, " (");
+  let s: u64 = emit_operand(em, vf.inst_op(it, 1), t);
+  let u: u64 = wr.put_str(em.w, ")));\n");
+  return 1;
+};
+
+let emit_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = (");
+  let f: u64 = wr.emit_type(em.w, t);
+  let g: u64 = wr.put_str(em.w, ")");
+  if k == codes.INST_SEXT() {
+    let h: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
+    let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let j: u64 = wr.put_str(em.w, "), ");
+    let l: u64 = wr.put_u64_dec(em.w, wr.type_width(wr.it_ty(it)));
+    let m: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  let h: u64 = wr.put_str(em.w, "((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let j: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let l: u64 = wr.put_u64_dec(em.w, wr.type_width(t));
+  let m: u64 = wr.put_str(em.w, "));\n");
+  return 1;
+};
+
+// --- 内联表达式的文本 -----------------------------------------------------
+// 这些函数只输出值与自身类型的完整表达式，供使用位置直接展开。
+let emit_expr_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let w: u64 = wr.type_width(wr.it_ty(it));
+  let a: u64 = wr.put_byte(em.w, 40);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, ")((");
+  let d: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let e: u64 = wr.put_byte(em.w, 32);
+  let f: u64 = wr.put_str(em.w, int_op_text(k));
+  let g: u64 = wr.put_byte(em.w, 32);
+  let h: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let i: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let j: u64 = wr.put_u64_dec(em.w, w);
+  let l: u64 = wr.put_str(em.w, "))");
+  return 1;
+};
+
+let emit_expr_int_div_shift = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let w: u64 = wr.type_width(wr.it_ty(it));
+  let a: u64 = wr.put_byte(em.w, 40);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_byte(em.w, 41);
+  let d: u64 = wr.put_str(em.w, div_shift_name(k));
+  let e: u64 = wr.put_str(em.w, "((uint64_t)(");
+  let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let g: u64 = wr.put_str(em.w, "), (uint64_t)(");
+  let h: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let i: u64 = wr.put_str(em.w, "), ");
+  let j: u64 = wr.put_u64_dec(em.w, w);
+  let l: u64 = wr.put_byte(em.w, 41);
+  return 1;
+};
+
+let emit_expr_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let ty: vf.IrType = wr.it_ty(it);
+  let w: u64 = wr.type_width(ty);
+  let a: u64 = wr.put_str(em.w, "(uint8_t)(");
+  if (k >= codes.INST_SLT()) and (k <= codes.INST_SGE()) {
+    let e: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
+    let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let g: u64 = wr.put_str(em.w, "), ");
+    let h: u64 = wr.put_u64_dec(em.w, w);
+    let i: u64 = wr.put_str(em.w, ") ");
+    let j: u64 = wr.put_str(em.w, signed_cmp_text(k));
+    let l: u64 = wr.put_str(em.w, " lain_sext((uint64_t)(");
+    let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+    let n: u64 = wr.put_str(em.w, "), ");
+    let o: u64 = wr.put_u64_dec(em.w, w);
+    let p: u64 = wr.put_str(em.w, "))");
+    return 1;
+  }
+  if ty.kind == vf.TY_ADDR() {
+    let e: u64 = wr.put_str(em.w, "(uintptr_t)(");
+    let f: u64 = emit_operand(em, vf.inst_op(it, 0), ty);
+    let g: u64 = wr.put_str(em.w, ") ");
+    let h: u64 = wr.put_str(em.w, int_cmp_text(k));
+    let i: u64 = wr.put_str(em.w, " (uintptr_t)(");
+    let j: u64 = emit_operand(em, vf.inst_op(it, 1), ty);
+    let l: u64 = wr.put_str(em.w, "))");
+    return 1;
+  }
+  let e: u64 = wr.put_str(em.w, "((uint64_t)(");
+  let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let g: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let h: u64 = wr.put_u64_dec(em.w, w);
+  let i: u64 = wr.put_str(em.w, ")) ");
+  let j: u64 = wr.put_str(em.w, int_cmp_text(k));
+  let l: u64 = wr.put_str(em.w, " ((uint64_t)(");
+  let m: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let n: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let o: u64 = wr.put_u64_dec(em.w, w);
+  let p: u64 = wr.put_str(em.w, ")))");
+  return 1;
+};
+
+let emit_expr_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let a: u64 = wr.put_byte(em.w, 40);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_byte(em.w, 41);
+  if k == codes.INST_SEXT() {
+    let h: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
+    let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let j: u64 = wr.put_str(em.w, "), ");
+    let l: u64 = wr.put_u64_dec(em.w, wr.type_width(wr.it_ty(it)));
+    let m: u64 = wr.put_byte(em.w, 41);
+    return 1;
+  }
+  let h: u64 = wr.put_str(em.w, "((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let j: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let l: u64 = wr.put_u64_dec(em.w, wr.type_width(t));
+  let m: u64 = wr.put_str(em.w, "))");
+  return 1;
+};
+
+let emit_inline_expr = func(em: Mut(C99Emitter), ii: u64) -> u64 {
+  let it: vf.IrInst = wr.inst_at(em.m, ii);
+  let k: u64 = it.kind;
+  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return emit_expr_int_arith(em, it, k); }
+  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return emit_expr_int_arith(em, it, k); }
+  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return emit_expr_int_div_shift(em, it, k); }
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_expr_int_compare(em, it, k); }
+  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return emit_expr_int_convert(em, it, k); }
+  return 0;
+};
+
+let emit_bitcast = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let ot: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = ");
+  if t.kind == vf.TY_ADDR() {
+    let f: u64 = wr.put_str(em.w, "(void *)(uintptr_t)(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_bits(64));
+    let h: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let f: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)(");
+      let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+      let h: u64 = wr.put_str(em.w, "));\n");
+      return 1;
+    }
+    let f: u64 = wr.put_str(em.w, "lain_bitcast_u64_f64((");
+    let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let h: u64 = wr.put_str(em.w, "));\n");
+    return 1;
+  }
+  if ot.kind == vf.TY_FLOAT() {
+    if ot.width <= 32 {
+      let f: u64 = wr.put_str(em.w, "(uint32_t)lain_bitcast_f32_u32(");
+      let g: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+      let h: u64 = wr.put_str(em.w, ");\n");
+      return 1;
+    }
+    let f: u64 = wr.put_str(em.w, "(uint64_t)lain_bitcast_f64_u64(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+    let h: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = wr.put_str(em.w, "(");
+  let g: u64 = wr.emit_type(em.w, t);
+  let h: u64 = wr.put_str(em.w, ")((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let j: u64 = wr.put_str(em.w, ") & lain_mask(");
+  let l: u64 = wr.put_u64_dec(em.w, wr.type_width(t));
+  let m: u64 = wr.put_str(em.w, "));\n");
+  return 1;
+};
+
+let emit_float_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let ot: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = (");
+  let f: u64 = wr.emit_type(em.w, t);
+  let g: u64 = wr.put_str(em.w, ")(");
+  if (k == codes.INST_FPTOSI()) or (k == codes.INST_FPTOUI()) {
+    let h: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+    let i: u64 = wr.put_str(em.w, "));\n");
+    return 1;
+  }
+  if (k == codes.INST_SITOFP()) or (k == codes.INST_UITOFP()) {
+    let h: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+    let i: u64 = wr.put_str(em.w, "));\n");
+    return 1;
+  }
+  let h: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
+  let i: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 指针与内存 -----------------------------------------------------------
+let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "void *");
+  let c: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let d: u64 = wr.put_str(em.w, " = (void *)(uintptr_t)((uint64_t)(uintptr_t)(");
+  let e: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let f: u64 = wr.put_str(em.w, ") + ((uint64_t)(");
+  let g: u64 = emit_operand_u64(em, vf.inst_op(it, 1));
+  let h: u64 = wr.put_str(em.w, ")) * ((uint64_t)(");
+  let i: u64 = emit_operand_u64(em, vf.inst_op(it, 2));
+  let j: u64 = wr.put_str(em.w, ")) + ((uint64_t)(");
+  let l: u64 = emit_operand_u64(em, vf.inst_op(it, 3));
+  let m: u64 = wr.put_str(em.w, ")));\n");
+  return 1;
+};
+
+// 判断某个值是否在任何非 #alloca 指令的操作数或被调符号里出现。
+let ops_use_name = func(it: vf.IrInst, name: u64, i: u64) -> u64 {
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(0); }
+    let op: vf.IrOperand = vf.inst_op(it, at);
+    if (op.kind == vf.OP_VALUE()) and (op.name == name) { break c(1); }
+    at = at + 1;
+  };
+  return hit;
+};
+
+let cases_use_name = func(m: Ref(vf.IrModule), it: vf.IrInst, name: u64, i: u64) -> u64 {
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.case_count { break c(0); }
+    let cs: vf.IrCase = wr.case_at(m, it.cases_at + at);
+    if region_uses_name(m, cs.body, name) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
+};
+
+let region_uses_from = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, i: u64) -> u64 {
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.inst_count { break c(0); }
+    let ii: u64 = wr.region_inst(r, at);
+    let it: vf.IrInst = wr.inst_at(m, ii);
+    if it.kind != codes.INST_ALLOCA() {
+      if it.symbol == name { break c(1); }
+      if ops_use_name(it, name, 0) == 1 { break c(1); }
+    }
+    if region_uses_name(m, it.body, name) == 1 { break c(1); }
+    if region_uses_name(m, it.else_body, name) == 1 { break c(1); }
+    if region_uses_name(m, it.default_body, name) == 1 { break c(1); }
+    if cases_use_name(m, it, name, 0) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
+};
+
+let region_uses_name = func(m: Ref(vf.IrModule), ri: u64, name: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 0; }
+  let r: vf.IrRegion = wr.region_at(m, ri);
+  return region_uses_from(m, r, name, 0);
+};
+
+let emit_alloca = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.result_count == 0 { return 1; }
+  let p: vf.IrProc = wr.proc_at(em.m, em.proc);
+  let rname: u64 = vf.inst_result_name(it, 0);
+  if region_uses_name(em.m, p.body, rname) == 0 { return 1; }
+  let bytes: u64 = wr.type_byte_size(wr.it_ty(it));
+  let cnt_op: vf.IrOperand = vf.inst_op(it, 0);
+  if (em.depth == 1) and (em.loop_depth == 0) and (cnt_op.kind == vf.OP_INT()) {
+    let total: u64 = bytes * cnt_op.bits;
+    let words: u64 = 1;
+    if total > 0 { words = (total + 7) / 8; }
+    let a0: u64 = emit_indent(em, em.depth);
+    let a1: u64 = wr.put_str(em.w, "uint64_t _a");
+    let a2: u64 = wr.put_u64_dec(em.w, rname);
+    let a3: u64 = wr.put_str(em.w, "[");
+    let a4: u64 = wr.put_u64_dec(em.w, words);
+    let a5: u64 = wr.put_str(em.w, "] = {0};\n");
+    let b0: u64 = emit_indent(em, em.depth);
+    let b1: u64 = wr.put_str(em.w, "void *");
+    let b2: u64 = wr.emit_value_name(em.w, rname);
+    let b3: u64 = wr.put_str(em.w, " = (void *)_a");
+    let b4: u64 = wr.put_u64_dec(em.w, rname);
+    let b5: u64 = wr.put_str(em.w, ";\n");
+    return 1;
+  }
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "void *");
+  let c: u64 = wr.emit_value_name(em.w, rname);
+  let d: u64 = wr.put_str(em.w, " = lain_alloca_push(&_alloca_head, (size_t)");
+  let e: u64 = wr.put_u64_dec(em.w, bytes);
+  let f: u64 = wr.put_str(em.w, " * (size_t)(");
+  let g: u64 = emit_operand_u64(em, cnt_op);
+  let h: u64 = wr.put_str(em.w, "));\n");
+  return 1;
+};
+
+let emit_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.result_type(em.m, it, 0);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = ");
+  if t.kind == vf.TY_ADDR() {
+    let f: u64 = wr.put_str(em.w, "lain_load_addr(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+    let h: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let f: u64 = wr.put_str(em.w, "lain_load_f32(");
+      let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+      let h: u64 = wr.put_str(em.w, ");\n");
+      return 1;
+    }
+    let f: u64 = wr.put_str(em.w, "lain_load_f64(");
+    let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+    let h: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  let f: u64 = wr.put_str(em.w, "(");
+  let g: u64 = wr.emit_type(em.w, t);
+  let h: u64 = wr.put_str(em.w, ")lain_load_bits(");
+  let i: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let j: u64 = wr.put_str(em.w, ", ");
+  let l: u64 = wr.put_u64_dec(em.w, wr.type_width(t));
+  let m: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  if t.kind == vf.TY_ADDR() {
+    let b: u64 = wr.put_str(em.w, "lain_store_addr(");
+    let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+    let d: u64 = wr.put_str(em.w, ", ");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let b: u64 = wr.put_str(em.w, "lain_store_f32(");
+      let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+      let d: u64 = wr.put_str(em.w, ", ");
+      let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+      let f: u64 = wr.put_str(em.w, ");\n");
+      return 1;
+    }
+    let b: u64 = wr.put_str(em.w, "lain_store_f64(");
+    let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+    let d: u64 = wr.put_str(em.w, ", ");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = wr.put_str(em.w, ");\n");
+    return 1;
+  }
+  let b: u64 = wr.put_str(em.w, "lain_store_bits(");
+  let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
+  let d: u64 = wr.put_str(em.w, ", (uint64_t)(");
+  let e: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
+  let f: u64 = wr.put_str(em.w, "), ");
+  let g: u64 = wr.put_u64_dec(em.w, wr.type_width(t));
+  let h: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+// --- 原子操作 -------------------------------------------------------------
+// IR 的内存序取值按 ORDER_* 排序，C 内建函数用的是 __ATOMIC_* 常量。
+let c_memorder = func(order: u64) -> Slice(u8) {
+  if order == 0 { return "__ATOMIC_RELAXED"; }
+  if order == 1 { return "__ATOMIC_ACQUIRE"; }
+  if order == 2 { return "__ATOMIC_RELEASE"; }
+  if order == 3 { return "__ATOMIC_ACQ_REL"; }
+  if order == 4 { return "__ATOMIC_SEQ_CST"; }
+  return "__ATOMIC_SEQ_CST";
+};
+
+// 内存序操作数是常量时直接发射常量，是局部值时交给前导文本里的 lain_memorder
+// 在运行期换算，避免同一个表达式被求值多次。
+let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
+  if op.kind == vf.OP_INT() {
+    return wr.put_str(em.w, c_memorder(op.bits));
+  }
+  let a: u64 = wr.put_str(em.w, "lain_memorder((uint64_t)(");
+  let b: u64 = emit_value_ref(em, op.name);
+  let c: u64 = wr.put_str(em.w, "))");
+  return 1;
+};
+
+// __atomic_* 只接受整数与指针类型，浮点按同宽的位模式参与。
+let atomic_c_type = func(t: vf.IrType) -> Slice(u8) {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return "uint32_t"; }
+    return "uint64_t";
+  }
+  return wr.c_type_name(t);
+};
+
+let emit_atomic_ptr = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  let a: u64 = wr.put_byte(em.w, 40);
+  let b: u64 = wr.put_str(em.w, atomic_c_type(t));
+  let c: u64 = wr.put_str(em.w, " *)");
+  return emit_operand(em, op, vf.type_addr());
+};
+
+let emit_atomic_value = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let a: u64 = wr.put_str(em.w, "lain_bitcast_f32_u32((float)(");
+      let b: u64 = emit_operand(em, op, vf.type_float(32));
+      let c: u64 = wr.put_str(em.w, "))");
+      return 1;
+    }
+    let a: u64 = wr.put_str(em.w, "lain_bitcast_f64_u64((double)(");
+    let b: u64 = emit_operand(em, op, vf.type_float(64));
+    let c: u64 = wr.put_str(em.w, "))");
+    return 1;
+  }
+  let a: u64 = wr.put_byte(em.w, 40);
+  let b: u64 = wr.put_str(em.w, atomic_c_type(t));
+  let c: u64 = wr.put_str(em.w, ")(");
+  let d: u64 = emit_operand(em, op, t);
+  let e: u64 = wr.put_byte(em.w, 41);
+  return 1;
+};
+
+// 指针类型的读改写加数在 C 里必须写成整数。
+let emit_atomic_addend = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() {
+    let a: u64 = wr.put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_operand(em, op, vf.type_addr());
+    let c: u64 = wr.put_byte(em.w, 41);
+    return 1;
+  }
+  return emit_atomic_value(em, op, t);
+};
+
+let emit_atomic_result_open = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)"); }
+    return wr.put_str(em.w, "lain_bitcast_u64_f64((uint64_t)");
+  }
+  return 1;
+};
+
+let emit_atomic_result_close = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_FLOAT() { return wr.put_byte(em.w, 41); }
+  return 1;
+};
+
+let emit_atomic_pair_head = func(em: Mut(C99Emitter), it: vf.IrInst, t: vf.IrType) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, " ");
+  let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+  let e: u64 = wr.put_str(em.w, " = ");
+  let f: u64 = emit_atomic_result_open(em, t);
+  return 1;
+};
+
+let emit_atomic_fence = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "__atomic_thread_fence(");
+  let c: u64 = emit_memorder(em, vf.inst_op(it, 0));
+  let d: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_atomic_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = wr.put_str(em.w, "__atomic_load_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let d: u64 = wr.put_str(em.w, ", ");
+  let e: u64 = emit_memorder(em, vf.inst_op(it, 1));
+  let f: u64 = wr.put_byte(em.w, 41);
+  let g: u64 = emit_atomic_result_close(em, t);
+  let h: u64 = wr.put_str(em.w, ";\n");
+  return 1;
+};
+
+let emit_atomic_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "__atomic_store_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 1), t);
+  let d: u64 = wr.put_str(em.w, ", ");
+  let e: u64 = emit_atomic_value(em, vf.inst_op(it, 0), t);
+  let f: u64 = wr.put_str(em.w, ", ");
+  let g: u64 = emit_memorder(em, vf.inst_op(it, 2));
+  let h: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_atomic_order_tail = func(em: Mut(C99Emitter), it: vf.IrInst, idx: u64) -> u64 {
+  if it.operand_count <= idx { return wr.put_str(em.w, "__ATOMIC_SEQ_CST"); }
+  return emit_memorder(em, vf.inst_op(it, idx));
+};
+
+let emit_atomic_xchg = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = wr.put_str(em.w, "__atomic_exchange_n(");
+  let c: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let d: u64 = wr.put_str(em.w, ", ");
+  let e: u64 = emit_atomic_value(em, vf.inst_op(it, 1), t);
+  let f: u64 = wr.put_str(em.w, ", ");
+  let g: u64 = emit_atomic_order_tail(em, it, 2);
+  let h: u64 = wr.put_byte(em.w, 41);
+  let i: u64 = emit_atomic_result_close(em, t);
+  let j: u64 = wr.put_str(em.w, ";\n");
+  return 1;
+};
+
+// 比较交换把旧值留在临时量里，再按结果类型搬进结果变量。
+let emit_atomic_cmpxchg = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let tmp: u64 = next_temp(em);
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, atomic_c_type(t));
+  let c: u64 = wr.put_str(em.w, " _cx");
+  let d: u64 = wr.put_u64_dec(em.w, tmp);
+  let e: u64 = wr.put_str(em.w, " = ");
+  let f: u64 = emit_atomic_value(em, vf.inst_op(it, 1), t);
+  let g: u64 = wr.put_str(em.w, ";\n");
+  let h: u64 = emit_indent(em, em.depth);
+  let i: u64 = wr.put_str(em.w, "__atomic_compare_exchange_n(");
+  let j: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let k: u64 = wr.put_str(em.w, ", &_cx");
+  let l: u64 = wr.put_u64_dec(em.w, tmp);
+  let m: u64 = wr.put_str(em.w, ", ");
+  let n: u64 = emit_atomic_value(em, vf.inst_op(it, 2), t);
+  let o: u64 = wr.put_str(em.w, ", 0, ");
+  let p: u64 = emit_atomic_order_tail(em, it, 3);
+  let q: u64 = wr.put_str(em.w, ", __ATOMIC_RELAXED);\n");
+  let r: u64 = emit_atomic_pair_head(em, it, t);
+  let s: u64 = wr.put_str(em.w, "_cx");
+  let u: u64 = wr.put_u64_dec(em.w, tmp);
+  let v: u64 = emit_atomic_result_close(em, t);
+  let x: u64 = wr.put_str(em.w, ";\n");
+  return 1;
+};
+
+let rmw_op_name = func(k: u64) -> Slice(u8) {
+  if k == codes.INST_RMW_ADD() { return "add"; }
+  if k == codes.INST_RMW_SUB() { return "sub"; }
+  if k == codes.INST_RMW_AND() { return "and"; }
+  if k == codes.INST_RMW_OR() { return "or"; }
+  if k == codes.INST_RMW_XOR() { return "xor"; }
+  return "add";
+};
+
+let emit_atomic_rmw = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
+  let t: vf.IrType = wr.it_ty(it);
+  let a: u64 = emit_atomic_pair_head(em, it, t);
+  let b: u64 = wr.put_str(em.w, "__atomic_fetch_");
+  let c: u64 = wr.put_str(em.w, rmw_op_name(k));
+  let d: u64 = wr.put_str(em.w, "(");
+  let e: u64 = emit_atomic_ptr(em, vf.inst_op(it, 0), t);
+  let f: u64 = wr.put_str(em.w, ", ");
+  let g: u64 = emit_atomic_addend(em, vf.inst_op(it, 1), t);
+  let h: u64 = wr.put_str(em.w, ", ");
+  let i: u64 = emit_atomic_order_tail(em, it, 2);
+  let j: u64 = wr.put_byte(em.w, 41);
+  let l: u64 = emit_atomic_result_close(em, t);
+  let m: u64 = wr.put_str(em.w, ";\n");
+  return 1;
+};
+
+// --- 调用 -----------------------------------------------------------------
+// @extern 的回调形参在 IR 里是 TY_ADDR，调用点必须把它投到 C 原型要求的函数
+// 指针类型，否则 void * 与函数指针之间是不兼容的形参类型。
+let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
+                          p: vf.IrProc, i: u64) -> u64 {
+  let id: u64 = if p.is_extern == 1 { wr.c_abi_id(wr.extern_link_of(p)) } else { 0 };
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(1); }
+    if at > 0 { let sep: u64 = wr.put_str(em.w, ", "); }
+    let want: vf.IrType = if at < p.param_count { wr.param_ty(wr.proc_param(p, at)) } else { vf.type_bits(64) };
+    if wr.c_abi_param_is_fn(id, at) == 1 {
+      if wr.c_abi_param_is_win_fn(id, at) == 1 {
+        let w0: u64 = wr.put_str(em.w, "LAIN_WIN_FNPTR_CAST(");
+        let w1: u64 = wr.put_str(em.w, wr.c_abi_param_type(id, at));
+        let w2: u64 = wr.put_str(em.w, ")");
+      } else {
+        let o: u64 = wr.put_byte(em.w, 40);
+        let t: u64 = wr.put_str(em.w, wr.c_abi_param_type(id, at));
+        let c1: u64 = wr.put_str(em.w, ")(uintptr_t)");
+      }
+    }
+    let rc: u64 = emit_operand(em, vf.inst_op(it, at), want);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
+};
+
+let emit_pair_expr = func(em: Mut(C99Emitter), t: vf.IrType, tmp: u64, which: u64) -> u64 {
+  let field: Slice(u8) = if which == 0 { ".a" } else { ".b" };
+  if t.kind == vf.TY_ADDR() {
+    let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)_c");
+    let b: u64 = wr.put_u64_dec(em.w, tmp);
+    let c: u64 = wr.put_str(em.w, field);
+    return 1;
+  }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 {
+      let a: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)_c");
+      let b: u64 = wr.put_u64_dec(em.w, tmp);
+      let c: u64 = wr.put_str(em.w, field);
+      let d: u64 = wr.put_byte(em.w, 41);
+      return 1;
+    }
+    let a: u64 = wr.put_str(em.w, "lain_bitcast_u64_f64(_c");
+    let b: u64 = wr.put_u64_dec(em.w, tmp);
+    let c: u64 = wr.put_str(em.w, field);
+    let d: u64 = wr.put_byte(em.w, 41);
+    return 1;
+  }
+  let a: u64 = wr.put_str(em.w, "(");
+  let b: u64 = wr.emit_type(em.w, t);
+  let c: u64 = wr.put_str(em.w, ")_c");
+  let d: u64 = wr.put_u64_dec(em.w, tmp);
+  let e: u64 = wr.put_str(em.w, field);
+  return 1;
+};
+
+let emit_pair_results = func(em: Mut(C99Emitter), it: vf.IrInst, tmp: u64) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
+    let t: vf.IrType = wr.result_type(em.m, it, i);
+    let a: u64 = emit_indent(em, em.depth);
+    let b: u64 = wr.emit_type(em.w, t);
+    let c: u64 = wr.put_str(em.w, " ");
+    let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, i));
+    let e: u64 = wr.put_str(em.w, " = ");
+    let f: u64 = emit_pair_expr(em, t, tmp, i);
+    let g: u64 = wr.put_str(em.w, ";\n");
+    i = i + 1;
+  };
+  return 1;
+};
+
+let emit_direct_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let pi: u64 = wr.find_proc(em.m, it.symbol);
+  if pi == vf.NO_REGION() { return 0; }
+  let p: vf.IrProc = wr.proc_at(em.m, pi);
+  let tmp: u64 = next_temp(em);
+  let a: u64 = emit_indent(em, em.depth);
+  if p.result_count == 1 {
+    let t: vf.IrType = wr.proc_type(p, 0);
+    let b: u64 = wr.emit_type(em.w, t);
+    let c: u64 = wr.put_str(em.w, " ");
+    let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+    let e: u64 = wr.put_str(em.w, " = ");
+  } else if p.result_count > 1 {
+    let b: u64 = wr.put_str(em.w, "LainPair _c");
+    let c: u64 = wr.put_u64_dec(em.w, tmp);
+    let d: u64 = wr.put_str(em.w, " = ");
+  }
+  let f: u64 = wr.emit_proc_name(em.w, p);
+  let g: u64 = wr.put_byte(em.w, 40);
+  let h: u64 = emit_call_args(em, it, p, 0);
+  let i: u64 = wr.put_str(em.w, ");\n");
+  if p.result_count > 1 {
+    let j: u64 = emit_pair_results(em, it, tmp);
+  }
+  return 1;
+};
+
+let emit_indirect_args = func(em: Mut(C99Emitter), it: vf.IrInst, i: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.operand_count { break c(1); }
+    if at > 1 { let sep: u64 = wr.put_str(em.w, ", "); }
+    let a: u64 = wr.put_str(em.w, "(uint64_t)(");
+    let b: u64 = emit_operand_u64(em, vf.inst_op(it, at));
+    let c: u64 = wr.put_byte(em.w, 41);
+    at = at + 1;
+  };
+  return ok;
+};
+
+let emit_indirect_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.result_count > 1 { return 0; }
+  let a: u64 = emit_indent(em, em.depth);
+  if it.result_count == 1 {
+    let t: vf.IrType = wr.result_type(em.m, it, 0);
+    let b: u64 = wr.emit_type(em.w, t);
+    let c: u64 = wr.put_str(em.w, " ");
+    let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
+    let e: u64 = wr.put_str(em.w, " = ");
+  }
+  let b: u64 = wr.put_str(em.w, "((");
+  if it.result_count == 0 {
+    let c: u64 = wr.put_str(em.w, "void");
+  } else {
+    let t: vf.IrType = wr.result_type(em.m, it, 0);
+    let c: u64 = wr.emit_type(em.w, t);
+  }
+  let c2: u64 = wr.put_str(em.w, " (*)(");
+  let n: u64 = if it.operand_count <= 1 { 0 } else { it.operand_count - 1 };
+  if n == 0 {
+    let d: u64 = wr.put_str(em.w, "void");
+  } else {
+    let i: u64 = loop c(i: u64 = 0) while i < n {
+      if i > 0 { let sep: u64 = wr.put_str(em.w, ", "); }
+      let rc: u64 = wr.put_str(em.w, "uint64_t");
+      i = i + 1;
+    };
+  }
+  let e2: u64 = wr.put_str(em.w, "))(");
+  let f: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
+  let g: u64 = wr.put_str(em.w, "))(");
+  let h: u64 = emit_indirect_args(em, it, 1);
+  let i2: u64 = wr.put_str(em.w, ");\n");
+  return 1;
+};
+
+let emit_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.symbol != 0 { return emit_direct_call(em, it); }
+  return emit_indirect_call(em, it);
+};
+
+// --- 结构控制流 -----------------------------------------------------------
+let emit_if = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_indent(em, em.depth);
+  let c: u64 = wr.put_str(em.w, "if (((");
+  let d: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_bool());
+  let e: u64 = wr.put_str(em.w, ") & 1u) != 0) {\n");
+  em.depth = em.depth + 1;
+  let f: u64 = emit_region(em, it.body, ii, it.body);
+  em.depth = em.depth - 1;
+  if f == 0 { return 0; }
+  if it.else_body != vf.NO_REGION() {
+    let g: u64 = emit_indent(em, em.depth);
+    let h: u64 = wr.put_str(em.w, "} else {\n");
+    em.depth = em.depth + 1;
+    let i: u64 = emit_region(em, it.else_body, ii, it.else_body);
+    em.depth = em.depth - 1;
+    if i == 0 { return 0; }
+  }
+  let j: u64 = emit_indent(em, em.depth);
+  let k: u64 = wr.put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_region_params = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= r.param_count { break c(1); }
+    let p: vf.IrParam = wr.region_param(r, at);
+    let pt: vf.IrType = wr.param_ty(p);
+    let a: u64 = emit_indent(em, em.depth);
+    let b: u64 = wr.emit_type(em.w, pt);
+    let c: u64 = wr.put_str(em.w, " ");
+    let d: u64 = wr.emit_value_name(em.w, p.name);
+    let e: u64 = wr.put_str(em.w, " = ");
+    let f: u64 = emit_zero_value(em.w, pt);
+    let g: u64 = wr.put_str(em.w, ";\n");
+    at = at + 1;
+  };
+  return ok;
+};
+
+let emit_loop = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let r: vf.IrRegion = wr.region_at(em.m, it.body);
+  let lid: u64 = next_temp(em);
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_region_params(em, r, 0);
+  let c: u64 = emit_indent(em, em.depth);
+  let d: u64 = wr.put_str(em.w, "for (;;) {\n");
+  let at: u64 = em.loop_depth;
+  if at >= 32 { return 0; }
+  em.loop_labels[at] = it.label;
+  em.loop_ids[at] = lid;
+  em.loop_insts[at] = ii;
+  em.loop_regions[at] = it.body;
+  em.loop_depth = at + 1;
+  em.depth = em.depth + 1;
+  let e: u64 = emit_region(em, it.body, vf.NO_REGION(), vf.NO_REGION());
+  em.depth = em.depth - 1;
+  em.loop_depth = at;
+  if e == 0 { return 0; }
+  let f: u64 = emit_indent(em, em.depth + 1);
+  let g: u64 = wr.put_str(em.w, "lbl_cont_");
+  let h: u64 = wr.put_u64_dec(em.w, lid);
+  let i: u64 = wr.put_str(em.w, ":;\n");
+  let j: u64 = emit_indent(em, em.depth);
+  let k: u64 = wr.put_str(em.w, "}\n");
+  let l: u64 = emit_indent(em, em.depth);
+  let m: u64 = wr.put_str(em.w, "lbl_end_");
+  let n: u64 = wr.put_u64_dec(em.w, lid);
+  let o: u64 = wr.put_str(em.w, ":;\n");
+  return 1;
+};
+
+let emit_switch = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
+  let a: u64 = emit_result_decls(em, it);
+  let b: u64 = emit_indent(em, em.depth);
+  let c: u64 = wr.put_str(em.w, "switch ((uint64_t)(");
+  let d: u64 = emit_operand(em, vf.inst_op(it, 0), wr.it_ty(it));
+  let e: u64 = wr.put_str(em.w, ")) {\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.case_count {
+    let cs: vf.IrCase = wr.case_at(em.m, it.cases_at + i);
+    let k0: u64 = emit_indent(em, em.depth);
+    let k1: u64 = wr.put_str(em.w, "case UINT64_C(");
+    let k2: u64 = wr.put_u64_dec(em.w, cs.value);
+    let k3: u64 = wr.put_str(em.w, "): {\n");
+    em.depth = em.depth + 1;
+    let k4: u64 = emit_region(em, cs.body, ii, cs.body);
+    em.depth = em.depth - 1;
+    let k5: u64 = emit_indent(em, em.depth + 1);
+    let k6: u64 = wr.put_str(em.w, "break;\n");
+    let k7: u64 = emit_indent(em, em.depth);
+    let k8: u64 = wr.put_str(em.w, "}\n");
+    i = i + 1;
+  };
+  let j0: u64 = emit_indent(em, em.depth);
+  let j1: u64 = wr.put_str(em.w, "default: {\n");
+  em.depth = em.depth + 1;
+  let j2: u64 = emit_region(em, it.default_body, ii, it.default_body);
+  em.depth = em.depth - 1;
+  let j3: u64 = emit_indent(em, em.depth + 1);
+  let j4: u64 = wr.put_str(em.w, "break;\n");
+  let j5: u64 = emit_indent(em, em.depth);
+  let j6: u64 = wr.put_str(em.w, "}\n");
+  let j7: u64 = emit_indent(em, em.depth);
+  let j8: u64 = wr.put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_yield = func(em: Mut(C99Emitter), it: vf.IrInst, yield_inst: u64, yield_region: u64) -> u64 {
+  if yield_inst == vf.NO_REGION() { return 1; }
+  if yield_region == vf.NO_REGION() { return 1; }
+  let target: vf.IrInst = wr.inst_at(em.m, yield_inst);
+  let r: vf.IrRegion = wr.region_at(em.m, yield_region);
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < target.result_count {
+      let name: u64 = vf.inst_result_name(target, i);
+      let t: vf.IrType = if i < r.result_count { wr.region_type(r, i) } else { wr.result_type(em.m, target, i) };
+      let rc: u64 = emit_assign_cast(em, name, t, vf.inst_op(it, i));
+    }
+    i = i + 1;
+  };
+  return 1;
+};
+
+let scan_loop = func(em: Mut(C99Emitter), label: u64, i: u64) -> u64 {
+  if i >= em.loop_depth { return vf.NO_REGION(); }
+  let at: u64 = em.loop_depth - 1 - i;
+  if em.loop_labels[at] == label { return at; }
+  return scan_loop(em, label, i + 1);
+};
+
+let find_loop = func(em: Mut(C99Emitter), label: u64) -> u64 {
+  return scan_loop(em, label, 0);
+};
+
+let emit_break = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let at: u64 = find_loop(em, it.label);
+  if at == vf.NO_REGION() { return 0; }
+  let loop_inst: u64 = em.loop_insts[at];
+  let lid: u64 = em.loop_ids[at];
+  let target: vf.IrInst = wr.inst_at(em.m, loop_inst);
+  let r: vf.IrRegion = wr.region_at(em.m, em.loop_regions[at]);
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < target.result_count {
+      let name: u64 = vf.inst_result_name(target, i);
+      let t: vf.IrType = if i < r.result_count { wr.region_type(r, i) } else { wr.result_type(em.m, target, i) };
+      let rc: u64 = emit_assign_cast(em, name, t, vf.inst_op(it, i));
+    }
+    i = i + 1;
+  };
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "goto lbl_end_");
+  let c: u64 = wr.put_u64_dec(em.w, lid);
+  let d: u64 = wr.put_str(em.w, ";\n");
+  return 1;
+};
+
+let emit_continue = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  let at: u64 = find_loop(em, it.label);
+  if at == vf.NO_REGION() { return 0; }
+  let lid: u64 = em.loop_ids[at];
+  let r: vf.IrRegion = wr.region_at(em.m, em.loop_regions[at]);
+  let base: u64 = next_temp(em);
+  em.temp = base + it.operand_count;
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "{\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < r.param_count {
+      let p: vf.IrParam = wr.region_param(r, i);
+      let pt: vf.IrType = wr.param_ty(p);
+      let c: u64 = emit_indent(em, em.depth + 1);
+      let d: u64 = wr.emit_type(em.w, pt);
+      let e: u64 = wr.put_str(em.w, " _n");
+      let f: u64 = wr.put_u64_dec(em.w, base + i);
+      let g: u64 = wr.put_str(em.w, " = (");
+      let h: u64 = wr.emit_type(em.w, pt);
+      let j: u64 = wr.put_str(em.w, ")(");
+      let k: u64 = emit_operand(em, vf.inst_op(it, i), pt);
+      let l: u64 = wr.put_str(em.w, ");\n");
+    }
+    i = i + 1;
+  };
+  let m: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < r.param_count {
+      let p: vf.IrParam = wr.region_param(r, i);
+      let n: u64 = emit_indent(em, em.depth + 1);
+      let o: u64 = wr.emit_value_name(em.w, p.name);
+      let q: u64 = wr.put_str(em.w, " = _n");
+      let s: u64 = wr.put_u64_dec(em.w, base + i);
+      let t: u64 = wr.put_str(em.w, ";\n");
+    }
+    i = i + 1;
+  };
+  let u: u64 = emit_indent(em, em.depth + 1);
+  let v: u64 = wr.put_str(em.w, "goto lbl_cont_");
+  let x: u64 = wr.put_u64_dec(em.w, lid);
+  let y: u64 = wr.put_str(em.w, ";\n");
+  let z: u64 = emit_indent(em, em.depth);
+  let z2: u64 = wr.put_str(em.w, "}\n");
+  return 1;
+};
+
+let current_proc = func(em: Mut(C99Emitter)) -> vf.IrProc {
+  return wr.proc_at(em.m, em.proc);
+};
+
+let emit_return = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
+  if it.operand_count == 0 {
+    let a: u64 = emit_indent(em, em.depth);
+    if em.has_alloca == 1 {
+      let a0: u64 = wr.put_str(em.w, "lain_alloca_free(&_alloca_head);\n");
+      let a1: u64 = emit_indent(em, em.depth);
+    }
+    let b: u64 = wr.put_str(em.w, "return;\n");
+    return 1;
+  }
+  let p: vf.IrProc = current_proc(em);
+  if it.operand_count == 1 {
+    let t: vf.IrType = wr.proc_type(p, 0);
+    let a0: u64 = emit_indent(em, em.depth);
+    if em.has_alloca == 0 {
+      let b0: u64 = wr.put_str(em.w, "return (");
+      let b1: u64 = wr.emit_type(em.w, t);
+      let b2: u64 = wr.put_str(em.w, ")(");
+      let b3: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+      let b4: u64 = wr.put_str(em.w, ");\n");
+      return 1;
+    }
+    let a1: u64 = wr.put_str(em.w, "{ ");
+    let b: u64 = wr.emit_type(em.w, t);
+    let c: u64 = wr.put_str(em.w, " _ret_val = (");
+    let c2: u64 = wr.emit_type(em.w, t);
+    let d: u64 = wr.put_str(em.w, ")(");
+    let e: u64 = emit_operand(em, vf.inst_op(it, 0), t);
+    let f: u64 = wr.put_str(em.w, "); lain_alloca_free(&_alloca_head); return _ret_val; }\n");
+    return 1;
+  }
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "{\n");
+  let c: u64 = emit_indent(em, em.depth + 1);
+  let d: u64 = wr.put_str(em.w, "LainPair _ret;\n");
+  let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
+    if i < p.result_count {
+      let e: u64 = emit_indent(em, em.depth + 1);
+      let f: u64 = wr.put_str(em.w, "_ret.");
+      let g: u64 = if i == 0 { wr.put_str(em.w, "a") } else { wr.put_str(em.w, "b") };
+      let h: u64 = wr.put_str(em.w, " = (uint64_t)(");
+      let j: u64 = emit_operand_u64(em, vf.inst_op(it, i));
+      let k: u64 = wr.put_str(em.w, ");\n");
+    }
+    i = i + 1;
+  };
+  if em.has_alloca == 1 {
+    let l0: u64 = emit_indent(em, em.depth + 1);
+    let l1: u64 = wr.put_str(em.w, "lain_alloca_free(&_alloca_head);\n");
+  }
+  let l: u64 = emit_indent(em, em.depth + 1);
+  let m: u64 = wr.put_str(em.w, "return _ret;\n");
+  let n: u64 = emit_indent(em, em.depth);
+  let o: u64 = wr.put_str(em.w, "}\n");
+  return 1;
+};
+
+let emit_unreachable = func(em: Mut(C99Emitter)) -> u64 {
+  let a: u64 = emit_indent(em, em.depth);
+  let b: u64 = wr.put_str(em.w, "lain_trap(\"unreachable\");\n");
+  return 1;
+};

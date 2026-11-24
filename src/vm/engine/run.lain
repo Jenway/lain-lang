@@ -1,0 +1,190 @@
+// src/vm/engine/run.lain —— CU：单步推进、进入子过程、跑到终态与整段执行。
+//
+// 位置约定与内核一致：分派**之前**不推进 position。算子执行期间
+// cur_region/cur_position 就是当前这条指令；分派之后，如果算子没换帧也没动位置，
+// CU 才把 position 推进一格。
+//
+// 引擎不分配：帧栈、SSA 值槽与实参暂存区都在调用方给的一块字节区里按容量切出来。
+// 引擎不调度：一次只推进一个 TCB。引擎不吞故障：出问题就地记进 TCB 并返回
+// SLICE_TRAPPED，由宿主决定诊断与回收。
+let codes = import("src::ir::ir_codes");
+let vf = import("src::ir::verify");
+let vs = import("src::vm::vspace");
+let im = import("src::vm::image");
+let st = import("src::vm::engine::state");
+let ops = import("src::vm::engine::ops");
+
+// 推进一步。前置条件：TCB 处于 RUNNING；不满足时不动任何状态，原样返回当前切片结果。
+pub let vm_step = func(tcb: Mut(st.TCB)) -> st.VmResult {
+  if tcb.state == st.VM_BLOCKED() {
+    tcb.slice = st.SLICE_BLOCKED();
+    return st.result_of(tcb);
+  }
+  if tcb.state != st.VM_RUNNING() { return st.result_of(tcb); }
+  if (tcb.quota_steps != 0) and (tcb.steps >= tcb.quota_steps) {
+    st.trap_now(tcb, st.TRAP_FUEL(), st.ST_FUEL_EXHAUSTED());
+    return st.result_of(tcb);
+  }
+  if tcb.frame_count == 0 {
+    st.trap_now(tcb, st.TRAP_STATE(), st.ST_FRAME_NO_REGION());
+    return st.result_of(tcb);
+  }
+  let frame: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+  let rec: im.ImageRegion = im.vm_region(tcb.image, frame.region);
+  if rec.valid == 0 {
+    st.trap_now(tcb, st.TRAP_STATE(), st.ST_FRAME_NO_REGION());
+    return st.result_of(tcb);
+  }
+  tcb.cur_region = frame.region;
+  tcb.cur_position = frame.position;
+  // 区域末尾落下 = 顺序离开这个区域；产出值的区域落下是错的。
+  if frame.position >= rec.inst_count {
+    if rec.result_count > 0 {
+      st.trap_now(tcb, st.TRAP_STATE(), st.ST_REGION_NO_RESULT());
+      return st.result_of(tcb);
+    }
+    let zero: st.VmValue = st.value_zero();
+    let left: u64 = st.leave_region(tcb, 0, zero, zero);
+    return st.result_of(tcb);
+  }
+  let inst: vf.IrInst = im.vm_inst(tcb.image, frame.region, frame.position);
+  if inst.kind >= codes.INST_COUNT() {
+    st.trap_now(tcb, st.TRAP_STATE(), st.ST_UNKNOWN_INST());
+    return st.result_of(tcb);
+  }
+  let saved_count: u64 = tcb.frame_count;
+  let saved_region: u64 = frame.region;
+  let saved_position: u64 = frame.position;
+  let ran: u64 = ops.dispatch(tcb, inst);
+  tcb.steps = tcb.steps + 1;
+  if ran != st.SLICE_RUNNABLE() { return st.result_of(tcb); }
+  // 普通指令由 CU 统一推进位置；CONTINUE 主动把位置重置到 0，它的「没有变化」
+  // 恰恰就是回跳，不能再被当成落下一条指令。控制流指令自己管位置。
+  if tcb.frame_count == saved_count {
+    let now: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+    let stays: u64 = if (now.region == saved_region) and (now.position == saved_position) { 1 } else { 0 };
+    if (stays == 1) and (inst.kind != codes.INST_CONTINUE()) {
+      now.position = saved_position + 1;
+    }
+  }
+  return st.result_of(tcb);
+};
+
+// 进入一个子过程：压根帧、把参数绑到最前面几个槽、置 RUNNING。
+pub let vm_tcb_start = func(tcb: Mut(st.TCB), entry: u64, args: Slice(u64)) -> u64 {
+  if tcb.frame_count != 0 {
+    return st.vm_reject(tcb, st.ST_ALREADY_STARTED());
+  }
+  if (entry == im.NO_INDEX()) or (entry >= im.vm_sub_count(tcb.image)) {
+    return st.vm_reject(tcb, st.ST_ENTRY_NOT_FOUND());
+  }
+  let sub: im.SubInfo = im.vm_sub(tcb.image, entry);
+  if sub.body_region == im.NO_REGION() {
+    return st.vm_reject(tcb, st.ST_CALL_NO_BODY());
+  }
+  if args.len != sub.param_count {
+    return st.vm_reject(tcb, st.ST_CALL_ARITY());
+  }
+  if sub.param_count > st.MAX_OPERANDS() {
+    return st.vm_reject(tcb, st.ST_CALL_OPERANDS());
+  }
+  let rec: im.ImageRegion = im.vm_region(tcb.image, sub.body_region);
+  if rec.valid == 0 {
+    return st.vm_reject(tcb, st.ST_FRAME_NO_REGION());
+  }
+  if rec.slot_count > tcb.slot_cap {
+    return st.vm_reject(tcb, st.ST_SLOT_OVERFLOW());
+  }
+  let f: Mut(st.Frame) = st.tcb_frame_ptr(tcb, 0);
+  f.region = sub.body_region;
+  f.position = 0;
+  f.slot_base = 0;
+  f.slot_count = rec.slot_count;
+  f.parent_position = 0;
+  f.label = 0;
+  f.is_call_frame = 1;
+  f.stack_mark = 0;
+  st.clear_slots(tcb, 0, rec.slot_count);
+  tcb.frame_count = 1;
+  tcb.call_depth = 1;
+  tcb.stack_used = 0;
+  tcb.stack_peak = 0;
+  tcb.steps = 0;
+  tcb.has_result = 0;
+  tcb.result_width = 64;
+  tcb.result_bits = 0;
+  tcb.trap_kind = st.TRAP_NONE();
+  tcb.trap_status = 0;
+  tcb.trap_region = 0;
+  tcb.trap_position = 0;
+  tcb.slice = st.SLICE_RUNNABLE();
+  let bound: u64 = bind_entry_args(tcb, sub, args, 0);
+  if bound != 0 { return bound; }
+  tcb.state = st.VM_RUNNING();
+  return st.SLICE_RUNNABLE();
+};
+
+let bind_entry_args = func(tcb: Mut(st.TCB), sub: im.SubInfo, args: Slice(u64), i: u64) -> u64 {
+  if i >= sub.param_count { return 0; }
+  let ty: vf.IrType = st.param_type_at(sub.params, i);
+  let w: u64 = st.type_width(ty.kind, ty.width);
+  let dst: Mut(st.VmValue) = st.tcb_slot_ptr(tcb, i);
+  dst.width = w;
+  dst.bits = args[i] & st.width_mask(w);
+  return bind_entry_args(tcb, sub, args, i + 1);
+};
+
+// 跑到终态：DONE / TRAPPED / BLOCKED。燃料耗尽在 vm_step 里直接变成 Trap。
+let run_to_end = func(tcb: Mut(st.TCB)) -> st.VmResult {
+  let spun: st.VmResult = loop spin(step: st.VmResult = vm_step(tcb)) while step.status == st.SLICE_RUNNABLE() {
+    step = vm_step(tcb);
+  };
+  return spun;
+};
+
+// apply 的物理契约：独立栈租约、独立 TCB、限额执行、终态交付。
+// arena 里切出帧栈与值槽；栈租约按 max_stack_bytes 向 space 申请，结束后释放。
+pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
+                        caps: Mut(st.VmCapTable), quota: st.VmQuota, owner: u64,
+                        entry: u64, args: Slice(u64),
+                        arena: MutSlice(u8)) -> st.VmResult {
+  let empty: MutSlice(st.VmTraceEvent) =
+      make_slice(MutSlice(st.VmTraceEvent), null_ref(Mut(st.VmTraceEvent)), 0);
+  let count0: u64 = 0;
+  let count: Mut(u64) = mut_of(count0);
+  return vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, empty, count);
+};
+
+// 与 vm_apply 相同，只是多挂一块轨迹缓冲区。空切片等价于不挂。
+pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
+                               caps: Mut(st.VmCapTable), quota: st.VmQuota, owner: u64,
+                               entry: u64, args: Slice(u64), arena: MutSlice(u8),
+                               trace: MutSlice(st.VmTraceEvent),
+                               count: Mut(u64)) -> st.VmResult {
+  let need: u64 = st.vm_tcb_bytes(image, quota);
+  if arena.len < need { return st.vm_trap_result(st.TRAP_STATE(), st.ST_ARENA_TOO_SMALL()); }
+  let lease: vs.StackLease = vs.vm_no_lease();
+  if quota.max_stack_bytes > 0 {
+    lease = vs.vm_alloc_stack(space, quota.max_stack_bytes, owner);
+    if vs.vm_lease_none(lease) != 0 {
+      return st.vm_trap_result(st.TRAP_CAPACITY_EXCEEDED(), st.ST_STACK_EXHAUSTED());
+    }
+  }
+  let tcb: st.TCB = st.vm_tcb_blank();
+  let live: Mut(st.TCB) = mut_of(tcb);
+  let made: u64 = st.vm_tcb_new(image, space, caps, quota, lease, owner, arena, live);
+  if made == 0 {
+    if vs.vm_lease_none(lease) == 0 {
+      let dropped: u64 = vs.vm_free_stack(space, lease);
+    }
+    return st.vm_trap_result(st.TRAP_STATE(), st.ST_ARENA_TOO_SMALL());
+  }
+  let traced: u64 = st.vm_tcb_set_trace(live, trace, count);
+  let started: u64 = vm_tcb_start(live, entry, args);
+  let result: st.VmResult = if started != st.SLICE_RUNNABLE() { st.result_of(live) } else { run_to_end(live) };
+  let closed: u64 = st.vm_tcb_free(live);
+  if vs.vm_lease_none(lease) == 0 {
+    let freed: u64 = vs.vm_free_stack(space, lease);
+  }
+  return result;
+};

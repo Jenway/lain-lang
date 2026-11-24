@@ -15,189 +15,81 @@
 // 确定性拒绝（状态 1072），不做任何静默错值。整数、位、比较、转换、访存、
 // 调用与结构化控制流全部实现。
 //
-// 依赖契约（src/vm/vspace.lain）：
-//   VmSpace / StackLease / MEM_READ / MEM_WRITE / MEM_CALL
-//   vm_alloc_stack / vm_free_stack / vm_no_lease / vm_lease_none
-//   vm_borrow / vm_end_borrow / vm_set_accessible
-//   vm_lease_base / vm_lease_capacity / vm_check / vm_load / vm_store
-// 依赖契约（src/vm/image.lain）：
-//   VmImage / NO_REGION / NO_INDEX / ImageRegion / InstMeta / OperandRef /
-//   ParamInit / CaseInfo / SubInfo
-//   vm_region / vm_inst / vm_inst_meta / vm_operand_ref / vm_result_slot /
-//   vm_param_init / vm_case / vm_symbol_addr / vm_sub / vm_sub_count /
-//   vm_sub_addr / vm_sub_at / vm_sub_index_by_body /
-//   vm_max_region_depth / vm_max_slots
-//
-// `vm_result_slot` 返回的下标相对帧的 slot_base；`vm_param_init` 的初值按
-// 父帧（执行 #loop 那一帧）求值。
-//
-// VmResult.result_val 是指向同一个结果值的指针：当前前端把聚合里的聚合字段
-// 表示成指针，调用方因此可以写 `result.result_val.bits`（与 `result.result_bits`
-// 等价）。
-//
-// 本模块的结构体只放标量与指针字段：当前前端对「指针寻址的聚合里的聚合字段」
-// 会多走一次解引用，所以配额、租约、结果都摊平成标量；需要交出聚合时（唯一的
-// 例子是 VmResult.result_val）就交一个指针。依赖的 VmSpace / VmImage 只经访问器
-// 使用，引擎不读它们的字段布局。
-let codes = import("src::ir::ir_codes");
-let vf = import("src::ir::verify");
+// 本文件是门面：执行状态在 src/vm/engine/state.lain，单条指令的语义在
+// src/vm/engine/ops.lain，CU 与整段执行在 src/vm/engine/run.lain。这里把它们的
+// 公开名字按原名重新导出，调用方从 engine 取这些名字照旧可用。
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
+let st = import("src::vm::engine::state");
+let run = import("src::vm::engine::run");
 
 // --- 上限 -----------------------------------------------------------------
-pub let MAX_OPERANDS = func() -> u64 { return 16; };
-pub let MAX_RESULTS = func() -> u64 { return 2; };
-let STACK_ALIGN = func() -> u64 { return 16; };
+pub let MAX_OPERANDS = func() -> u64 { return st.MAX_OPERANDS(); };
+pub let MAX_RESULTS = func() -> u64 { return st.MAX_RESULTS(); };
 
 // --- 执行状态与切片结果 ----------------------------------------------------
-pub let VM_READY = func() -> u64 { return 0; };
-pub let VM_RUNNING = func() -> u64 { return 1; };
-pub let VM_DEAD = func() -> u64 { return 2; };
-pub let VM_BLOCKED = func() -> u64 { return 3; };
+pub let VM_READY = func() -> u64 { return st.VM_READY(); };
+pub let VM_RUNNING = func() -> u64 { return st.VM_RUNNING(); };
+pub let VM_DEAD = func() -> u64 { return st.VM_DEAD(); };
+pub let VM_BLOCKED = func() -> u64 { return st.VM_BLOCKED(); };
 
-pub let SLICE_RUNNABLE = func() -> u64 { return 0; };
-pub let SLICE_DONE = func() -> u64 { return 1; };
-pub let SLICE_TRAPPED = func() -> u64 { return 2; };
-pub let SLICE_BLOCKED = func() -> u64 { return 3; };
+pub let SLICE_RUNNABLE = func() -> u64 { return st.SLICE_RUNNABLE(); };
+pub let SLICE_DONE = func() -> u64 { return st.SLICE_DONE(); };
+pub let SLICE_TRAPPED = func() -> u64 { return st.SLICE_TRAPPED(); };
+pub let SLICE_BLOCKED = func() -> u64 { return st.SLICE_BLOCKED(); };
 
 // --- 故障分类 -------------------------------------------------------------
-pub let TRAP_NONE = func() -> u64 { return 0; };
-pub let TRAP_MEMORY_OOB = func() -> u64 { return 1; };
-pub let TRAP_ALIGNMENT = func() -> u64 { return 2; };
-pub let TRAP_PERM_VIOLATION = func() -> u64 { return 3; };
-pub let TRAP_ARITH_DOMAIN = func() -> u64 { return 4; };
-pub let TRAP_CAP_DENIED = func() -> u64 { return 5; };
-pub let TRAP_CAPACITY_EXCEEDED = func() -> u64 { return 6; };
-pub let TRAP_UNREACHABLE = func() -> u64 { return 7; };
-pub let TRAP_STATE = func() -> u64 { return 8; };
-pub let TRAP_FUEL = func() -> u64 { return 9; };
-pub let TRAP_CALL_DEPTH = func() -> u64 { return 10; };
-pub let TRAP_UNIMPLEMENTED = func() -> u64 { return 11; };
-pub let TRAP_STACK_OVERFLOW = func() -> u64 { return 12; };
-
-// --- 故障状态码 -----------------------------------------------------------
-let ST_FRAME_NO_REGION = func() -> u64 { return 1001; };
-let ST_FRAME_OVERFLOW = func() -> u64 { return 1002; };
-let ST_SLOT_OVERFLOW = func() -> u64 { return 1003; };
-let ST_REGION_NO_RESULT = func() -> u64 { return 1004; };
-let ST_UNKNOWN_INST = func() -> u64 { return 1005; };
-let ST_BAD_FRAME_DISTANCE = func() -> u64 { return 1006; };
-let ST_RESULT_NO_SLOT = func() -> u64 { return 1007; };
-let ST_SHIFT_TOO_WIDE = func() -> u64 { return 1010; };
-let ST_DIVIDE_BY_ZERO = func() -> u64 { return 1011; };
-let ST_INT_OVERFLOW = func() -> u64 { return 1012; };
-let ST_BAD_BITS_OP = func() -> u64 { return 1013; };
-let ST_BAD_COMPARE_OP = func() -> u64 { return 1014; };
-let ST_BAD_CONVERT_OP = func() -> u64 { return 1015; };
-let ST_LOAD_FAULT = func() -> u64 { return 1020; };
-let ST_STORE_FAULT = func() -> u64 { return 1021; };
-let ST_READ_ONLY = func() -> u64 { return 1022; };
-let ST_ALIGNMENT = func() -> u64 { return 1023; };
-let ST_BAD_MEMORY_WIDTH = func() -> u64 { return 1024; };
-let ST_ALLOCA_OVERFLOW = func() -> u64 { return 1030; };
-let ST_STACK_UNAVAILABLE = func() -> u64 { return 1031; };
-let ST_STACK_EXHAUSTED = func() -> u64 { return 1032; };
-let ST_STACK_WINDOW = func() -> u64 { return 1033; };
-let ST_FUEL_EXHAUSTED = func() -> u64 { return 1040; };
-let ST_CALL_DEPTH = func() -> u64 { return 1041; };
-let ST_CALL_ARITY = func() -> u64 { return 1050; };
-let ST_CALL_NO_SUB = func() -> u64 { return 1051; };
-let ST_CALL_NO_BODY = func() -> u64 { return 1052; };
-let ST_CALL_OPERANDS = func() -> u64 { return 1053; };
-let ST_INDIRECT_NO_CALL = func() -> u64 { return 1054; };
-let ST_INDIRECT_NO_SUB = func() -> u64 { return 1055; };
-let ST_RETURN_NO_SLOT = func() -> u64 { return 1056; };
-let ST_YIELD_RESULTS = func() -> u64 { return 1057; };
-let ST_BREAK_NO_LOOP = func() -> u64 { return 1058; };
-let ST_BREAK_RESULTS = func() -> u64 { return 1059; };
-let ST_BREAK_NO_SLOT = func() -> u64 { return 1060; };
-let ST_CONTINUE_NO_LOOP = func() -> u64 { return 1061; };
-let ST_CONTINUE_PARAMS = func() -> u64 { return 1062; };
-let ST_LOOP_NO_REGION = func() -> u64 { return 1063; };
-let ST_LOOP_PARAMS = func() -> u64 { return 1064; };
-let ST_SWITCH_NO_CASES = func() -> u64 { return 1065; };
-let ST_SWITCH_NO_DEFAULT = func() -> u64 { return 1066; };
-let ST_CAP_UNRESOLVED = func() -> u64 { return 1067; };
-let ST_CAP_NOT_FUNCTION = func() -> u64 { return 1068; };
-let ST_CAP_NO_FN = func() -> u64 { return 1069; };
-let ST_ENTRY_NOT_FOUND = func() -> u64 { return 1070; };
-let ST_ARENA_TOO_SMALL = func() -> u64 { return 1071; };
-let ST_FLOAT_UNSUPPORTED = func() -> u64 { return 1072; };
-let ST_VECTOR_UNSUPPORTED = func() -> u64 { return 1073; };
-let ST_ATOMIC_UNSUPPORTED = func() -> u64 { return 1074; };
-let ST_ALREADY_STARTED = func() -> u64 { return 1075; };
-let ST_ASSEMBLY_FAILED = func() -> u64 { return 1076; };
-let ST_ATOMIC_ORDER = func() -> u64 { return 1077; };
+pub let TRAP_NONE = func() -> u64 { return st.TRAP_NONE(); };
+pub let TRAP_MEMORY_OOB = func() -> u64 { return st.TRAP_MEMORY_OOB(); };
+pub let TRAP_ALIGNMENT = func() -> u64 { return st.TRAP_ALIGNMENT(); };
+pub let TRAP_PERM_VIOLATION = func() -> u64 { return st.TRAP_PERM_VIOLATION(); };
+pub let TRAP_ARITH_DOMAIN = func() -> u64 { return st.TRAP_ARITH_DOMAIN(); };
+pub let TRAP_CAP_DENIED = func() -> u64 { return st.TRAP_CAP_DENIED(); };
+pub let TRAP_CAPACITY_EXCEEDED = func() -> u64 { return st.TRAP_CAPACITY_EXCEEDED(); };
+pub let TRAP_UNREACHABLE = func() -> u64 { return st.TRAP_UNREACHABLE(); };
+pub let TRAP_STATE = func() -> u64 { return st.TRAP_STATE(); };
+pub let TRAP_FUEL = func() -> u64 { return st.TRAP_FUEL(); };
+pub let TRAP_CALL_DEPTH = func() -> u64 { return st.TRAP_CALL_DEPTH(); };
+pub let TRAP_UNIMPLEMENTED = func() -> u64 { return st.TRAP_UNIMPLEMENTED(); };
+pub let TRAP_STACK_OVERFLOW = func() -> u64 { return st.TRAP_STACK_OVERFLOW(); };
 
 // --- 配额 -----------------------------------------------------------------
-// 三个上界都是 0 = 不限额（与内核 quota 的约定一致：0 不表示「一个都不许」）。
-pub let VmQuota = struct {
-  max_steps: u64,
-  max_stack_bytes: u64,
-  max_call_depth: u64,
-};
+pub let VmQuota = st.VmQuota;
 
 pub let quota_new = func(max_steps: u64, max_stack_bytes: u64, max_call_depth: u64) -> VmQuota {
-  return VmQuota {
-    max_steps: max_steps,
-    max_stack_bytes: max_stack_bytes,
-    max_call_depth: max_call_depth,
-  };
+  return st.quota_new(max_steps, max_stack_bytes, max_call_depth);
 };
 
 // --- 值 -------------------------------------------------------------------
-// 值是纯位串加位宽；地址就是位串。没有类型元数据，也没有对象身份。
-pub let VmValue = struct {
-  width: u64,
-  bits: u64,
-};
+pub let VmValue = st.VmValue;
 
 pub let value_zero = func() -> VmValue {
-  return VmValue { width: 64, bits: 0 };
+  return st.value_zero();
 };
 
 pub let value_bits = func(bits: u64, width: u64) -> VmValue {
-  return VmValue { width: width, bits: bits & width_mask(width) };
+  return st.value_bits(bits, width);
 };
 
 // --- 最大值与位宽助手 -----------------------------------------------------
 pub let max_u64 = func() -> u64 {
-  let zero: u64 = 0;
-  return zero - 1;
+  return st.max_u64();
 };
 
 pub let width_mask = func(width: u64) -> u64 {
-  if width == 0 { return 0; }
-  if width >= 64 { return max_u64(); }
-  let one: u64 = 1;
-  return (one << width) - 1;
+  return st.width_mask(width);
 };
 
 pub let sign_fill = func(bits: u64, width: u64) -> u64 {
-  if (width == 0) or (width >= 64) { return bits; }
-  let mask: u64 = width_mask(width);
-  let sign: u64 = (bits >> (width - 1)) & 1;
-  if sign == 0 { return bits & mask; }
-  return (bits & mask) | (max_u64() ^ mask);
+  return st.sign_fill(bits, width);
 };
 
-// 物理类型的位宽。#addr 没有位宽概念，按单字算。
 pub let type_width = func(kind: u64, width: u64) -> u64 {
-  if kind == codes.TY_ADDR() { return 64; }
-  if width == 0 { return 64; }
-  return width;
+  return st.type_width(kind, width);
 };
 
-// 物理类型占多少字节。
 pub let type_size = func(kind: u64, width: u64) -> u64 {
-  if kind == codes.TY_ADDR() { return 8; }
-  if width < 8 { return 1; }
-  return width / 8;
-};
-
-let align_to = func(n: u64, a: u64) -> u64 {
-  let mask: u64 = a - 1;
-  return (n + mask) & (max_u64() ^ mask);
+  return st.type_size(kind, width);
 };
 
 // --- 能力空间 -------------------------------------------------------------
@@ -207,1882 +99,215 @@ pub let VmCaps = sig {
   pub let invoke: Fn((Mut(Self), u64, Slice(u64)) -> u64);
 };
 
-pub let CAP_FUNCTION = func() -> u64 { return 1; };
-// Meta 原语的种类号。它们同样由宿主函数承载，区别只在登记时写进表项的
-// kind，供调用方按种类分派与审计。
-pub let CAP_AST_TX_BEGIN = func() -> u64 { return 2; };
-pub let CAP_AST_TX_COMMIT = func() -> u64 { return 3; };
-pub let CAP_AST_TX_ROLLBACK = func() -> u64 { return 4; };
-pub let CAP_AST_MK_TOKEN = func() -> u64 { return 5; };
-pub let CAP_AST_MK_GROUP = func() -> u64 { return 6; };
-pub let CAP_TYPE_REC_BEGIN = func() -> u64 { return 7; };
-pub let CAP_TYPE_REC_ADD = func() -> u64 { return 8; };
-pub let CAP_TYPE_REC_END = func() -> u64 { return 9; };
+pub let CAP_FUNCTION = func() -> u64 { return st.CAP_FUNCTION(); };
+pub let CAP_AST_TX_BEGIN = func() -> u64 { return st.CAP_AST_TX_BEGIN(); };
+pub let CAP_AST_TX_COMMIT = func() -> u64 { return st.CAP_AST_TX_COMMIT(); };
+pub let CAP_AST_TX_ROLLBACK = func() -> u64 { return st.CAP_AST_TX_ROLLBACK(); };
+pub let CAP_AST_MK_TOKEN = func() -> u64 { return st.CAP_AST_MK_TOKEN(); };
+pub let CAP_AST_MK_GROUP = func() -> u64 { return st.CAP_AST_MK_GROUP(); };
+pub let CAP_TYPE_REC_BEGIN = func() -> u64 { return st.CAP_TYPE_REC_BEGIN(); };
+pub let CAP_TYPE_REC_ADD = func() -> u64 { return st.CAP_TYPE_REC_ADD(); };
+pub let CAP_TYPE_REC_END = func() -> u64 { return st.CAP_TYPE_REC_END(); };
 
-// 表项能否被调用：FUNCTION 与全部 Meta 种类都是宿主函数，其余（含 0）拒绝。
 pub let cap_kind_callable = func(kind: u64) -> u64 {
-  if kind < CAP_FUNCTION() { return 0; }
-  if kind > CAP_TYPE_REC_END() { return 0; }
-  return 1;
+  return st.cap_kind_callable(kind);
 };
 
-// 一个能力表项。context 是注册时冻结的可信绑定，不进入参数词、不进入值槽。
-pub let VmCapEntry = struct {
-  link_name: u64,
-  kind: u64,
-  context: u64,
-  invoke_fn: Fn((u64, Slice(u64)) -> u64),
-};
+pub let VmCapEntry = st.VmCapEntry;
 
-pub let VmCapTable = struct {
-  entries: Mut(VmCapEntry),
-  count: u64,
-  cap: u64,
-  frozen: u64,
-};
-
-let cap_entry_ptr = func(t: Mut(VmCapTable), i: u64) -> Mut(VmCapEntry) {
-  return t.entries + i * size_of(VmCapEntry);
-};
+pub let VmCapTable = st.VmCapTable;
 
 pub let caps_new = func(entries: Mut(VmCapEntry), cap: u64) -> VmCapTable {
-  return VmCapTable { entries: entries, count: 0, cap: cap, frozen: 0 };
+  return st.caps_new(entries, cap);
 };
 
 pub let caps_register = func(t: Mut(VmCapTable), link_name: u64, kind: u64, context: u64,
                             invoke_fn: Fn((u64, Slice(u64)) -> u64)) -> u64 {
-  if t.frozen == 1 { return 0; }
-  if t.count >= t.cap { return 0; }
-  let p: Mut(VmCapEntry) = cap_entry_ptr(t, t.count);
-  p.link_name = link_name;
-  p.kind = kind;
-  p.context = context;
-  p.invoke_fn = invoke_fn;
-  t.count = t.count + 1;
-  return 1;
+  return st.caps_register(t, link_name, kind, context, invoke_fn);
 };
 
 pub let caps_freeze = func(t: Mut(VmCapTable)) -> u64 {
-  t.frozen = 1;
-  return 1;
+  return st.caps_freeze(t);
 };
 
-pub let caps_is_frozen = func(t: Mut(VmCapTable)) -> u64 { return t.frozen; };
+pub let caps_is_frozen = func(t: Mut(VmCapTable)) -> u64 {
+  return st.caps_is_frozen(t);
+};
 
-// 找表项；返回「下标 + 1」，0 表示没有。
 pub let caps_find = func(t: Mut(VmCapTable), link_name: u64, i: u64) -> u64 {
-  if i >= t.count { return 0; }
-  let entry: VmCapEntry = deref(cap_entry_ptr(t, i));
-  if entry.link_name == link_name { return i + 1; }
-  return caps_find(t, link_name, i + 1);
+  return st.caps_find(t, link_name, i);
 };
 
 // VmCaps 的引擎侧见证：一张冻结过的能力表就是它的 Self。
 pub let VmCapHost: VmCaps = module {
   pub let Self = VmCapTable;
   pub let invoke = func(self: Mut(VmCapTable), link_name: u64, args: Slice(u64)) -> u64 {
-    let hit: u64 = caps_find(self, link_name, 0);
-    if hit == 0 { return 0; }
-    let e: Mut(VmCapEntry) = cap_entry_ptr(self, hit - 1);
-    if cap_kind_callable(e.kind) == 0 { return 0; }
-    let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
-    if (fn as u64) == 0 { return 0; }
-    return fn(e.context, args);
+    return st.caps_invoke(self, link_name, args);
   };
 };
 
 // --- 同步端点 -------------------------------------------------------------
-pub let EP_IDLE = func() -> u64 { return 0; };
-pub let EP_SENDER_PARKED = func() -> u64 { return 1; };
-pub let EP_RECEIVER_PARKED = func() -> u64 { return 2; };
-pub let EP_SENDER_DELIVERED = func() -> u64 { return 3; };
+pub let EP_IDLE = func() -> u64 { return st.EP_IDLE(); };
+pub let EP_SENDER_PARKED = func() -> u64 { return st.EP_SENDER_PARKED(); };
+pub let EP_RECEIVER_PARKED = func() -> u64 { return st.EP_RECEIVER_PARKED(); };
+pub let EP_SENDER_DELIVERED = func() -> u64 { return st.EP_SENDER_DELIVERED(); };
 
-pub let EP_OK = func() -> u64 { return 0; };
-pub let EP_BLOCKED = func() -> u64 { return 1; };
-pub let EP_BUSY = func() -> u64 { return 2; };
+pub let EP_OK = func() -> u64 { return st.EP_OK(); };
+pub let EP_BLOCKED = func() -> u64 { return st.EP_BLOCKED(); };
+pub let EP_BUSY = func() -> u64 { return st.EP_BUSY(); };
 
-// 无缓冲会合点。同一时刻最多挂一个对端，最多携带一份在途的值。
-pub let Endpoint = struct {
-  id: u64,
-  state: u64,
-  peer: u64,
-  value_width: u64,
-  value_bits: u64,
-};
+pub let Endpoint = st.Endpoint;
 
 pub let endpoint_new = func(id: u64) -> Endpoint {
-  return Endpoint { id: id, state: EP_IDLE(), peer: 0, value_width: 64, value_bits: 0 };
+  return st.endpoint_new(id);
 };
 
-pub let endpoint_state = func(ep: Ref(Endpoint)) -> u64 { return ep.state; };
-
-pub let endpoint_peer = func(ep: Ref(Endpoint)) -> u64 { return ep.peer; };
-
-let endpoint_store = func(ep: Mut(Endpoint), value: VmValue) -> u64 {
-  ep.value_width = value.width;
-  ep.value_bits = value.bits;
-  return 0;
+pub let endpoint_state = func(ep: Ref(Endpoint)) -> u64 {
+  return st.endpoint_state(ep);
 };
 
-let endpoint_clear = func(ep: Mut(Endpoint)) -> u64 {
-  ep.value_width = 64;
-  ep.value_bits = 0;
-  return 0;
+pub let endpoint_peer = func(ep: Ref(Endpoint)) -> u64 {
+  return st.endpoint_peer(ep);
 };
 
-// 发送：对端已在等就把值放进会合槽并唤醒它；否则把自己挂上。
 pub let endpoint_send = func(ep: Mut(Endpoint), who: u64, value: VmValue,
                              out_who: Mut(u64)) -> u64 {
-  if ep.state == EP_RECEIVER_PARKED() {
-    let put: u64 = endpoint_store(ep, value);
-    ep.state = EP_SENDER_DELIVERED();
-    deref(out_who) = ep.peer;
-    return EP_OK();
-  }
-  if ep.state == EP_IDLE() {
-    let put: u64 = endpoint_store(ep, value);
-    ep.peer = who;
-    ep.state = EP_SENDER_PARKED();
-    return EP_BLOCKED();
-  }
-  return EP_BUSY();
+  return st.endpoint_send(ep, who, value, out_who);
 };
 
-// 接收：发送方已挂上就取走它的值并唤醒它；否则把自己挂上。
 pub let endpoint_recv = func(ep: Mut(Endpoint), who: u64, out: Mut(VmValue),
                              out_who: Mut(u64)) -> u64 {
-  if ep.state == EP_SENDER_PARKED() {
-    deref(out) = VmValue { width: ep.value_width, bits: ep.value_bits };
-    let sender: u64 = ep.peer;
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    deref(out_who) = sender;
-    return EP_OK();
-  }
-  if ep.state == EP_SENDER_DELIVERED() {
-    deref(out) = VmValue { width: ep.value_width, bits: ep.value_bits };
-    let receiver: u64 = ep.peer;
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    deref(out_who) = receiver;
-    return EP_OK();
-  }
-  if ep.state == EP_IDLE() {
-    ep.peer = who;
-    ep.state = EP_RECEIVER_PARKED();
-    return EP_BLOCKED();
-  }
-  return EP_BUSY();
+  return st.endpoint_recv(ep, who, out, out_who);
 };
 
-// 撤销一次挂起（Trap、取消、TCB 销毁）。挂起者才撤销得动。
 pub let endpoint_cancel = func(ep: Mut(Endpoint), who: u64) -> u64 {
-  if ep.peer != who { return 0; }
-  if (ep.state == EP_SENDER_PARKED()) or (ep.state == EP_RECEIVER_PARKED()) {
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    return 1;
-  }
-  return 0;
+  return st.endpoint_cancel(ep, who);
 };
 
 // --- 调用轨迹 -------------------------------------------------------------
-// 一条轨迹事件：进入/离开哪个子过程、当时的调用深度与已用步数。缓冲区、容量
-// 与计数指针都由调用方给；没挂缓冲区（trace_cap == 0）时记录一次都不发生，
-// 建 TCB 的既有调用方因此零开销。
-pub let VmTraceEvent = struct {
-  sub_sym: u64,
-  depth: u64,
-  steps: u64,
-  kind: u64,
-};
+pub let VmTraceEvent = st.VmTraceEvent;
 
-pub let TRACE_ENTER = func() -> u64 { return 1; };
-pub let TRACE_EXIT = func() -> u64 { return 2; };
-pub let TRACE_TRAP = func() -> u64 { return 3; };
+pub let TRACE_ENTER = func() -> u64 { return st.TRACE_ENTER(); };
+pub let TRACE_EXIT = func() -> u64 { return st.TRACE_EXIT(); };
+pub let TRACE_TRAP = func() -> u64 { return st.TRACE_TRAP(); };
 
 // --- 帧与 TCB -------------------------------------------------------------
-pub let Frame = struct {
-  region: u64,
-  position: u64,
-  slot_base: u64,
-  slot_count: u64,
-  parent_position: u64,
-  label: u64,
-  is_call_frame: u64,
-  stack_mark: u64,
-};
+pub let Frame = st.Frame;
 
-// TCB 只放标量字段：聚合字段在指针写入路径上的 ABI 不可靠，所以配额、租约、
-// 结果值都摊平成标量。
-pub let TCB = struct {
-  image: Ref(im.VmImage),
-  space: Mut(vs.VmSpace),
-  caps: Mut(VmCapTable),
-  lease_index: u64,
-  lease_generation: u64,
-  owner: u64,
-  quota_steps: u64,
-  quota_stack_bytes: u64,
-  quota_call_depth: u64,
-  frames: Mut(Frame),
-  frame_cap: u64,
-  frame_count: u64,
-  slots: Mut(VmValue),
-  slot_cap: u64,
-  args: Mut(VmValue),
-  arg_words: Mut(u64),
-  call_depth: u64,
-  stack_used: u64,
-  stack_peak: u64,
-  steps: u64,
-  state: u64,
-  slice: u64,
-  trap_kind: u64,
-  trap_status: u64,
-  trap_region: u64,
-  trap_position: u64,
-  has_result: u64,
-  result_width: u64,
-  result_bits: u64,
-  result_cell: Mut(VmValue),
-  cur_region: u64,
-  cur_position: u64,
-  trace_buf: Mut(VmTraceEvent),
-  trace_cap: u64,
-  trace_count: Mut(u64),
-};
+pub let TCB = st.TCB;
 
 // TCB 的 UFCS 入口：调用方 use 本模块后可以写 tcb.vm_step()、tcb.vm_tcb_steps()
 // 这类形式，接收者可以是 TCB、Ref(TCB) 或 Mut(TCB)。
 pub let Self = TCB;
 
-let tcb_lease = func(tcb: Mut(TCB)) -> vs.StackLease {
-  return vs.StackLease { index: tcb.lease_index, generation: tcb.lease_generation };
-};
 // 引擎对外交出的执行结果。result_width/result_bits 是可直接读的摊平副本；
 // result_val 指向同一个值（当前前端把聚合字段表示成指针，所以这里就是指针）。
-pub let VmResult = struct {
-  status: u64,
-  steps_used: u64,
-  result_width: u64,
-  result_bits: u64,
-  result_val: Mut(VmValue),
-  trap_kind: u64,
-  trap_status: u64,
-};
-
-// 拒绝执行（还没建出 TCB）时的结果值落点。
-let trap_cell: Array(u64, 2) = [64, 0];
-
-let trap_value_ptr = func() -> Mut(VmValue) {
-  return ptr_cast(Mut(VmValue), mut_of(trap_cell));
-};
+pub let VmResult = st.VmResult;
 
 // --- TCB 的读写面 ---------------------------------------------------------
-pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return tcb.state; };
-pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return tcb.steps; };
-pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return tcb.stack_peak; };
-pub let vm_tcb_has_result = func(tcb: Ref(TCB)) -> u64 { return tcb.has_result; };
+pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_state(tcb); };
+pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_steps(tcb); };
+pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_stack_peak(tcb); };
+pub let vm_tcb_has_result = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_has_result(tcb); };
 pub let vm_tcb_result = func(tcb: Ref(TCB)) -> VmValue {
-  return VmValue { width: tcb.result_width, bits: tcb.result_bits };
+  return st.vm_tcb_result(tcb);
 };
-pub let vm_tcb_trap_kind = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_kind; };
-pub let vm_tcb_trap_status = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_status; };
-pub let vm_tcb_trap_region = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_region; };
-pub let vm_tcb_trap_position = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_position; };
-pub let vm_tcb_current_region = func(tcb: Ref(TCB)) -> u64 { return tcb.cur_region; };
-pub let vm_tcb_call_depth = func(tcb: Ref(TCB)) -> u64 { return tcb.call_depth; };
-pub let vm_tcb_frame_count = func(tcb: Ref(TCB)) -> u64 { return tcb.frame_count; };
-
-let ref_frame_ptr = func(tcb: Ref(TCB), i: u64) -> Ref(Frame) {
-  let base: Ref(u8) = ptr_cast(Ref(u8), tcb.frames);
-  return ptr_cast(Ref(Frame), base + i * size_of(Frame));
-};
+pub let vm_tcb_trap_kind = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_kind(tcb); };
+pub let vm_tcb_trap_status = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_status(tcb); };
+pub let vm_tcb_trap_region = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_region(tcb); };
+pub let vm_tcb_trap_position = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_position(tcb); };
+pub let vm_tcb_current_region = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_current_region(tcb); };
+pub let vm_tcb_call_depth = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_call_depth(tcb); };
+pub let vm_tcb_frame_count = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_frame_count(tcb); };
 
 pub let vm_tcb_frame_region = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.region;
+  return st.vm_tcb_frame_region(tcb, i);
 };
 
 pub let vm_tcb_frame_position = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.position;
+  return st.vm_tcb_frame_position(tcb, i);
 };
 
 pub let vm_tcb_frame_slot_base = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.slot_base;
+  return st.vm_tcb_frame_slot_base(tcb, i);
 };
 
 pub let vm_tcb_frame_slot_count = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.slot_count;
+  return st.vm_tcb_frame_slot_count(tcb, i);
 };
 
 pub let vm_tcb_slot = func(tcb: Ref(TCB), i: u64) -> VmValue {
-  let base: Ref(u8) = ptr_cast(Ref(u8), tcb.slots);
-  let p: Ref(VmValue) = ptr_cast(Ref(VmValue), base + i * size_of(VmValue));
-  return deref(p);
+  return st.vm_tcb_slot(tcb, i);
 };
 
 pub let vm_tcb_block = func(tcb: Mut(TCB)) -> u64 {
-  tcb.state = VM_BLOCKED();
-  tcb.slice = SLICE_BLOCKED();
-  return SLICE_BLOCKED();
+  return st.vm_tcb_block(tcb);
 };
 
 pub let vm_tcb_wake = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VM_BLOCKED() { return 0; }
-  tcb.state = VM_RUNNING();
-  tcb.slice = SLICE_RUNNABLE();
-  return 1;
+  return st.vm_tcb_wake(tcb);
 };
 
-// 把正在执行的 TCB 就地停放：只改执行状态与切片结果，当前区域、区域内位置与
-// 整条帧链保持原样，恢复后从下一条指令继续。返回 0 表示停放成功，非零表示
-// TCB 不处于 RUNNING。
 pub let vm_tcb_yield = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VM_RUNNING() { return 1; }
-  tcb.state = VM_BLOCKED();
-  tcb.slice = SLICE_BLOCKED();
-  return 0;
+  return st.vm_tcb_yield(tcb);
 };
 
-// 唤醒被 vm_tcb_yield 停放的 TCB。返回 0 表示恢复成功，非零表示 TCB 不处于
-// BLOCKED。
 pub let vm_tcb_resume = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VM_BLOCKED() { return 1; }
-  tcb.state = VM_RUNNING();
-  tcb.slice = SLICE_RUNNABLE();
-  return 0;
+  return st.vm_tcb_resume(tcb);
 };
 
 // --- 容量与切分 -----------------------------------------------------------
-// 调用深度为 0 表示不限额；此时按 256 层预备（定长存储，不允许无限增长）。
-let UNLIMITED_DEPTH_FRAMES = func() -> u64 { return 256; };
-
 pub let frame_cap_of = func(image: Ref(im.VmImage), quota: VmQuota) -> u64 {
-  let depth: u64 = quota.max_call_depth;
-  let nesting: u64 = im.vm_max_region_depth(image) + 1;
-  if depth == 0 { return UNLIMITED_DEPTH_FRAMES() * nesting; }
-  return depth * nesting;
+  return st.frame_cap_of(image, quota);
 };
 
 pub let vm_tcb_bytes = func(image: Ref(im.VmImage), quota: VmQuota) -> u64 {
-  let frames: u64 = frame_cap_of(image, quota);
-  let slots: u64 = frames * im.vm_max_slots(image);
-  return align_to(frames * size_of(Frame), 8) +
-         align_to(slots * size_of(VmValue), 8) +
-         align_to(MAX_OPERANDS() * size_of(VmValue), 8) +
-         align_to(MAX_OPERANDS() * 8, 8) +
-         align_to(size_of(VmValue), 8);
+  return st.vm_tcb_bytes(image, quota);
 };
 
-let tcb_frame_ptr = func(tcb: Mut(TCB), i: u64) -> Mut(Frame) {
-  return tcb.frames + i * size_of(Frame);
-};
-
-let tcb_slot_ptr = func(tcb: Mut(TCB), i: u64) -> Mut(VmValue) {
-  return tcb.slots + i * size_of(VmValue);
-};
-
-let tcb_arg_slot = func(tcb: Mut(TCB), i: u64) -> Mut(VmValue) {
-  return tcb.args + i * size_of(VmValue);
-};
-
-let tcb_arg_word = func(tcb: Mut(TCB), i: u64) -> Mut(u64) {
-  return tcb.arg_words + i * size_of(u64);
-};
-
-// 空 TCB：只用来取一个可写的落点，内容全部由 vm_tcb_new 覆盖。
 pub let vm_tcb_blank = func() -> TCB {
-  return TCB {
-    image: null_ref(Ref(im.VmImage)),
-    space: null_ref(Mut(vs.VmSpace)),
-    caps: null_ref(Mut(VmCapTable)),
-    lease_index: vs.NO_INDEX(),
-    lease_generation: 0,
-    owner: 0,
-    quota_steps: 0,
-    quota_stack_bytes: 0,
-    quota_call_depth: 0,
-    frames: null_ref(Mut(Frame)),
-    frame_cap: 0,
-    frame_count: 0,
-    slots: null_ref(Mut(VmValue)),
-    slot_cap: 0,
-    args: null_ref(Mut(VmValue)),
-    arg_words: null_ref(Mut(u64)),
-    call_depth: 0,
-    stack_used: 0,
-    stack_peak: 0,
-    steps: 0,
-    state: VM_READY(),
-    slice: SLICE_RUNNABLE(),
-    trap_kind: TRAP_NONE(),
-    trap_status: 0,
-    trap_region: 0,
-    trap_position: 0,
-    has_result: 0,
-    result_width: 64,
-    result_bits: 0,
-    result_cell: null_ref(Mut(VmValue)),
-    cur_region: 0,
-    cur_position: 0,
-    trace_buf: null_ref(Mut(VmTraceEvent)),
-    trace_cap: 0,
-    trace_count: null_ref(Mut(u64)),
-  };
+  return st.vm_tcb_blank();
 };
 
-// 在 arena 里切出帧栈与值槽，并借用栈租约。容量不够返回 0（调用方负责拒绝）。
 pub let vm_tcb_new = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                           caps: Mut(VmCapTable), quota: VmQuota,
                           lease: vs.StackLease, owner: u64,
                           arena: MutSlice(u8), out: Mut(TCB)) -> u64 {
-  let frames: u64 = frame_cap_of(image, quota);
-  let frame_bytes: u64 = align_to(frames * size_of(Frame), 8);
-  let slot_cap: u64 = frames * im.vm_max_slots(image);
-  let slot_bytes: u64 = align_to(slot_cap * size_of(VmValue), 8);
-  let arg_bytes: u64 = align_to(MAX_OPERANDS() * size_of(VmValue), 8);
-  let word_bytes: u64 = align_to(MAX_OPERANDS() * 8, 8);
-  let cell_bytes: u64 = align_to(size_of(VmValue), 8);
-  let need: u64 = frame_bytes + slot_bytes + arg_bytes + word_bytes + cell_bytes;
-  if arena.len < need { return 0; }
-  let base: Mut(u8) = arena.ptr;
-  let slots_at: Mut(u8) = base + frame_bytes;
-  let args_at: Mut(u8) = slots_at + slot_bytes;
-  let words_at: Mut(u8) = args_at + arg_bytes;
-  let cell_at: Mut(u8) = words_at + word_bytes;
-  if vs.vm_lease_none(lease) == 0 {
-    let borrowed: u64 = vs.vm_borrow(space, lease);
-    if borrowed == 0 { return 0; }
-  }
-  deref(out) = TCB {
-    image: image,
-    space: space,
-    caps: caps,
-    lease_index: lease.index,
-    lease_generation: lease.generation,
-    owner: owner,
-    quota_steps: quota.max_steps,
-    quota_stack_bytes: quota.max_stack_bytes,
-    quota_call_depth: quota.max_call_depth,
-    frames: ptr_cast(Mut(Frame), base),
-    frame_cap: frames,
-    frame_count: 0,
-    slots: ptr_cast(Mut(VmValue), slots_at),
-    slot_cap: slot_cap,
-    args: ptr_cast(Mut(VmValue), args_at),
-    arg_words: ptr_cast(Mut(u64), words_at),
-    call_depth: 0,
-    stack_used: 0,
-    stack_peak: 0,
-    steps: 0,
-    state: VM_READY(),
-    slice: SLICE_RUNNABLE(),
-    trap_kind: TRAP_NONE(),
-    trap_status: 0,
-    trap_region: 0,
-    trap_position: 0,
-    has_result: 0,
-    result_width: 64,
-    result_bits: 0,
-    result_cell: ptr_cast(Mut(VmValue), cell_at),
-    cur_region: 0,
-    cur_position: 0,
-    trace_buf: null_ref(Mut(VmTraceEvent)),
-    trace_cap: 0,
-    trace_count: null_ref(Mut(u64)),
-  };
-  return 1;
+  return st.vm_tcb_new(image, space, caps, quota, lease, owner, arena, out);
 };
 
-// 挂上一块轨迹缓冲区。计数从零开始，容量就是切片的长度；传空切片等于不挂。
 pub let vm_tcb_set_trace = func(tcb: Mut(TCB), buf: MutSlice(VmTraceEvent),
                                 count: Mut(u64)) -> u64 {
-  tcb.trace_buf = buf.ptr;
-  tcb.trace_cap = buf.len;
-  tcb.trace_count = count;
-  deref(count) = 0;
-  return buf.len;
+  return st.vm_tcb_set_trace(tcb, buf, count);
 };
 
 pub let vm_tcb_trace_count = func(tcb: Ref(TCB)) -> u64 {
-  if is_null(tcb.trace_count) { return 0; }
-  return deref(tcb.trace_count);
+  return st.vm_tcb_trace_count(tcb);
 };
 
-pub let vm_tcb_trace_cap = func(tcb: Ref(TCB)) -> u64 { return tcb.trace_cap; };
-
-// 记一条轨迹事件。缓冲区满了就丢掉多余的事件，执行本身不受影响。
-let trace_record = func(tcb: Mut(TCB), sub_sym: u64, kind: u64) -> u64 {
-  if tcb.trace_cap == 0 { return 0; }
-  let count: u64 = deref(tcb.trace_count);
-  if count >= tcb.trace_cap { return 0; }
-  let p: Mut(VmTraceEvent) = tcb.trace_buf + count * size_of(VmTraceEvent);
-  p.sub_sym = sub_sym;
-  p.depth = tcb.call_depth;
-  p.steps = tcb.steps;
-  p.kind = kind;
-  deref(tcb.trace_count) = count + 1;
-  return 1;
+pub let vm_tcb_trace_cap = func(tcb: Ref(TCB)) -> u64 {
+  return st.vm_tcb_trace_cap(tcb);
 };
 
-// 某一帧所属子过程的符号号；区域没绑子过程时给 0。
-let frame_sub_symbol = func(tcb: Mut(TCB), index: u64) -> u64 {
-  if index >= tcb.frame_count { return 0; }
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, index);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, f.region);
-  if rec.sub_index == im.NO_INDEX() { return 0; }
-  let sub: im.SubInfo = im.vm_sub(tcb.image, rec.sub_index);
-  return sub.name;
-};
-
-// 销毁 TCB：窗口收回 0、结束借用。区段本身与额度归供给方。
 pub let vm_tcb_free = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) == 0 {
-    let cleared: u64 = vs.vm_set_accessible(tcb.space, lease, 0);
-    let released: u64 = vs.vm_end_borrow(tcb.space, lease);
-  }
-  tcb.frame_count = 0;
-  tcb.call_depth = 0;
-  tcb.state = VM_DEAD();
-  tcb.slice = SLICE_DONE();
-  return SLICE_DONE();
+  return st.vm_tcb_free(tcb);
 };
 
-let vm_reject = func(tcb: Mut(TCB), status: u64) -> u64 {
-  tcb.trap_kind = TRAP_STATE();
-  tcb.trap_status = status;
-  tcb.state = VM_DEAD();
-  tcb.slice = SLICE_TRAPPED();
-  return SLICE_TRAPPED();
-};
-
-let result_of = func(tcb: Mut(TCB)) -> VmResult {
-  let cell: Mut(VmValue) = tcb.result_cell;
-  cell.width = tcb.result_width;
-  cell.bits = tcb.result_bits;
-  return VmResult {
-    status: tcb.slice,
-    steps_used: tcb.steps,
-    result_width: tcb.result_width,
-    result_bits: tcb.result_bits,
-    result_val: cell,
-    trap_kind: tcb.trap_kind,
-    trap_status: tcb.trap_status,
-  };
-};
-
-// 引擎内部用来表达「装配失败」的结果：不涉及任何 TCB。
-// trap_status 必须非 0：宿主的标量通道把非 DONE 的 trap_status 当成错误码原样
-// 交回调用方，0 会被读成求值成功并交出零值。
-let vm_trap_result = func(trap_kind: u64, trap_status: u64) -> VmResult {
-  return VmResult {
-    status: SLICE_TRAPPED(),
-    steps_used: 0,
-    result_width: 64,
-    result_bits: 0,
-    result_val: trap_value_ptr(),
-    trap_kind: trap_kind,
-    trap_status: trap_status,
-  };
-};
-
+// --- 结果装配 -------------------------------------------------------------
 // 只知故障类别时的装配失败结果。
 pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
-  return vm_trap_result(trap_kind, ST_ASSEMBLY_FAILED());
-};
-
-// --- 槽与操作数 -----------------------------------------------------------
-let clear_slots = func(tcb: Mut(TCB), base: u64, count: u64) -> u64 {
-  let cleared: u64 = loop clear(left: u64 = count) while left > 0 {
-    let p: Mut(VmValue) = tcb_slot_ptr(tcb, base + left - 1);
-    p.width = 64;
-    p.bits = 0;
-    left = left - 1;
-  };
-  return 0;
-};
-
-// 一个装载后的操作数引用：字面量、符号地址、子过程入口、或某个外层帧的槽。
-let read_slot_ref = func(tcb: Mut(TCB), r: im.OperandRef, literal: u64,
-                         kind: u64, width: u64, out: Mut(VmValue)) -> u64 {
-  let w: u64 = type_width(kind, width);
-  if r.is_literal == 1 {
-    deref(out) = value_bits(literal, w);
-    return 0;
-  }
-  if r.is_symbol == 1 {
-    deref(out) = value_bits(im.vm_symbol_addr(tcb.image, r.symbol_index), 64);
-    return 0;
-  }
-  if r.is_proc == 1 {
-    deref(out) = value_bits(im.vm_sub_addr(tcb.image, r.symbol_index), 64);
-    return 0;
-  }
-  if r.frame_distance >= tcb.frame_count {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_FRAME_DISTANCE());
-  }
-  let fi: u64 = tcb.frame_count - 1 - r.frame_distance;
-  let frame: Mut(Frame) = tcb_frame_ptr(tcb, fi);
-  if r.slot >= frame.slot_count {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_FRAME_DISTANCE());
-  }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, frame.slot_base + r.slot);
-  deref(out) = deref(p);
-  return 0;
-};
-
-let operand_bits_at = func(inst: vf.IrInst, i: u64) -> u64 {
-  if i >= MAX_OPERANDS() { return 0; }
-  let op: vf.IrOperand = vf.inst_op(inst, i);
-  return op.bits;
-};
-
-let op_read = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                   out: Mut(VmValue)) -> u64 {
-  let r: im.OperandRef = im.vm_operand_ref(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  return read_slot_ref(tcb, r, operand_bits_at(inst, index), inst.ty_kind, inst.ty_width, out);
-};
-
-let op_read_typed = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                         kind: u64, width: u64, out: Mut(VmValue)) -> u64 {
-  let r: im.OperandRef = im.vm_operand_ref(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  return read_slot_ref(tcb, r, operand_bits_at(inst, index), kind, width, out);
-};
-
-let write_result = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                        value: VmValue) -> u64 {
-  let slot: u64 = im.vm_result_slot(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  if slot == im.NO_INDEX() {
-    return trap_now(tcb, TRAP_STATE(), ST_RESULT_NO_SLOT());
-  }
-  let frame: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let at: u64 = frame.slot_base + slot;
-  if at >= tcb.slot_cap { return trap_now(tcb, TRAP_STATE(), ST_SLOT_OVERFLOW()); }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, at);
-  p.width = value.width;
-  p.bits = value.bits;
-  return 0;
-};
-
-let write_result_bits = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                             bits: u64, width: u64) -> u64 {
-  return write_result(tcb, inst, index, value_bits(bits, width));
-};
-
-// 把值写进指定帧的下标结果槽（区域退出、break、return 用）。
-let write_frame_result = func(tcb: Mut(TCB), frame: Mut(Frame), position: u64,
-                              index: u64, value: VmValue, status: u64) -> u64 {
-  let slot: u64 = im.vm_result_slot(tcb.image, frame.region, position, index);
-  if slot == im.NO_INDEX() { return trap_now(tcb, TRAP_STATE(), status); }
-  if (frame.slot_base + slot) >= tcb.slot_cap {
-    return trap_now(tcb, TRAP_STATE(), ST_SLOT_OVERFLOW());
-  }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, frame.slot_base + slot);
-  p.width = value.width;
-  p.bits = value.bits;
-  return 0;
-};
-
-// 子过程与区域的参数/结果类型。跨模块的类型无法在调用方算 sizeof，
-// 所以按下标取记录一律走 verify 提供的访问器。
-let param_type_at = func(params: Ref(vf.IrParam), i: u64) -> vf.IrType {
-  let param: vf.IrParam = vf.param_at_ref(params, i);
-  return vf.IrType { kind: param.ty_kind, width: param.ty_width };
-};
-
-let result_type_at = func(results: Ref(vf.IrType), i: u64) -> vf.IrType {
-  return vf.type_at_ref(results, i);
-};
-
-let sub_result_type = func(image: Ref(im.VmImage), sub_index: u64, i: u64) -> vf.IrType {
-  let sub: im.SubInfo = im.vm_sub(image, sub_index);
-  return result_type_at(sub.results, i);
-};
-
-// --- 故障 -----------------------------------------------------------------
-let clear_stack_window = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) == 0 {
-    let ok: u64 = vs.vm_set_accessible(tcb.space, lease, 0);
-    return ok;
-  }
-  return 1;
-};
-
-let trap_now = func(tcb: Mut(TCB), kind: u64, status: u64) -> u64 {
-  let traced: u64 = trace_record(tcb, frame_sub_symbol(tcb, tcb.frame_count - 1), TRACE_TRAP());
-  tcb.trap_kind = kind;
-  tcb.trap_status = status;
-  if tcb.frame_count > 0 {
-    let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-    tcb.trap_region = f.region;
-    tcb.trap_position = f.position;
-  }
-  clear_stack_window(tcb);
-  tcb.state = VM_DEAD();
-  tcb.slice = SLICE_TRAPPED();
-  return SLICE_TRAPPED();
-};
-
-// --- 栈窗口 ---------------------------------------------------------------
-let stack_window_sync = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) != 0 { return 0; }
-  let ok: u64 = vs.vm_set_accessible(tcb.space, lease, tcb.stack_used);
-  if ok == 0 { return ST_STACK_WINDOW(); }
-  return 0;
-};
-
-// --- 区域栈 ---------------------------------------------------------------
-let push_region = func(tcb: Mut(TCB), region_id: u64, parent_position: u64,
-                       label: u64, is_call: u64) -> u64 {
-  let rec: im.ImageRegion = im.vm_region(tcb.image, region_id);
-  if rec.valid == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_FRAME_NO_REGION());
-  }
-  if tcb.frame_count >= tcb.frame_cap {
-    return trap_now(tcb, TRAP_STATE(), ST_FRAME_OVERFLOW());
-  }
-  if is_call == 1 {
-    if (tcb.quota_call_depth != 0) and (tcb.call_depth >= tcb.quota_call_depth) {
-      return trap_now(tcb, TRAP_CALL_DEPTH(), ST_CALL_DEPTH());
-    }
-  }
-  let parent: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count);
-  f.region = region_id;
-  f.position = 0;
-  f.slot_base = parent.slot_base + parent.slot_count;
-  f.slot_count = rec.slot_count;
-  f.parent_position = parent_position;
-  f.label = label;
-  f.is_call_frame = is_call;
-  f.stack_mark = tcb.stack_used;
-  if (f.slot_base + f.slot_count) > tcb.slot_cap {
-    return trap_now(tcb, TRAP_STATE(), ST_SLOT_OVERFLOW());
-  }
-  clear_slots(tcb, f.slot_base, f.slot_count);
-  tcb.frame_count = tcb.frame_count + 1;
-  if is_call == 1 { tcb.call_depth = tcb.call_depth + 1; }
-  return SLICE_RUNNABLE();
-};
-
-let recount_call_depth = func(tcb: Mut(TCB)) -> u64 {
-  let counted: u64 = loop scan(i: u64 = 0, depth: u64 = 0) while i < tcb.frame_count {
-    let f: Mut(Frame) = tcb_frame_ptr(tcb, i);
-    if f.is_call_frame == 1 { depth = depth + 1; }
-    i = i + 1;
-  };
-  tcb.call_depth = counted;
-  return counted;
-};
-
-let scan_loop_frame = func(tcb: Mut(TCB), label: u64, back: u64) -> u64 {
-  if back >= tcb.frame_count { return 0; }
-  let i: u64 = tcb.frame_count - 1 - back;
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, i);
-  if f.label == label { return i + 1; }
-  return scan_loop_frame(tcb, label, back + 1);
-};
-
-let find_loop_frame = func(tcb: Mut(TCB), label: u64) -> u64 {
-  if label == 0 { return 0; }
-  return scan_loop_frame(tcb, label, 0);
-};
-
-// 离开当前区域。yield 的值写进「创造这一帧那条指令」的结果槽，父位置推进一格。
-// 结构化区域退出不结束 alloca 的生命周期：只有根区域结束（整个 activation 结束）
-// 才把水位归零、窗口收回。
-let leave_region = func(tcb: Mut(TCB), count: u64, v0: VmValue, v1: VmValue) -> u64 {
-  if tcb.frame_count < 2 {
-    tcb.stack_used = 0;
-    if stack_window_sync(tcb) != 0 {
-      return trap_now(tcb, TRAP_STATE(), ST_STACK_WINDOW());
-    }
-    tcb.has_result = 0;
-    tcb.state = VM_DEAD();
-    tcb.slice = SLICE_DONE();
-    return SLICE_DONE();
-  }
-  let child: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let parent: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 2);
-  let at: u64 = child.parent_position;
-  if count > 0 {
-    let s0: u64 = write_frame_result(tcb, parent, at, 0, v0, ST_RESULT_NO_SLOT());
-    if s0 != 0 { return s0; }
-  }
-  if count > 1 {
-    let s1: u64 = write_frame_result(tcb, parent, at, 1, v1, ST_RESULT_NO_SLOT());
-    if s1 != 0 { return s1; }
-  }
-  tcb.frame_count = tcb.frame_count - 1;
-  parent.position = at + 1;
-  recount_call_depth(tcb);
-  return SLICE_RUNNABLE();
-};
-
-let pop_to_call_frame = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.frame_count == 0 { return 0; }
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  if f.is_call_frame == 1 { return tcb.frame_count; }
-  tcb.frame_count = tcb.frame_count - 1;
-  return pop_to_call_frame(tcb);
-};
-
-// --- ALU：整数 ------------------------------------------------------------
-// 整数算子的分类只做一次：指令码到枚举的映射放在 int_bin_op / int_cmp_op /
-// int_conv_op 里，真正执行语义的地方是对枚举的穷尽 match。新增算子时编译器会
-// 强制在每个分派处补一条，不会静默落进「未知算子」。
-let IntBinOp = enum {
-  Add
-  Sub
-  Mul
-  And
-  Or
-  Xor
-  Shl
-  Lshr
-  Ashr
-  Udiv
-  Urem
-  Sdiv
-  Srem
-  Unknown
-};
-
-let int_bin_op = func(k: u64) -> IntBinOp {
-  if k == codes.INST_ADD() { return IntBinOp.Add { }; }
-  if k == codes.INST_SUB() { return IntBinOp.Sub { }; }
-  if k == codes.INST_MUL() { return IntBinOp.Mul { }; }
-  if k == codes.INST_AND() { return IntBinOp.And { }; }
-  if k == codes.INST_OR() { return IntBinOp.Or { }; }
-  if k == codes.INST_XOR() { return IntBinOp.Xor { }; }
-  if k == codes.INST_SHL() { return IntBinOp.Shl { }; }
-  if k == codes.INST_LSHR() { return IntBinOp.Lshr { }; }
-  if k == codes.INST_ASHR() { return IntBinOp.Ashr { }; }
-  if k == codes.INST_UDIV() { return IntBinOp.Udiv { }; }
-  if k == codes.INST_UREM() { return IntBinOp.Urem { }; }
-  if k == codes.INST_SDIV() { return IntBinOp.Sdiv { }; }
-  if k == codes.INST_SREM() { return IntBinOp.Srem { }; }
-  return IntBinOp.Unknown { };
-};
-
-// 有符号除法与取余共用同一组判定：除零、最小负数除以 -1 的溢出。两个算子的
-// 溢出判定完全一致（SREM 也在这里拒），语义与逐个分支的写法相同。
-let signed_div_rem = func(tcb: Mut(TCB), x: u64, y: u64, width: u64,
-                          want_rem: u64, out: Mut(u64)) -> u64 {
-  let one: u64 = 1;
-  let filled_x: u64 = sign_fill(x, width);
-  let filled_y: u64 = sign_fill(y, width);
-  let sx: i64 = filled_x as i64;
-  let sy: i64 = filled_y as i64;
-  if sy == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-  if (sy == (0 - 1)) and (filled_x == (one << 63)) {
-    return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_INT_OVERFLOW());
-  }
-  let q: i64 = sx / sy;
-  let m: i64 = sx % sy;
-  let r: u64 = if want_rem == 1 { m as u64 } else { q as u64 };
-  deref(out) = r;
-  return 0;
-};
-
-let op_int_bin = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let width: u64 = type_width(inst.ty_kind, inst.ty_width);
-  let a: VmValue = value_zero();
-  let sa: u64 = op_read(tcb, inst, 0, mut_of(a));
-  if sa != 0 { return sa; }
-  let b: VmValue = value_zero();
-  let sb: u64 = op_read(tcb, inst, 1, mut_of(b));
-  if sb != 0 { return sb; }
-  let x: u64 = a.bits;
-  let y: u64 = b.bits;
-  let r: u64 = 0;
-
-  match int_bin_op(inst.kind) {
-    Add => { r = x + y; },
-    Sub => { r = x - y; },
-    Mul => { r = x * y; },
-    And => { r = x & y; },
-    Or => { r = x | y; },
-    Xor => { r = x ^ y; },
-    Shl => {
-      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
-      r = x << y;
-    },
-    Lshr => {
-      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
-      r = (x & width_mask(width)) >> y;
-    },
-    Ashr => {
-      if y >= width { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_SHIFT_TOO_WIDE()); }
-      let filled: u64 = sign_fill(x, width);
-      let sx: i64 = filled as i64;
-      let sy: i64 = y as i64;
-      let shifted: i64 = sx >> sy;
-      r = shifted as u64;
-    },
-    Udiv => {
-      if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-      r = (x & width_mask(width)) / (y & width_mask(width));
-    },
-    Urem => {
-      if y == 0 { return trap_now(tcb, TRAP_ARITH_DOMAIN(), ST_DIVIDE_BY_ZERO()); }
-      r = (x & width_mask(width)) % (y & width_mask(width));
-    },
-    Sdiv => {
-      let q: u64 = 0;
-      let s: u64 = signed_div_rem(tcb, x, y, width, 0, mut_of(q));
-      if s != 0 { return s; }
-      r = q;
-    },
-    Srem => {
-      let q: u64 = 0;
-      let s: u64 = signed_div_rem(tcb, x, y, width, 1, mut_of(q));
-      if s != 0 { return s; }
-      r = q;
-    },
-    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_BITS_OP()); },
-  }
-  return write_result_bits(tcb, inst, 0, r, width);
-};
-
-let IntCmpOp = enum {
-  Eq
-  Ne
-  Slt
-  Sle
-  Sgt
-  Sge
-  Ult
-  Ule
-  Ugt
-  Uge
-  Unknown
-};
-
-let int_cmp_op = func(k: u64) -> IntCmpOp {
-  if k == codes.INST_EQ() { return IntCmpOp.Eq { }; }
-  if k == codes.INST_NE() { return IntCmpOp.Ne { }; }
-  if k == codes.INST_SLT() { return IntCmpOp.Slt { }; }
-  if k == codes.INST_SLE() { return IntCmpOp.Sle { }; }
-  if k == codes.INST_SGT() { return IntCmpOp.Sgt { }; }
-  if k == codes.INST_SGE() { return IntCmpOp.Sge { }; }
-  if k == codes.INST_ULT() { return IntCmpOp.Ult { }; }
-  if k == codes.INST_ULE() { return IntCmpOp.Ule { }; }
-  if k == codes.INST_UGT() { return IntCmpOp.Ugt { }; }
-  if k == codes.INST_UGE() { return IntCmpOp.Uge { }; }
-  return IntCmpOp.Unknown { };
-};
-
-let op_int_cmp = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let width: u64 = type_width(inst.ty_kind, inst.ty_width);
-  let a: VmValue = value_zero();
-  let sa: u64 = op_read(tcb, inst, 0, mut_of(a));
-  if sa != 0 { return sa; }
-  let b: VmValue = value_zero();
-  let sb: u64 = op_read(tcb, inst, 1, mut_of(b));
-  if sb != 0 { return sb; }
-  let mask: u64 = width_mask(width);
-  let mx: u64 = a.bits & mask;
-  let my: u64 = b.bits & mask;
-  let filled_x: u64 = sign_fill(a.bits, width);
-  let filled_y: u64 = sign_fill(b.bits, width);
-  let sx: i64 = filled_x as i64;
-  let sy: i64 = filled_y as i64;
-  let truth: u64 = 0;
-
-  match int_cmp_op(inst.kind) {
-    Eq => { truth = if mx == my { 1 } else { 0 }; },
-    Ne => { truth = if mx != my { 1 } else { 0 }; },
-    Slt => { truth = if sx < sy { 1 } else { 0 }; },
-    Sle => { truth = if sx <= sy { 1 } else { 0 }; },
-    Sgt => { truth = if sx > sy { 1 } else { 0 }; },
-    Sge => { truth = if sx >= sy { 1 } else { 0 }; },
-    Ult => { truth = if mx < my { 1 } else { 0 }; },
-    Ule => { truth = if mx <= my { 1 } else { 0 }; },
-    Ugt => { truth = if mx > my { 1 } else { 0 }; },
-    Uge => { truth = if mx >= my { 1 } else { 0 }; },
-    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_COMPARE_OP()); },
-  }
-  return write_result_bits(tcb, inst, 0, truth, 1);
-};
-
-let IntConvOp = enum {
-  Zext
-  Sext
-  Trunc
-  Bitcast
-  Unknown
-};
-
-let int_conv_op = func(k: u64) -> IntConvOp {
-  if k == codes.INST_ZEXT() { return IntConvOp.Zext { }; }
-  if k == codes.INST_SEXT() { return IntConvOp.Sext { }; }
-  if k == codes.INST_TRUNC() { return IntConvOp.Trunc { }; }
-  if k == codes.INST_BITCAST() { return IntConvOp.Bitcast { }; }
-  return IntConvOp.Unknown { };
-};
-
-let op_int_conv = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let a: VmValue = value_zero();
-  let sa: u64 = op_read(tcb, inst, 0, mut_of(a));
-  if sa != 0 { return sa; }
-  let target: u64 = type_width(inst.ty_kind, inst.ty_width);
-  let source: u64 = if a.width == 0 { target } else { a.width };
-  let r: u64 = 0;
-  match int_conv_op(inst.kind) {
-    Zext => { r = a.bits & width_mask(source); },
-    Sext => { r = sign_fill(a.bits, source); },
-    Trunc => { r = a.bits; },
-    Bitcast => { r = a.bits; },
-    Unknown => { return trap_now(tcb, TRAP_STATE(), ST_BAD_CONVERT_OP()); },
-  }
-  return write_result_bits(tcb, inst, 0, r, target);
-};
-
-// --- ALU：浮点与向量 ------------------------------------------------------
-// 前端没有 f64，浮点算术无法用源码表达；这里确定性拒绝，绝不静默错值。
-let op_float_any = func(tcb: Mut(TCB)) -> u64 {
-  return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_FLOAT_UNSUPPORTED());
-};
-
-let op_vector_any = func(tcb: Mut(TCB)) -> u64 {
-  return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_VECTOR_UNSUPPORTED());
-};
-
-// --- 地址与内存 -----------------------------------------------------------
-let op_lea = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let base: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(base));
-  if s0 != 0 { return s0; }
-  let index: VmValue = value_zero();
-  let s1: u64 = op_read(tcb, inst, 1, mut_of(index));
-  if s1 != 0 { return s1; }
-  let scale: VmValue = value_zero();
-  let s2: u64 = op_read(tcb, inst, 2, mut_of(scale));
-  if s2 != 0 { return s2; }
-  let displacement: VmValue = value_zero();
-  let s3: u64 = op_read(tcb, inst, 3, mut_of(displacement));
-  if s3 != 0 { return s3; }
-  // 先把每个 VmValue 的载荷落成独立标量再算：多个聚合局部量的字段直接写在同一个
-  // 表达式里时，当前前端会把它们读串。
-  let bbits: u64 = base.bits;
-  let ibits: u64 = index.bits;
-  let sbits: u64 = scale.bits;
-  let dbits: u64 = displacement.bits;
-  let r: u64 = bbits + ibits * sbits + dbits;
-  return write_result_bits(tcb, inst, 0, r, 64);
-};
-
-let is_misaligned = func(align: u64, where: u64) -> u64 {
-  if align == 0 { return 0; }
-  let mask: u64 = align - 1;
-  if (where & mask) != 0 { return 1; }
-  return 0;
-};
-
-let op_load = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let address: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(address));
-  if s0 != 0 { return s0; }
-  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
-  if size > 8 {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
-  }
-  if is_misaligned(inst.align, address.bits) == 1 {
-    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
-  }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 0 {
-    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_LOAD_FAULT());
-  }
-  let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
-  return write_result_bits(tcb, inst, 0, raw, type_width(inst.ty_kind, inst.ty_width));
-};
-
-let op_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let value: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(value));
-  if s0 != 0 { return s0; }
-  let address: VmValue = value_zero();
-  let s1: u64 = op_read(tcb, inst, 1, mut_of(address));
-  if s1 != 0 { return s1; }
-  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
-  if size > 8 {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
-  }
-  if is_misaligned(inst.align, address.bits) == 1 {
-    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
-  }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_WRITE()) == 0 {
-    if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 1 {
-      return trap_now(tcb, TRAP_PERM_VIOLATION(), ST_READ_ONLY());
-    }
-    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_STORE_FAULT());
-  }
-  let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
-  return 0;
-};
-
-// --- 原子访问 -------------------------------------------------------------
-// 单线程 VM 里没有重排，内存序只做取值范围校验：越界或非整型字面量的序就地拒绝。
-let atomic_order_ok = func(inst: vf.IrInst, index: u64) -> u64 {
-  if index >= inst.operand_count { return 1; }
-  let op: vf.IrOperand = vf.inst_op(inst, index);
-  if op.kind != vf.OP_INT() { return 0; }
-  if op.bits > codes.ORDER_SEQ_CST() { return 0; }
-  return 1;
-};
-
-let op_atomic_load = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let order_at: u64 = 1;
-  if atomic_order_ok(inst, order_at) == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
-  }
-  let address: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(address));
-  if s0 != 0 { return s0; }
-  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
-  if size > 8 {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
-  }
-  if is_misaligned(inst.align, address.bits) == 1 {
-    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
-  }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 0 {
-    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_LOAD_FAULT());
-  }
-  let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
-  return write_result_bits(tcb, inst, 0, raw, type_width(inst.ty_kind, inst.ty_width));
-};
-
-let op_atomic_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let order_at: u64 = 2;
-  if atomic_order_ok(inst, order_at) == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
-  }
-  let value: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(value));
-  if s0 != 0 { return s0; }
-  let address: VmValue = value_zero();
-  let s1: u64 = op_read(tcb, inst, 1, mut_of(address));
-  if s1 != 0 { return s1; }
-  let size: u64 = type_size(inst.ty_kind, inst.ty_width);
-  if size > 8 {
-    return trap_now(tcb, TRAP_STATE(), ST_BAD_MEMORY_WIDTH());
-  }
-  if is_misaligned(inst.align, address.bits) == 1 {
-    return trap_now(tcb, TRAP_ALIGNMENT(), ST_ALIGNMENT());
-  }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_WRITE()) == 0 {
-    if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 1 {
-      return trap_now(tcb, TRAP_PERM_VIOLATION(), ST_READ_ONLY());
-    }
-    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_STORE_FAULT());
-  }
-  let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
-  return 0;
-};
-
-// 单线程里 fence 就是空操作：只校验那个内存序操作数。
-let op_atomic_any = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let k: u64 = inst.kind;
-  if k == codes.INST_ATOMIC_FENCE() {
-    if inst.operand_count != 1 {
-      return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
-    }
-    if atomic_order_ok(inst, 0) == 0 {
-      return trap_now(tcb, TRAP_STATE(), ST_ATOMIC_ORDER());
-    }
-    return 0;
-  }
-  if k == codes.INST_ATOMIC_LOAD() { return op_atomic_load(tcb, inst); }
-  if k == codes.INST_ATOMIC_STORE() { return op_atomic_store(tcb, inst); }
-  return trap_now(tcb, TRAP_UNIMPLEMENTED(), ST_ATOMIC_UNSUPPORTED());
-};
-
-let op_alloca = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  // count 是独立的无符号常量，不按元素类型宽度定宽读。
-  let count: u64 = inst.op0_bits;
-  let element: u64 = type_size(inst.ty_kind, inst.ty_width);
-  let align: u64 = STACK_ALIGN();
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) != 0 {
-    return trap_now(tcb, TRAP_CAPACITY_EXCEEDED(), ST_STACK_UNAVAILABLE());
-  }
-  let capacity: u64 = vs.vm_lease_capacity(tcb.space, lease);
-  if capacity == 0 {
-    return trap_now(tcb, TRAP_CAPACITY_EXCEEDED(), ST_STACK_UNAVAILABLE());
-  }
-  if (element != 0) and (count > max_u64() / element) {
-    return trap_now(tcb, TRAP_CAPACITY_EXCEEDED(), ST_ALLOCA_OVERFLOW());
-  }
-  let total: u64 = element * count;
-  if tcb.stack_used > (max_u64() - (align - 1)) {
-    return trap_now(tcb, TRAP_CAPACITY_EXCEEDED(), ST_ALLOCA_OVERFLOW());
-  }
-  let used: u64 = align_to(tcb.stack_used, align);
-  if total > (max_u64() - used) {
-    return trap_now(tcb, TRAP_CAPACITY_EXCEEDED(), ST_ALLOCA_OVERFLOW());
-  }
-  let limit: u64 = capacity;
-  if (tcb.quota_stack_bytes != 0) and (tcb.quota_stack_bytes < limit) {
-    limit = tcb.quota_stack_bytes;
-  }
-  if (used + total) > limit {
-    return trap_now(tcb, TRAP_STACK_OVERFLOW(), ST_STACK_EXHAUSTED());
-  }
-  let previous: u64 = tcb.stack_used;
-  tcb.stack_used = used + total;
-  if tcb.stack_used > tcb.stack_peak { tcb.stack_peak = tcb.stack_used; }
-  if stack_window_sync(tcb) != 0 {
-    tcb.stack_used = previous;
-    return trap_now(tcb, TRAP_STATE(), ST_STACK_WINDOW());
-  }
-  let base_addr: u64 = vs.vm_lease_base(tcb.space, lease);
-  return write_result_bits(tcb, inst, 0, base_addr + used, 64);
-};
-
-// --- 能力调用 -------------------------------------------------------------
-let cap_invoke = func(tcb: Mut(TCB), link_name: u64, args: Slice(u64),
-                      kind: u64, width: u64, out: Mut(VmValue)) -> u64 {
-  let hit: u64 = caps_find(tcb.caps, link_name, 0);
-  if hit == 0 {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_CAP_UNRESOLVED());
-  }
-  let e: Mut(VmCapEntry) = cap_entry_ptr(tcb.caps, hit - 1);
-  if e.kind != CAP_FUNCTION() {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_CAP_NOT_FUNCTION());
-  }
-  let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
-  if (fn as u64) == 0 {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_CAP_NO_FN());
-  }
-  let bits: u64 = fn(e.context, args);
-  deref(out) = value_bits(bits, type_width(kind, width));
-  return 0;
-};
-
-// 把实参读进 TCB 的暂存区（VmValue 一份、原始词一份）。
-// 超出声明参数位置的实参只有可变参数过程才有，没有类型记录，按 64 位原始值读入。
-let collect_args = func(tcb: Mut(TCB), inst: vf.IrInst, params: Ref(vf.IrParam),
-                        param_count: u64, arg_base: u64, count: u64, i: u64) -> u64 {
-  if i >= count { return 0; }
-  let cell: Mut(VmValue) = tcb_arg_slot(tcb, i);
-  let s: u64 = 0;
-  if i < param_count {
-    let ty: vf.IrType = param_type_at(params, i);
-    s = op_read_typed(tcb, inst, arg_base + i, ty.kind, ty.width, cell);
-  } else {
-    s = op_read_typed(tcb, inst, arg_base + i, codes.TY_ADDR(), 64, cell);
-  }
-  if s != 0 { return s; }
-  let w: Mut(u64) = tcb_arg_word(tcb, i);
-  deref(w) = cell.bits;
-  return collect_args(tcb, inst, params, param_count, arg_base, count, i + 1);
-};
-
-let bind_args = func(tcb: Mut(TCB), base: u64, count: u64, i: u64) -> u64 {
-  if i >= count { return 0; }
-  let src: Mut(VmValue) = tcb_arg_slot(tcb, i);
-  let dst: Mut(VmValue) = tcb_slot_ptr(tcb, base + i);
-  dst.width = src.width;
-  dst.bits = src.bits;
-  return bind_args(tcb, base, count, i + 1);
-};
-
-let enter_extern = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
-                        sub: im.SubInfo, arg_base: u64, arg_count: u64) -> u64 {
-  if sub.is_variadic == 1 {
-    if arg_count < sub.param_count {
-      return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
-    }
-  } else {
-    if arg_count != sub.param_count {
-      return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
-    }
-  }
-  if arg_count > MAX_OPERANDS() {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
-  }
-  // 同单元已定义过程可以被 extern 别名指回来，此时不进能力表。
-  if sub.link_name != 0 {
-    let redirected: u64 = im.vm_sub_index_by_body(tcb.image, sub.link_name);
-    if redirected != im.NO_INDEX() {
-      return enter_sub(tcb, inst, redirected, arg_base, arg_count, tcb.cur_position);
-    }
-  }
-  let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
-  if collected != 0 { return collected; }
-  let words: Slice(u64) = make_slice(Slice(u64), tcb.arg_words, arg_count);
-  let out: VmValue = value_zero();
-  let kind: u64 = 0;
-  let width: u64 = 0;
-  if sub.result_count > 0 {
-    let ty: vf.IrType = result_type_at(sub.results, 0);
-    kind = ty.kind;
-    width = ty.width;
-  }
-  let invoked: u64 = cap_invoke(tcb, sub.link_name, words, kind, width, mut_of(out));
-  if invoked != 0 { return invoked; }
-  if inst.result_count == 0 { return 0; }
-  return write_result(tcb, inst, 0, out);
-};
-
-let enter_sub = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
-                     arg_base: u64, arg_count: u64, parent_position: u64) -> u64 {
-  if (sub_index == im.NO_INDEX()) or (sub_index >= im.vm_sub_count(tcb.image)) {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_CALL_NO_SUB());
-  }
-  let sub: im.SubInfo = im.vm_sub(tcb.image, sub_index);
-  if sub.is_extern == 1 {
-    return enter_extern(tcb, inst, sub_index, sub, arg_base, arg_count);
-  }
-  if sub.body_region == im.NO_REGION() {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_CALL_NO_BODY());
-  }
-  if arg_count != sub.param_count {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
-  }
-  if arg_count > MAX_OPERANDS() {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
-  }
-  let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
-  if collected != 0 { return collected; }
-  let pushed: u64 = push_region(tcb, sub.body_region, parent_position, 0, 1);
-  if pushed != SLICE_RUNNABLE() { return pushed; }
-  let traced: u64 = trace_record(tcb, sub.name, TRACE_ENTER());
-  let callee: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  return bind_args(tcb, callee.slot_base, arg_count, 0);
-};
-
-let op_call = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  if inst.symbol != 0 {
-    return enter_sub(tcb, inst, meta.sub_index, 0, inst.operand_count, tcb.cur_position);
-  }
-  // 间接调用：操作数 0 是目标地址，其余是实参。能不能调用由区段的 CALL 权限说话。
-  if inst.operand_count == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
-  }
-  let target: VmValue = value_zero();
-  let s0: u64 = op_read_typed(tcb, inst, 0, codes.TY_ADDR(), 64, mut_of(target));
-  if s0 != 0 { return s0; }
-  if vs.vm_check(tcb.space, target.bits, 8, vs.MEM_CALL()) == 0 {
-    return trap_now(tcb, TRAP_MEMORY_OOB(), ST_INDIRECT_NO_CALL());
-  }
-  let sub_index: u64 = im.vm_sub_at(tcb.image, target.bits);
-  if sub_index == im.NO_INDEX() {
-    return trap_now(tcb, TRAP_CAP_DENIED(), ST_INDIRECT_NO_SUB());
-  }
-  let sub: im.SubInfo = im.vm_sub(tcb.image, sub_index);
-  if inst.operand_count != (sub.param_count + 1) {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_ARITY());
-  }
-  return enter_sub(tcb, inst, sub_index, 1, inst.operand_count - 1, tcb.cur_position);
-};
-
-// --- 结构化控制流 ---------------------------------------------------------
-let op_if = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  let condition: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(condition));
-  if s0 != 0 { return s0; }
-  let truth: u64 = condition.bits & 1;
-  let target: u64 = if truth == 1 { meta.then_region } else { meta.else_region };
-  if target == im.NO_REGION() { return SLICE_RUNNABLE(); }
-  return push_region(tcb, target, tcb.cur_position, 0, 0);
-};
-
-let op_switch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  let selector: VmValue = value_zero();
-  let s0: u64 = op_read(tcb, inst, 0, mut_of(selector));
-  if s0 != 0 { return s0; }
-  let width: u64 = if selector.width == 0 { 64 } else { selector.width };
-  let effective: u64 = if inst.has_ty == 1 { type_width(inst.ty_kind, inst.ty_width) } else { width };
-  let mask: u64 = width_mask(effective);
-  let raw: u64 = selector.bits & mask;
-  let target: u64 = op_switch_case(tcb, inst, meta, raw, mask, 0);
-  if tcb.state != VM_RUNNING() { return tcb.slice; }
-  if target == im.NO_REGION() {
-    return trap_now(tcb, TRAP_STATE(), ST_SWITCH_NO_DEFAULT());
-  }
-  return push_region(tcb, target, tcb.cur_position, 0, 0);
-};
-
-let op_switch_case = func(tcb: Mut(TCB), inst: vf.IrInst, meta: im.InstMeta,
-                          raw: u64, mask: u64, i: u64) -> u64 {
-  if i >= inst.case_count { return meta.default_region; }
-  if meta.case_base == im.NO_INDEX() {
-    return trap_now(tcb, TRAP_STATE(), ST_SWITCH_NO_CASES());
-  }
-  let kase: im.CaseInfo = im.vm_case(tcb.image, meta.case_base + i);
-  if (kase.value & mask) == raw { return kase.region; }
-  return op_switch_case(tcb, inst, meta, raw, mask, i + 1);
-};
-
-let op_loop = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, meta.loop_region);
-  if rec.valid == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_LOOP_NO_REGION());
-  }
-  if rec.param_count > MAX_OPERANDS() {
-    return trap_now(tcb, TRAP_STATE(), ST_LOOP_PARAMS());
-  }
-  let collected: u64 = collect_inits(tcb, meta.loop_region, rec, 0);
-  if collected != 0 { return collected; }
-  let pushed: u64 = push_region(tcb, meta.loop_region, tcb.cur_position, inst.label, 0);
-  if pushed != SLICE_RUNNABLE() { return pushed; }
-  let loop_frame: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  return bind_args(tcb, loop_frame.slot_base, rec.param_count, 0);
-};
-
-// 循环初值在父帧求值。
-//
-// 当前 LAINIR 的 #loop 不带初值操作数，装载器只提供字面量初值（image.lain 的
-// 注释与 C99 后端的区域参数零初始化一致）。ParamInit 的引用字段在返回聚合里是
-// 块指针，且指回已退栈的临时块（前端把嵌套聚合表示成指针），读不到；bits 是
-// 标量字段，可安全读取。所以这里按字面量初值执行。
-let literal_operand_ref = func() -> im.OperandRef {
-  return im.OperandRef {
-    is_literal: 1,
-    is_symbol: 0,
-    is_proc: 0,
-    frame_distance: 0,
-    slot: 0,
-    symbol_index: 0,
-  };
-};
-
-let collect_inits = func(tcb: Mut(TCB), region_id: u64, rec: im.ImageRegion, i: u64) -> u64 {
-  if i >= rec.param_count { return 0; }
-  let init: im.ParamInit = im.vm_param_init(tcb.image, region_id, i);
-  let init_bits: u64 = init.bits;
-  let ty: vf.IrType = param_type_at(rec.params, i);
-  let cell: Mut(VmValue) = tcb_arg_slot(tcb, i);
-  let s: u64 = read_slot_ref(tcb, literal_operand_ref(), init_bits, ty.kind, ty.width, cell);
-  if s != 0 { return s; }
-  return collect_inits(tcb, region_id, rec, i + 1);
-};
-
-let op_yield = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let rec: im.ImageRegion = im.vm_region(tcb.image, tcb.cur_region);
-  if inst.operand_count != rec.result_count {
-    return trap_now(tcb, TRAP_STATE(), ST_YIELD_RESULTS());
-  }
-  let v0: VmValue = value_zero();
-  let v1: VmValue = value_zero();
-  if inst.operand_count > 0 {
-    let ty: vf.IrType = result_type_at(rec.results, 0);
-    let s0: u64 = op_read_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
-    if s0 != 0 { return s0; }
-  }
-  if inst.operand_count > 1 {
-    let ty: vf.IrType = result_type_at(rec.results, 1);
-    let s1: u64 = op_read_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
-    if s1 != 0 { return s1; }
-  }
-  return leave_region(tcb, inst.operand_count, v0, v1);
-};
-
-let op_break = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let found: u64 = find_loop_frame(tcb, inst.label);
-  if (found == 0) or (found < 2) {
-    return trap_now(tcb, TRAP_STATE(), ST_BREAK_NO_LOOP());
-  }
-  let loop_index: u64 = found - 1;
-  let loop_frame: Mut(Frame) = tcb_frame_ptr(tcb, loop_index);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, loop_frame.region);
-  if inst.operand_count != rec.result_count {
-    return trap_now(tcb, TRAP_STATE(), ST_BREAK_RESULTS());
-  }
-  let v0: VmValue = value_zero();
-  let v1: VmValue = value_zero();
-  if inst.operand_count > 0 {
-    let ty: vf.IrType = result_type_at(rec.results, 0);
-    let s0: u64 = op_read_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
-    if s0 != 0 { return s0; }
-  }
-  if inst.operand_count > 1 {
-    let ty: vf.IrType = result_type_at(rec.results, 1);
-    let s1: u64 = op_read_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
-    if s1 != 0 { return s1; }
-  }
-  let parent: Mut(Frame) = tcb_frame_ptr(tcb, loop_index - 1);
-  let at: u64 = loop_frame.parent_position;
-  if inst.operand_count > 0 {
-    let s2: u64 = write_frame_result(tcb, parent, at, 0, v0, ST_BREAK_NO_SLOT());
-    if s2 != 0 { return s2; }
-  }
-  if inst.operand_count > 1 {
-    let s3: u64 = write_frame_result(tcb, parent, at, 1, v1, ST_BREAK_NO_SLOT());
-    if s3 != 0 { return s3; }
-  }
-  tcb.frame_count = loop_index;
-  parent.position = at + 1;
-  recount_call_depth(tcb);
-  return SLICE_RUNNABLE();
-};
-
-let op_continue = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let found: u64 = find_loop_frame(tcb, inst.label);
-  if found == 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_CONTINUE_NO_LOOP());
-  }
-  let loop_index: u64 = found - 1;
-  let loop_frame: Mut(Frame) = tcb_frame_ptr(tcb, loop_index);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, loop_frame.region);
-  if inst.operand_count != rec.param_count {
-    return trap_now(tcb, TRAP_STATE(), ST_CONTINUE_PARAMS());
-  }
-  if inst.operand_count > MAX_OPERANDS() {
-    return trap_now(tcb, TRAP_STATE(), ST_CALL_OPERANDS());
-  }
-  let collected: u64 = collect_loop_args(tcb, inst, rec, 0);
-  if collected != 0 { return collected; }
-  let bound: u64 = bind_args(tcb, loop_frame.slot_base, inst.operand_count, 0);
-  if bound != 0 { return bound; }
-  tcb.frame_count = loop_index + 1;
-  loop_frame.position = 0;
-  recount_call_depth(tcb);
-  return SLICE_RUNNABLE();
-};
-
-let collect_loop_args = func(tcb: Mut(TCB), inst: vf.IrInst, rec: im.ImageRegion,
-                             i: u64) -> u64 {
-  if i >= inst.operand_count { return 0; }
-  let ty: vf.IrType = param_type_at(rec.params, i);
-  let cell: Mut(VmValue) = tcb_arg_slot(tcb, i);
-  let s: u64 = op_read_typed(tcb, inst, i, ty.kind, ty.width, cell);
-  if s != 0 { return s; }
-  return collect_loop_args(tcb, inst, rec, i + 1);
-};
-
-let op_return = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let leaving: u64 = frame_sub_symbol(tcb, tcb.frame_count - 1);
-  let traced: u64 = trace_record(tcb, leaving, TRACE_EXIT());
-  let value: VmValue = value_zero();
-  if inst.operand_count > 0 {
-    let rec: im.ImageRegion = im.vm_region(tcb.image, tcb.cur_region);
-    let kind: u64 = 0;
-    let width: u64 = 0;
-    if rec.sub_index < im.vm_sub_count(tcb.image) {
-      let sub: im.SubInfo = im.vm_sub(tcb.image, rec.sub_index);
-      if sub.result_count > 0 {
-        let ty: vf.IrType = result_type_at(sub.results, 0);
-        kind = ty.kind;
-        width = ty.width;
-      }
-    }
-    let s0: u64 = op_read_typed(tcb, inst, 0, kind, width, mut_of(value));
-    if s0 != 0 { return s0; }
-  }
-  let remaining: u64 = pop_to_call_frame(tcb);
-  if remaining == 0 {
-    tcb.has_result = 0;
-    tcb.call_depth = 0;
-    tcb.state = VM_DEAD();
-    tcb.slice = SLICE_DONE();
-    return SLICE_DONE();
-  }
-  let callee: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  tcb.stack_used = callee.stack_mark;
-  if stack_window_sync(tcb) != 0 {
-    return trap_now(tcb, TRAP_STATE(), ST_STACK_WINDOW());
-  }
-  tcb.frame_count = tcb.frame_count - 1;
-  recount_call_depth(tcb);
-  if tcb.frame_count == 0 {
-    tcb.result_width = value.width;
-    tcb.result_bits = value.bits;
-    tcb.has_result = if inst.operand_count > 0 { 1 } else { 0 };
-    tcb.state = VM_DEAD();
-    tcb.slice = SLICE_DONE();
-    return SLICE_DONE();
-  }
-  let caller: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  if inst.operand_count > 0 {
-    let s1: u64 = write_frame_result(tcb, caller, caller.position, 0, value, ST_RETURN_NO_SLOT());
-    if s1 != 0 { return s1; }
-  }
-  caller.position = caller.position + 1;
-  return SLICE_RUNNABLE();
-};
-
-let op_unreachable = func(tcb: Mut(TCB)) -> u64 {
-  return trap_now(tcb, TRAP_UNREACHABLE(), ST_UNKNOWN_INST());
-};
-
-// --- 分派 -----------------------------------------------------------------
-let is_int_bin = func(k: u64) -> bool {
-  if (k == codes.INST_ADD()) or (k == codes.INST_SUB()) or (k == codes.INST_MUL()) { return true; }
-  if (k == codes.INST_SDIV()) or (k == codes.INST_UDIV()) { return true; }
-  if (k == codes.INST_SREM()) or (k == codes.INST_UREM()) { return true; }
-  if (k == codes.INST_AND()) or (k == codes.INST_OR()) or (k == codes.INST_XOR()) { return true; }
-  if (k == codes.INST_SHL()) or (k == codes.INST_LSHR()) or (k == codes.INST_ASHR()) { return true; }
-  return false;
-};
-
-let is_int_cmp = func(k: u64) -> bool {
-  if k < codes.INST_EQ() { return false; }
-  if k > codes.INST_UGE() { return false; }
-  return true;
-};
-
-let is_float_bin = func(k: u64) -> bool {
-  if (k == codes.INST_FADD()) or (k == codes.INST_FSUB()) { return true; }
-  if (k == codes.INST_FMUL()) or (k == codes.INST_FDIV()) { return true; }
-  return false;
-};
-
-let is_float_cmp = func(k: u64) -> bool {
-  if k < codes.INST_FOEQ() { return false; }
-  if k > codes.INST_FUGE() { return false; }
-  return true;
-};
-
-let is_int_conv = func(k: u64) -> bool {
-  if (k == codes.INST_ZEXT()) or (k == codes.INST_SEXT()) { return true; }
-  if (k == codes.INST_TRUNC()) or (k == codes.INST_BITCAST()) { return true; }
-  return false;
-};
-
-let is_float_conv = func(k: u64) -> bool {
-  if k < codes.INST_FPEXT() { return false; }
-  if k > codes.INST_UITOFP() { return false; }
-  return true;
-};
-
-let is_vector = func(k: u64) -> bool {
-  if k < codes.INST_VADD() { return false; }
-  if k > codes.INST_VCMPGT() { return false; }
-  return true;
-};
-
-let is_atomic = func(k: u64) -> bool {
-  if (k == codes.INST_ATOMIC_LOAD()) or (k == codes.INST_ATOMIC_STORE()) { return true; }
-  if k == codes.INST_ATOMIC_FENCE() { return true; }
-  if k < codes.INST_XCHG() { return false; }
-  if k > codes.INST_RMW_XOR() { return false; }
-  return true;
-};
-
-// 指令族的分类结果。分类本身只在这一个阶梯里做一次，dispatch 只对枚举做穷尽
-// match：新增指令族时编译器会在两处同时要求补齐，不会静默落进未知指令。
-let OpClass = enum {
-  IntBin
-  IntCmp
-  IntConv
-  Float
-  Vector
-  Atomic
-  Lea
-  Load
-  Store
-  Alloca
-  Call
-  If
-  Loop
-  Switch
-  Yield
-  Break
-  Continue
-  Return
-  Unreachable
-  Unknown
-};
-
-let op_class = func(k: u64) -> OpClass {
-  if is_int_bin(k) { return OpClass.IntBin { }; }
-  if is_int_cmp(k) { return OpClass.IntCmp { }; }
-  if is_int_conv(k) { return OpClass.IntConv { }; }
-  if is_float_bin(k) { return OpClass.Float { }; }
-  if is_float_cmp(k) { return OpClass.Float { }; }
-  if is_float_conv(k) { return OpClass.Float { }; }
-  if is_vector(k) { return OpClass.Vector { }; }
-  if is_atomic(k) { return OpClass.Atomic { }; }
-  if k == codes.INST_FNEG() { return OpClass.Float { }; }
-  if k == codes.INST_LEA() { return OpClass.Lea { }; }
-  if k == codes.INST_LOAD() { return OpClass.Load { }; }
-  if k == codes.INST_STORE() { return OpClass.Store { }; }
-  if k == codes.INST_ALLOCA() { return OpClass.Alloca { }; }
-  if k == codes.INST_CALL() { return OpClass.Call { }; }
-  if k == codes.INST_IF() { return OpClass.If { }; }
-  if k == codes.INST_LOOP() { return OpClass.Loop { }; }
-  if k == codes.INST_SWITCH() { return OpClass.Switch { }; }
-  if k == codes.INST_YIELD() { return OpClass.Yield { }; }
-  if k == codes.INST_BREAK() { return OpClass.Break { }; }
-  if k == codes.INST_CONTINUE() { return OpClass.Continue { }; }
-  if k == codes.INST_RETURN() { return OpClass.Return { }; }
-  if k == codes.INST_UNREACHABLE() { return OpClass.Unreachable { }; }
-  return OpClass.Unknown { };
-};
-
-let dispatch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
-  let cls: OpClass = op_class(inst.kind);
-  let result: u64 = match cls {
-    IntBin => op_int_bin(tcb, inst),
-    IntCmp => op_int_cmp(tcb, inst),
-    IntConv => op_int_conv(tcb, inst),
-    Float => op_float_any(tcb),
-    Vector => op_vector_any(tcb),
-    Atomic => op_atomic_any(tcb, inst),
-    Lea => op_lea(tcb, inst),
-    Load => op_load(tcb, inst),
-    Store => op_store(tcb, inst),
-    Alloca => op_alloca(tcb, inst),
-    Call => op_call(tcb, inst),
-    If => op_if(tcb, inst),
-    Loop => op_loop(tcb, inst),
-    Switch => op_switch(tcb, inst),
-    Yield => op_yield(tcb, inst),
-    Break => op_break(tcb, inst),
-    Continue => op_continue(tcb, inst),
-    Return => op_return(tcb, inst),
-    Unreachable => op_unreachable(tcb),
-    Unknown => trap_now(tcb, TRAP_STATE(), ST_UNKNOWN_INST()),
-  };
-  return result;
+  return st.vm_result_trap(trap_kind);
 };
 
 // --- CU -------------------------------------------------------------------
 // 推进一步。前置条件：TCB 处于 RUNNING；不满足时不动任何状态，原样返回当前切片结果。
 pub let vm_step = func(tcb: Mut(TCB)) -> VmResult {
-  if tcb.state == VM_BLOCKED() {
-    tcb.slice = SLICE_BLOCKED();
-    return result_of(tcb);
-  }
-  if tcb.state != VM_RUNNING() { return result_of(tcb); }
-  if (tcb.quota_steps != 0) and (tcb.steps >= tcb.quota_steps) {
-    trap_now(tcb, TRAP_FUEL(), ST_FUEL_EXHAUSTED());
-    return result_of(tcb);
-  }
-  if tcb.frame_count == 0 {
-    trap_now(tcb, TRAP_STATE(), ST_FRAME_NO_REGION());
-    return result_of(tcb);
-  }
-  let frame: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, frame.region);
-  if rec.valid == 0 {
-    trap_now(tcb, TRAP_STATE(), ST_FRAME_NO_REGION());
-    return result_of(tcb);
-  }
-  tcb.cur_region = frame.region;
-  tcb.cur_position = frame.position;
-  // 区域末尾落下 = 顺序离开这个区域；产出值的区域落下是错的。
-  if frame.position >= rec.inst_count {
-    if rec.result_count > 0 {
-      trap_now(tcb, TRAP_STATE(), ST_REGION_NO_RESULT());
-      return result_of(tcb);
-    }
-    let zero: VmValue = value_zero();
-    let left: u64 = leave_region(tcb, 0, zero, zero);
-    return result_of(tcb);
-  }
-  let inst: vf.IrInst = im.vm_inst(tcb.image, frame.region, frame.position);
-  if inst.kind >= codes.INST_COUNT() {
-    trap_now(tcb, TRAP_STATE(), ST_UNKNOWN_INST());
-    return result_of(tcb);
-  }
-  let saved_count: u64 = tcb.frame_count;
-  let saved_region: u64 = frame.region;
-  let saved_position: u64 = frame.position;
-  let ran: u64 = dispatch(tcb, inst);
-  tcb.steps = tcb.steps + 1;
-  if ran != SLICE_RUNNABLE() { return result_of(tcb); }
-  // 普通指令由 CU 统一推进位置；CONTINUE 主动把位置重置到 0，它的「没有变化」
-  // 恰恰就是回跳，不能再被当成落下一条指令。控制流指令自己管位置。
-  if tcb.frame_count == saved_count {
-    let now: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-    let stays: u64 = if (now.region == saved_region) and (now.position == saved_position) { 1 } else { 0 };
-    if (stays == 1) and (inst.kind != codes.INST_CONTINUE()) {
-      now.position = saved_position + 1;
-    }
-  }
-  return result_of(tcb);
+  return run.vm_step(tcb);
 };
 
 // 进入一个子过程：压根帧、把参数绑到最前面几个槽、置 RUNNING。
 pub let vm_tcb_start = func(tcb: Mut(TCB), entry: u64, args: Slice(u64)) -> u64 {
-  if tcb.frame_count != 0 {
-    return vm_reject(tcb, ST_ALREADY_STARTED());
-  }
-  if (entry == im.NO_INDEX()) or (entry >= im.vm_sub_count(tcb.image)) {
-    return vm_reject(tcb, ST_ENTRY_NOT_FOUND());
-  }
-  let sub: im.SubInfo = im.vm_sub(tcb.image, entry);
-  if sub.body_region == im.NO_REGION() {
-    return vm_reject(tcb, ST_CALL_NO_BODY());
-  }
-  if args.len != sub.param_count {
-    return vm_reject(tcb, ST_CALL_ARITY());
-  }
-  if sub.param_count > MAX_OPERANDS() {
-    return vm_reject(tcb, ST_CALL_OPERANDS());
-  }
-  let rec: im.ImageRegion = im.vm_region(tcb.image, sub.body_region);
-  if rec.valid == 0 {
-    return vm_reject(tcb, ST_FRAME_NO_REGION());
-  }
-  if rec.slot_count > tcb.slot_cap {
-    return vm_reject(tcb, ST_SLOT_OVERFLOW());
-  }
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, 0);
-  f.region = sub.body_region;
-  f.position = 0;
-  f.slot_base = 0;
-  f.slot_count = rec.slot_count;
-  f.parent_position = 0;
-  f.label = 0;
-  f.is_call_frame = 1;
-  f.stack_mark = 0;
-  clear_slots(tcb, 0, rec.slot_count);
-  tcb.frame_count = 1;
-  tcb.call_depth = 1;
-  tcb.stack_used = 0;
-  tcb.stack_peak = 0;
-  tcb.steps = 0;
-  tcb.has_result = 0;
-  tcb.result_width = 64;
-  tcb.result_bits = 0;
-  tcb.trap_kind = TRAP_NONE();
-  tcb.trap_status = 0;
-  tcb.trap_region = 0;
-  tcb.trap_position = 0;
-  tcb.slice = SLICE_RUNNABLE();
-  let bound: u64 = bind_entry_args(tcb, sub, args, 0);
-  if bound != 0 { return bound; }
-  tcb.state = VM_RUNNING();
-  return SLICE_RUNNABLE();
-};
-
-let bind_entry_args = func(tcb: Mut(TCB), sub: im.SubInfo, args: Slice(u64), i: u64) -> u64 {
-  if i >= sub.param_count { return 0; }
-  let ty: vf.IrType = param_type_at(sub.params, i);
-  let w: u64 = type_width(ty.kind, ty.width);
-  let dst: Mut(VmValue) = tcb_slot_ptr(tcb, i);
-  dst.width = w;
-  dst.bits = args[i] & width_mask(w);
-  return bind_entry_args(tcb, sub, args, i + 1);
-};
-
-// 跑到终态：DONE / TRAPPED / BLOCKED。燃料耗尽在 vm_step 里直接变成 Trap。
-let run_to_end = func(tcb: Mut(TCB)) -> VmResult {
-  let spun: VmResult = loop spin(step: VmResult = vm_step(tcb)) while step.status == SLICE_RUNNABLE() {
-    step = vm_step(tcb);
-  };
-  return spun;
+  return run.vm_tcb_start(tcb, entry, args);
 };
 
 // apply 的物理契约：独立栈租约、独立 TCB、限额执行、终态交付。
@@ -2091,42 +316,14 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                         caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
                         entry: u64, args: Slice(u64),
                         arena: MutSlice(u8)) -> VmResult {
-  let empty: MutSlice(VmTraceEvent) =
-      make_slice(MutSlice(VmTraceEvent), null_ref(Mut(VmTraceEvent)), 0);
-  let count0: u64 = 0;
-  let count: Mut(u64) = mut_of(count0);
-  return vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, empty, count);
+  return run.vm_apply(image, space, caps, quota, owner, entry, args, arena);
 };
 
 // 与 vm_apply 相同，只是多挂一块轨迹缓冲区。空切片等价于不挂。
 pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                                caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
                                entry: u64, args: Slice(u64), arena: MutSlice(u8),
-                               trace: MutSlice(VmTraceEvent), count: Mut(u64)) -> VmResult {
-  let need: u64 = vm_tcb_bytes(image, quota);
-  if arena.len < need { return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL()); }
-  let lease: vs.StackLease = vs.vm_no_lease();
-  if quota.max_stack_bytes > 0 {
-    lease = vs.vm_alloc_stack(space, quota.max_stack_bytes, owner);
-    if vs.vm_lease_none(lease) != 0 {
-      return vm_trap_result(TRAP_CAPACITY_EXCEEDED(), ST_STACK_EXHAUSTED());
-    }
-  }
-  let tcb: TCB = vm_tcb_blank();
-  let live: Mut(TCB) = mut_of(tcb);
-  let made: u64 = vm_tcb_new(image, space, caps, quota, lease, owner, arena, live);
-  if made == 0 {
-    if vs.vm_lease_none(lease) == 0 {
-      let dropped: u64 = vs.vm_free_stack(space, lease);
-    }
-    return vm_trap_result(TRAP_STATE(), ST_ARENA_TOO_SMALL());
-  }
-  let traced: u64 = vm_tcb_set_trace(live, trace, count);
-  let started: u64 = vm_tcb_start(live, entry, args);
-  let result: VmResult = if started != SLICE_RUNNABLE() { result_of(live) } else { run_to_end(live) };
-  let closed: u64 = vm_tcb_free(live);
-  if vs.vm_lease_none(lease) == 0 {
-    let freed: u64 = vs.vm_free_stack(space, lease);
-  }
-  return result;
+                               trace: MutSlice(VmTraceEvent),
+                               count: Mut(u64)) -> VmResult {
+  return run.vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, trace, count);
 };

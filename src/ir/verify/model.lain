@@ -1,0 +1,652 @@
+// LAINIR 模块表示：类型类别、操作数类别、错误码、记录结构与构造器。
+//
+// 表示用平坦下标：过程、区域、指令、分支各自放在连续记录里，彼此用下标引用。
+// 所有聚合都用 Mut 指针加计数表示，调用方用 IrBuilder 在一块原始字节区上顺序
+// 追加记录，构造过程不产生任何堆分配。静态验证在 src::ir::verify::checks。
+let codes = import("src::ir::ir_codes");
+
+// --- 类型类别 -------------------------------------------------------------
+// 物理类型类别与 ir_codes 的编号保持一致；void 与 bool 是本层额外区分。
+pub let TY_VOID = func() -> u64 { return 5; };
+pub let TY_BITS = func() -> u64 { return codes.TY_BITS(); };
+pub let TY_FLOAT = func() -> u64 { return codes.TY_FLOATS(); };
+pub let TY_ADDR = func() -> u64 { return codes.TY_ADDR(); };
+pub let TY_BOOL = func() -> u64 { return 4; };
+pub let TY_VEC = func() -> u64 { return codes.TY_VEC(); };
+
+// --- 操作数类别 -----------------------------------------------------------
+pub let OP_VALUE = func() -> u64 { return 0; };
+pub let OP_INT = func() -> u64 { return 1; };
+pub let OP_FLOAT = func() -> u64 { return 2; };
+
+// --- 验证器错误码 ---------------------------------------------------------
+pub let ERR_OK = func() -> u64 { return 0; };
+pub let ERR_BAD_OPCODE = func() -> u64 { return 1; };
+pub let ERR_UNDEF_VAL = func() -> u64 { return 2; };
+pub let ERR_TYPE_MISMATCH = func() -> u64 { return 3; };
+pub let ERR_NO_TERM = func() -> u64 { return 4; };
+pub let ERR_DUP_DEF = func() -> u64 { return 5; };
+pub let ERR_BAD_SWITCH = func() -> u64 { return 6; };
+// 绑定表耗尽：这是一个容量上限，与重复定义无关，必须报成自己的错误码。
+pub let ERR_BIND_CAP = func() -> u64 { return 7; };
+
+// --- 容量上限 -------------------------------------------------------------
+pub let MAX_OPERANDS = func() -> u64 { return 16; };
+pub let MAX_RESULTS = func() -> u64 { return 2; };
+// 一个过程验证沿途同时可见的参数与指令结果上限，也是模块 scratch 里绑定
+// 表的槽数：宿主原语样例的 main 就要 84 条，旧的 64 条会把它误判成重复
+// 定义。模块 scratch 由调用方按自己的 arena 分配（宿主切割测试里整个 IR
+// arena 不到 40KB，还要装两个模块），所以这个数不能定得太大，96 是两者
+// 之间的取值。
+pub let MAX_BINDINGS = func() -> u64 { return 96; };
+// 真实模块（宿主构造的 IR）用的绑定表槽数放在验证器自己的静态区里，不占
+// 模块 scratch；验证与文本发射都走这张表，所以小 arena 的切割测试仍然只
+// 需要 96 槽的那块 scratch。4096 个元素的数组字面量逐元素发 #lea，绑定数
+// 随元素同步增长，所以这张表按 4200 槽准备。
+pub let LARGE_BINDINGS = func() -> u64 { return 4200; };
+pub let MAX_LOOPS = func() -> u64 { return 8; };
+pub let MAX_DEPTH = func() -> u64 { return 64; };
+
+pub let INST_CAP = func() -> u64 { return 8; };
+pub let REGION_CAP = func() -> u64 { return 8; };
+pub let PROC_CAP = func() -> u64 { return 2; };
+pub let PARAM_CAP = func() -> u64 { return 8; };
+pub let TYPE_CAP = func() -> u64 { return 4; };
+pub let CASE_CAP = func() -> u64 { return 4; };
+
+// 没有区域的哨兵值。
+pub let NO_REGION = func() -> u64 { return 4294967295; };
+
+// --- 数据结构 -------------------------------------------------------------
+pub let IrType = struct {
+  kind: u64,
+  width: u64,
+};
+
+pub let IrOperand = struct {
+  kind: u64,
+  name: u64,
+  bits: u64,
+};
+
+pub let IrParam = struct {
+  name: u64,
+  ty_kind: u64,
+  ty_width: u64,
+};
+
+pub let IrCase = struct {
+  value: u64,
+  body: u64,
+};
+
+pub let IrInst = struct {
+  kind: u64,
+  ty_kind: u64,
+  ty_width: u64,
+  has_ty: u64,
+  op0_kind: u64,
+  op0_name: u64,
+  op0_bits: u64,
+  op1_kind: u64,
+  op1_name: u64,
+  op1_bits: u64,
+  op2_kind: u64,
+  op2_name: u64,
+  op2_bits: u64,
+  op3_kind: u64,
+  op3_name: u64,
+  op3_bits: u64,
+  op4_kind: u64,
+  op4_name: u64,
+  op4_bits: u64,
+  op5_kind: u64,
+  op5_name: u64,
+  op5_bits: u64,
+  op6_kind: u64,
+  op6_name: u64,
+  op6_bits: u64,
+  op7_kind: u64,
+  op7_name: u64,
+  op7_bits: u64,
+  op8_kind: u64,
+  op8_name: u64,
+  op8_bits: u64,
+  op9_kind: u64,
+  op9_name: u64,
+  op9_bits: u64,
+  op10_kind: u64,
+  op10_name: u64,
+  op10_bits: u64,
+  op11_kind: u64,
+  op11_name: u64,
+  op11_bits: u64,
+  op12_kind: u64,
+  op12_name: u64,
+  op12_bits: u64,
+  op13_kind: u64,
+  op13_name: u64,
+  op13_bits: u64,
+  op14_kind: u64,
+  op14_name: u64,
+  op14_bits: u64,
+  op15_kind: u64,
+  op15_name: u64,
+  op15_bits: u64,
+  operand_count: u64,
+  r0: u64,
+  r1: u64,
+  result_count: u64,
+  body: u64,
+  else_body: u64,
+  default_body: u64,
+  cases_at: u64,
+  case_count: u64,
+  label: u64,
+  symbol: u64,
+  align: u64,
+};
+
+pub let IrRegion = struct {
+  params: Ref(IrParam),
+  param_count: u64,
+  results: Ref(IrType),
+  result_count: u64,
+  insts: Ref(u64),
+  inst_count: u64,
+};
+
+pub let IrProc = struct {
+  name: u64,
+  link_name: u64,
+  is_extern: u64,
+  // extern 过程的调用约定属性：abi 与 lib 各自是一个下发的编号，
+  // is_variadic 置 1 表示实参个数可以多于形参个数。
+  abi: u64,
+  lib: u64,
+  is_variadic: u64,
+  params: Ref(IrParam),
+  param_count: u64,
+  results: Ref(IrType),
+  result_count: u64,
+  body: u64,
+};
+
+pub let IrModule = struct {
+  name: u64,
+  procs: Ref(IrProc),
+  proc_count: u64,
+  regions: Ref(IrRegion),
+  region_count: u64,
+  insts: Ref(IrInst),
+  inst_count: u64,
+  cases: Ref(IrCase),
+  case_count: u64,
+  scratch: Mut(u64),
+};
+
+// --- 构造器 ---------------------------------------------------------------
+pub let op_zero = func() -> IrOperand {
+  return IrOperand { kind: OP_VALUE(), name: 0, bits: 0 };
+};
+
+pub let op_value = func(name: u64) -> IrOperand {
+  return IrOperand { kind: OP_VALUE(), name: name, bits: 0 };
+};
+
+pub let op_int = func(bits: u64) -> IrOperand {
+  return IrOperand { kind: OP_INT(), name: 0, bits: bits };
+};
+
+pub let op_float = func(bits: u64) -> IrOperand {
+  return IrOperand { kind: OP_FLOAT(), name: 0, bits: bits };
+};
+
+pub let type_void = func() -> IrType { return IrType { kind: TY_VOID(), width: 0 }; };
+pub let type_bits = func(w: u64) -> IrType { return IrType { kind: TY_BITS(), width: w }; };
+pub let type_float = func(w: u64) -> IrType { return IrType { kind: TY_FLOAT(), width: w }; };
+pub let type_addr = func() -> IrType { return IrType { kind: TY_ADDR(), width: 0 }; };
+pub let type_bool = func() -> IrType { return IrType { kind: TY_BOOL(), width: 1 }; };
+pub let type_vec = func(w: u64) -> IrType { return IrType { kind: TY_VEC(), width: w }; };
+
+pub let param_new = func(name: u64, ty: IrType) -> IrParam {
+  return IrParam { name: name, ty_kind: ty.kind, ty_width: ty.width };
+};
+
+pub let case_new = func(value: u64, body: u64) -> IrCase {
+  return IrCase { value: value, body: body };
+};
+
+pub let inst_new = func(kind: u64) -> IrInst {
+  return IrInst {
+    kind: kind,
+    ty_kind: TY_VOID(),
+    ty_width: 0,
+    has_ty: 0,
+    op0_kind: OP_VALUE(),
+    op0_name: 0,
+    op0_bits: 0,
+    op1_kind: OP_VALUE(),
+    op1_name: 0,
+    op1_bits: 0,
+    op2_kind: OP_VALUE(),
+    op2_name: 0,
+    op2_bits: 0,
+    op3_kind: OP_VALUE(),
+    op3_name: 0,
+    op3_bits: 0,
+    op4_kind: OP_VALUE(),
+    op4_name: 0,
+    op4_bits: 0,
+    op5_kind: OP_VALUE(),
+    op5_name: 0,
+    op5_bits: 0,
+    op6_kind: OP_VALUE(),
+    op6_name: 0,
+    op6_bits: 0,
+    op7_kind: OP_VALUE(),
+    op7_name: 0,
+    op7_bits: 0,
+    op8_kind: OP_VALUE(),
+    op8_name: 0,
+    op8_bits: 0,
+    op9_kind: OP_VALUE(),
+    op9_name: 0,
+    op9_bits: 0,
+    op10_kind: OP_VALUE(),
+    op10_name: 0,
+    op10_bits: 0,
+    op11_kind: OP_VALUE(),
+    op11_name: 0,
+    op11_bits: 0,
+    op12_kind: OP_VALUE(),
+    op12_name: 0,
+    op12_bits: 0,
+    op13_kind: OP_VALUE(),
+    op13_name: 0,
+    op13_bits: 0,
+    op14_kind: OP_VALUE(),
+    op14_name: 0,
+    op14_bits: 0,
+    op15_kind: OP_VALUE(),
+    op15_name: 0,
+    op15_bits: 0,
+    operand_count: 0,
+    r0: 0,
+    r1: 0,
+    result_count: 0,
+    body: NO_REGION(),
+    else_body: NO_REGION(),
+    default_body: NO_REGION(),
+    cases_at: 0,
+    case_count: 0,
+    label: 0,
+    symbol: 0,
+    align: 0,
+  };
+};
+
+pub let region_new = func(params: Ref(IrParam), param_count: u64,
+                          results: Ref(IrType), result_count: u64,
+                          insts: Ref(u64), inst_count: u64) -> IrRegion {
+  return IrRegion {
+    params: params,
+    param_count: param_count,
+    results: results,
+    result_count: result_count,
+    insts: insts,
+    inst_count: inst_count,
+  };
+};
+
+pub let proc_new = func(name: u64, params: Ref(IrParam), param_count: u64,
+                        results: Ref(IrType), result_count: u64) -> IrProc {
+  return IrProc {
+    name: name,
+    link_name: 0,
+    is_extern: 0,
+    abi: 0,
+    lib: 0,
+    is_variadic: 0,
+    params: params,
+    param_count: param_count,
+    results: results,
+    result_count: result_count,
+    body: NO_REGION(),
+  };
+};
+
+pub let module_new = func(name: u64, procs: Ref(IrProc), proc_count: u64,
+                          regions: Ref(IrRegion), region_count: u64,
+                          insts: Ref(IrInst), inst_count: u64,
+                          cases: Ref(IrCase), case_count: u64,
+                          scratch: Mut(u64)) -> IrModule {
+  return IrModule {
+    name: name,
+    procs: procs,
+    proc_count: proc_count,
+    regions: regions,
+    region_count: region_count,
+    insts: insts,
+    inst_count: inst_count,
+    cases: cases,
+    case_count: case_count,
+    scratch: scratch,
+  };
+};
+
+// --- 指令修改 -------------------------------------------------------------
+let set_op = func(it: Mut(IrInst), i: u64, op: IrOperand) -> u64 {
+  if i == 0 { it.op0_kind = op.kind; it.op0_name = op.name; it.op0_bits = op.bits; }
+  if i == 1 { it.op1_kind = op.kind; it.op1_name = op.name; it.op1_bits = op.bits; }
+  if i == 2 { it.op2_kind = op.kind; it.op2_name = op.name; it.op2_bits = op.bits; }
+  if i == 3 { it.op3_kind = op.kind; it.op3_name = op.name; it.op3_bits = op.bits; }
+  if i == 4 { it.op4_kind = op.kind; it.op4_name = op.name; it.op4_bits = op.bits; }
+  if i == 5 { it.op5_kind = op.kind; it.op5_name = op.name; it.op5_bits = op.bits; }
+  if i == 6 { it.op6_kind = op.kind; it.op6_name = op.name; it.op6_bits = op.bits; }
+  if i == 7 { it.op7_kind = op.kind; it.op7_name = op.name; it.op7_bits = op.bits; }
+  if i == 8 { it.op8_kind = op.kind; it.op8_name = op.name; it.op8_bits = op.bits; }
+  if i == 9 { it.op9_kind = op.kind; it.op9_name = op.name; it.op9_bits = op.bits; }
+  if i == 10 { it.op10_kind = op.kind; it.op10_name = op.name; it.op10_bits = op.bits; }
+  if i == 11 { it.op11_kind = op.kind; it.op11_name = op.name; it.op11_bits = op.bits; }
+  if i == 12 { it.op12_kind = op.kind; it.op12_name = op.name; it.op12_bits = op.bits; }
+  if i == 13 { it.op13_kind = op.kind; it.op13_name = op.name; it.op13_bits = op.bits; }
+  if i == 14 { it.op14_kind = op.kind; it.op14_name = op.name; it.op14_bits = op.bits; }
+  if i == 15 { it.op15_kind = op.kind; it.op15_name = op.name; it.op15_bits = op.bits; }
+  return 0;
+};
+
+pub let inst_set_type = func(it: Mut(IrInst), kind: u64, width: u64) -> u64 {
+  it.ty_kind = kind;
+  it.ty_width = width;
+  it.has_ty = 1;
+  return 0;
+};
+
+pub let inst_add_operand = func(it: Mut(IrInst), op: IrOperand) -> u64 {
+  let at: u64 = it.operand_count;
+  if at >= MAX_OPERANDS() { return 0; }
+  set_op(it, at, op);
+  it.operand_count = at + 1;
+  return 0;
+};
+
+pub let inst_add_result = func(it: Mut(IrInst), name: u64) -> u64 {
+  let at: u64 = it.result_count;
+  if at >= MAX_RESULTS() { return 0; }
+  if at == 0 { it.r0 = name; }
+  if at == 1 { it.r1 = name; }
+  it.result_count = at + 1;
+  return 0;
+};
+
+pub let inst_set_body = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.body = ri;
+  return 0;
+};
+
+pub let inst_set_else = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.else_body = ri;
+  return 0;
+};
+
+pub let inst_set_default = func(it: Mut(IrInst), ri: u64) -> u64 {
+  it.default_body = ri;
+  return 0;
+};
+
+pub let inst_set_cases = func(it: Mut(IrInst), at: u64, count: u64) -> u64 {
+  it.cases_at = at;
+  it.case_count = count;
+  return 0;
+};
+
+pub let inst_set_label = func(it: Mut(IrInst), label: u64) -> u64 {
+  it.label = label;
+  return 0;
+};
+
+pub let inst_set_symbol = func(it: Mut(IrInst), symbol: u64) -> u64 {
+  it.symbol = symbol;
+  return 0;
+};
+
+pub let inst_set_align = func(it: Mut(IrInst), align: u64) -> u64 {
+  it.align = align;
+  return 0;
+};
+
+pub let proc_set_body = func(p: Mut(IrProc), ri: u64) -> u64 {
+  p.body = ri;
+  return 0;
+};
+
+pub let proc_set_extern = func(p: Mut(IrProc), link: u64) -> u64 {
+  p.is_extern = 1;
+  p.link_name = link;
+  p.body = NO_REGION();
+  return 0;
+};
+
+// 调用约定属性可以单独写在带函数体的过程上，所以这里不碰 is_extern 与 body。
+pub let proc_set_abi = func(p: Mut(IrProc), abi: u64, lib: u64, is_variadic: u64) -> u64 {
+  p.abi = abi;
+  p.lib = lib;
+  p.is_variadic = is_variadic;
+  return 0;
+};
+
+// --- 记录读取 -------------------------------------------------------------
+pub let inst_op = func(it: IrInst, i: u64) -> IrOperand {
+  if i == 0 { return IrOperand { kind: it.op0_kind, name: it.op0_name, bits: it.op0_bits }; }
+  if i == 1 { return IrOperand { kind: it.op1_kind, name: it.op1_name, bits: it.op1_bits }; }
+  if i == 2 { return IrOperand { kind: it.op2_kind, name: it.op2_name, bits: it.op2_bits }; }
+  if i == 3 { return IrOperand { kind: it.op3_kind, name: it.op3_name, bits: it.op3_bits }; }
+  if i == 4 { return IrOperand { kind: it.op4_kind, name: it.op4_name, bits: it.op4_bits }; }
+  if i == 5 { return IrOperand { kind: it.op5_kind, name: it.op5_name, bits: it.op5_bits }; }
+  if i == 6 { return IrOperand { kind: it.op6_kind, name: it.op6_name, bits: it.op6_bits }; }
+  if i == 7 { return IrOperand { kind: it.op7_kind, name: it.op7_name, bits: it.op7_bits }; }
+  if i == 8 { return IrOperand { kind: it.op8_kind, name: it.op8_name, bits: it.op8_bits }; }
+  if i == 9 { return IrOperand { kind: it.op9_kind, name: it.op9_name, bits: it.op9_bits }; }
+  if i == 10 { return IrOperand { kind: it.op10_kind, name: it.op10_name, bits: it.op10_bits }; }
+  if i == 11 { return IrOperand { kind: it.op11_kind, name: it.op11_name, bits: it.op11_bits }; }
+  if i == 12 { return IrOperand { kind: it.op12_kind, name: it.op12_name, bits: it.op12_bits }; }
+  if i == 13 { return IrOperand { kind: it.op13_kind, name: it.op13_name, bits: it.op13_bits }; }
+  if i == 14 { return IrOperand { kind: it.op14_kind, name: it.op14_name, bits: it.op14_bits }; }
+  if i == 15 { return IrOperand { kind: it.op15_kind, name: it.op15_name, bits: it.op15_bits }; }
+  return op_zero();
+};
+
+pub let inst_result_name = func(it: IrInst, i: u64) -> u64 {
+  if i == 0 { return it.r0; }
+  if i == 1 { return it.r1; }
+  return 0;
+};
+
+pub let inst_ty = func(it: IrInst) -> IrType {
+  return IrType { kind: it.ty_kind, width: it.ty_width };
+};
+
+pub let param_ty = func(p: IrParam) -> IrType {
+  return IrType { kind: p.ty_kind, width: p.ty_width };
+};
+
+// 每块记录区都是一张定长元素表：先按元素类型造一个下标视图，再取元素地址。
+// 视图的元素个数只写进类型元数据并决定下标步长，不分配存储；65536 是覆盖
+// 所有调用方容量的视图上限，真实容量由调用方的计数把关。
+pub let inst_slot = func(base: Ref(IrInst), i: u64) -> Mut(IrInst) {
+  let view: Mut(Array(IrInst, 65536)) = ptr_cast(Mut(Array(IrInst, 65536)), base);
+  return mut_of(deref(view)[i]);
+};
+
+pub let region_slot = func(base: Ref(IrRegion), i: u64) -> Mut(IrRegion) {
+  let view: Mut(Array(IrRegion, 65536)) = ptr_cast(Mut(Array(IrRegion, 65536)), base);
+  return mut_of(deref(view)[i]);
+};
+
+pub let proc_slot = func(base: Ref(IrProc), i: u64) -> Mut(IrProc) {
+  let view: Mut(Array(IrProc, 65536)) = ptr_cast(Mut(Array(IrProc, 65536)), base);
+  return mut_of(deref(view)[i]);
+};
+
+pub let param_slot = func(base: Ref(IrParam), i: u64) -> Ref(IrParam) {
+  let view: Ref(Array(IrParam, 65536)) = ptr_cast(Ref(Array(IrParam, 65536)), base);
+  return ref_of(deref(view)[i]);
+};
+
+pub let type_slot = func(base: Ref(IrType), i: u64) -> Ref(IrType) {
+  let view: Ref(Array(IrType, 65536)) = ptr_cast(Ref(Array(IrType, 65536)), base);
+  return ref_of(deref(view)[i]);
+};
+
+pub let case_slot = func(base: Ref(IrCase), i: u64) -> Ref(IrCase) {
+  let view: Ref(Array(IrCase, 65536)) = ptr_cast(Ref(Array(IrCase, 65536)), base);
+  return ref_of(deref(view)[i]);
+};
+
+pub let inst_at_ref = func(base: Ref(IrInst), i: u64) -> IrInst {
+  let s: Slice(IrInst) = make_slice(Slice(IrInst), base, i + 1);
+  return s[i];
+};
+
+pub let region_at_ref = func(base: Ref(IrRegion), i: u64) -> IrRegion {
+  let s: Slice(IrRegion) = make_slice(Slice(IrRegion), base, i + 1);
+  return s[i];
+};
+
+pub let proc_at_ref = func(base: Ref(IrProc), i: u64) -> IrProc {
+  let s: Slice(IrProc) = make_slice(Slice(IrProc), base, i + 1);
+  return s[i];
+};
+
+pub let param_at_ref = func(base: Ref(IrParam), i: u64) -> IrParam {
+  let s: Slice(IrParam) = make_slice(Slice(IrParam), base, i + 1);
+  return s[i];
+};
+
+pub let type_at_ref = func(base: Ref(IrType), i: u64) -> IrType {
+  let s: Slice(IrType) = make_slice(Slice(IrType), base, i + 1);
+  return s[i];
+};
+
+pub let case_at_ref = func(base: Ref(IrCase), i: u64) -> IrCase {
+  let s: Slice(IrCase) = make_slice(Slice(IrCase), base, i + 1);
+  return s[i];
+};
+
+// --- 构造器（顺序追加到原始字节区）---------------------------------------
+pub let IrBuilder = struct {
+  insts: Mut(IrInst),
+  inst_count: u64,
+  regions: Mut(IrRegion),
+  region_count: u64,
+  procs: Mut(IrProc),
+  proc_count: u64,
+  params: Mut(IrParam),
+  param_count: u64,
+  types: Mut(IrType),
+  type_count: u64,
+  cases: Mut(IrCase),
+  case_count: u64,
+  scratch: Mut(u64),
+};
+
+pub let builder_new = func(arena: Mut(u8)) -> IrBuilder {
+  let inst_bytes: u64 = INST_CAP() * size_of(IrInst);
+  let region_bytes: u64 = REGION_CAP() * size_of(IrRegion);
+  let proc_bytes: u64 = PROC_CAP() * size_of(IrProc);
+  let param_bytes: u64 = PARAM_CAP() * size_of(IrParam);
+  let type_bytes: u64 = TYPE_CAP() * size_of(IrType);
+  let regions_at: Mut(u8) = arena + inst_bytes;
+  let procs_at: Mut(u8) = regions_at + region_bytes;
+  let params_at: Mut(u8) = procs_at + proc_bytes;
+  let types_at: Mut(u8) = params_at + param_bytes;
+  let cases_at: Mut(u8) = types_at + type_bytes;
+  let scratch_at: Mut(u64) = ptr_cast(Mut(u64), cases_at + CASE_CAP() * size_of(IrCase));
+  return IrBuilder {
+    insts: ptr_cast(Mut(IrInst), arena),
+    inst_count: 0,
+    regions: ptr_cast(Mut(IrRegion), regions_at),
+    region_count: 0,
+    procs: ptr_cast(Mut(IrProc), procs_at),
+    proc_count: 0,
+    params: ptr_cast(Mut(IrParam), params_at),
+    param_count: 0,
+    types: ptr_cast(Mut(IrType), types_at),
+    type_count: 0,
+    cases: ptr_cast(Mut(IrCase), cases_at),
+    case_count: 0,
+    scratch: scratch_at,
+  };
+};
+
+pub let builder_clear = func(b: Mut(IrBuilder)) -> u64 {
+  b.inst_count = 0;
+  b.region_count = 0;
+  b.proc_count = 0;
+  b.param_count = 0;
+  b.type_count = 0;
+  b.case_count = 0;
+  return 0;
+};
+
+pub let add_inst = func(b: Mut(IrBuilder), kind: u64) -> Mut(IrInst) {
+  let i: u64 = b.inst_count;
+  let p: Mut(IrInst) = inst_slot(b.insts, i);
+  deref(p) = inst_new(kind);
+  b.inst_count = i + 1;
+  return p;
+};
+
+pub let add_region = func(b: Mut(IrBuilder), params: Ref(IrParam), param_count: u64,
+                          results: Ref(IrType), result_count: u64,
+                          insts: Ref(u64), inst_count: u64) -> Mut(IrRegion) {
+  let i: u64 = b.region_count;
+  let p: Mut(IrRegion) = region_slot(b.regions, i);
+  deref(p) = region_new(params, param_count, results, result_count, insts, inst_count);
+  b.region_count = i + 1;
+  return p;
+};
+
+pub let add_proc = func(b: Mut(IrBuilder), name: u64,
+                        params: Ref(IrParam), param_count: u64,
+                        results: Ref(IrType), result_count: u64) -> Mut(IrProc) {
+  let i: u64 = b.proc_count;
+  let p: Mut(IrProc) = proc_slot(b.procs, i);
+  deref(p) = proc_new(name, params, param_count, results, result_count);
+  b.proc_count = i + 1;
+  return p;
+};
+
+pub let add_param = func(b: Mut(IrBuilder), name: u64, ty: IrType) -> Ref(IrParam) {
+  let i: u64 = b.param_count;
+  let s: MutSlice(IrParam) = make_slice(MutSlice(IrParam), b.params, i + 1);
+  s[i] = param_new(name, ty);
+  b.param_count = i + 1;
+  return param_slot(b.params, i);
+};
+
+pub let add_type = func(b: Mut(IrBuilder), ty: IrType) -> Ref(IrType) {
+  let i: u64 = b.type_count;
+  let s: MutSlice(IrType) = make_slice(MutSlice(IrType), b.types, i + 1);
+  s[i] = ty;
+  b.type_count = i + 1;
+  return type_slot(b.types, i);
+};
+
+pub let add_case = func(b: Mut(IrBuilder), value: u64, body: u64) -> Ref(IrCase) {
+  let i: u64 = b.case_count;
+  let s: MutSlice(IrCase) = make_slice(MutSlice(IrCase), b.cases, i + 1);
+  s[i] = case_new(value, body);
+  b.case_count = i + 1;
+  return case_slot(b.cases, i);
+};
+
+pub let builder_module = func(b: Mut(IrBuilder), name: u64) -> IrModule {
+  return module_new(name,
+                    ptr_cast(Ref(IrProc), b.procs), b.proc_count,
+                    ptr_cast(Ref(IrRegion), b.regions), b.region_count,
+                    ptr_cast(Ref(IrInst), b.insts), b.inst_count,
+                    ptr_cast(Ref(IrCase), b.cases), b.case_count,
+                    b.scratch);
+};

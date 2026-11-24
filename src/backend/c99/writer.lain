@@ -1,0 +1,708 @@
+// C99 写入器与查询基础：输出缓冲、符号名、类型文本、过程索引、C ABI 原型表与可达性分析。
+let codes = import("src::ir::ir_codes");
+let vf = import("src::ir::verify");
+let tab = import("src::host::symtab");
+let os = import("std::os");
+
+// 符号表由调用方通过 set_syms 交进来，C99 后端只在这一个格子里保存它的堆地址。
+// 调用方没有交表时格子保持 0，名字退化成 "anon" 或句柄的十进制值。
+let g_syms: Array(u64, 1) = [0];
+
+let syms_cells = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), mut_of(g_syms), 1);
+};
+
+pub let set_syms = func(s: Mut(tab.HostSymTab)) -> u64 {
+  let cells: MutSlice(u64) = syms_cells();
+  cells[0] = s as u64;
+  return 0;
+};
+
+let syms_get = func() -> Mut(tab.HostSymTab) {
+  let cells: MutSlice(u64) = syms_cells();
+  return ptr_cast(Mut(tab.HostSymTab), cells[0]);
+};
+
+// --- writer ---------------------------------------------------------------
+// deferred 置 1 的 writer 处在「库前导 + 独立入口」形态：过程声明与过程体必须等到
+// emit_entry_main 拿到入口符号之后再发射，否则无法判定哪些过程真的可达。
+// split 置 1 的 writer 处在分片形态：非 extern 过程不带 static，数据定义与外部声明
+// 分开发射，过程声明与过程体由调用方按文件切分。
+pub let C99Writer = struct {
+  buf: MutSlice(u8),
+  len: u64,
+  ok: u64,
+  deferred: u64,
+  split: u64,
+};
+
+// 关联类型导出：调用方可以按 UFCS 写成 w.put_str(...)。
+pub let Self = C99Writer;
+
+pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
+  return C99Writer { buf: buf, len: 0, ok: 1, deferred: 0, split: 0 };
+};
+
+pub let writer_set_split = func(w: Mut(C99Writer), v: u64) -> u64 {
+  w.split = v;
+  return v;
+};
+
+pub let writer_new = func(buf: MutSlice(u8)) -> C99Writer {
+  return new_writer(buf);
+};
+
+pub let writer_len = func(w: Mut(C99Writer)) -> u64 {
+  return w.len;
+};
+
+pub let writer_ok = func(w: Mut(C99Writer)) -> u64 {
+  return w.ok;
+};
+
+pub let put_byte = func(w: Mut(C99Writer), b: u8) -> u64 {
+  if w.ok == 0 { return 0; }
+  if w.len >= w.buf.len {
+    w.ok = 0;
+    return 0;
+  }
+  w.buf[w.len] = b;
+  w.len = w.len + 1;
+  return 1;
+};
+
+pub let put_str = func(w: Mut(C99Writer), s: Slice(u8)) -> u64 {
+  let i: u64 = loop c(i: u64 = 0) while i < s.len {
+    let rc: u64 = put_byte(w, s[i]);
+    i = i + 1;
+  };
+  return 1;
+};
+
+pub let put_line = func(w: Mut(C99Writer), s: Slice(u8)) -> u64 {
+  let rc: u64 = put_str(w, s);
+  return put_byte(w, 10);
+};
+
+let put_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
+  let b: u8 = (48 + d) as u8;
+  return put_byte(w, b);
+};
+
+let put_hex_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
+  if d < 10 { return put_digit(w, d); }
+  let b: u8 = (87 + d) as u8;
+  return put_byte(w, b);
+};
+
+pub let put_u64_dec = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let d: u64 = loop c(d: u64 = 1) while 1 {
+    if d > v / 10 { break c(d); }
+    d = d * 10;
+  };
+  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
+    let rc: u64 = put_digit(w, n / d);
+    n = n - n / d * d;
+    if d <= 1 { break c(1); }
+    d = d / 10;
+  };
+  return ok;
+};
+
+let put_u64_hex_digits = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let d: u64 = loop c(d: u64 = 1) while 1 {
+    if d > v / 16 { break c(d); }
+    d = d * 16;
+  };
+  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
+    let rc: u64 = put_hex_digit(w, n / d);
+    n = n - n / d * d;
+    if d <= 1 { break c(1); }
+    d = d / 16;
+  };
+  return ok;
+};
+
+pub let put_u64_hex = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let rc: u64 = put_str(w, "0x");
+  return put_u64_hex_digits(w, v);
+};
+
+pub let put_hex2 = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let hi: u64 = v / 16;
+  let lo: u64 = v - hi * 16;
+  let a: u64 = put_hex_digit(w, hi);
+  return put_hex_digit(w, lo);
+};
+
+pub let put_u64_lit = func(w: Mut(C99Writer), v: u64) -> u64 {
+  let a: u64 = put_str(w, "UINT64_C(");
+  let b: u64 = put_u64_dec(w, v);
+  return put_byte(w, 41);
+};
+
+// --- C99 类型 -------------------------------------------------------------
+pub let c_type_name = func(t: vf.IrType) -> Slice(u8) {
+  if t.kind == vf.TY_VOID() { return "void"; }
+  if t.kind == vf.TY_ADDR() { return "void *"; }
+  if t.kind == vf.TY_FLOAT() {
+    if t.width <= 32 { return "float"; }
+    return "double";
+  }
+  if t.kind == vf.TY_BOOL() { return "uint8_t"; }
+  if t.kind == vf.TY_VEC() { return "uint64_t"; }
+  if t.width <= 8 { return "uint8_t"; }
+  if t.width <= 16 { return "uint16_t"; }
+  if t.width <= 32 { return "uint32_t"; }
+  return "uint64_t";
+};
+
+pub let emit_type = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  let s: Slice(u8) = c_type_name(t);
+  return put_str(w, s);
+};
+
+pub let type_width = func(t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_ADDR() { return 64; }
+  if t.kind == vf.TY_VOID() { return 0; }
+  return t.width;
+};
+
+pub let type_byte_size = func(t: vf.IrType) -> u64 {
+  let w: u64 = type_width(t);
+  let n: u64 = (w + 7) / 8;
+  if n == 0 { return 1; }
+  return n;
+};
+
+// --- 符号名 ---------------------------------------------------------------
+let sym_byte = func(h: u64, i: u64) -> u64 {
+  let s: Mut(tab.HostSymTab) = syms_get();
+  if is_null(s) { return 0; }
+  let p: Ref(u8) = tab.sym_addr(s, h);
+  let b: u8 = deref(p + i);
+  return b as u64;
+};
+
+pub let sym_equals = func(h: u64, s: Slice(u8)) -> u64 {
+  let st: Mut(tab.HostSymTab) = syms_get();
+  if is_null(st) { return 0; }
+  if h == 0 { return 0; }
+  let n: u64 = tab.sym_len(st, h);
+  if n != s.len { return 0; }
+  let eq: u64 = loop c(i: u64 = 0) while 1 {
+    if i >= n { break c(1); }
+    if sym_byte(h, i) != (s[i] as u64) { break c(0); }
+    i = i + 1;
+  };
+  return eq;
+};
+
+let is_ident_char = func(b: u64) -> u64 {
+  if b == 95 { return 1; }
+  if (b >= 48) and (b <= 57) { return 1; }
+  if (b >= 65) and (b <= 90) { return 1; }
+  if (b >= 97) and (b <= 122) { return 1; }
+  return 0;
+};
+
+pub let put_sanitized = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let s: Mut(tab.HostSymTab) = syms_get();
+  if is_null(s) {
+    return put_str(w, "anon");
+  }
+  let n: u64 = tab.sym_len(s, h);
+  if n == 0 {
+    return put_str(w, "anon");
+  }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let b: u64 = sym_byte(h, i);
+    if is_ident_char(b) == 1 {
+      let rc: u64 = put_byte(w, b as u8);
+    } else if b == 46 {
+      let rc: u64 = put_str(w, "_d_");
+    } else if b == 58 {
+      let rc: u64 = put_str(w, "_c_");
+    } else if b == 45 {
+      let rc: u64 = put_str(w, "_m_");
+    } else {
+      let rc0: u64 = put_byte(w, 95);
+      let rc1: u64 = put_hex2(w, b);
+    }
+    i = i + 1;
+  };
+  return 1;
+};
+
+// 自定义过程的名字只在同一份 C 文本里互相引用，用符号句柄的十进制值命名即可，
+// 不需要宿主符号表；extern 过程必须保留 link_name 的原文才能对上宿主 C 符号。
+pub let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  if p.is_extern == 1 {
+    if p.link_name != 0 { return put_sanitized(w, p.link_name); }
+    return put_sanitized(w, p.name);
+  }
+  let rc: u64 = put_str(w, "lain_fn_");
+  return put_u64_dec(w, p.name);
+};
+
+// 模块级数据符号与局部值共用同一个 C 名字空间：两者都是 v<句柄>，句柄在同一个
+// 符号表里唯一，所以 OP_VALUE 引用任何一个都落到同一个 C 标识符上。
+pub let emit_data_name = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let rc: u64 = put_str(w, "v");
+  return put_u64_dec(w, h);
+};
+
+pub let emit_value_name = func(w: Mut(C99Writer), h: u64) -> u64 {
+  let rc: u64 = put_str(w, "v");
+  return put_u64_dec(w, h);
+};
+
+// --- 模块查询 -------------------------------------------------------------
+pub let it_ty = func(it: vf.IrInst) -> vf.IrType {
+  return vf.inst_ty(it);
+};
+
+pub let param_ty = func(p: vf.IrParam) -> vf.IrType {
+  return vf.param_ty(p);
+};
+
+let find_non_extern_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
+  let found: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= m.proc_count { break c(vf.NO_REGION()); }
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if (p.is_extern == 0) and (p.name == name) { break c(at); }
+    at = at + 1;
+  };
+  return found;
+};
+
+let find_proc_linear = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
+  let direct: u64 = find_non_extern_proc(m, name);
+  if direct != vf.NO_REGION() { return direct; }
+  let found: u64 = loop c(at: u64 = i) while 1 {
+    if at >= m.proc_count { break c(vf.NO_REGION()); }
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.name == name { break c(at); }
+    at = at + 1;
+  };
+  if found != vf.NO_REGION() {
+    let ext: vf.IrProc = proc_at(m, found);
+    if (ext.is_extern == 1) and (ext.link_name != 0) {
+      let redir: u64 = find_non_extern_proc(m, ext.link_name);
+      if redir != vf.NO_REGION() { return redir; }
+    }
+  }
+  return found;
+};
+
+// O(1) 过程名哈希索引：emit_value_ref 在每条指令的每个 OP_VALUE 上都要查一次
+// find_proc，线性扫描在大型模块上会退化成数十亿次结构体拷贝。
+let PIDX_CAP = func() -> u64 { return 16384; };
+let g_pidx_meta: Array(u64, 4) = [0, 0, 0, 0];
+
+let pidx_hash = func(name: u64) -> u64 {
+  let h: u64 = (name * 11400714819323198485) >> 50;
+  return h & 16383;
+};
+
+let pidx_put_if_absent = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64, idx: u64) -> u64 {
+  if name == 0 { return 0; }
+  let mask: u64 = 16383;
+  let slot: u64 = pidx_hash(name);
+  loop p(step: u64 = 0, s: u64 = slot) while step < 16384 {
+    let k: u64 = keys[s];
+    if k == 0 {
+      keys[s] = name;
+      vals[s] = idx + 1;
+      return 1;
+    }
+    if k == name { return 0; }
+    s = (s + 1) & mask;
+    step = step + 1;
+  };
+  return 0;
+};
+
+let pidx_lookup_raw = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64) -> u64 {
+  if name == 0 { return vf.NO_REGION(); }
+  let mask: u64 = 16383;
+  let slot: u64 = pidx_hash(name);
+  loop p(step: u64 = 0, s: u64 = slot) while step < 16384 {
+    let k: u64 = keys[s];
+    if k == 0 { return vf.NO_REGION(); }
+    if k == name { return vals[s] - 1; }
+    s = (s + 1) & mask;
+    step = step + 1;
+  };
+  return vf.NO_REGION();
+};
+
+let pidx_ensure = func(m: Ref(vf.IrModule)) -> u64 {
+  let meta: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(g_pidx_meta), 4);
+  let mp: u64 = m.procs as u64;
+  let mc: u64 = m.proc_count;
+  if (meta[0] == mp) and (meta[1] == mc) and (meta[2] != 0) { return 1; }
+  if mc > 8192 { return 0; }
+  if meta[2] == 0 {
+    let kraw: u64 = os.alloc_bytes(16384 * 8);
+    let vraw: u64 = os.alloc_bytes(16384 * 8);
+    if (kraw == 0) or (vraw == 0) { return 0; }
+    meta[2] = kraw;
+    meta[3] = vraw;
+  }
+  let keys: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[2]), 16384);
+  let vals: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[3]), 16384);
+  loop z(i: u64 = 0) while i < 16384 {
+    keys[i] = 0;
+    vals[i] = 0;
+    i = i + 1;
+  };
+  loop p1(at: u64 = 0) while at < mc {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.is_extern == 0 {
+      pidx_put_if_absent(keys, vals, p.name, at);
+    }
+    at = at + 1;
+  };
+  loop p2(at: u64 = 0) while at < mc {
+    let p: vf.IrProc = vf.proc_at_ref(m.procs, at);
+    if p.is_extern == 1 {
+      let target: u64 = at;
+      if p.link_name != 0 {
+        let redir: u64 = pidx_lookup_raw(keys, vals, p.link_name);
+        if redir != vf.NO_REGION() {
+          let rp: vf.IrProc = vf.proc_at_ref(m.procs, redir);
+          if rp.is_extern == 0 { target = redir; }
+        }
+      }
+      pidx_put_if_absent(keys, vals, p.name, target);
+    }
+    at = at + 1;
+  };
+  meta[0] = mp;
+  meta[1] = mc;
+  return 1;
+};
+
+pub let find_proc = func(m: Ref(vf.IrModule), name: u64) -> u64 {
+  if name == 0 { return vf.NO_REGION(); }
+  if pidx_ensure(m) == 1 {
+    let meta: MutSlice(u64) = make_slice(MutSlice(u64), mut_of(g_pidx_meta), 4);
+    let keys: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[2]), 16384);
+    let vals: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), meta[3]), 16384);
+    return pidx_lookup_raw(keys, vals, name);
+  }
+  return find_proc_linear(m, name, 0);
+};
+
+pub let region_at = func(m: Ref(vf.IrModule), ri: u64) -> vf.IrRegion {
+  return vf.region_at_ref(m.regions, ri);
+};
+
+pub let inst_at = func(m: Ref(vf.IrModule), ii: u64) -> vf.IrInst {
+  return vf.inst_at_ref(m.insts, ii);
+};
+
+pub let case_at = func(m: Ref(vf.IrModule), ci: u64) -> vf.IrCase {
+  return vf.case_at_ref(m.cases, ci);
+};
+
+pub let proc_at = func(m: Ref(vf.IrModule), pi: u64) -> vf.IrProc {
+  return vf.proc_at_ref(m.procs, pi);
+};
+
+pub let region_inst = func(r: vf.IrRegion, i: u64) -> u64 {
+  let base: Ref(u8) = ptr_cast(Ref(u8), r.insts);
+  let p: Ref(u64) = ptr_cast(Ref(u64), base + i * size_of(u64));
+  return deref(p);
+};
+
+pub let region_type = func(r: vf.IrRegion, i: u64) -> vf.IrType {
+  return vf.type_at_ref(r.results, i);
+};
+
+pub let region_param = func(r: vf.IrRegion, i: u64) -> vf.IrParam {
+  return vf.param_at_ref(r.params, i);
+};
+
+pub let proc_type = func(p: vf.IrProc, i: u64) -> vf.IrType {
+  return vf.type_at_ref(p.results, i);
+};
+
+pub let proc_param = func(p: vf.IrProc, i: u64) -> vf.IrParam {
+  return vf.param_at_ref(p.params, i);
+};
+
+pub let result_type = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> vf.IrType {
+  let k: u64 = it.kind;
+  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return vf.type_bool(); }
+  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return vf.type_bool(); }
+  if k == codes.INST_LEA() { return vf.type_addr(); }
+  if k == codes.INST_ALLOCA() { return vf.type_addr(); }
+  if k == codes.INST_IF() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_LOOP() {
+    if it.body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_SWITCH() {
+    if it.default_body == vf.NO_REGION() { return vf.type_void(); }
+    let r: vf.IrRegion = region_at(m, it.default_body);
+    if i >= r.result_count { return vf.type_void(); }
+    return region_type(r, i);
+  }
+  if k == codes.INST_CALL() {
+    if it.symbol != 0 {
+      let pi: u64 = find_proc(m, it.symbol);
+      if pi == vf.NO_REGION() { return vf.type_void(); }
+      let p: vf.IrProc = proc_at(m, pi);
+      if i >= p.result_count { return vf.type_void(); }
+      return proc_type(p, i);
+    }
+  }
+  return vf.inst_ty(it);
+};
+
+// 前导文本已经 #include 了这些标准头文件，重复声明只会和头文件里的原型冲突。
+// Win32 的 kernel32 符号不在这里：它们的头文件只在 _WIN32 下引入，由下面的 C ABI
+// 原型表区分「Windows 上跳过、其他平台自己声明」。
+pub let is_c_stdlib_symbol = func(h: u64) -> u64 {
+  if h == 0 { return 0; }
+  if sym_equals(h, "malloc") == 1 { return 1; }
+  if sym_equals(h, "calloc") == 1 { return 1; }
+  if sym_equals(h, "realloc") == 1 { return 1; }
+  if sym_equals(h, "free") == 1 { return 1; }
+  if sym_equals(h, "fopen") == 1 { return 1; }
+  if sym_equals(h, "fclose") == 1 { return 1; }
+  if sym_equals(h, "fread") == 1 { return 1; }
+  if sym_equals(h, "fwrite") == 1 { return 1; }
+  if sym_equals(h, "fseek") == 1 { return 1; }
+  if sym_equals(h, "ftell") == 1 { return 1; }
+  if sym_equals(h, "remove") == 1 { return 1; }
+  if sym_equals(h, "system") == 1 { return 1; }
+  if sym_equals(h, "strlen") == 1 { return 1; }
+  if sym_equals(h, "memcpy") == 1 { return 1; }
+  if sym_equals(h, "memset") == 1 { return 1; }
+  if sym_equals(h, "printf") == 1 { return 1; }
+  if sym_equals(h, "fprintf") == 1 { return 1; }
+  if sym_equals(h, "puts") == 1 { return 1; }
+  if sym_equals(h, "exit") == 1 { return 1; }
+  if sym_equals(h, "abort") == 1 { return 1; }
+  if sym_equals(h, "getenv") == 1 { return 1; }
+  return 0;
+};
+
+pub let extern_link_of = func(p: vf.IrProc) -> u64 {
+  if p.link_name != 0 { return p.link_name; }
+  return p.name;
+};
+
+// --- C ABI 原型表 ---------------------------------------------------------
+// LAINIR 的形参只保留类型种类与位宽：@extern 里写成 Fn((Mut(u8)) -> c_uint) 的
+// 回调参数落进 IR 就是 TY_ADDR，C 函数指针的完整签名在 IR 里已经丢失。凡是 C
+// 头文件或 C ABI 对形参有函数指针要求的符号，都由这张表补回 C 侧类型；同一张表
+// 还决定该符号的声明由谁负责：标准头文件、windows.h，或者本后端。
+// 0 表示符号不在表内。
+pub let c_abi_id = func(h: u64) -> u64 {
+  if h == 0 { return 0; }
+  if sym_equals(h, "CreateThread") == 1 { return 1; }
+  if sym_equals(h, "WaitForSingleObject") == 1 { return 2; }
+  if sym_equals(h, "CloseHandle") == 1 { return 3; }
+  if sym_equals(h, "Sleep") == 1 { return 4; }
+  if sym_equals(h, "GetTickCount64") == 1 { return 5; }
+  if sym_equals(h, "qsort") == 1 { return 6; }
+  return 0;
+};
+
+// 声明的归属：0 由本后端发射；1 前导文本的标准头文件已经声明；2 只有 windows.h
+// 在 _WIN32 下声明，本后端只在其他平台发射，避免和 dllimport 原型重复。
+pub let c_abi_decl_kind = func(id: u64) -> u64 {
+  if id == 0 { return 0; }
+  if id == 6 { return 1; }
+  return 2;
+};
+
+// 表内形参的 C 类型文本；返回空切片表示该位形参没有表项，回落到 IR 类型。
+pub let c_abi_param_type = func(id: u64, i: u64) -> Slice(u8) {
+  if id == 1 {
+    if i == 0 { return "void *"; }
+    if i == 1 { return "uint64_t"; }
+    if i == 2 { return "LainThreadStartFn"; }
+    if i == 3 { return "void *"; }
+    if i == 4 { return "uint32_t"; }
+    if i == 5 { return "void *"; }
+    return "";
+  }
+  if id == 2 {
+    if i == 0 { return "void *"; }
+    if i == 1 { return "uint32_t"; }
+    return "";
+  }
+  if id == 3 {
+    if i == 0 { return "void *"; }
+    return "";
+  }
+  if id == 4 {
+    if i == 0 { return "uint32_t"; }
+    return "";
+  }
+  if id == 6 {
+    if i == 0 { return "void *"; }
+    if i == 1 { return "uint64_t"; }
+    if i == 2 { return "uint64_t"; }
+    if i == 3 { return "LainCompareFn"; }
+    return "";
+  }
+  return "";
+};
+
+pub let c_abi_param_is_fn = func(id: u64, i: u64) -> u64 {
+  if (id == 1) and (i == 2) { return 1; }
+  if (id == 6) and (i == 3) { return 1; }
+  return 0;
+};
+
+// Windows 上这些回调形参的类型由 windows.h 提供，直接传值就能编译；其他平台
+// 的 C 原型是本后端发射的，必须把值投到 typedef 的函数指针类型上。
+pub let c_abi_param_is_win_fn = func(id: u64, i: u64) -> u64 {
+  if (id == 1) and (i == 2) { return 1; }
+  return 0;
+};
+
+// 同一个 C 符号被多个模块以不同的本地名字绑定：只发射第一次出现的声明。
+pub let extern_link_seen = func(m: Ref(vf.IrModule), link: u64, limit: u64) -> u64 {
+  if link == 0 { return 0; }
+  let found: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= limit { break c(0); }
+    let p: vf.IrProc = proc_at(m, at);
+    if (p.is_extern == 1) and (extern_link_of(p) == link) { break c(1); }
+    at = at + 1;
+  };
+  return found;
+};
+
+// --- 死过程剪除 -----------------------------------------------------------
+// 过程在 LAINIR 里只有两种引用形态：INST_CALL 的 symbol 记录的直接调用目标，以及任
+// 何指令操作数里能被解析成过程的 OP_VALUE（取函数地址、间接调用的目标）。模块级数据
+// 只有原始字节、没有重定位表，数据段无法持有过程引用，所以除入口之外不存在根。
+// 可达性用标记表加队列做广度优先扩散：标记表某格为 1 表示对应过程可达。
+// 标记表长度交回 0 表示无法判定（过程数为零或容量申请失败），此时调用方按
+// 「全部过程可达」处理。
+let reach_table = func(raw: u64, n: u64) -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), n);
+};
+
+let reach_empty = func() -> MutSlice(u64) {
+  return make_slice(MutSlice(u64), null_ref(Mut(u64)), 0);
+};
+
+// 名字能解析成过程且尚未标记时，标记并压入队列，交回新的队尾。
+let mark_proc_ref = func(m: Ref(vf.IrModule), name: u64, mark: MutSlice(u64),
+                         queue: MutSlice(u64), tail: u64) -> u64 {
+  if name == 0 { return tail; }
+  let pi: u64 = find_proc(m, name);
+  if pi == vf.NO_REGION() { return tail; }
+  if pi >= mark.len { return tail; }
+  if mark[pi] != 0 { return tail; }
+  if tail >= queue.len { return tail; }
+  mark[pi] = 1;
+  queue[tail] = pi;
+  return tail + 1;
+};
+
+let scan_inst_procs = func(m: Ref(vf.IrModule), it: vf.IrInst, mark: MutSlice(u64),
+                           queue: MutSlice(u64), tail: u64) -> u64 {
+  let t0: u64 = mark_proc_ref(m, it.symbol, mark, queue, tail);
+  let out: u64 = loop c(i: u64 = 0, t: u64 = t0) while i < it.operand_count {
+    let op: vf.IrOperand = vf.inst_op(it, i);
+    if op.kind == vf.OP_VALUE() {
+      t = mark_proc_ref(m, op.name, mark, queue, t);
+    }
+    i = i + 1;
+  };
+  return out;
+};
+
+let scan_cases_procs = func(m: Ref(vf.IrModule), it: vf.IrInst, mark: MutSlice(u64),
+                            queue: MutSlice(u64), tail: u64) -> u64 {
+  let out: u64 = loop c(i: u64 = 0, t: u64 = tail) while i < it.case_count {
+    let cs: vf.IrCase = case_at(m, it.cases_at + i);
+    t = scan_region_procs(m, cs.body, mark, queue, t);
+    i = i + 1;
+  };
+  return out;
+};
+
+let scan_region_procs = func(m: Ref(vf.IrModule), ri: u64, mark: MutSlice(u64),
+                             queue: MutSlice(u64), tail: u64) -> u64 {
+  if ri == vf.NO_REGION() { return tail; }
+  let r: vf.IrRegion = region_at(m, ri);
+  let out: u64 = loop c(at: u64 = 0, t: u64 = tail) while at < r.inst_count {
+    let it: vf.IrInst = inst_at(m, region_inst(r, at));
+    let t1: u64 = scan_inst_procs(m, it, mark, queue, t);
+    let t2: u64 = scan_region_procs(m, it.body, mark, queue, t1);
+    let t3: u64 = scan_region_procs(m, it.else_body, mark, queue, t2);
+    let t4: u64 = scan_region_procs(m, it.default_body, mark, queue, t3);
+    t = scan_cases_procs(m, it, mark, queue, t4);
+    at = at + 1;
+  };
+  return out;
+};
+
+// 入口过程未知时把每个过程都标为可达，调用方因此发射全部过程。
+pub let compute_reachable_procs = func(m: Ref(vf.IrModule), entry_proc: u64) -> MutSlice(u64) {
+  let n: u64 = m.proc_count;
+  if n == 0 { return reach_empty(); }
+  let mark_raw: u64 = os.alloc_bytes(n * 8);
+  if mark_raw == 0 { return reach_empty(); }
+  let queue_raw: u64 = os.alloc_bytes(n * 8);
+  if queue_raw == 0 {
+    let freed: u64 = os.free_bytes(mark_raw);
+    return reach_empty();
+  }
+  let mark: MutSlice(u64) = reach_table(mark_raw, n);
+  let queue: MutSlice(u64) = reach_table(queue_raw, n);
+  let zeroed: u64 = loop c(i: u64 = 0) while i < n {
+    mark[i] = 0;
+    i = i + 1;
+  };
+  if (entry_proc == vf.NO_REGION()) or (entry_proc >= n) {
+    let all: u64 = loop c(i: u64 = 0) while i < n {
+      mark[i] = 1;
+      i = i + 1;
+    };
+    let freed_all: u64 = os.free_bytes(queue_raw);
+    return mark;
+  }
+  mark[entry_proc] = 1;
+  queue[0] = entry_proc;
+  let scanned: u64 = loop c(head: u64 = 0, tail: u64 = 1) while head < tail {
+    let pi: u64 = queue[head];
+    let p: vf.IrProc = proc_at(m, pi);
+    if p.body != vf.NO_REGION() {
+      tail = scan_region_procs(m, p.body, mark, queue, tail);
+    }
+    head = head + 1;
+  };
+  let freed_q: u64 = os.free_bytes(queue_raw);
+  return mark;
+};
+
+pub let release_reachable_procs = func(mark: MutSlice(u64)) -> u64 {
+  if mark.len == 0 { return 0; }
+  return os.free_bytes(mark.ptr as u64);
+};
+
+pub let reachable_proc_count = func(mark: MutSlice(u64)) -> u64 {
+  if mark.len == 0 { return 0; }
+  return loop c(i: u64 = 0, n: u64 = 0) while i < mark.len {
+    if mark[i] == 1 { n = n + 1; }
+    i = i + 1;
+  };
+};

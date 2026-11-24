@@ -1,0 +1,273 @@
+// src/sema/effects/infer.lain —— 效应行成员判定、Trap 环境效应与调用点检查。
+//
+// 一次 perform 是否被允许取决于当前帧栈上活着的效应行；私有 let 过程在编译
+// 期间累积自己推断出来的行，调用点按被调用过程的行检查 ! 与处理器覆盖。
+let st = import("src::driver::state");
+let ir = import("src::ir::ir");
+let s = import("src::driver::sym");
+let ax = import("src::syntax::ast");
+let modules = import("src::sema::modules");
+let row = import("src::sema::effects::row");
+
+let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
+let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
+let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
+let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
+
+pub let current_allows = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let c: Mut(row.EffCtx) = row.ctx(k);
+  let i: u64 = c.fn;
+  let ok: u64 = loop f(i: u64 = c.fn) while i > 0 {
+    let r: Mut(row.EffRow) = row.frame_at(c, i - 1);
+    if is_null(r) == 0 {
+      let j: u64 = loop g(j: u64 = 0) while j < r.n {
+        let p: Mut(u64) = row.item_at(r, j);
+        let tag: u64 = deref(p);
+        let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+        let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+        if tag == 1 { return 1; }
+        if tag == 0 {
+          if (deref(pa) == bodyg) and ((deref(pb) == param_tid) or (deref(pb) == 0) or (param_tid == 0)) { return 1; }
+        }
+        j = j + 1;
+      };
+    }
+    i = i - 1;
+  };
+  return 0;
+};
+
+// --- 私有 let 过程的效应推断 ----------------------------------------------
+// 只有私有、未写 !{...} 且不是 main 的 let 过程参与推断：推断表条目 16 字节，
+// [过程符号, 推断出的效应行]。推断行住在持久分配区，跨源仍然可读。
+let inf_at = func(c: Mut(row.EffCtx), i: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.inf) + i * 16);
+};
+
+let inf_lookup = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> Mut(row.EffRow) {
+  if is_null(se) { return null_ref(Mut(row.EffRow)); }
+  let c: Mut(row.EffCtx) = row.ctx(k);
+  let hit: Mut(row.EffRow) = null_ref(Mut(row.EffRow));
+  let done: u64 = loop sc(i: u64 = 0) while i < c.infn {
+    let p: Mut(u64) = inf_at(c, i);
+    if deref(p) == (se as u64) {
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      hit = ptr_cast(Mut(row.EffRow), deref(pa));
+      break sc(i + 1);
+    }
+    i = i + 1;
+  };
+  return hit;
+};
+
+let inf_grow = func(k: Mut(st.State), c: Mut(row.EffCtx)) -> Mut(u64) {
+  let ncap: u64 = c.infc * 2;
+  let nb: Mut(u8) = st.st_ralloc(k, ncap * 16);
+  let ob: Mut(u8) = ptr_cast(Mut(u8), c.inf);
+  let cp: u64 = loop mv(i: u64 = 0) while i < c.infn {
+    let s0: Mut(u64) = ptr_cast(Mut(u64), ob + i * 16);
+    let d0: Mut(u64) = ptr_cast(Mut(u64), nb + i * 16);
+    deref(d0) = deref(s0);
+    let s1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), s0) + 8);
+    let d1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), d0) + 8);
+    deref(d1) = deref(s1);
+    i = i + 1;
+  };
+  c.inf = ptr_cast(Mut(u64), nb);
+  c.infc = ncap;
+  return c.inf;
+};
+
+// 进入一个过程体的编译：合格的过程拿到一张空的推断行，返回先前的推断目标。
+// 不合格的过程把目标清掉，它的体内不会往任何行里记账。
+pub let infer_begin = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> u64 {
+  let c: Mut(row.EffCtx) = row.ctx(k);
+  let prev: u64 = c.inftarget;
+  c.inftarget = 0;
+  if is_null(se) { return prev; }
+  if modules.sym_kind(se) != modules.sym_kind_func() { return prev; }
+  if modules.sym_pub(se) != 0 { return prev; }
+  if modules.sym_shape(se) != 0 { return prev; }
+  if modules.sym_name(se) == s.intern("main", 4) { return prev; }
+  let row0: Mut(row.EffRow) = inf_lookup(k, se);
+  let target: Mut(row.EffRow) = row0;
+  if is_null(target) == 1 {
+    target = row.row_alloc_p(k, 64);
+    if c.infn >= c.infc { let g: Mut(u64) = inf_grow(k, c); }
+    let p: Mut(u64) = inf_at(c, c.infn);
+    deref(p) = se as u64;
+    let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+    deref(pa) = target as u64;
+    c.infn = c.infn + 1;
+  }
+  c.inftarget = target as u64;
+  return prev;
+};
+
+pub let infer_end = func(k: Mut(st.State), prev: u64) -> u64 {
+  let c: Mut(row.EffCtx) = row.ctx(k);
+  c.inftarget = prev;
+  return prev;
+};
+
+// 当前帧栈里还活着的那张推断行就是记账目标；嵌套过程各自压自己的帧，
+// 外层的推断行不在栈顶范围内时这里返回空，效应照旧报错。
+let infer_target = func(k: Mut(st.State)) -> Mut(row.EffRow) {
+  let c: Mut(row.EffCtx) = row.ctx(k);
+  let want: u64 = c.inftarget;
+  let hit: Mut(row.EffRow) = null_ref(Mut(row.EffRow));
+  if want == 0 { return hit; }
+  let done: u64 = loop sc(i: u64 = c.fn) while i > 0 {
+    let r: Mut(row.EffRow) = row.frame_at(c, i - 1);
+    if (r as u64) == want {
+      hit = r;
+      break sc(i - 1);
+    }
+    i = i - 1;
+  };
+  return hit;
+};
+
+pub let infer_add = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let tgt: Mut(row.EffRow) = infer_target(k);
+  if is_null(tgt) == 1 { return 0; }
+  return row.row_push(k, tgt, 0, bodyg, param_tid);
+};
+
+// 被调用过程的效应行：先查推断表，再按声明的 !{...} 组解析。
+pub let callee_row = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> Mut(row.EffRow) {
+  if is_null(se) { return row.row_empty(k); }
+  let inferred: Mut(row.EffRow) = inf_lookup(k, se);
+  if is_null(inferred) == 0 { return inferred; }
+  let kd: u64 = modules.sym_kind(se);
+  if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() { return row.row_empty(k); }
+  let bidx: u64 = modules.sym_shape(se);
+  if bidx == 0 { return row.row_empty(k); }
+  return row.row_from_hdr(k, modules.sym_src(se), modules.sym_mod(se), bidx);
+};
+
+// --- 环境 Trap -----------------------------------------------------------
+// Trap 是环境效应：它的名字就是身份，任何声明为 Trap 的效应符号都匹配。
+pub let is_trap_effect = func(k: Mut(st.State), eff: Mut(modules.SymEntry)) -> u64 {
+  if is_null(eff) { return 0; }
+  if modules.sym_kind(eff) != row.kind_effect() { return 0; }
+  if modules.sym_name(eff) == s.intern("Trap", 4) { return 1; }
+  return 0;
+};
+
+// 按形状与类型实参定位效应符号：效应行项目（tag 0）存的正是这一对。
+let effect_at = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> Mut(modules.SymEntry) {
+  let cnt: u64 = modules.sym_count(k);
+  let found: Mut(modules.SymEntry) = null_ref(Mut(modules.SymEntry));
+  let done: u64 = loop sc(i: u64 = 0) while i < cnt {
+    let se: Mut(modules.SymEntry) = modules.sym_at(k, i);
+    if (modules.sym_kind(se) == row.kind_effect()) and (modules.sym_shape(se) == bodyg) {
+      if (modules.sym_qual(se) == param_tid) or (param_tid == 0) {
+        found = se;
+        break sc(i + 1);
+      }
+    }
+    i = i + 1;
+  };
+  return found;
+};
+
+pub let is_trap_shape = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
+  let se: Mut(modules.SymEntry) = effect_at(k, bodyg, param_tid);
+  return is_trap_effect(k, se);
+};
+
+// 效应行里的一项是不是 Trap：tag 1 只存名字符号，tag 0 存形状与类型实参。
+let row_item_trap = func(k: Mut(st.State), p: Mut(u64)) -> u64 {
+  let tag: u64 = deref(p);
+  let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+  let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+  if tag == 0 { return is_trap_shape(k, deref(pa), deref(pb)); }
+  if deref(pa) == s.intern("Trap", 4) { return 1; }
+  return 0;
+};
+
+// 行里除 Trap 之外的效应仍然要求调用点写 !。
+let row_needs_bang = func(k: Mut(st.State), row0: Mut(row.EffRow)) -> u64 {
+  if row.row_is_empty(row0) == 1 { return 0; }
+  let need: u64 = loop it(i: u64 = 0) while i < row0.n {
+    let p: Mut(u64) = row.item_at(row0, i);
+    if row_item_trap(k, p) == 0 { break it(1); }
+    if i + 1 >= row0.n { break it(0); }
+    i = i + 1;
+  };
+  return need;
+};
+
+// --- 调用点纯度检查 -------------------------------------------------------
+// 返回 1 表示调用点带了 !，0 表示不带。缺 ! 或效应未被允许时就地报错。
+pub let call_guard = func(k: Mut(st.State), se: Mut(modules.SymEntry), g: u64, nxt: u64) -> u64 {
+  let r: Mut(row.EffRow) = callee_row(k, se);
+  if row.row_is_empty(r) == 1 { return 0; }
+  let n: u64 = n_count(g);
+  let bang: u64 = 0;
+  if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
+  if bang == 0 and row_needs_bang(k, r) == 1 {
+    let m: Ref(u8) = "missing ! on effectful call";
+    let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
+    st.st_fail(k, ax.e_type());
+    return 0;
+  }
+  let i: u64 = 0;
+  let ok: u64 = loop it(i: u64 = 0) while i < r.n {
+    let p: Mut(u64) = row.item_at(r, i);
+    if row_item_trap(k, p) == 0 {
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if tag == 0 {
+        if current_allows(k, deref(pa), deref(pb)) == 0 {
+          let added: u64 = infer_add(k, deref(pa), deref(pb));
+          if added == 0 {
+            let m2: Ref(u8) = "unhandled effect";
+            let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+            st.st_fail(k, ax.e_type());
+            return 0;
+          }
+        }
+      }
+    }
+    i = i + 1;
+  };
+  return bang;
+};
+
+pub let call_guard_row = func(k: Mut(st.State), r: Mut(row.EffRow), g: u64, nxt: u64) -> u64 {
+  if row.row_is_empty(r) == 1 { return 0; }
+  let n: u64 = n_count(g);
+  let bang: u64 = 0;
+  if nxt < n and is_group(g, nxt) == 0 and n_sym(g, nxt) == s.p_bang() { bang = 1; }
+  if bang == 0 and row_needs_bang(k, r) == 1 {
+    let m: Ref(u8) = "missing ! on effectful call";
+    let d: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m, 27);
+    st.st_fail(k, ax.e_type());
+    return 0;
+  }
+  let i: u64 = 0;
+  let ok: u64 = loop it(i: u64 = 0) while i < r.n {
+    let p: Mut(u64) = row.item_at(r, i);
+    if row_item_trap(k, p) == 0 {
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if tag == 0 {
+        if current_allows(k, deref(pa), deref(pb)) == 0 {
+          let added: u64 = infer_add(k, deref(pa), deref(pb));
+          if added == 0 {
+            let m2: Ref(u8) = "unhandled effect";
+            let d2: u64 = ir.diag(k, n_at(g, nxt - 2), 1, m2, 16);
+            st.st_fail(k, ax.e_type());
+            return 0;
+          }
+        }
+      }
+    }
+    i = i + 1;
+  };
+  return bang;
+};

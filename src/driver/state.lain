@@ -4,6 +4,10 @@
 
 let hr = import("src::driver::host_rt");
 
+// 已登记源标记的槽数：与宿主源码管理器的 source_cap 一致（256），源编号再大
+// 也会被宿主先拒掉，所以按源编号写入这张字节表不会越界。
+let DONE_CAP = func() -> u64 { return 256; };
+
 pub let LoopFrame = struct {
   label: u64,
   res: u64,
@@ -117,7 +121,7 @@ pub let st_new = func(cap: u64) -> Mut(State) {
   let r: Mut(u8) = hr.mem_alloc(8192, 8);
   let q: Mut(u8) = hr.mem_alloc(16777216, 8);
   let d: Mut(u8) = hr.mem_alloc(1048576, 8);
-  let g: Mut(u8) = hr.mem_alloc(64, 8);
+  let g: Mut(u8) = hr.mem_alloc(DONE_CAP(), 8);
   let h: Mut(u8) = hr.mem_alloc(16777216, 8);
   let m: Mut(u8) = hr.mem_alloc(65536, 8);
   let t: Mut(u8) = hr.mem_alloc(4194304, 8);
@@ -264,12 +268,14 @@ pub let st_set_dataused = func(p: Mut(State), v: u64) -> u64 { p.dataused = v; r
 let st_donebase = func(p: Mut(State)) -> Mut(u8) { return p.donebase; };
 
 pub let st_done = func(p: Mut(State), src: u64) -> u64 {
-  let ds: Slice(u8) = make_slice(Slice(u8), p.donebase, 64);
+  if src >= DONE_CAP() { return 0; }
+  let ds: Slice(u8) = make_slice(Slice(u8), p.donebase, DONE_CAP());
   return b2u(ds[src]);
 };
 
 pub let st_mark_done = func(p: Mut(State), src: u64) -> u64 {
-  let ds: MutSlice(u8) = make_slice(MutSlice(u8), p.donebase, 64);
+  if src >= DONE_CAP() { return 0; }
+  let ds: MutSlice(u8) = make_slice(MutSlice(u8), p.donebase, DONE_CAP());
   let one: u8 = 1;
   ds[src] = one;
   return 1;

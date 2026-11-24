@@ -1,0 +1,471 @@
+// C99 模块级发射：过程声明与过程体、数据定义、前导文本、分片形态与入口包装。
+let codes = import("src::ir::ir_codes");
+let vf = import("src::ir::verify");
+let tr = import("std::trace");
+let wr = import("src::backend::c99::writer");
+let inst = import("src::backend::c99::inst");
+
+let C99Writer = wr.C99Writer;
+let C99Emitter = inst.C99Emitter;
+
+// --- 过程与模块 -----------------------------------------------------------
+let emit_proc_return_type = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  if p.result_count == 0 { return wr.put_str(w, "void"); }
+  if p.result_count == 1 {
+    let t: vf.IrType = wr.proc_type(p, 0);
+    return wr.emit_type(w, t);
+  }
+  return wr.put_str(w, "LainPair");
+};
+
+// 小型的非 extern 叶子过程直接标记为 static inline：clang -O2 会内联这些常量 getter，
+// 不再为它们保留完整的 out-of-line 函数符号。
+let proc_inline_hint = func(m: Ref(vf.IrModule), p: vf.IrProc) -> u64 {
+  if p.is_extern == 1 { return 0; }
+  if p.body == vf.NO_REGION() { return 0; }
+  let r: vf.IrRegion = wr.region_at(m, p.body);
+  if r.inst_count > 4 { return 0; }
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= r.inst_count { break c(1); }
+    let it: vf.IrInst = wr.inst_at(m, wr.region_inst(r, at));
+    if it.kind == codes.INST_ALLOCA() { break c(0); }
+    if it.kind == codes.INST_CALL() { break c(0); }
+    at = at + 1;
+  };
+  return ok;
+};
+
+pub let emit_proc_signature = func(w: Mut(C99Writer), m: Ref(vf.IrModule), p: vf.IrProc) -> u64 {
+  if (p.is_extern == 0) and (w.split == 0) {
+    if proc_inline_hint(m, p) == 1 {
+      let a0: u64 = wr.put_str(w, "static inline ");
+    } else {
+      let a: u64 = wr.put_str(w, "static ");
+    }
+  }
+  let a2: u64 = emit_proc_return_type(w, p);
+  let b: u64 = wr.put_str(w, " ");
+  let c: u64 = wr.emit_proc_name(w, p);
+  let d: u64 = wr.put_byte(w, 40);
+  let variadic: u64 = 0;
+  if (p.is_extern == 1) and (p.is_variadic == 1) { variadic = 1; }
+  if p.param_count == 0 {
+    if variadic == 1 {
+      let e0: u64 = wr.put_str(w, "...");
+    } else {
+      let e: u64 = wr.put_str(w, "void");
+    }
+  } else {
+    let id: u64 = if p.is_extern == 1 { wr.c_abi_id(wr.extern_link_of(p)) } else { 0 };
+    let i: u64 = loop c(i: u64 = 0) while i < p.param_count {
+      if i > 0 { let sep: u64 = wr.put_str(w, ", "); }
+      let prm: vf.IrParam = wr.proc_param(p, i);
+      let ft: Slice(u8) = wr.c_abi_param_type(id, i);
+      if ft.len == 0 {
+        let e0: u64 = wr.emit_type(w, wr.param_ty(prm));
+      } else {
+        let e1: u64 = wr.put_str(w, ft);
+      }
+      let f: u64 = wr.put_str(w, " ");
+      let g: u64 = wr.emit_value_name(w, prm.name);
+      i = i + 1;
+    };
+    if variadic == 1 {
+      let e1: u64 = wr.put_str(w, ", ...");
+    }
+  }
+  return wr.put_byte(w, 41);
+};
+
+// extern 过程的声明只在第一次遇到它的 C 符号时发射：标准库原型已由前导文本引入，
+// 同一连接名被多个模块绑定则只保留首个。
+let proc_decl_skip = func(m: Ref(vf.IrModule), at: u64) -> u64 {
+  let p: vf.IrProc = wr.proc_at(m, at);
+  if p.is_extern == 0 { return 0; }
+  if wr.find_proc(m, p.name) != at { return 1; }
+  let link: u64 = wr.extern_link_of(p);
+  if wr.c_abi_decl_kind(wr.c_abi_id(link)) == 1 { return 1; }
+  if wr.is_c_stdlib_symbol(link) == 1 { return 1; }
+  if wr.extern_link_seen(m, link, at) == 1 { return 1; }
+  return 0;
+};
+
+// windows.h 在 _WIN32 下已经带着 dllimport 声明了这些符号，后端再声明一次会让
+// clang 报「redeclared without dllimport attribute」。所以这些声明只在非 Windows
+// 平台发射：那里没有 windows.h，编译期仍然能看到完整的 C 原型。
+let emit_one_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), at: u64) -> u64 {
+  if proc_decl_skip(m, at) == 1 { return 1; }
+  let p: vf.IrProc = wr.proc_at(m, at);
+  let id: u64 = if p.is_extern == 1 { wr.c_abi_id(wr.extern_link_of(p)) } else { 0 };
+  let guarded: u64 = if wr.c_abi_decl_kind(id) == 2 { 1 } else { 0 };
+  if guarded == 1 {
+    let g0: u64 = wr.put_str(w, "#if !defined(_WIN32)\n");
+  }
+  let a: u64 = emit_proc_signature(w, m, p);
+  let b: u64 = wr.put_str(w, ";\n");
+  if guarded == 1 {
+    let g1: u64 = wr.put_str(w, "#endif\n");
+  }
+  return 1;
+};
+
+pub let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u64) -> u64 {
+  if w.deferred == 1 { return 1; }
+  let ok: u64 = loop c(at: u64 = i) while 1 {
+    if at >= m.proc_count { break c(1); }
+    let rc: u64 = emit_one_proc_decl(w, m, at);
+    if rc == 0 { break c(0); }
+    at = at + 1;
+  };
+  return ok;
+};
+
+// 标记表长度为零时按「全部过程可达」处理。
+pub let emit_reachable_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                        mark: MutSlice(u64)) -> u64 {
+  let ok: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= m.proc_count { break c(1); }
+    if (mark.len == 0) or (mark[at] == 1) {
+      let rc: u64 = emit_one_proc_decl(w, m, at);
+      if rc == 0 { break c(0); }
+    }
+    at = at + 1;
+  };
+  return ok;
+};
+
+// 只发射索引落在 [lo, hi) 之内、且可达的非 extern 过程体，供分片按批切分。
+pub let emit_reachable_proc_bodies_range = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                               mark: MutSlice(u64), lo: u64,
+                                               hi: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = lo) while 1 {
+    if at >= hi { break c(1); }
+    if (mark.len == 0) or (mark[at] == 1) {
+      let p: vf.IrProc = wr.proc_at(m, at);
+      if p.is_extern == 0 {
+        let rc: u64 = emit_proc_body_c99(w, m, at);
+        if rc == 0 { break c(0); }
+      }
+    }
+    at = at + 1;
+  };
+  return ok;
+};
+
+let emit_reachable_proc_bodies = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                      mark: MutSlice(u64)) -> u64 {
+  return emit_reachable_proc_bodies_range(w, m, mark, 0, m.proc_count);
+};
+
+pub let emit_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = wr.proc_at(m, pi);
+  let a: u64 = emit_proc_signature(w, m, p);
+  return wr.put_str(w, ";\n");
+};
+
+// 数据定义的主体：名字、长度与字节内容，三种发射形态共用这一段文本。
+let emit_data_decl_body = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8)) -> u64 {
+  let b: u64 = wr.emit_data_name(w, symbol);
+  let c: u64 = wr.put_byte(w, 91);
+  let size: u64 = if bytes.len == 0 { 1 } else { bytes.len };
+  let d: u64 = wr.put_u64_dec(w, size);
+  let e: u64 = wr.put_str(w, "] = {");
+  if bytes.len == 0 {
+    let f: u64 = wr.put_str(w, "0");
+  } else {
+    let i: u64 = loop c(i: u64 = 0) while i < bytes.len {
+      if i > 0 { let sep: u64 = wr.put_byte(w, 44); }
+      if i - i / 16 * 16 == 0 { let nl: u64 = wr.put_str(w, "\n  "); }
+      let f: u64 = wr.put_str(w, "0x");
+      let g: u64 = wr.put_hex2(w, bytes[i] as u64);
+      i = i + 1;
+    };
+  }
+  return wr.put_str(w, "\n};\n");
+};
+
+pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = wr.put_str(w, "static const uint8_t ");
+  } else {
+    let a: u64 = wr.put_str(w, "static uint8_t ");
+  }
+  let t: u64 = emit_data_decl_body(w, symbol, bytes);
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 分片形态的数据定义：符号不带 static，其他分片经共享头的外部声明引用同一份。
+pub let emit_data_decl_shared = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = wr.put_str(w, "const uint8_t ");
+  } else {
+    let a: u64 = wr.put_str(w, "uint8_t ");
+  }
+  let t: u64 = emit_data_decl_body(w, symbol, bytes);
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 分片形态的外部声明：长度与定义保持一致，数组类型因此是完整的。
+pub let emit_data_decl_extern = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = wr.put_str(w, "extern const uint8_t ");
+  } else {
+    let a: u64 = wr.put_str(w, "extern uint8_t ");
+  }
+  let b: u64 = wr.emit_data_name(w, symbol);
+  let c: u64 = wr.put_byte(w, 91);
+  let size: u64 = if bytes.len == 0 { 1 } else { bytes.len };
+  let d: u64 = wr.put_u64_dec(w, size);
+  let e: u64 = wr.put_str(w, "];\n");
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+let cases_have_alloca = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> u64 {
+  let hit: u64 = loop c(at: u64 = i) while 1 {
+    if at >= it.case_count { break c(0); }
+    let cs: vf.IrCase = wr.case_at(m, it.cases_at + at);
+    if region_has_alloca(m, cs.body) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
+};
+
+// 过程体（包含嵌套区域与 switch 分支）是否真的会调用 lain_alloca_push。
+let region_has_alloca = func(m: Ref(vf.IrModule), ri: u64) -> u64 {
+  if ri == vf.NO_REGION() { return 0; }
+  let r: vf.IrRegion = wr.region_at(m, ri);
+  let hit: u64 = loop c(at: u64 = 0) while 1 {
+    if at >= r.inst_count { break c(0); }
+    let it: vf.IrInst = wr.inst_at(m, wr.region_inst(r, at));
+    if it.kind == codes.INST_ALLOCA() { break c(1); }
+    if region_has_alloca(m, it.body) == 1 { break c(1); }
+    if region_has_alloca(m, it.else_body) == 1 { break c(1); }
+    if region_has_alloca(m, it.default_body) == 1 { break c(1); }
+    if cases_have_alloca(m, it, 0) == 1 { break c(1); }
+    at = at + 1;
+  };
+  return hit;
+};
+
+pub let emit_proc_body_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  if w.deferred == 1 { return 1; }
+  let start: u64 = w.len;
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = wr.proc_at(m, pi);
+  if p.is_extern == 1 { return 0; }
+  let needs_alloca: u64 = region_has_alloca(m, p.body);
+  let c: u64 = emit_proc_signature(w, m, p);
+  let d: u64 = wr.put_str(w, " {\n");
+  if needs_alloca == 1 {
+    let e: u64 = wr.put_str(w, "  LainAllocaNode *_alloca_head = NULL;\n");
+    let f: u64 = wr.put_str(w, "  (void)_alloca_head;\n");
+  }
+  let e0: C99Emitter = inst.emitter_new(w, m);
+  let em: Mut(C99Emitter) = mut_of(e0);
+  em.proc = pi;
+  em.depth = 1;
+  em.has_alloca = needs_alloca;
+  let ip: u64 = inst.inl_prepare(em);
+  let g: u64 = inst.emit_region(em, p.body, vf.NO_REGION(), vf.NO_REGION());
+  let h: u64 = wr.put_str(w, "}\n\n");
+  if g == 0 { return 0; }
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+pub let emit_proc_c99 = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
+  let start: u64 = w.len;
+  if pi >= m.proc_count { return 0; }
+  let p: vf.IrProc = wr.proc_at(m, pi);
+  if p.is_extern == 1 { return 0; }
+  let a: u64 = emit_all_proc_decls(w, m, 0);
+  let b: u64 = wr.put_byte(w, 10);
+  let body_rc: u64 = emit_proc_body_c99(w, m, pi);
+  if body_rc == 0 { return 0; }
+  return w.len - start;
+};
+
+// --- 前导文本 -------------------------------------------------------------
+let preamble_helpers = func() -> Slice(u8) {
+  return "/* Generated by the pure-Lain C99 backend. */\n#if !defined(_WIN32)\n#define _POSIX_C_SOURCE 200809L\n#endif\n#if defined(_WIN32)\n#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS\n#endif\n#endif\n#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#if defined(_WIN32)\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#else\n#include <time.h>\n#endif\n\n#if !defined(__ATOMIC_RELAXED)\n#define __ATOMIC_RELAXED 0\n#define __ATOMIC_CONSUME 1\n#define __ATOMIC_ACQUIRE 2\n#define __ATOMIC_RELEASE 3\n#define __ATOMIC_ACQ_REL 4\n#define __ATOMIC_SEQ_CST 5\n#endif\n\ntypedef struct LainPair { uint64_t a; uint64_t b; } LainPair;\ntypedef struct LainAllocaNode {\n  struct LainAllocaNode *next;\n  uint64_t align;\n#if !defined(NDEBUG)\n  size_t bytes;\n#endif\n} LainAllocaNode;\n\nstatic void lain_trap(const char *msg) {\n  fputs(\"lain trap: \", stderr);\n  fputs(msg, stderr);\n  fputc('\\n', stderr);\n  abort();\n}\n\nstatic inline uint64_t lain_mask(uint32_t w) {\n  return (w >= 64u) ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);\n}\n\nstatic inline int lain_memorder(uint64_t o) {\n  switch (o) {\n    case 0: return __ATOMIC_RELAXED;\n    case 1: return __ATOMIC_ACQUIRE;\n    case 2: return __ATOMIC_RELEASE;\n    case 3: return __ATOMIC_ACQ_REL;\n    case 4: return __ATOMIC_SEQ_CST;\n    default: return __ATOMIC_SEQ_CST;\n  }\n}\n\nstatic inline int64_t lain_sext(uint64_t v, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  v &= m;\n  if ((w > 0u) && (w < 64u) && ((v & (UINT64_C(1) << (w - 1u))) != 0u)) v |= ~m;\n  return (int64_t)v;\n}\n\nstatic inline uint64_t lain_sdiv(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed div by zero\");\n  return (uint64_t)(sa / sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_srem(uint64_t a, uint64_t b, uint32_t w) {\n  int64_t sa = lain_sext(a, w);\n  int64_t sb = lain_sext(b, w);\n  if (sb == 0) lain_trap(\"signed rem by zero\");\n  return (uint64_t)(sa % sb) & lain_mask(w);\n}\n\nstatic inline uint64_t lain_udiv(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned div by zero\");\n  return (ua / ub) & m;\n}\n\nstatic inline uint64_t lain_urem(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t ua = a & m;\n  uint64_t ub = b & m;\n  if (ub == 0) lain_trap(\"unsigned rem by zero\");\n  return (ua % ub) & m;\n}\n\nstatic inline uint64_t lain_shl(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"shl >= width\");\n  return ((a & m) << sh) & m;\n}\n\nstatic inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  if (sh >= w) lain_trap(\"lshr >= width\");\n  return (a & m) >> sh;\n}\n\nstatic inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint32_t w) {\n  uint64_t m = lain_mask(w);\n  uint64_t sh = b & m;\n  int64_t sa;\n  if (sh >= w) lain_trap(\"ashr >= width\");\n  sa = lain_sext(a, w);\n  if (sa < 0) return ~(~((uint64_t)sa) >> sh) & m;\n  return ((uint64_t)sa >> sh) & m;\n}\n";
+};
+
+// C ABI 回调类型：@extern 写成 Fn(...) 的形参在 LAINIR 里只剩指针类型，C 侧的
+// 函数指针类型在这里以 typedef 补回，声明与调用点共用同一个名字。
+// LAIN_WIN_FNPTR_CAST 在 Windows 上展开为空：那里的 kernel32 原型来自 windows.h，
+// 回调形参已经是这些函数的真实类型；其他平台由后端声明，需要显式投到 typedef。
+let preamble_c_abi = func() -> Slice(u8) {
+  return "typedef uint32_t (*LainThreadStartFn)(void *);\ntypedef int32_t (*LainCompareFn)(const void *, const void *);\n\n#if defined(_WIN32)\n#define LAIN_WIN_FNPTR_CAST(type)\n#else\n#define LAIN_WIN_FNPTR_CAST(type) (type)(uintptr_t)\n#endif\n\n";
+};
+
+let preamble_memory = func() -> Slice(u8) {
+  return "static inline uint64_t lain_load_bits(const void *p, uint32_t w) {\n  uint64_t v = 0;\n  uint32_t n = (w + 7u) / 8u;\n  if (n > 0u) memcpy(&v, p, n);\n  return v & lain_mask(w);\n}\n\nstatic inline void lain_store_bits(void *p, uint64_t v, uint32_t w) {\n  uint32_t n = (w + 7u) / 8u;\n  uint64_t masked = v & lain_mask(w);\n  if (n > 0u) memcpy(p, &masked, n);\n}\n\nstatic inline void *lain_load_addr(const void *p) {\n  void *v = NULL;\n  memcpy(&v, p, sizeof(v));\n  return v;\n}\n\nstatic inline void lain_store_addr(void *p, void *v) {\n  memcpy(p, &v, sizeof(v));\n}\n\nstatic inline float lain_load_f32(const void *p) { float v = 0.0f; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline double lain_load_f64(const void *p) { double v = 0.0; memcpy(&v, p, sizeof(v)); return v; }\nstatic inline void lain_store_f32(void *p, float v) { memcpy(p, &v, sizeof(v)); }\nstatic inline void lain_store_f64(void *p, double v) { memcpy(p, &v, sizeof(v)); }\nstatic inline float lain_bitcast_u32_f32(uint32_t v) { float f = 0.0f; memcpy(&f, &v, sizeof(f)); return f; }\nstatic inline uint32_t lain_bitcast_f32_u32(float f) { uint32_t v = 0; memcpy(&v, &f, sizeof(v)); return v; }\nstatic inline double lain_bitcast_u64_f64(uint64_t v) { double d = 0.0; memcpy(&d, &v, sizeof(d)); return d; }\nstatic inline uint64_t lain_bitcast_f64_u64(double d) { uint64_t v = 0; memcpy(&v, &d, sizeof(v)); return v; }\n\n#if !defined(NDEBUG)\nstatic size_t _lain_alloca_live = 0;\n#endif\n\nstatic inline void *lain_alloca_push(LainAllocaNode **head, size_t n) {\n  LainAllocaNode *node = (LainAllocaNode *)calloc(1, sizeof(LainAllocaNode) + n);\n  if (!node) lain_trap(\"alloca out of memory\");\n#if !defined(NDEBUG)\n  node->bytes = n;\n  _lain_alloca_live += n;\n  if (_lain_alloca_live > (256u * 1024u * 1024u)) lain_trap(\"alloca budget exceeded (256 MiB)\");\n#endif\n  node->next = *head;\n  node->align = 0;\n  *head = node;\n  return (void *)(node + 1);\n}\n\nstatic inline void lain_alloca_free(LainAllocaNode **head) {\n  LainAllocaNode *cur = *head;\n  while (cur) {\n    LainAllocaNode *next = cur->next;\n#if !defined(NDEBUG)\n    _lain_alloca_live -= cur->bytes;\n#endif\n    free(cur);\n    cur = next;\n  }\n  *head = NULL;\n}\n";
+};
+
+let preamble_io = func() -> Slice(u8) {
+  return "static uint64_t lain_io_write(void *p, uint64_t len) {\n  size_t wrote;\n  if (len == 0) return 0;\n  wrote = fwrite(p, 1, (size_t)len, stdout);\n  if (wrote != (size_t)len) lain_trap(\"io write failed\");\n  return len;\n}\n\nstatic uint64_t lain_io_print_i64(uint64_t v) {\n  int n = printf(\"%lld\", (long long)(int64_t)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_print_u64(uint64_t v) {\n  int n = printf(\"%llu\", (unsigned long long)v);\n  if (n < 0) lain_trap(\"io print failed\");\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_io_newline(void) {\n  if (putchar('\\n') == EOF) lain_trap(\"io write failed\");\n  return 1;\n}\n\nstatic uint64_t lain_perf_steps(void) { return 0; }\n\nstatic uint64_t lain_perf_nanos(void) {\n#if defined(_WIN32)\n  static LARGE_INTEGER freq;\n  static int ready = 0;\n  LARGE_INTEGER now;\n  uint64_t sec, rem;\n  if (!ready) {\n    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) lain_trap(\"perf frequency failed\");\n    ready = 1;\n  }\n  if (!QueryPerformanceCounter(&now)) lain_trap(\"perf counter failed\");\n  sec = (uint64_t)(now.QuadPart / freq.QuadPart);\n  rem = (uint64_t)(now.QuadPart % freq.QuadPart);\n  return sec * UINT64_C(1000000000) + (rem * UINT64_C(1000000000)) / (uint64_t)freq.QuadPart;\n#else\n  struct timespec ts;\n  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) lain_trap(\"clock_gettime failed\");\n  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;\n#endif\n}\n";
+};
+
+let preamble_os = func() -> Slice(u8) {
+  return "static int g_lain_argc = 0;\nstatic char **g_lain_argv = NULL;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n";
+};
+
+let preamble_entry = func() -> Slice(u8) {
+  return "static int (*lain_entry_hook)(int, char **) = NULL;\n\nstatic int lain_entry_run(int argc, char **argv) {\n  g_lain_argc = argc;\n  g_lain_argv = argv;\n  if (lain_entry_hook) return lain_entry_hook(argc, argv);\n  return 0;\n}\n\nint main(int argc, char **argv) {\n  return lain_entry_run(argc, argv);\n}\n";
+};
+
+let emit_preamble_no_main = func(w: Mut(C99Writer)) -> u64 {
+  let start: u64 = w.len;
+  let a: u64 = wr.put_str(w, preamble_helpers());
+  let abi_p: u64 = wr.put_str(w, preamble_c_abi());
+  let b: u64 = wr.put_str(w, preamble_memory());
+  let c: u64 = wr.put_str(w, preamble_io());
+  let os_p: u64 = wr.put_str(w, preamble_os());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 库形态的前导文本：不含 int main，调用方自己发射入口。入口由 emit_entry_main 提供，
+// 过程声明与过程体因此延后到那里发射，才能按入口做死过程剪除。
+pub let emit_preamble_lib = func(w: Mut(C99Writer)) -> u64 {
+  w.deferred = 1;
+  return emit_preamble_no_main(w);
+};
+
+// 自带 int main 桩的前导文本：不接入口，全部过程都必须原样发射。
+pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
+  w.deferred = 0;
+  let start: u64 = w.len;
+  let n: u64 = emit_preamble_no_main(w);
+  if n == 0 { return 0; }
+  let d: u64 = wr.put_str(w, preamble_entry());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 分片形态的 os 全局量：定义放在入口文件，各分片通过共享头引用同一份。
+let preamble_os_split = func() -> Slice(u8) {
+  return "extern int g_lain_argc;\nextern char **g_lain_argv;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n";
+};
+
+// 分片形态的共享头前导：全部静态辅助函数与 os 访问器，不含 int main。
+pub let emit_split_preamble_shared = func(w: Mut(C99Writer)) -> u64 {
+  let start: u64 = w.len;
+  let a: u64 = wr.put_str(w, preamble_helpers());
+  let abi_p: u64 = wr.put_str(w, preamble_c_abi());
+  let b: u64 = wr.put_str(w, preamble_memory());
+  let c: u64 = wr.put_str(w, preamble_io());
+  let os_p: u64 = wr.put_str(w, preamble_os_split());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 入口文件里为共享头中的 extern 声明提供定义。
+pub let emit_split_main_globals = func(w: Mut(C99Writer)) -> u64 {
+  return wr.put_str(w, "int g_lain_argc = 0;\nchar **g_lain_argv = NULL;\n");
+};
+
+// --- 入口包装 -------------------------------------------------------------
+let emit_entry_invoke = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
+  let a: u64 = wr.put_str(w, "  ");
+  if p.result_count == 0 {
+    let b: u64 = wr.emit_proc_name(w, p);
+    let c: u64 = wr.put_str(w, "();\n");
+    return 1;
+  }
+  let d: u64 = emit_proc_return_type(w, p);
+  let e: u64 = wr.put_str(w, " r = ");
+  let f: u64 = wr.emit_proc_name(w, p);
+  let g: u64 = wr.put_str(w, "();\n");
+  return 1;
+};
+
+let emit_entry_print_result = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
+  if t.kind == vf.TY_BITS() {
+    let a: u64 = wr.put_str(w, "  printf(\"result=%lld (u64=%llu)\\n\", (long long)lain_sext((uint64_t)r, ");
+    let b: u64 = wr.put_u64_dec(w, t.width);
+    let c: u64 = wr.put_str(w, "), (unsigned long long)((uint64_t)r & lain_mask(");
+    let d: u64 = wr.put_u64_dec(w, t.width);
+    let e: u64 = wr.put_str(w, ")));\n");
+    return 1;
+  }
+  if t.kind == vf.TY_ADDR() {
+    return wr.put_str(w, "  printf(\"result=%p\\n\", r);\n");
+  }
+  return wr.put_str(w, "  printf(\"result=%g\\n\", (double)r);\n");
+};
+
+pub let emit_entry_main = func(w: Mut(C99Writer), m: Ref(vf.IrModule), entry_sym: u64, print_result: u64) -> u64 {
+  let start: u64 = w.len;
+  let pi: u64 = wr.find_proc(m, entry_sym);
+  // 库前导形态下声明与过程体一直延到这里：入口符号现在才知道，正好按它剪除。
+  if w.deferred == 1 {
+    w.deferred = 0;
+    let mark: MutSlice(u64) = wr.compute_reachable_procs(m, pi);
+    let total: u64 = m.proc_count;
+    let kept: u64 = if mark.len == 0 { total } else { wr.reachable_proc_count(mark) };
+    tr.counter("c99_procs_total", total);
+    tr.counter("c99_procs_emitted", kept);
+    tr.counter("c99_pruned_procs", total - kept);
+    let d: u64 = emit_reachable_proc_decls(w, m, mark);
+    let sep1: u64 = wr.put_byte(w, 10);
+    let b: u64 = emit_reachable_proc_bodies(w, m, mark);
+    let inl_meta_view: MutSlice(u64) = inst.inl_meta();
+    tr.counter("c99_inlined_exprs", inl_meta_view[10]);
+    let sep2: u64 = wr.put_byte(w, 10);
+    let rel: u64 = wr.release_reachable_procs(mark);
+    if (d == 0) or (b == 0) {
+      w.ok = 0;
+      return 0;
+    }
+  }
+  if pi == vf.NO_REGION() {
+    w.ok = 0;
+    return 0;
+  }
+  let p: vf.IrProc = wr.proc_at(m, pi);
+  let a: u64 = wr.put_str(w, "int main(int argc, char **argv) {\n  g_lain_argc = argc;\n  g_lain_argv = argv;\n");
+  let b: u64 = emit_entry_invoke(w, p);
+  if p.result_count == 0 {
+    if print_result != 0 {
+      let c: u64 = wr.put_str(w, "  printf(\"result=void\\n\");\n");
+    }
+    let d: u64 = wr.put_str(w, "  return 0;\n");
+  } else {
+    if print_result != 0 {
+      if p.result_count == 1 {
+        let t: vf.IrType = wr.proc_type(p, 0);
+        let c: u64 = emit_entry_print_result(w, t);
+      } else {
+        let c: u64 = wr.put_str(w, "  printf(\"result=%llu,%llu\\n\", (unsigned long long)r.a, (unsigned long long)r.b);\n");
+      }
+      let d: u64 = wr.put_str(w, "  return 0;\n");
+    } else {
+      if p.result_count == 1 {
+        let e: u64 = wr.put_str(w, "  return (int)r;\n");
+      } else {
+        let e: u64 = wr.put_str(w, "  return (int)r.a;\n");
+      }
+    }
+  }
+  let z: u64 = wr.put_str(w, "}\n");
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+pub let fnv1a_hash = func(buf: Slice(u8)) -> u64 {
+  let h: u64 = 0xcbf29ce484222325;
+  let i: u64 = loop c(i: u64 = 0) while i < buf.len {
+    h = h ^ (buf[i] as u64);
+    h = h * 0x100000001b3;
+    i = i + 1;
+  };
+  return h;
+};
