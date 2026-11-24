@@ -101,7 +101,9 @@ let drop_obj = func(k: Mut(st.State), off: u64, t: Mut(ty.Ty)) -> u64 {
 
 // 作用域里一个局部量的 drop：静态与运行期存活旗标都为真时调用。
 // 取值与调用一起放进 #if 区域，区域内的操作数都在区域内定义。
-pub let emit_drop_entry = func(k: Mut(st.State), off: u64) -> u64 {
+// cold 为 1 时只在冷路径上发射（中止传播、默认返回），不改编译期存活状态，
+// 也不写运行期旗标：那些路径编译完之后正常路径还会继续用到这些局部量。
+let emit_drop_entry_mode = func(k: Mut(st.State), off: u64, cold: u64) -> u64 {
   let t: Mut(ty.Ty) = new_ty(k);
   let a: u64 = env.env_ty(k, off, t);
   let sh: u64 = ty.tsh(t);
@@ -119,26 +121,36 @@ pub let emit_drop_entry = func(k: Mut(st.State), off: u64) -> u64 {
     let obj0: u64 = drop_obj(k, off, t);
     let d0: u64 = agg.drop_value_at(k, sh, obj0);
   }
+  if cold == 1 { return 0; }
   let b: u64 = env.env_set_alive(k, off, 0);
   return set_alive_flag(k, fs, 0);
 };
 
+pub let emit_drop_entry = func(k: Mut(st.State), off: u64) -> u64 {
+  return emit_drop_entry_mode(k, off, 0);
+};
+
 // 从当前绑定栈顶向下 drop 到 stop（不含 stop），天然给出逆声明顺序。
 // off 是当前未处理区段的顶端，逐条减一个记录宽度向前走。
-let drop_walk = func(k: Mut(st.State), off: u64, stop: u64) -> u64 {
+let drop_walk_mode = func(k: Mut(st.State), off: u64, stop: u64, cold: u64) -> u64 {
   if off <= stop { return 0; }
   let eoff: u64 = off - env.env_rec();
-  let d: u64 = emit_drop_entry(k, eoff + 1);
+  let d: u64 = emit_drop_entry_mode(k, eoff + 1, cold);
   if st.st_ok(k) != 0 { return 0; }
-  return drop_walk(k, eoff, stop);
+  return drop_walk_mode(k, eoff, stop, cold);
 };
 
 pub let drop_from = func(k: Mut(st.State), stop: u64) -> u64 {
-  return drop_walk(k, st.st_sp(k), stop);
+  return drop_walk_mode(k, st.st_sp(k), stop, 0);
 };
 
 pub let drop_all = func(k: Mut(st.State)) -> u64 {
   return drop_from(k, 0);
+};
+
+// 冷路径上的全部 drop：不改变编译期存活状态，供中止传播与默认返回使用。
+pub let drop_all_cold = func(k: Mut(st.State)) -> u64 {
+  return drop_walk_mode(k, st.st_sp(k), 0, 1);
 };
 
 // 当前参数组里从 i 起的表达式恰好是一个裸局部名（后面紧跟逗号、分号或结束）。
