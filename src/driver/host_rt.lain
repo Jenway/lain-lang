@@ -943,6 +943,221 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
   return rc;
 };
 
+// --- 分片 C99 发射 ---------------------------------------------------------
+// 分片形态把整份 C 源码切成一组文件：共享头承载前导文本、数据外部声明与全部过程
+// 声明；数据定义单独成文件；过程体按索引区间分批；入口单独成文件；manifest 按行
+// 列出全部 .c 文件路径，供构建脚本逐一编译。
+
+// 前缀的最后一段：分片文件与共享头同目录，所以 #include 只用文件名字段。
+let split_base = func(prefix: Slice(u8)) -> Slice(u8) {
+  let cut: u64 = loop c(i: u64 = 0, last: u64 = 0) while i < prefix.len {
+    let b: u64 = prefix[i] as u64;
+    if b == 47 { last = i + 1; }
+    i = i + 1;
+  };
+  return make_slice(Slice(u8), prefix.ptr + cut, prefix.len - cut);
+};
+
+let split_path = func(dst: Mut(u8), prefix: Slice(u8), suffix: Slice(u8)) -> Slice(u8) {
+  let a: u64 = put_text(dst, 0, prefix);
+  let b: u64 = put_text(dst, a, suffix);
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst), b);
+};
+
+let split_part_path = func(dst: Mut(u8), prefix: Slice(u8), n: u64) -> Slice(u8) {
+  let a: u64 = put_text(dst, 0, prefix);
+  let b: u64 = put_text(dst, a, "_p");
+  let c: u64 = put_dec(dst, b, n);
+  let d: u64 = put_text(dst, c, ".c");
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst), d);
+};
+
+let split_writer = func(buf: Mut(u8), cap: u64) -> c99.C99Writer {
+  let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
+  return c99.new_writer(ms);
+};
+
+let split_flush = func(buf: Mut(u8), w: Mut(c99.C99Writer), path: Slice(u8),
+                       msg: Slice(u8)) -> u64 {
+  let ok: u64 = c99.writer_ok(w);
+  if ok == 0 { return note_fail(msg); }
+  let wrote: u64 = c99.writer_len(w);
+  let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
+  let rc: u64 = os.write_file(path, out);
+  if rc != 0 { return note_fail(msg); }
+  return 0;
+};
+
+let split_include = func(w: Mut(c99.C99Writer), base: Slice(u8), suffix: Slice(u8)) -> u64 {
+  let a: u64 = c99.put_str(w, "#include \"");
+  let b: u64 = c99.put_str(w, base);
+  let c: u64 = c99.put_str(w, suffix);
+  return c99.put_str(w, "\"\n");
+};
+
+let split_data_rec = func(m: Mut(irh.ModState), i: u64) -> irh.DataRec {
+  let at: Mut(irh.DataRec) = m.data + i * size_of(DataRecCell);
+  return deref(at);
+};
+
+let split_data_externs = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+  if i >= m.data_count { return 1; }
+  let d: irh.DataRec = split_data_rec(m, i);
+  let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
+  let rc: u64 = c99.emit_data_decl_extern(w, d.symbol, bytes, d.is_writable);
+  return split_data_externs(w, m, i + 1);
+};
+
+let split_data_defs = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+  if i >= m.data_count { return 1; }
+  let d: irh.DataRec = split_data_rec(m, i);
+  let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
+  let rc: u64 = c99.emit_data_decl_shared(w, d.symbol, bytes, d.is_writable);
+  return split_data_defs(w, m, i + 1);
+};
+
+let manifest_add = func(mb: Mut(u8), at: u64, prefix: Slice(u8), suffix: Slice(u8)) -> u64 {
+  let a: u64 = put_text(mb, at, prefix);
+  let b: u64 = put_text(mb, a, suffix);
+  let nl: Mut(u8) = mb + b;
+  deref(nl) = 10 as u8;
+  return b + 1;
+};
+
+let manifest_add_part = func(mb: Mut(u8), at: u64, prefix: Slice(u8), n: u64) -> u64 {
+  let a: u64 = put_text(mb, at, prefix);
+  let b: u64 = put_text(mb, a, "_p");
+  let c: u64 = put_dec(mb, b, n);
+  let d: u64 = put_text(mb, c, ".c");
+  let nl: Mut(u8) = mb + d;
+  deref(nl) = 10 as u8;
+  return d + 1;
+};
+
+pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
+                              print_result: u64, batch: u64) -> u64 {
+  let h: Mut(HostRt) = rt();
+  let m: Mut(irh.ModState) = mod_of(h.ir, modv);
+  let modval: vf.IrModule = module_of(m);
+  let mv: Ref(vf.IrModule) = ref_of(modval);
+  let es: u64 = sym_intern(entry.ptr, entry.len);
+  let pi: u64 = c99.find_proc(mv, es);
+  if pi == vf.NO_REGION() {
+    return note_fail("[host_rt] emit_c99_split: entry procedure not found\n");
+  }
+  let cap: u64 = out_bytes();
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 {
+    return note_fail("[host_rt] emit_c99_split: output buffer allocation failed\n");
+  }
+  let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let p_buf: Mut(u8) = bump_take(h, prefix.len + 32, 8);
+  let base0: Slice(u8) = split_base(prefix);
+  let inc_base: Slice(u8) = if base0.len == 0 { prefix } else { base0 };
+  let step: u64 = if batch == 0 { 400 } else { batch };
+  let mark: MutSlice(u64) = c99.compute_reachable_procs(mv, pi);
+  let guard: u64 = c99.fnv1a_hash(prefix);
+
+  // 共享头：前导文本 + 数据外部声明 + 全部过程声明。
+  let w10: c99.C99Writer = split_writer(buf, cap);
+  let w1: Mut(c99.C99Writer) = mut_of(w10);
+  let w1s: u64 = c99.writer_set_split(w1, 1);
+  let g0: u64 = c99.put_str(w1, "#ifndef LAIN_SPLIT_C_");
+  let g1: u64 = c99.put_u64_hex(w1, guard);
+  let g2: u64 = c99.put_str(w1, "\n#define LAIN_SPLIT_C_");
+  let g3: u64 = c99.put_u64_hex(w1, guard);
+  let g4: u64 = c99.put_str(w1, "\n");
+  let g5: u64 = c99.emit_split_preamble_shared(w1);
+  let g6: u64 = split_data_externs(w1, m, 0);
+  let g7: u64 = c99.emit_reachable_proc_decls(w1, mv, mark);
+  let g8: u64 = c99.put_str(w1, "\n#endif\n");
+  let shared_path: Slice(u8) = split_path(p_buf, prefix, "_shared.h");
+  let rc_s: u64 = split_flush(buf, w1, shared_path,
+                              "[host_rt] emit_c99_split: failed to write shared header\n");
+  if rc_s != 0 {
+    let rel_s: u64 = c99.release_reachable_procs(mark);
+    os.free_bytes(raw);
+    return rc_s;
+  }
+
+  // 数据定义文件。
+  let w20: c99.C99Writer = split_writer(buf, cap);
+  let w2: Mut(c99.C99Writer) = mut_of(w20);
+  let w2s: u64 = c99.writer_set_split(w2, 1);
+  let d_inc: u64 = split_include(w2, inc_base, "_shared.h");
+  let d_sep: u64 = c99.put_str(w2, "\n");
+  let d_def: u64 = split_data_defs(w2, m, 0);
+  let data_path: Slice(u8) = split_path(p_buf, prefix, "_data.c");
+  let rc_d: u64 = split_flush(buf, w2, data_path,
+                              "[host_rt] emit_c99_split: failed to write data file\n");
+  if rc_d != 0 {
+    let rel_d: u64 = c99.release_reachable_procs(mark);
+    os.free_bytes(raw);
+    return rc_d;
+  }
+
+  // 过程体分片：每片最多 step 个过程索引。
+  let parts_rc: u64 = loop c(lo: u64 = 0, part: u64 = 0) while 1 {
+    if lo >= m.proc_count { break c(0); }
+    let wp0: c99.C99Writer = split_writer(buf, cap);
+    let wp: Mut(c99.C99Writer) = mut_of(wp0);
+    let wps: u64 = c99.writer_set_split(wp, 1);
+    let p_inc: u64 = split_include(wp, inc_base, "_shared.h");
+    let p_sep: u64 = c99.put_str(wp, "\n");
+    let p_body: u64 = c99.emit_reachable_proc_bodies_range(wp, mv, mark, lo, lo + step);
+    let part_path: Slice(u8) = split_part_path(p_buf, prefix, part);
+    let rc_p: u64 = split_flush(buf, wp, part_path,
+                                "[host_rt] emit_c99_split: failed to write procedure part\n");
+    if rc_p != 0 { break c(rc_p); }
+    lo = lo + step;
+    part = part + 1;
+  };
+  if parts_rc != 0 {
+    let rel_p: u64 = c99.release_reachable_procs(mark);
+    os.free_bytes(raw);
+    return parts_rc;
+  }
+
+  // 入口文件：os 全局量定义 + int main。
+  let w30: c99.C99Writer = split_writer(buf, cap);
+  let w3: Mut(c99.C99Writer) = mut_of(w30);
+  let w3s: u64 = c99.writer_set_split(w3, 1);
+  let m_inc: u64 = split_include(w3, inc_base, "_shared.h");
+  let m_sep: u64 = c99.put_str(w3, "\n");
+  let m_glob: u64 = c99.emit_split_main_globals(w3);
+  let m_sep2: u64 = c99.put_str(w3, "\n");
+  let m_main: u64 = c99.emit_entry_main(w3, mv, es, print_result);
+  let main_path: Slice(u8) = split_path(p_buf, prefix, "_main.c");
+  let rc_m: u64 = split_flush(buf, w3, main_path,
+                              "[host_rt] emit_c99_split: failed to write entry file\n");
+  if rc_m != 0 {
+    let rel_m: u64 = c99.release_reachable_procs(mark);
+    os.free_bytes(raw);
+    return rc_m;
+  }
+
+  // manifest：数据文件、入口文件、所有过程分片各占一行。
+  let part_count: u64 = (m.proc_count + step - 1) / step;
+  let mf_cap: u64 = (part_count + 4) * (prefix.len + 32);
+  let mf: Mut(u8) = bump_take(h, mf_cap, 8);
+  let mf_a: u64 = manifest_add(mf, 0, prefix, "_data.c");
+  let mf_b: u64 = manifest_add(mf, mf_a, prefix, "_main.c");
+  let mf_c: u64 = loop c(i: u64 = 0, at: u64 = mf_b) while i < part_count {
+    at = manifest_add_part(mf, at, prefix, i);
+    i = i + 1;
+  };
+  let mf_path: Slice(u8) = split_path(p_buf, prefix, "_manifest.txt");
+  let mf_out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), mf), mf_c);
+  let mf_rc: u64 = os.write_file(mf_path, mf_out);
+  let rel_all: u64 = c99.release_reachable_procs(mark);
+  os.free_bytes(raw);
+  if mf_rc != 0 {
+    return note_fail("[host_rt] emit_c99_split: failed to write manifest\n");
+  }
+  tr.counter("c99_split_parts", part_count);
+  return 0;
+};
+
 // --- 虚拟机 -----------------------------------------------------------------
 // 虚拟机的事件落在 Perfetto 的第二条泳道上：调用轨迹按条展开成 span，已用步数
 // 记成计数事件，整次调用再包一层 vm_apply 区间，区间附带轨迹条数。

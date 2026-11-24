@@ -21,6 +21,7 @@ let CliOpts = struct {
   print_result: bool,
   dump_expand: bool,
   out_path: OptSlice.Opt,
+  split_c: OptSlice.Opt,
   trace_path: OptSlice.Opt,
   entry_name: OptSlice.Opt,
   target: OptSlice.Opt,
@@ -58,7 +59,7 @@ let arg = func(i: u64) -> Slice(u8) {
 };
 
 let usage = func() -> u64 {
-  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--c99] [--opt] [--entry <name>] [--target <windows|linux|macos>] [--trace <trace.json>] [--print-result] [--dump-expand] [--help]\n";
+  let msg: Slice(u8) = "usage: lainc <source.lain> [--out <out.l1|out.c>] [--split-c <prefix>] [--c99] [--opt] [--entry <name>] [--target <windows|linux|macos>] [--trace <trace.json>] [--print-result] [--dump-expand] [--help]\n";
   return os.eprint(msg);
 };
 
@@ -67,6 +68,10 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
   let s: Slice(u8) = arg(i);
   if same(s, "--out") and (i + 1 < n) {
     o.out_path = OptSlice.some(arg(i + 1));
+    return parse(o, i + 2, n);
+  }
+  if same(s, "--split-c") and (i + 1 < n) {
+    o.split_c = OptSlice.some(arg(i + 1));
     return parse(o, i + 2, n);
   }
   if same(s, "--entry") and (i + 1 < n) {
@@ -101,7 +106,7 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
     o.dump_expand = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--out") or same(s, "--entry") or same(s, "--trace") or same(s, "--target") {
+  if same(s, "--out") or same(s, "--split-c") or same(s, "--entry") or same(s, "--trace") or same(s, "--target") {
     o.bad_args = true;
     return 1;
   }
@@ -234,6 +239,7 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
     print_result: false,
     dump_expand: false,
     out_path: OptSlice.none(),
+    split_c: OptSlice.none(),
     trace_path: OptSlice.none(),
     entry_name: OptSlice.none(),
     target: OptSlice.none(),
@@ -314,6 +320,22 @@ let run_cli = func() -> u64 !{ err.CompileErr } {
                          "LAINIR verification failed")!;
   }
   let out_opt: OptSlice.Opt = o.out_path;
+  let split_opt: OptSlice.Opt = o.split_c;
+  match split_opt {
+    None => 0,
+    Some(prefix) => {
+      let en: Slice(u8) = entry_name(o);
+      let pr: u64 = if o.print_result { 1 } else { 0 };
+      let t_sp: u64 = tr.span_begin();
+      let rc: u64 = hr.emit_c99_split(st.st_mod(k), prefix, en, pr, 400);
+      let ev_sp: u64 = tr.span_end("cli_emit_split_c", "lainc", t_sp, rc);
+      if rc != 0 {
+        return err.fail_info(err.ErrKind.HostCap { }, rc, added, 0, 0,
+                             "failed to write split C99 output")!;
+      }
+      0
+    },
+  }
   match out_opt {
     None => 0,
     Some(out_path) => {

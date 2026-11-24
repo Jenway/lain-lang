@@ -28,18 +28,26 @@ let syms_get = func() -> Mut(tab.HostSymTab) {
 // --- writer ---------------------------------------------------------------
 // deferred 置 1 的 writer 处在「库前导 + 独立入口」形态：过程声明与过程体必须等到
 // emit_entry_main 拿到入口符号之后再发射，否则无法判定哪些过程真的可达。
+// split 置 1 的 writer 处在分片形态：非 extern 过程不带 static，数据定义与外部声明
+// 分开发射，过程声明与过程体由调用方按文件切分。
 pub let C99Writer = struct {
   buf: MutSlice(u8),
   len: u64,
   ok: u64,
   deferred: u64,
+  split: u64,
 };
 
 // 关联类型导出：调用方可以按 UFCS 写成 w.put_str(...)。
 pub let Self = C99Writer;
 
 pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
-  return C99Writer { buf: buf, len: 0, ok: 1, deferred: 0 };
+  return C99Writer { buf: buf, len: 0, ok: 1, deferred: 0, split: 0 };
+};
+
+pub let writer_set_split = func(w: Mut(C99Writer), v: u64) -> u64 {
+  w.split = v;
+  return v;
 };
 
 pub let writer_new = func(buf: MutSlice(u8)) -> C99Writer {
@@ -2470,7 +2478,7 @@ let proc_inline_hint = func(m: Ref(vf.IrModule), p: vf.IrProc) -> u64 {
 };
 
 pub let emit_proc_signature = func(w: Mut(C99Writer), m: Ref(vf.IrModule), p: vf.IrProc) -> u64 {
-  if p.is_extern == 0 {
+  if (p.is_extern == 0) and (w.split == 0) {
     if proc_inline_hint(m, p) == 1 {
       let a0: u64 = put_str(w, "static inline ");
     } else {
@@ -2793,8 +2801,8 @@ pub let emit_all_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule), i: u6
 };
 
 // 标记表长度为零时按「全部过程可达」处理。
-let emit_reachable_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
-                                    mark: MutSlice(u64)) -> u64 {
+pub let emit_reachable_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                        mark: MutSlice(u64)) -> u64 {
   let ok: u64 = loop c(at: u64 = 0) while 1 {
     if at >= m.proc_count { break c(1); }
     if (mark.len == 0) or (mark[at] == 1) {
@@ -2806,10 +2814,12 @@ let emit_reachable_proc_decls = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
   return ok;
 };
 
-let emit_reachable_proc_bodies = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
-                                      mark: MutSlice(u64)) -> u64 {
-  let ok: u64 = loop c(at: u64 = 0) while 1 {
-    if at >= m.proc_count { break c(1); }
+// 只发射索引落在 [lo, hi) 之内、且可达的非 extern 过程体，供分片按批切分。
+pub let emit_reachable_proc_bodies_range = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                               mark: MutSlice(u64), lo: u64,
+                                               hi: u64) -> u64 {
+  let ok: u64 = loop c(at: u64 = lo) while 1 {
+    if at >= hi { break c(1); }
     if (mark.len == 0) or (mark[at] == 1) {
       let p: vf.IrProc = proc_at(m, at);
       if p.is_extern == 0 {
@@ -2822,6 +2832,11 @@ let emit_reachable_proc_bodies = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
   return ok;
 };
 
+let emit_reachable_proc_bodies = func(w: Mut(C99Writer), m: Ref(vf.IrModule),
+                                      mark: MutSlice(u64)) -> u64 {
+  return emit_reachable_proc_bodies_range(w, m, mark, 0, m.proc_count);
+};
+
 pub let emit_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -> u64 {
   if pi >= m.proc_count { return 0; }
   let p: vf.IrProc = proc_at(m, pi);
@@ -2829,13 +2844,8 @@ pub let emit_proc_decl = func(w: Mut(C99Writer), m: Ref(vf.IrModule), pi: u64) -
   return put_str(w, ";\n");
 };
 
-pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
-  let start: u64 = w.len;
-  if is_writable == 0 {
-    let a: u64 = put_str(w, "static const uint8_t ");
-  } else {
-    let a: u64 = put_str(w, "static uint8_t ");
-  }
+// 数据定义的主体：名字、长度与字节内容，三种发射形态共用这一段文本。
+let emit_data_decl_body = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8)) -> u64 {
   let b: u64 = emit_data_name(w, symbol);
   let c: u64 = put_byte(w, 91);
   let size: u64 = if bytes.len == 0 { 1 } else { bytes.len };
@@ -2852,7 +2862,47 @@ pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), 
       i = i + 1;
     };
   }
-  let h: u64 = put_str(w, "\n};\n");
+  return put_str(w, "\n};\n");
+};
+
+pub let emit_data_decl = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = put_str(w, "static const uint8_t ");
+  } else {
+    let a: u64 = put_str(w, "static uint8_t ");
+  }
+  let t: u64 = emit_data_decl_body(w, symbol, bytes);
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 分片形态的数据定义：符号不带 static，其他分片经共享头的外部声明引用同一份。
+pub let emit_data_decl_shared = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = put_str(w, "const uint8_t ");
+  } else {
+    let a: u64 = put_str(w, "uint8_t ");
+  }
+  let t: u64 = emit_data_decl_body(w, symbol, bytes);
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 分片形态的外部声明：长度与定义保持一致，数组类型因此是完整的。
+pub let emit_data_decl_extern = func(w: Mut(C99Writer), symbol: u64, bytes: Slice(u8), is_writable: u64) -> u64 {
+  let start: u64 = w.len;
+  if is_writable == 0 {
+    let a: u64 = put_str(w, "extern const uint8_t ");
+  } else {
+    let a: u64 = put_str(w, "extern uint8_t ");
+  }
+  let b: u64 = emit_data_name(w, symbol);
+  let c: u64 = put_byte(w, 91);
+  let size: u64 = if bytes.len == 0 { 1 } else { bytes.len };
+  let d: u64 = put_u64_dec(w, size);
+  let e: u64 = put_str(w, "];\n");
   if w.ok == 0 { return 0; }
   return w.len - start;
 };
@@ -2951,6 +3001,28 @@ pub let emit_preamble = func(w: Mut(C99Writer)) -> u64 {
   let d: u64 = put_str(w, preamble_entry());
   if w.ok == 0 { return 0; }
   return w.len - start;
+};
+
+// 分片形态的 os 全局量：定义放在入口文件，各分片通过共享头引用同一份。
+let preamble_os_split = func() -> Slice(u8) {
+  return "extern int g_lain_argc;\nextern char **g_lain_argv;\n\nstatic uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n\nstatic uint64_t lain_os_argv_len(uint64_t idx) {\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  return (uint64_t)strlen(g_lain_argv[idx]);\n}\n\nstatic uint64_t lain_os_argv_copy(uint64_t idx, void *buf, uint64_t cap) {\n  size_t n;\n  if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0;\n  n = strlen(g_lain_argv[idx]);\n  if (n > (size_t)cap) n = (size_t)cap;\n  if (n > 0 && buf) memcpy(buf, g_lain_argv[idx], n);\n  return (uint64_t)n;\n}\n\nstatic uint64_t lain_os_eprint(void *ptr, uint64_t len) {\n  if (len > 0 && ptr) fwrite(ptr, 1, (size_t)len, stderr);\n  return len;\n}\n";
+};
+
+// 分片形态的共享头前导：全部静态辅助函数与 os 访问器，不含 int main。
+pub let emit_split_preamble_shared = func(w: Mut(C99Writer)) -> u64 {
+  let start: u64 = w.len;
+  let a: u64 = put_str(w, preamble_helpers());
+  let abi_p: u64 = put_str(w, preamble_c_abi());
+  let b: u64 = put_str(w, preamble_memory());
+  let c: u64 = put_str(w, preamble_io());
+  let os_p: u64 = put_str(w, preamble_os_split());
+  if w.ok == 0 { return 0; }
+  return w.len - start;
+};
+
+// 入口文件里为共享头中的 extern 声明提供定义。
+pub let emit_split_main_globals = func(w: Mut(C99Writer)) -> u64 {
+  return put_str(w, "int g_lain_argc = 0;\nchar **g_lain_argv = NULL;\n");
 };
 
 // --- 入口包装 -------------------------------------------------------------

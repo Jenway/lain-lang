@@ -577,43 +577,7 @@ let state_addr = func(k: Mut(st.State)) -> u64 {
   return res;
 };
 
-// 当前可恢复效应的处理器入口：一个 (tag, payload) -> u64 的函数指针。
-let handler_name = func(k: Mut(st.State)) -> u64 {
-  return ir.sym_lit("__eff_handler", 13);
-};
-
-let ensure_handler = func(k: Mut(st.State)) -> u64 {
-  let nm: u64 = handler_name(k);
-  if ir.data_find(k, nm) != 0 { return nm; }
-  let buf: Mut(u8) = st.st_databuf(k) + st.st_dataused(k);
-  let zs: MutSlice(u8) = make_slice(MutSlice(u8), buf, 8);
-  let z: u64 = loop w(i: u64 = 0) while i < 8 {
-    zs[i] = 0;
-    i = i + 1;
-  };
-  let used: u64 = st.st_set_dataused(k, st.st_dataused(k) + 8);
-  let add: u64 = ir.data_add(k, nm, buf, 8, 1);
-  return nm;
-};
-
-let handler_addr = func(k: Mut(st.State)) -> u64 {
-  let nm: u64 = ensure_handler(k);
-  let res: u64 = ir.fresh_t(k);
-  let e: u64 = ir.emit_lea(k, res, nm, 0, 1, 0);
-  return res;
-};
-
-let load_addr_field = func(k: Mut(st.State), nm: u64, off: u64) -> Mut(ty.Val) {
-  let at: Mut(ty.Ty) = ir.taddr(k);
-  let p: u64 = agg.off_of(k, nm, off);
-  let res: u64 = ir.fresh_t(k);
-  let rc: u64 = ir.args_reset(k);
-  let a: u64 = ir.arg_ref(k, p);
-  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, at, 0);
-  let v: Mut(ty.Val) = new_val(k);
-  return ty.val_ref(v, res, at);
-};
-
+// 运行期读写辅助：base 可以是一个数据符号，也可以是一个地址寄存器。
 let load_u64 = func(k: Mut(st.State), base: u64, off: u64) -> u64 {
   let p: u64 = agg.off_of(k, base, off);
   let t: Mut(ty.Ty) = t64(k);
@@ -636,6 +600,144 @@ let store_val = func(k: Mut(st.State), base: u64, off: u64, v: Mut(ty.Val)) -> u
   let c: Mut(ty.Val) = new_val(k);
   let rc: u64 = cx.coerce(k, v, ty.vty(v), t, c);
   return agg.store_at(k, base, off, c, t);
+};
+
+// 帧区：__eff_top 指向栈顶帧，__eff_hcur 是帧区的下一个空位；
+// 一帧 16 字节 = [处理器过程指针@0, 上一帧指针@8]。帧住在静态帧区而不是
+// 过程栈上，因此某个过程带着未恢复的帧提前 return 时，剩下的指针仍然可读写。
+let handler_top_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_top", 9);
+};
+
+let handler_cur_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_hcur", 10);
+};
+
+let handler_frames_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_hframes", 13);
+};
+
+let hframe_bytes = func() -> u64 { return 16384; };
+
+let ensure_global = func(k: Mut(st.State), nm: u64, size: u64) -> u64 {
+  if ir.data_find(k, nm) != 0 { return nm; }
+  let buf: Mut(u8) = st.st_databuf(k) + st.st_dataused(k);
+  let zs: MutSlice(u8) = make_slice(MutSlice(u8), buf, size);
+  let z: u64 = loop w(i: u64 = 0) while i < size {
+    zs[i] = 0;
+    i = i + 1;
+  };
+  let used: u64 = st.st_set_dataused(k, st.st_dataused(k) + size);
+  let add: u64 = ir.data_add(k, nm, buf, size, 1);
+  return nm;
+};
+
+let ensure_handler = func(k: Mut(st.State)) -> u64 {
+  return ensure_global(k, handler_top_name(k), 8);
+};
+
+let ensure_hcur = func(k: Mut(st.State)) -> u64 {
+  return ensure_global(k, handler_cur_name(k), 8);
+};
+
+let ensure_hframes = func(k: Mut(st.State)) -> u64 {
+  return ensure_global(k, handler_frames_name(k), hframe_bytes());
+};
+
+let proc_addr = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let res: u64 = ir.fresh_t(k);
+  let e: u64 = ir.emit_lea(k, res, name, 0, 1, 0);
+  let v: Mut(ty.Val) = new_val(k);
+  let vr: u64 = ty.val_ref(v, res, at);
+  return v;
+};
+
+// u64 与地址互转：BITCAST 会把新类型登到指令上，后面用同一份值当指针才过验。
+let as_addr = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Val) {
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let out: Mut(ty.Val) = new_val(k);
+  let c: u64 = cx.coerce(k, v, ty.vty(v), at, out);
+  return out;
+};
+
+let as_u64 = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Val) {
+  let t: Mut(ty.Ty) = t64(k);
+  let out: Mut(ty.Val) = new_val(k);
+  let c: u64 = cx.coerce(k, v, ty.vty(v), t, out);
+  return out;
+};
+
+let u64_val = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
+  let v: Mut(ty.Val) = new_val(k);
+  ty.val_ref(v, name, t64(k));
+  return v;
+};
+
+let add_imm = func(k: Mut(st.State), a: u64, imm: u64) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let res: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let x: u64 = ir.arg_ref(k, a);
+  let y: u64 = ir.arg_int(k, imm);
+  let ins: u64 = ir.emit(k, codes.INST_ADD(), res, t);
+  return res;
+};
+
+// 进入可恢复 handle：帧记 (处理器过程, 上一帧)，__eff_top 与 __eff_hcur 上推一格。
+// 返回保存本帧地址的槽号，body 结束后用它弹出。
+let push_eff_frame = func(k: Mut(st.State), fnname: u64) -> u64 {
+  let g: u64 = ensure_handler(k);
+  let gc: u64 = ensure_hcur(k);
+  let gf: u64 = ensure_hframes(k);
+  let u64t: Mut(ty.Ty) = t64(k);
+  // 首次使用：游标指向帧区首地址。
+  let cur0: u64 = load_u64(k, gc, 0);
+  let cinit: u64 = cond_u64(k, codes.INST_EQ(), cur0, 0);
+  let ir0: u64 = ir.region_begin(k);
+  let f0n: u64 = ir.fresh_t(k);
+  let e0: u64 = ir.emit_lea(k, f0n, gf, 0, 1, 0);
+  let f0a: Mut(ty.Val) = new_val(k);
+  let f0r: u64 = ty.val_ref(f0a, f0n, ir.taddr(k));
+  let f0v: Mut(ty.Val) = as_u64(k, f0a);
+  let s0: u64 = store_val(k, gc, 0, f0v);
+  let ir0e: u64 = ir.region_end(k);
+  let if0: u64 = ir.emit_if(k, 0, cinit, ir0e, 0);
+  let cur: u64 = load_u64(k, gc, 0);
+  let cura: Mut(ty.Val) = as_addr(k, u64_val(k, cur));
+  let top: u64 = load_u64(k, g, 0);
+  let s1: u64 = store_val(k, ty.vn(cura), 0, proc_addr(k, fnname));
+  let s2: u64 = store_val(k, ty.vn(cura), 8, u64_val(k, top));
+  let s3: u64 = agg.store_at(k, g, 0, cura, ir.taddr(k));
+  let nxt: u64 = add_imm(k, cur, 16);
+  let s4: u64 = store_val(k, gc, 0, u64_val(k, nxt));
+  let slot: u64 = alloc_dyn_slot(k);
+  let s5: u64 = cx.slot_put(k, slot, cura, ir.taddr(k));
+  return slot;
+};
+
+// 退出：__eff_top 回到本帧记录的上一帧，游标回到本帧开头。
+let pop_eff_frame = func(k: Mut(st.State), slot: u64) -> u64 {
+  let g: u64 = ensure_handler(k);
+  let gc: u64 = ensure_hcur(k);
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let fv: Mut(ty.Val) = new_val(k);
+  let sg: u64 = cx.slot_get(k, slot, at, fv);
+  let prev: u64 = load_u64(k, ty.vn(fv), 8);
+  let s0: u64 = store_val(k, g, 0, u64_val(k, prev));
+  let fu: Mut(ty.Val) = as_u64(k, fv);
+  let s1: u64 = store_val(k, gc, 0, fu);
+  return 1;
+};
+
+let cond_u64 = func(k: Mut(st.State), kind: u64, a: u64, imm: u64) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let res: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let x: u64 = ir.arg_ref(k, a);
+  let y: u64 = ir.arg_int(k, imm);
+  let ins: u64 = ir.emit(k, kind, res, t);
+  return res;
 };
 
 pub let emit_default_return = func(k: Mut(st.State)) -> u64 {
@@ -919,114 +1021,59 @@ let arm_inline = func(k: Mut(st.State), hr: Mut(HandlerRec), bodyg: u64, param_t
   return 1;
 };
 
-let handler_fn = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
-  let u64t: Mut(ty.Ty) = t64(k);
-  let u64id: u64 = ireg.tid_of(k, u64t);
-  let tbl: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 24));
-  deref(tbl) = u64id;
-  let w1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + 8);
-  deref(w1) = u64id;
-  let fid: u64 = ct.fn_t(k, u64id, 2, tbl as u64);
-  let ft: Mut(ty.Ty) = new_ty(k);
-  let fp: u64 = ireg.project(k, fid, ft);
-  let fv: Mut(ty.Val) = new_val(k);
-  ty.val_ref(fv, name, ft);
-  return fv;
-};
-
-let save_handler = func(k: Mut(st.State)) -> u64 {
-  let nm: u64 = handler_name(k);
-  let hv: Mut(ty.Val) = load_addr_field(k, nm, 0);
-  let at: Mut(ty.Ty) = ir.taddr(k);
-  let sl: u64 = st.st_next_slot(k);
-  cx.slot_put(k, sl, hv, at);
-  return sl;
-};
-
-let restore_handler = func(k: Mut(st.State), slot: u64) -> u64 {
-  let nm: u64 = handler_name(k);
-  let at: Mut(ty.Ty) = ir.taddr(k);
-  let v: Mut(ty.Val) = new_val(k);
-  cx.slot_get(k, slot, at, v);
-  return agg.store_at(k, nm, 0, v, at);
-};
-
-let install_handler = func(k: Mut(st.State), name: u64) -> u64 {
-  let nm: u64 = handler_name(k);
-  let at: Mut(ty.Ty) = ir.taddr(k);
-  let ares: u64 = ir.fresh_t(k);
-  let e: u64 = ir.emit_lea(k, ares, name, 0, 1, 0);
-  let av: Mut(ty.Val) = new_val(k);
-  ty.val_ref(av, ares, at);
-  return agg.store_at(k, nm, 0, av, at);
-};
-
-// 可恢复操作的同步回调：当前处理器存在时直接调用它拿回 resume 值。
+// 可恢复操作的同步派发：沿 __eff_top 链调用处理器过程，
+// 处理器臂里 resume 的返回值就是这个 perform 的值。
+// 没有活动帧时退回旧通道：写 __eff_state 并交回 0。
 let resumable_dispatch = func(k: Mut(st.State), tag: u64, payload: Mut(ty.Val), info: Mut(OpInfo), out: Mut(ty.Val)) -> u64 {
-  let hv: Mut(ty.Val) = load_addr_field(k, handler_name(k), 0);
-  let at: Mut(ty.Ty) = ty.vty(hv);
+  let g: u64 = ensure_handler(k);
   let u64t: Mut(ty.Ty) = t64(k);
-  let hv64: Mut(ty.Val) = new_val(k);
-  let hc: u64 = cx.coerce(k, hv, at, u64t, hv64);
-  let cond: u64 = ir.fresh_t(k);
-  ir.args_reset(k);
-  let ca: u64 = ir.arg_ref(k, ty.vn(hv64));
-  let cb: u64 = ir.arg_int(k, 0);
-  let cmp: u64 = ir.emit(k, codes.INST_NE(), cond, u64t);
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let topa: Mut(ty.Val) = new_val(k);
+  let topl: u64 = agg.load_at(k, g, 0, at, topa);
+  let topu: Mut(ty.Val) = new_val(k);
+  let topc: u64 = cx.coerce(k, topa, at, u64t, topu);
+  let cond: u64 = cond_u64(k, codes.INST_NE(), ty.vn(topu), 0);
   let slot: u64 = alloc_dyn_slot(k);
   let tr: u64 = ir.region_begin(k);
+  // 派发成功就是一次正常求值：把状态通道上的旧 tag 清掉，
+  // 否则外层 handle 的正常完成分支会把旧 tag 误当成待处理事件。
+  let sa0: u64 = state_addr(k);
+  let sc0: u64 = store_lit(k, sa0, 0, 0);
+  let fnv: Mut(ty.Val) = new_val(k);
+  let fnl: u64 = agg.load_at(k, ty.vn(topa), 0, at, fnv);
   let pv: Mut(ty.Val) = new_val(k);
   let pc: u64 = cx.coerce(k, payload, ty.vty(payload), u64t, pv);
-  let ptbl: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 64));
-  let p0: u64 = ty.ty_at(cx.ty_idx(ptbl, 0), u64t);
-  let p1: u64 = ty.ty_at(cx.ty_idx(ptbl, 1), u64t);
-  let u64id: u64 = ireg.tid_of(k, u64t);
-  let tbl: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 24));
-  deref(tbl) = u64id;
-  let w1: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), tbl) + 8);
-  deref(w1) = u64id;
   let item: u64 = 1 + 64 * 256;
-  let plo: u64 = item + item * 65536;
+  let plo: u64 = item + item * 65536 + item * 16777216;
   ir.args_reset(k);
-  let tgt: u64 = ir.arg_ref(k, ty.vn(hv));
+  let tgt: u64 = ir.arg_ref(k, ty.vn(fnv));
   let t1: u64 = ir.arg_int(k, tag);
-  let pv2: u64 = ir.op_val(k, pv);
+  let t2: u64 = ir.op_val(k, pv);
+  let t3: u64 = ir.arg_ref(k, ty.vn(topu));
   let rv: u64 = ir.fresh_t(k);
   let ic: u64 = ir.emit_call_indirect(k, rv, u64t, plo, 0);
   let rvv: Mut(ty.Val) = new_val(k);
   ty.val_ref(rvv, rv, u64t);
-  cx.slot_put(k, slot, rvv, u64t);
+  let sp: u64 = cx.slot_put(k, slot, rvv, u64t);
   let tre: u64 = ir.region_end(k);
   let er: u64 = ir.region_begin(k);
   let sa: u64 = state_addr(k);
   let s0: u64 = store_lit(k, sa, 0, tag);
   let s1: u64 = store_val(k, sa, 8, payload);
   let s2: u64 = store_lit(k, sa, 24, 0);
+  let z: Mut(ty.Val) = new_val(k);
+  ty.val_lit(z, 0, u64t);
+  cx.slot_put(k, slot, z, u64t);
+  if in_handle(k) == 0 {
+    let dr: u64 = emit_default_return(k);
+  }
   let ere: u64 = ir.region_end(k);
   let ifi: u64 = ir.emit_if(k, 0, cond, tre, ere);
-  if in_handle(k) == 1 {
-    let rv2: Mut(ty.Val) = new_val(k);
-    cx.slot_get(k, slot, u64t, rv2);
-    let rt: Mut(ty.Ty) = new_ty(k);
-    let rj: u64 = ireg.project(k, info.ret_tid, rt);
-    let c2: u64 = cx.coerce(k, rv2, u64t, rt, out);
-    return 1;
-  }
-  let stv: u64 = load_u64(k, sa, 0);
-  let cond2: u64 = ir.fresh_t(k);
-  ir.args_reset(k);
-  let qa: u64 = ir.arg_ref(k, stv);
-  let qb: u64 = ir.arg_int(k, 0);
-  let cmp2: u64 = ir.emit(k, codes.INST_NE(), cond2, u64t);
-  let rr: u64 = ir.region_begin(k);
-  let dr: u64 = emit_default_return(k);
-  let rre: u64 = ir.region_end(k);
-  let ci2: u64 = ir.emit_if(k, 0, cond2, rre, 0);
-  let rv3: Mut(ty.Val) = new_val(k);
-  cx.slot_get(k, slot, u64t, rv3);
-  let rt2: Mut(ty.Ty) = new_ty(k);
-  let rj2: u64 = ireg.project(k, info.ret_tid, rt2);
-  let c3: u64 = cx.coerce(k, rv3, u64t, rt2, out);
+  let rv2: Mut(ty.Val) = new_val(k);
+  cx.slot_get(k, slot, u64t, rv2);
+  let rt: Mut(ty.Ty) = new_ty(k);
+  let rj: u64 = ireg.project(k, info.ret_tid, rt);
+  let c2: u64 = cx.coerce(k, rv2, u64t, rt, out);
   return 1;
 };
 
@@ -1095,29 +1142,22 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       }
 
     }
+    if info.abortive == 0 {
+      // 可恢复操作：沿运行期处理器链同步取回 resume 值。
+      let dd: u64 = resumable_dispatch(k, tag, payload, info, out);
+      return j2 + 3;
+    }
     let base: u64 = state_addr(k);
     let tag2: u64 = tag;
     let s0: u64 = store_lit(k, base, 0, tag);
     let s1: u64 = store_val(k, base, 8, payload);
     let s2: u64 = store_lit(k, base, 24, 0);
     if in_handle(k) == 1 {
-      if info.abortive == 1 {
-        ty.val_none(out);
-      } else {
-        let rt: Mut(ty.Ty) = new_ty(k);
-        let rj: u64 = ireg.project(k, info.ret_tid, rt);
-        ty.val_lit(out, 0, rt);
-      }
+      ty.val_none(out);
     } else {
-      if info.abortive == 1 {
-        let dr: u64 = emit_default_return(k);
-        let ma: u64 = mark_abort(k);
-        ty.val_none(out);
-      } else {
-        let rt2: Mut(ty.Ty) = new_ty(k);
-        let rj2: u64 = ireg.project(k, info.ret_tid, rt2);
-        ty.val_lit(out, 0, rt2);
-      }
+      let dr: u64 = emit_default_return(k);
+      let ma: u64 = mark_abort(k);
+      ty.val_none(out);
     }
     return j2 + 3;
   }
@@ -1430,9 +1470,43 @@ let disp_at = func(c: Mut(EffCtx), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.disp) + i * 48);
 };
 
+// 处理器分支体里一旦用到 handle 所在过程的局部量，就不能编进独立过程：
+// 此时只保留词法内联恢复，不登记派发过程。
+let scan_names = func(k: Mut(st.State), g: u64, i: u64, end: u64, b1: u64, b2: u64) -> u64 {
+  if i >= end { return 0; }
+  if is_group(g, i) == 1 {
+    let sub: u64 = n_at(g, i);
+    if scan_names(k, sub, 0, n_count(sub), b1, b2) == 1 { return 1; }
+  } else {
+    if is_name(g, i) == 1 {
+      let nm: u64 = n_sym(g, i);
+      if nm != b1 and nm != b2 and env.env_find(k, nm) != 0 { return 1; }
+    }
+  }
+  return scan_names(k, g, i + 1, end, b1, b2);
+};
+
+let disp_needs_env = func(k: Mut(st.State), hr: Mut(HandlerRec)) -> u64 {
+  let fb: Mut(u64) = box(k);
+  box_put(fb, 0);
+  let done: u64 = loop a(i: u64 = 0) while i < hr.n {
+    let ar: Mut(HArm) = arm_at(hr, i);
+    if ar.kind == 1 and ar.abortive == 0 {
+      let aend: u64 = arm_end(hr.ag, ar.body);
+      if scan_names(k, hr.ag, ar.body, aend, ar.bind, ar.resume_bind) == 1 {
+        box_put(fb, 1);
+        break a(i + 1);
+      }
+    }
+    i = i + 1;
+  };
+  return box_get(fb);
+};
+
 // 为一个 handle 登记可恢复处理器。名字先给出，过程体等到外层过程收尾后再编。
 let enqueue_disp = func(k: Mut(st.State), hr: Mut(HandlerRec)) -> u64 {
   if hr.has_resumable == 0 { return 0; }
+  if disp_needs_env(k, hr) == 1 { return 0; }
   let c: Mut(EffCtx) = ctx(k);
   if c.dn >= c.dcap { return st.st_fail(k, ax.e_frame()); }
   let seq: u64 = st.st_next_tmp(k);
@@ -1503,7 +1577,9 @@ let disp_arm_region = func(k: Mut(st.State), ag: u64, ar: Mut(HArm), pay: Mut(ty
   return ir.region_end(k);
 };
 
-// 每个 handle 生成一个 (tag, payload) -> u64 的处理器过程。
+// 每个 handle 生成一个 (tag, payload, frame) -> u64 的处理器过程。
+// 过程执行期间把 __eff_top 退到上一帧（分支体里的 perform 归外层管），
+// 收尾时把本帧重新置顶，再把分支算出的值作为 resume 值返回。
 pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let c: Mut(EffCtx) = ctx(k);
   if c.dn == 0 { return 0; }
@@ -1539,16 +1615,31 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let bp: u64 = ir.proc_begin(k, nm);
   let tag: u64 = ir.fresh_t(k);
   let pay: u64 = ir.fresh_t(k);
+  let frm: u64 = ir.fresh_t(k);
   ir.proc_param(k, tag, u64t);
   ir.proc_param(k, pay, u64t);
+  ir.proc_param(k, frm, u64t);
   ir.proc_result(k, u64t);
   ir.region_begin(k);
-  let sl: u64 = emit_slots(k, 0, 8 + cnt + cx.count_tree(ag, 0));
+  let sl: u64 = emit_slots(k, 0, 9 + cnt + cx.count_tree(ag, 0));
   let payv: Mut(ty.Val) = new_val(k);
   ty.val_ref(payv, pay, u64t);
   let tagv: Mut(ty.Val) = new_val(k);
   ty.val_ref(tagv, tag, u64t);
   let resname: u64 = ir.fresh_t(k);
+  // 上一帧：帧里存的是 {过程指针@0, 上一帧指针@8}。指针值保持地址类型，
+  // 只在存盘、比较与形参位置转成 u64。
+  let at: Mut(ty.Ty) = ir.taddr(k);
+  let framev: Mut(ty.Val) = new_val(k);
+  ty.val_ref(framev, frm, u64t);
+  let fra: Mut(ty.Val) = new_val(k);
+  let frc: u64 = cx.coerce(k, framev, u64t, at, fra);
+  let prev: Mut(ty.Val) = new_val(k);
+  let prevl: u64 = agg.load_at(k, ty.vn(fra), 8, at, prev);
+  let prevu: Mut(ty.Val) = new_val(k);
+  let prevc: u64 = cx.coerce(k, prev, at, u64t, prevu);
+  let gtop: u64 = ensure_handler(k);
+  let sw0: u64 = store_val(k, gtop, 0, prevu);
   let i: u64 = 0;
   let added: u64 = loop dc(i: u64 = 0) while i < cnt {
     let ar: Mut(HArm) = ptr_cast(Mut(HArm), ptr_cast(Mut(u8), arms) + i * 88);
@@ -1556,18 +1647,53 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
     let ca: u64 = ir.case_add(k, ar.tag, cr);
     i = i + 1;
   };
+  // 默认分支：本处理器不管这个 tag，交给上一帧；没有上一帧就记录未处理并回 0。
   let dr: u64 = ir.region_begin(k);
+  let has_prev: u64 = cond_u64(k, codes.INST_NE(), ty.vn(prevu), 0);
+  let pr: u64 = ir.region_begin(k);
+  let pfn: Mut(ty.Val) = new_val(k);
+  let pfl: u64 = agg.load_at(k, ty.vn(prev), 0, at, pfn);
+  let item: u64 = 1 + 64 * 256;
+  let plo: u64 = item + item * 65536 + item * 16777216;
+  ir.args_reset(k);
+  let qa: u64 = ir.arg_ref(k, ty.vn(pfn));
+  let qb: u64 = ir.arg_ref(k, tag);
+  let qc: u64 = ir.arg_ref(k, pay);
+  let qd: u64 = ir.arg_ref(k, ty.vn(prevu));
+  let qr: u64 = ir.fresh_t(k);
+  let qc2: u64 = ir.emit_call_indirect(k, qr, u64t, plo, 0);
+  let qrv: Mut(ty.Val) = new_val(k);
+  ty.val_ref(qrv, qr, u64t);
+  ir.args_reset(k);
+  let r1: u64 = ir.region_result(k, u64t);
+  let qn: u64 = cx.val_force(k, qrv, u64t);
+  let qo: u64 = ir.arg_ref(k, qn);
+  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  let pre: u64 = ir.region_end(k);
+  let nr: u64 = ir.region_begin(k);
   let base: u64 = state_addr(k);
   let stg: u64 = store_val(k, base, 0, tagv);
   ir.args_reset(k);
-  let rr: u64 = ir.region_result(k, u64t);
+  let r2: u64 = ir.region_result(k, u64t);
   let z2: Mut(ty.Val) = new_val(k);
   ty.val_lit(z2, 0, u64t);
   let zn: u64 = cx.val_force(k, z2, u64t);
   let za: u64 = ir.arg_ref(k, zn);
   ir.emit_jump(k, codes.INST_YIELD(), 0);
+  let nre: u64 = ir.region_end(k);
+  let pifv: u64 = ir.fresh_t(k);
+  let pif: u64 = ir.emit_if(k, pifv, has_prev, pre, nre);
+  // 把 if 的结果作为 switch 默认分支的结果交出去。
+  ir.args_reset(k);
+  let r0: u64 = ir.region_result(k, u64t);
+  let pifv2: Mut(ty.Val) = new_val(k);
+  ty.val_ref(pifv2, pifv, u64t);
+  let pifn: u64 = cx.val_force(k, pifv2, u64t);
+  let pifa: u64 = ir.arg_ref(k, pifn);
+  ir.emit_jump(k, codes.INST_YIELD(), 0);
   let dre: u64 = ir.region_end(k);
   let sw: u64 = ir.emit_switch(k, resname, tag, u64t, dre);
+  let sw1: u64 = store_val(k, gtop, 0, framev);
   ir.args_reset(k);
   let sv2: Mut(ty.Val) = new_val(k);
   ty.val_ref(sv2, resname, u64t);
@@ -1718,9 +1844,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   if direct == 0 { cand = frames_row(k); }
   let hr: Mut(HandlerRec) = parse_arms(k, ag, cand, n_count(ag));
   if st.st_ok(k) != 0 { return wi + 2; }
-  let dname: u64 = 0;
-  let hs: u64 = if dname != 0 { save_handler(k) } else { no_slot() };
-  if dname != 0 { let ih: u64 = install_handler(k, dname); }
+  let dname: u64 = if hr.has_resumable == 1 { enqueue_disp(k, hr) } else { 0 };
   let gen_first: u64 = if is_null(callee) == 0 and modules.sym_kind(callee) == modules.sym_kind_generic() {
     1
   } else if direct == 0 and i + 1 < n and is_name(g, i + 1) == 1 {
@@ -1754,6 +1878,9 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     return wi + 2;
   }
   let caught: Mut(EffRow) = ptr_cast(Mut(EffRow), hr.row);
+  // 可恢复处理器：把 (过程, 上一帧) 帧压到链表顶，body 里任意调用深度的
+  // perform 都沿这条链找回它；帧住静态帧区，提前 return 也不会留下野指针。
+  let hs: u64 = if dname != 0 { push_eff_frame(k, dname) } else { no_slot() };
   let cw: u64 = if gen_first == 1 { 0 } else { push_frame(k, caught) };
   let ph: u64 = if gen_first == 1 { 0 } else { push_handler(k, hr) };
   let prev: u64 = in_handle(k);
@@ -1783,7 +1910,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     if gen_first == 0 { let pq: u64 = pop_handler(k); let pf: u64 = pop_frame(k); }
     return nx;
   }
-  if dname != 0 { let rh: u64 = restore_handler(k, hs); }
+  if dname != 0 { let po: u64 = pop_eff_frame(k, hs); }
   let rs2: u64 = set_in_handle(k, prev);
   if gen_first == 0 { let pq2: u64 = pop_handler(k); let pf2: u64 = pop_frame(k); };
   let rwant: Mut(ty.Ty) = new_ty(k);
