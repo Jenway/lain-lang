@@ -4,6 +4,7 @@ let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
 let ir = import("src::ir::ir");
+let codes = import("src::ir::ir_codes");
 let s = import("src::driver::sym");
 let ax = import("src::syntax::ast");
 let cx = import("src::sema::ctx");
@@ -281,6 +282,69 @@ let ufcs_dispatch = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
   if st.st_ok(k) != 0 { return i + 4; }
   let ep: u64 = cl.emit_prepared(k, modules.sym_qual(me), cx.sig_ret(sg), np, ab, want, out);
   return i + 4;
+};
+
+let spill_scalar_val = func(k: Mut(st.State), ov: Mut(ty.Val), vt: Mut(ty.Ty)) -> u64 {
+  let slot: u64 = ir.fresh_t(k);
+  let rc: u64 = ir.args_reset(k);
+  let sz: u64 = (ty.tw(vt) + 7) / 8;
+  let a0: u64 = ir.arg_int(k, if sz == 0 { 8 } else { sz });
+  let ia: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), slot, vt, 0);
+  let rc2: u64 = ir.args_reset(k);
+  let a1: u64 = if ty.vlit(ov) == 1 { ir.arg_int(k, ty.vbits(ov)) } else { ir.arg_ref(k, ty.vn(ov)) };
+  let a2: u64 = ir.arg_ref(k, slot);
+  let is0: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, vt, 0);
+  return slot;
+};
+
+@root let lainc_ufcs_on_val = func(k: Mut(st.State), g: u64, i: u64, fname: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let vt: Mut(ty.Ty) = new_ty(k);
+  ty.ty_at(vt, ty.vty(out));
+  let sh: u64 = ty.tsh(vt);
+  let self_tid: u64 = ireg.tid_of(k, vt);
+  let hit: Mut(gv.UfcsHit) = ptr_cast(Mut(gv.UfcsHit), st.st_alloc(k, 16));
+  if gv.ufcs_method(k, self_tid, fname, hit) == 0 { return 0; }
+  if hit.count > 1 {
+    ctf.fail_msg(k, "ambiguous UFCS method", 21, ax.e_type());
+    return 0;
+  }
+  let me: Mut(modules.SymEntry) = modules.sym_find(k, hit.modv, fname);
+  let sg: Mut(u8) = modules.sym_sig(me);
+  let np: u64 = cx.sig_np(sg);
+  if np == 0 {
+    ctf.fail_msg(k, "ufcs method has no receiver parameter", 37, ax.e_type());
+    return 0;
+  }
+  let ps: Mut(ty.Ty) = cx.sig_params(sg);
+  let p0: Mut(ty.Ty) = cx.ty_idx(ps, 0);
+  let p0sh: u64 = ty.tsh(p0);
+  let p0k: u64 = if p0sh == 0 { 0 } else { agg.shp_kind(p0sh) };
+  let want_ref: u64 = if p0k == agg.kind_ref() and ct.elem_tid(k, p0sh) == self_tid { 1 } else { 0 };
+  let want_mut: u64 = if p0k == agg.kind_mut() and ct.elem_tid(k, p0sh) == self_tid { 1 } else { 0 };
+  let want_val: u64 = if p0k != agg.kind_ref() and p0k != agg.kind_mut() and ireg.tid_of(k, p0) == self_tid { 1 } else { 0 };
+  let av: Mut(ty.Val) = new_val(k);
+  if want_val == 1 {
+    cx.coerce(k, out, vt, p0, av);
+  } else if want_ref == 1 or want_mut == 1 {
+    let rt: Mut(ty.Ty) = ufcs_ref_ty(k, self_tid, want_mut);
+    let ptr_name: u64 = if sh == 0 { spill_scalar_val(k, out, vt) } else { ty.vn(out) };
+    let rv: Mut(ty.Val) = new_val(k);
+    ty.val_ref(rv, ptr_name, rt);
+    cx.coerce(k, rv, rt, p0, av);
+  } else {
+    ctf.fail_msg(k, "ufcs method first parameter is not Self", 39, ax.e_type());
+    return 0;
+  }
+  if st.st_ok(k) != 0 { return 0; }
+  let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, np * 56 + 8));
+  let z: u64 = ufcs_zero(ab, 0, np);
+  ty.val_at(val_idx(ab, 0), av);
+  let j: u64 = cl.call_args(k, n_at(g, i + 2), 0, 1, np, ab, ps);
+  if st.st_ok(k) != 0 { return 0; }
+  let rvv: Mut(ty.Val) = new_val(k);
+  let ep: u64 = cl.emit_prepared(k, modules.sym_qual(me), cx.sig_ret(sg), np, ab, want, rvv);
+  ty.val_at(out, rvv);
+  return 1;
 };
 
 // 名字 . 名字：本地变量、枚举变体与静态数据走运行期路径，其余按模块成员路径解析。

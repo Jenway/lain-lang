@@ -20,6 +20,7 @@ let drop = import("src::sema::drop");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern core_tail(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_tail;
+extern ufcs_on_val_bridge(k: Mut(st.State), g: u64, i: u64, fname: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_ufcs_on_val;
 
 // 槽与聚合成员一律存一个机器字：标量是值本身，引用族、Fn、切片头、聚合与
 // 数组是地址。所以定位成员只有一种读法——按成员类型的宽度把那个字 load 出来。
@@ -621,7 +622,16 @@ pub let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: 
   let uw: u64 = unwrap_ref(k, out);
   let ignored_uw: u64 = uw;
   let sh: u64 = ty.tsh(ty.vty(out));
-  if sh == 0 { st.st_fail(k, ax.e_type()); return i + 2; }
+  let is_call_sfx: u64 = if interp == 0 and i + 2 < ax.n_count(g) and ax.is_group(g, i + 2) == 1 and ax.delim(ax.n_at(g, i + 2)) == ax.dl_paren() { 1 } else { 0 };
+  if sh == 0 {
+    if is_call_sfx == 1 {
+      let uf0: u64 = ufcs_on_val_bridge(k, g, i, fname, want, out);
+      if st.st_ok(k) != 0 { return i + 3; }
+      if uf0 != 0 { return core_tail(k, g, i + 3, minp, want, out); }
+    }
+    st.st_fail(k, ax.e_type());
+    return i + 2;
+  }
   let kd: u64 = agg.shp_kind(sh);
   if kd == agg.kind_slice() or kd == agg.kind_mutslice() {
     let ut: Mut(ty.Ty) = t64(k);
@@ -643,6 +653,11 @@ pub let member_on_val = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: 
   }
   let m: Mut(agg.Member) = agg.mem_find(sh, fname);
   if is_null(m) {
+    if is_call_sfx == 1 {
+      let uf1: u64 = ufcs_on_val_bridge(k, g, i, fname, want, out);
+      if st.st_ok(k) != 0 { return i + 3; }
+      if uf1 != 0 { return core_tail(k, g, i + 3, minp, want, out); }
+    }
     if interp == 1 {
       let nf: Ref(u8) = "no such field";
       let d: u64 = ir.diag(k, 0, 1, nf, 13);
