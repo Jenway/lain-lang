@@ -627,6 +627,20 @@ let MetaFieldPrinter = func(T: Type) -> Module {
 
 let MetaBoolPrinter = MetaFieldPrinter(MetaBoolRec);
 
+// 纯数据反射描述表：编译期字段事实（name / offset / 类型宽度）与调用方给的类别码
+// 打包进 std::meta.FieldDesc 数组，之后的查询与写出都只是普通函数调用。
+let pack_meta_field_descs = func(dst: MutSlice(meta.FieldDesc), kinds: Slice(u64)) -> u64 {
+  let i: u64 = 0;
+  comptime for f in fields_of(MetaBoolRec) {
+    dst[i].name = f.name;
+    dst[i].offset = f.offset as u64;
+    dst[i].size = size_of(f.type);
+    dst[i].kind = kinds[i];
+    i = i + 1;
+  }
+  return i;
+};
+
 // 泛型函数里的 comptime for：单态化后的 T 必须能在编译期绑定里查到。
 let count_fields = func(v: Ref(T)) ?{ T: Type } -> u64 {
   let n: u64 = 0;
@@ -654,6 +668,44 @@ let run_meta_and_bool_suite = func() -> i64 {
   let names: Slice(u8) = MetaBoolPrinter.join_names(r);
   t.eq_bytes(mut_of(st), "fields_of(T).name Slice(u8)", names, "ok,tag,active");
   t.eq_u64(mut_of(st), "generic comptime for fields_of(T)", count_fields(ref_of(r)), 3);
+
+  // 纯数据反射描述表：打包、求和、按名查找与 CSV 写出。
+  let blank: meta.FieldDesc = meta.FieldDesc { name: "", offset: 0, size: 0, kind: 0 };
+  let descs: Array(meta.FieldDesc, 3) = [blank, blank, blank];
+  let kinds: Array(u64, 3) = [0, 0, 0];
+  kinds[0] = meta.KIND_BOOL;
+  kinds[1] = meta.KIND_INT;
+  kinds[2] = meta.KIND_BOOL;
+  let packed: u64 = pack_meta_field_descs(slice_of(mut_of(descs), 3), slice_of(kinds));
+  t.eq_u64(mut_of(st), "pack meta field descs count", packed, 3);
+  let fs: Slice(meta.FieldDesc) = slice_of(descs);
+  t.eq_u64(mut_of(st), "total_field_bytes", meta.total_field_bytes(fs), 3);
+  t.eq_u64(mut_of(st), "packed offset[0]", fs[0].offset, 0);
+  t.eq_u64(mut_of(st), "packed offset[2]", fs[2].offset, 2);
+  t.eq_u64(mut_of(st), "packed size[1]", fs[1].size, 1);
+  t.eq_u64(mut_of(st), "packed kind[0]", fs[0].kind, meta.KIND_BOOL);
+  t.eq_u64(mut_of(st), "packed kind[1]", fs[1].kind, meta.KIND_INT);
+  let hit: meta.FieldIndex.Opt = meta.find_field(fs, "tag");
+  t.eq_bool(mut_of(st), "find_field tag is_some", meta.FieldIndex.is_some(hit), true);
+  t.eq_u64(mut_of(st), "find_field tag index", meta.FieldIndex.unwrap_or(hit, 99), 1);
+  let miss: meta.FieldIndex.Opt = meta.find_field(fs, "absent");
+  t.eq_bool(mut_of(st), "find_field absent is_none", meta.FieldIndex.is_none(miss), true);
+  t.eq_u64(mut_of(st), "find_field absent fallback", meta.FieldIndex.unwrap_or(miss, 99), 99);
+  let cbuf: Array(u8, 32) = [0; 32];
+  let cms: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), mut_of(cbuf)), 32);
+  let clen: u64 = meta.emit_field_names_csv(fs, cms);
+  t.eq_u64(mut_of(st), "emit_field_names_csv length", clen, 13);
+  let csv: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), cms.ptr), clen);
+  t.eq_bytes(mut_of(st), "emit_field_names_csv bytes", csv, "ok,tag,active");
+  let td: meta.TypeDesc = meta.TypeDesc {
+    name: "MetaBoolRec",
+    size: size_of(MetaBoolRec),
+    align: align_of(MetaBoolRec),
+    fields: fs,
+  };
+  t.eq_bytes(mut_of(st), "TypeDesc name", td.name, "MetaBoolRec");
+  t.eq_u64(mut_of(st), "TypeDesc size", td.size, size_of(MetaBoolRec));
+  t.eq_u64(mut_of(st), "TypeDesc fields total", meta.total_field_bytes(td.fields), 3);
   let sarr: Array(Slice(u8), 2) = ["alpha", "omega"];
   t.eq_bytes(mut_of(st), "Array(Slice(u8), 2)[0]", sarr[0], "alpha");
   t.eq_bytes(mut_of(st), "Array(Slice(u8), 2)[1]", sarr[1], "omega");
