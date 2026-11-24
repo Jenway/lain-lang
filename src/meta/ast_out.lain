@@ -7,36 +7,28 @@
 // 全部存储由调用方一次性交给 ast_out_init：在一块原始字节区里按固定容量
 // 切出节点表、紧排的 32 位孩子表、词文本池、驻留桶头、驻留链与事务检查点。
 // 构造过程中没有额外分配，节点生命周期完全由水位决定。
+//
+// 节点类别、分隔符、记录布局与字段读取住在 src::meta::ast，本文件把它们的
+// 公开名字按原名重新导出，调用方从 ast_out 取这些名字照旧可用。
 let mem = import("std::mem");
+let ast = import("src::meta::ast");
 
-// --- 节点类别与分隔符 -------------------------------------------------------
-pub let KIND_TOKEN = func() -> u64 { return 1; };
-pub let KIND_GROUP = func() -> u64 { return 2; };
+// --- 共享定义 ---------------------------------------------------------------
+pub let RawNode = ast.RawNode;
 
-pub let DL_NONE = func() -> u64 { return 0; };
-pub let DL_PAREN = func() -> u64 { return 40; };
-pub let DL_BRACKET = func() -> u64 { return 91; };
-pub let DL_BRACE = func() -> u64 { return 123; };
+pub let KIND_TOKEN = func() -> u64 { return ast.KIND_TOKEN(); };
+pub let KIND_GROUP = func() -> u64 { return ast.KIND_GROUP(); };
+
+pub let DL_NONE = func() -> u64 { return ast.DL_NONE(); };
+pub let DL_PAREN = func() -> u64 { return ast.DL_PAREN(); };
+pub let DL_BRACKET = func() -> u64 { return ast.DL_BRACKET(); };
+pub let DL_BRACE = func() -> u64 { return ast.DL_BRACE(); };
 
 // 没有节点。节点下标从 0 起，节点表容量不允许达到这个值。
-pub let NO_NODE = func() -> u64 { return 4294967295; };
+pub let NO_NODE = func() -> u64 { return ast.NO_NODE(); };
 
 // 没有登记钩子时的默认回调：什么都不做，终止照常由 mem.halt_now 完成。
 let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
-
-// --- 记录 -------------------------------------------------------------------
-// 一个合成节点。词的空孩子区段为 0/0，组的空文本区段为 0/0。
-pub let RawNode = struct {
-  kind: u64,
-  delim: u64,
-  sym: u64,
-  span_id: u64,
-  origin: u64,
-  child_off: u64,
-  child_count: u64,
-  text_off: u64,
-  text_len: u64,
-};
 
 // 事务检查点：开事务瞬间的全部水位与当时的根节点。
 pub let Mark = struct {
@@ -102,7 +94,7 @@ pub let last_err_detail = func(a: Mut(AstOut)) -> u64 { return a.err_detail; };
 // --- 记录地址 ---------------------------------------------------------------
 // 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
 let node_slot = func(a: Mut(AstOut), id: u64) -> Mut(RawNode) {
-  return a.nodes + id * size_of(RawNode);
+  return a.nodes + id * ast.raw_node_bytes();
 };
 
 let kid_slot = func(a: Mut(AstOut), i: u64) -> Mut(u32) {
@@ -129,24 +121,24 @@ pub let hash_cap_of = func(node_cap: u64) -> u64 {
   return loop g(c: u64 = 16) while c < node_cap { c = c * 2; };
 };
 
-let node_bytes = func(node_cap: u64) -> u64 { return align8(node_cap * size_of(RawNode)); };
+let node_bytes = func(node_cap: u64) -> u64 { return align8(node_cap * ast.raw_node_bytes()); };
 let kid_bytes = func(kid_cap: u64) -> u64 { return align8(kid_cap * 4); };
 let chain_bytes = func(node_cap: u64) -> u64 { return align8(node_cap * 4); };
 let head_bytes = func(node_cap: u64) -> u64 { return align8(hash_cap_of(node_cap) * 4); };
 let pool_bytes = func(pool_cap: u64) -> u64 { return align8(pool_cap); };
 let mark_bytes = func(mark_cap: u64) -> u64 { return align8(mark_cap * size_of(Mark)); };
 
+// 节点下标必须能塞进 32 位孩子表，且不能撞上 NO_NODE。
+let check_node_cap = func(node_cap: u64) -> u64 {
+  if node_cap > NO_NODE() { return mem.halt_now(node_cap); }
+  return node_cap;
+};
+
 // 调用方要准备的字节数。各区段依次是：节点表、孩子表、驻留链、驻留桶头、
 // 文本池、事务检查点。
 pub let ast_out_bytes = func(node_cap: u64, kid_cap: u64, pool_cap: u64, mark_cap: u64) -> u64 {
   return node_bytes(node_cap) + kid_bytes(kid_cap) + chain_bytes(node_cap) +
          head_bytes(node_cap) + pool_bytes(pool_cap) + mark_bytes(mark_cap);
-};
-
-// 节点下标必须能塞进 32 位孩子表，且不能撞上 NO_NODE。
-let check_node_cap = func(node_cap: u64) -> u64 {
-  if node_cap > NO_NODE() { return mem.halt_now(node_cap); }
-  return node_cap;
 };
 
 pub let ast_out_init = func(arena: Mut(u8), node_cap: u64, kid_cap: u64, pool_cap: u64,
@@ -296,8 +288,8 @@ pub let tx_rollback = func(a: Mut(AstOut), tx: u64) -> u64 {
 let trap_node = func(a: Mut(AstOut), cause: u64) -> RawNode {
   let dead: u64 = trap_with(a, "AstOut::node_at: node index out of range", cause);
   return RawNode {
-    kind: 0,
-    delim: 0,
+    kind: KIND_TOKEN(),
+    delim: DL_NONE(),
     sym: 0,
     span_id: 0,
     origin: 0,
@@ -321,43 +313,43 @@ pub let node_at = func(a: Mut(AstOut), id: u64) -> RawNode {
 
 pub let node_kind = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.kind;
+  return ast.raw_kind(n);
 };
 
 pub let node_delim = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.delim;
+  return ast.raw_delim(n);
 };
 
 pub let node_sym = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.sym;
+  return ast.raw_sym(n);
 };
 
 pub let node_span = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.span_id;
+  return ast.raw_span(n);
 };
 
 pub let node_origin = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.origin;
+  return ast.raw_origin(n);
 };
 
 pub let child_count = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  return n.child_count;
+  return ast.raw_child_count(n);
 };
 
 pub let child_at = func(a: Mut(AstOut), id: u64, i: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  if n.kind != KIND_GROUP() {
+  if ast.is_group_kind(ast.raw_kind(n)) == 0 {
     return trap_with(a, "AstOut::child_at: node is not a group", id);
   }
-  if i >= n.child_count {
+  if i >= ast.raw_child_count(n) {
     return trap_with(a, "AstOut::child_at: child index out of range", i);
   }
-  let p: Mut(u32) = kid_slot(a, n.child_off + i);
+  let p: Mut(u32) = kid_slot(a, ast.raw_child_off(n) + i);
   let v: u32 = deref(p);
   return v as u64;
 };
@@ -370,9 +362,9 @@ pub let trap_slice = func(a: Mut(AstOut), cause: u64) -> Slice(u8) {
 // 词文本的只读视图，指向文本池里被驻留的那一段。
 pub let text_of = func(a: Mut(AstOut), id: u64) -> Slice(u8) {
   let n: RawNode = node_at(a, id);
-  if n.kind != KIND_TOKEN() { return trap_slice(a, id); }
-  let p: Mut(u8) = a.pool + n.text_off;
-  return make_slice(Slice(u8), p, n.text_len);
+  if ast.is_token_kind(ast.raw_kind(n)) == 0 { return trap_slice(a, id); }
+  let p: Mut(u8) = a.pool + ast.raw_text_off(n);
+  return make_slice(Slice(u8), p, ast.raw_text_len(n));
 };
 
 // --- 词驻留 ---------------------------------------------------------------
@@ -395,13 +387,13 @@ let tok_hash = func(sym: u64, origin: u64, span: u64, text: Slice(u8)) -> u64 {
 
 let tok_eq = func(a: Mut(AstOut), id: u64, sym: u64, origin: u64, span: u64, text: Slice(u8)) -> u64 {
   let n: RawNode = node_at(a, id);
-  if n.kind != KIND_TOKEN() { return 0; }
-  if n.sym != sym { return 0; }
-  if n.origin != origin { return 0; }
-  if n.span_id != span { return 0; }
-  if n.text_len != text.len { return 0; }
-  let same: u64 = loop c(i: u64 = 0, ok: u64 = 1) while i < n.text_len {
-    let p: Mut(u8) = a.pool + (n.text_off + i);
+  if ast.is_token_kind(ast.raw_kind(n)) == 0 { return 0; }
+  if ast.raw_sym(n) != sym { return 0; }
+  if ast.raw_origin(n) != origin { return 0; }
+  if ast.raw_span(n) != span { return 0; }
+  if ast.raw_text_len(n) != text.len { return 0; }
+  let same: u64 = loop c(i: u64 = 0, ok: u64 = 1) while i < ast.raw_text_len(n) {
+    let p: Mut(u8) = a.pool + (ast.raw_text_off(n) + i);
     let b: u8 = deref(p);
     let t: u8 = text[i];
     if b != t { ok = 0; }
@@ -484,15 +476,6 @@ let room_pool = func(a: Mut(AstOut), n: u64) -> u64 {
   return a.pool_used;
 };
 
-// 组的分隔符只能是 0、 (、 [、 {。
-let check_delim = func(delim: u64) -> u64 {
-  if delim == DL_NONE() { return delim; }
-  if delim == DL_PAREN() { return delim; }
-  if delim == DL_BRACKET() { return delim; }
-  if delim == DL_BRACE() { return delim; }
-  return mem.halt_now(delim);
-};
-
 // 孩子只能指向已经完整构造好的活节点，正常构造因此天然无环。
 let check_kid = func(a: Mut(AstOut), v: u32) -> u64 {
   let w: u64 = v as u64;
@@ -562,7 +545,7 @@ pub let mk_token = func(a: Mut(AstOut), sym: u64, origin: u64, span: u64,
 // 组：delim 是分隔符的 ASCII 码，span 是诊断用的源码跨度句柄，kids 是紧排的
 // 32 位孩子下标。孩子按给定次序追加到孩子表尾部。
 pub let mk_group = func(a: Mut(AstOut), delim: u64, span: u64, kids: Slice(u32)) -> u64 {
-  let dl: u64 = check_delim(delim);
+  let dl: u64 = ast.check_delim(delim);
   let n: u64 = kids.len;
   let base: u64 = room_kids(a, n);
   let copied: u64 = copy_kids(a, base, kids);
@@ -572,7 +555,7 @@ pub let mk_group = func(a: Mut(AstOut), delim: u64, span: u64, kids: Slice(u32))
 };
 
 pub let mk_group_empty = func(a: Mut(AstOut), delim: u64, span: u64) -> u64 {
-  let dl: u64 = check_delim(delim);
+  let dl: u64 = ast.check_delim(delim);
   let base: u64 = a.kid_used;
   return put_node(a, KIND_GROUP(), dl, 0, span, 0, base, 0, 0, 0);
 };
@@ -581,7 +564,7 @@ pub let mk_group_empty = func(a: Mut(AstOut), delim: u64, span: u64) -> u64 {
 // 孩子区段上，因此在检查点之前构造的组直接拒绝。
 let check_rewrite = func(a: Mut(AstOut), id: u64) -> u64 {
   let n: RawNode = node_at(a, id);
-  if n.kind != KIND_GROUP() {
+  if ast.is_group_kind(ast.raw_kind(n)) == 0 {
     return trap_with(a, "AstOut::check_rewrite: node is not a group", id);
   }
   if a.depth != 0 {
@@ -596,7 +579,7 @@ let check_rewrite = func(a: Mut(AstOut), id: u64) -> u64 {
 // 改写：把已有的组换成新的分隔符与新的孩子表，节点只就地更新三个字段。
 pub let rewrite_group = func(a: Mut(AstOut), id: u64, delim: u64, kids: Slice(u32)) -> u64 {
   let keep: u64 = check_rewrite(a, id);
-  let dl: u64 = check_delim(delim);
+  let dl: u64 = ast.check_delim(delim);
   let cnt: u64 = kids.len;
   let base: u64 = room_kids(a, cnt);
   let copied: u64 = copy_kids(a, base, kids);
@@ -610,7 +593,7 @@ pub let rewrite_group = func(a: Mut(AstOut), id: u64, delim: u64, kids: Slice(u3
 
 pub let rewrite_group_empty = func(a: Mut(AstOut), id: u64, delim: u64) -> u64 {
   let keep: u64 = check_rewrite(a, id);
-  let dl: u64 = check_delim(delim);
+  let dl: u64 = ast.check_delim(delim);
   let slot: Mut(RawNode) = node_slot(a, id);
   slot.delim = dl;
   slot.child_off = a.kid_used;
@@ -621,8 +604,8 @@ pub let rewrite_group_empty = func(a: Mut(AstOut), id: u64, delim: u64) -> u64 {
 // --- 短名接口 ---------------------------------------------------------------
 // Reader、展开遍次与宏构造点用这组紧凑命名：mark 是节点水位，begin / commit /
 // rollback 是事务三件套，token / group 是无来源节点的构造快捷方式。
-pub let K_TOKEN = func() -> u64 { return KIND_TOKEN(); };
-pub let K_GROUP = func() -> u64 { return KIND_GROUP(); };
+pub let K_TOKEN = func() -> u64 { return ast.KIND_TOKEN(); };
+pub let K_GROUP = func() -> u64 { return ast.KIND_GROUP(); };
 
 pub let mark = func(a: Mut(AstOut)) -> u64 { return a.node_used; };
 pub let begin = func(a: Mut(AstOut)) -> u64 { return tx_begin(a); };

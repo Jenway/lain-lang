@@ -79,7 +79,10 @@ pub let State = struct {
   typesh: u64,
   ctcache: Mut(u8),
   ctcache_n: u64,
-  genblk: Mut(u8),
+  witness_blk: Mut(u8),
+  mono_blk: Mut(u8),
+  genq_blk: Mut(u8),
+  eff_slot: Mut(u64),
   in_proc: u64,
   fq_base: Mut(u8),
   fq_used: u64,
@@ -100,7 +103,10 @@ let zero_words = func(raw: Mut(u8), words: u64) -> u64 {
 // cap：绑定栈字节数。arena 与持久分配都跨源存活：一次编译
 // 里所有源的形状、类型、符号必须同时有效。
 pub let st_new = func(cap: u64) -> Mut(State) {
-  let gb_bytes: u64 = 128;
+  let witness_bytes: u64 = 24;
+  let mono_bytes: u64 = 16;
+  let genq_bytes: u64 = 40;
+  let eff_bytes: u64 = 8;
   let fq_bytes: u64 = 32768;
   let raw: Mut(u8) = hr.mem_alloc(size_of(State), 8);
   let b: Mut(u8) = hr.mem_alloc(cap, 8);
@@ -117,10 +123,16 @@ pub let st_new = func(cap: u64) -> Mut(State) {
   let u: Mut(u8) = hr.mem_alloc(8192, 8);
   let v: Mut(u8) = hr.mem_alloc(65536, 8);
   let x: Mut(u8) = hr.mem_alloc(32, 8);
-  let gb: Mut(u8) = hr.mem_alloc(gb_bytes, 8);
+  let wb: Mut(u8) = hr.mem_alloc(witness_bytes, 8);
+  let mb: Mut(u8) = hr.mem_alloc(mono_bytes, 8);
+  let qb: Mut(u8) = hr.mem_alloc(genq_bytes, 8);
+  let eb: Mut(u8) = hr.mem_alloc(eff_bytes, 8);
   let fq: Mut(u8) = hr.mem_alloc(fq_bytes, 8);
   let w: u64 = zero_words(raw, size_of(State) / 8);
-  let gz: u64 = zero_words(gb, gb_bytes / 8);
+  let wz: u64 = zero_words(wb, witness_bytes / 8);
+  let mz: u64 = zero_words(mb, mono_bytes / 8);
+  let qz: u64 = zero_words(qb, genq_bytes / 8);
+  let ez: u64 = zero_words(eb, eff_bytes / 8);
   let fz: u64 = zero_words(fq, fq_bytes / 8);
   let p: Mut(State) = ptr_cast(Mut(State), raw);
   p.base = b;
@@ -151,7 +163,10 @@ pub let st_new = func(cap: u64) -> Mut(State) {
   p.ctbase = v;
   p.ctcap = 65536;
   p.ctret = x;
-  p.genblk = gb;
+  p.witness_blk = wb;
+  p.mono_blk = mb;
+  p.genq_blk = qb;
+  p.eff_slot = ptr_cast(Mut(u64), eb);
   p.vmod_seq = 1000;
   p.in_proc = 0;
   p.fq_base = fq;
@@ -448,8 +463,12 @@ pub let st_set_ctcache = func(p: Mut(State), v: Mut(u8)) -> Mut(u8) { p.ctcache 
 pub let st_ctcache_n = func(p: Mut(State)) -> u64 { return p.ctcache_n; };
 pub let st_set_ctcache_n = func(p: Mut(State), v: u64) -> u64 { p.ctcache_n = v; return v; };
 
-// Phase 2B 拓展块（128 字节）：见证表 / 单态化缓存 / 泛型待编队列。
-pub let st_genblk = func(p: Mut(State)) -> Mut(u8) { return p.genblk; };
+// 编译期语义侧运行块，各自独立分配、各自清零：
+// 见证记录栈（24B）、单态化缓存（16B）、泛型待编队列（40B）、效应上下文槽（8B）。
+pub let st_witness_blk = func(p: Mut(State)) -> Mut(u8) { return p.witness_blk; };
+pub let st_mono_blk = func(p: Mut(State)) -> Mut(u8) { return p.mono_blk; };
+pub let st_genq_blk = func(p: Mut(State)) -> Mut(u8) { return p.genq_blk; };
+pub let st_eff_slot = func(p: Mut(State)) -> Mut(u64) { return p.eff_slot; };
 
 // 虚拟模块序号：内联 module 与函子实例化共用一条单调递增的编号流。
 let st_vmod_seq = func(p: Mut(State)) -> u64 { return p.vmod_seq; };
