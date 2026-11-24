@@ -26,7 +26,8 @@ let Vec64 = col.Vec(u64);
 let Map64 = col.HashMapU64(u64);
 let OptI64 = opt.Option(i64);
 let OptU64 = opt.Option(u64);
-let BudgetVec = col.VecIn(u64, col.BudgetAlloc(u64));
+let BudgetVec = col.Vec(u64) ?{ al: mem.TypedAlloc(u64, mem.BudgetTracker) };
+let BudgetMap = col.HashMapU64(u64) ?{ al: mem.BudgetTracker };
 let U64Iter = algo.SliceIter(u64);
 
 use Vec64;
@@ -395,14 +396,23 @@ let run_collections_suite = func() -> i64 {
   t.eq_bool(mut_of(st), "map get_opt none", OptU64.is_none(miss_opt), true);
 
   let btr: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(4096);
-  {
-    let bv: BudgetVec.Self = BudgetVec.with_alloc(btr);
-    let b0: bool = BudgetVec.push(mut_of(bv), 1);
-    let b1: bool = BudgetVec.push(mut_of(bv), 2);
-    let both: bool = b0 and b1;
-    t.eq_bool(mut_of(st), "budget vec push", both, true);
-  }
-  t.eq_u64(mut_of(st), "budget vec drop leaks nothing", mem.BudgetTracker.leaked(ref_of(btr)), 0);
+  let bv: BudgetVec.Self = BudgetVec.with_alloc(btr);
+  let b0: bool = BudgetVec.push(mut_of(bv), 1);
+  let b1: bool = BudgetVec.push(mut_of(bv), 2);
+  let both: bool = b0 and b1;
+  t.eq_bool(mut_of(st), "budget vec push", both, true);
+  t.eq_bool(mut_of(st), "budget vec live > 0", mem.BudgetTracker.live(ref_of(bv.alloc)) > 0, true);
+  BudgetVec.drop(mut_of(bv));
+  t.eq_u64(mut_of(st), "budget vec drop leaks nothing", mem.BudgetTracker.leaked(ref_of(bv.alloc)), 0);
+
+  let btr2: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(4096);
+  let bm: BudgetMap.Self = BudgetMap.with_alloc(btr2);
+  let m0: bool = BudgetMap.put(mut_of(bm), 10, 100);
+  let m1: bool = BudgetMap.put(mut_of(bm), 20, 200);
+  t.eq_bool(mut_of(st), "budget map put", m0 and m1, true);
+  t.eq_bool(mut_of(st), "budget map live > 0", mem.BudgetTracker.live(ref_of(bm.alloc)) > 0, true);
+  BudgetMap.drop(mut_of(bm));
+  t.eq_u64(mut_of(st), "budget map drop leaks nothing", mem.BudgetTracker.leaked(ref_of(bm.alloc)), 0);
   return t.finish(mut_of(st));
 };
 

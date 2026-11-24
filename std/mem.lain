@@ -302,3 +302,44 @@ pub let budget_alloc_or = func(t: Mut(BudgetTracker.Tracker), bytes: u64, fallba
     oom(n) => fallback,
   };
 };
+
+// ---------------------------------------------------------------------------
+// TypedAllocator：面向元素类型 T 的切片级分配器签名，以及从字节级 Allocator 适配。
+// ---------------------------------------------------------------------------
+pub let TypedAllocator = sig {
+  pub let Self: Type;
+  pub let Elem: Type;
+  pub let alloc: Fn((Mut(Self), u64) -> MutSlice(Elem));
+  pub let free: Fn((Mut(Self), MutSlice(Elem)) -> u64);
+};
+
+pub let TypedAlloc = func(T: Type, Raw: Module) -> Module {
+  return module {
+    pub let Self = Raw.Self;
+    pub let Elem = T;
+
+    pub let alloc = func(a: Mut(Self), count: u64) -> MutSlice(T) {
+      if count == 0 {
+        return make_slice(MutSlice(T), null_ref(Mut(T)), 0);
+      }
+      let elem_sz: u64 = size_of(T) as u64;
+      let bytes: u64 = count * elem_sz;
+      let raw: u64 = Raw.alloc(a, bytes);
+      if raw == 0 {
+        return make_slice(MutSlice(T), null_ref(Mut(T)), 0);
+      }
+      return make_slice(MutSlice(T), ptr_cast(Mut(T), raw), count);
+    };
+
+    pub let free = func(a: Mut(Self), buf: MutSlice(T)) -> u64 {
+      if (buf.ptr as u64) == 0 {
+        return 0;
+      }
+      return Raw.free(a, buf.ptr as u64);
+    };
+  };
+};
+
+pub let SystemTypedAlloc = func(T: Type) -> Module {
+  return TypedAlloc(T, SystemAlloc);
+};

@@ -1,14 +1,19 @@
 // std::collections::map —— u64 键的开放寻址哈希表函子。
 //
-// 存储由调用方给出的分配器策略负责：Alloc 满足 std::mem.Allocator 的
-// Alloc.Self / Alloc.alloc / Alloc.free 三个成员。容量随载荷增长，
-// 装载因子超过七成时按两倍扩容并整表重排。
+// 存储由隐式编译期参数 al 给出的分配器策略负责：al 满足 std::mem.Allocator，
+// 缺省为 mem.SystemAlloc，调用点可以用 ?{ al: mem.BudgetTracker } 换成别的策略。
+// 构造入口：with_alloc 给出任意策略的句柄，with_capacity 额外预领容量，
+// new 只在句柄能凭空造出时（宿主堆）存在。
+// 容量随载荷增长，装载因子超过七成时按两倍扩容并整表重排。
 // 容器类型自带固有 drop：离开作用域时先析构占用槽位里的值，再把三块存储
 // 归还给分配器，并把指针复位成空引用，所以重复调用 drop 不会二次释放。
 let mem = import("std::mem");
 let option = import("std::option");
 
-pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
+pub let HashMapU64 = func(V: Type)
+  ?{ al: mem.Allocator = mem.SystemAlloc }
+  -> Module
+{
   let opt = option.Option(V);
   return module {
     pub let Opt = opt.Opt;
@@ -20,7 +25,7 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
       vals: Mut(V),
       len: u64,
       cap: u64,
-      alloc: Alloc.Self,
+      alloc: al.Self,
     };
 
     pub let Map = Self;
@@ -105,15 +110,15 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
     };
 
     // 分配器回 0 时没有可继续的路径，就地终止程序。
-    let alloc_bytes = func(a: Mut(Alloc.Self), bytes: u64) -> u64 {
-      let raw: u64 = Alloc.alloc(a, bytes);
+    let alloc_bytes = func(a: Mut(al.Self), bytes: u64) -> u64 {
+      let raw: u64 = al.alloc(a, bytes);
       if raw == 0 {
         let dead: u64 = mem.halt_now(bytes);
       }
       return raw;
     };
 
-    pub let with_capacity = func(a: Alloc.Self, cap: u64) -> Self {
+    pub let with_capacity = func(a: al.Self, cap: u64) -> Self {
       if cap == 0 {
         return Self {
           keys: null_ref(Mut(u64)),
@@ -124,7 +129,7 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
           alloc: a,
         };
       }
-      let ap: Mut(Alloc.Self) = mut_of(a);
+      let ap: Mut(al.Self) = mut_of(a);
       let keys_raw: u64 = alloc_bytes(ap, cap * 8);
       let used_raw: u64 = alloc_bytes(ap, cap * (size_of(bool) as u64));
       let vals_raw: u64 = alloc_bytes(ap, cap * elem_bytes());
@@ -135,7 +140,7 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
       return Self { keys: keys, used: used, vals: vals, len: 0, cap: cap, alloc: a };
     };
 
-    pub let with_alloc = func(a: Alloc.Self) -> Self {
+    pub let with_alloc = func(a: al.Self) -> Self {
       return with_capacity(a, 16);
     };
 
@@ -143,7 +148,7 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
     let grow = func(m: Mut(Self)) {
       let old_cap: u64 = deref(m).cap;
       let new_cap: u64 = if old_cap == 0 { 16 } else { old_cap * 2 };
-      let a: Mut(Alloc.Self) = mut_of(deref(m).alloc);
+      let a: Mut(al.Self) = mut_of(deref(m).alloc);
       let keys_raw: u64 = alloc_bytes(a, new_cap * 8);
       let used_raw: u64 = alloc_bytes(a, new_cap * (size_of(bool) as u64));
       let vals_raw: u64 = alloc_bytes(a, new_cap * elem_bytes());
@@ -165,13 +170,13 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
         i = i + 1;
       };
       if is_null(old_keys) == false {
-        let f0: u64 = Alloc.free(a, old_keys as u64);
+        let f0: u64 = al.free(a, old_keys as u64);
       }
       if is_null(old_used) == false {
-        let f1: u64 = Alloc.free(a, old_used as u64);
+        let f1: u64 = al.free(a, old_used as u64);
       }
       if is_null(old_vals) == false {
-        let f2: u64 = Alloc.free(a, old_vals as u64);
+        let f2: u64 = al.free(a, old_vals as u64);
       }
       deref(m).keys = new_keys;
       deref(m).used = new_used;
@@ -189,16 +194,16 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
         }
         i = i + 1;
       };
-      let a: Mut(Alloc.Self) = mut_of(deref(m).alloc);
+      let a: Mut(al.Self) = mut_of(deref(m).alloc);
       let keys: Mut(u64) = deref(m).keys;
       if is_null(keys) == false {
-        let f0: u64 = Alloc.free(a, keys as u64);
+        let f0: u64 = al.free(a, keys as u64);
       }
       if is_null(used) == false {
-        let f1: u64 = Alloc.free(a, used as u64);
+        let f1: u64 = al.free(a, used as u64);
       }
       if is_null(vals) == false {
-        let f2: u64 = Alloc.free(a, vals as u64);
+        let f2: u64 = al.free(a, vals as u64);
       }
       deref(m).keys = null_ref(Mut(u64));
       deref(m).used = null_ref(Mut(bool));
@@ -287,71 +292,18 @@ pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
       };
       deref(m).len = 0;
     };
-  };
-};
 
-// ---------------------------------------------------------------------------
-// HashMapU64：绑定宿主堆分配器的默认实例。
-//
-// 分配器以模块字面量交给函子：编译期实参求值只接受模块字面量与词法绑定，
-// 点号路径上的子模块（如 mem.SystemAlloc）要在函子内部再投影一次。
-// ---------------------------------------------------------------------------
-pub let HashMapU64 = func(V: Type) -> Module {
-  let Inner = HashMapU64In(V, module {
-    pub let Self = mem.SystemHandle;
+    // 无参构造需要一个能凭空造出的分配器句柄。al.Self 只能出现在类型位置，
+    // 所以句柄单独包一个结构体，让 size_of 在编译期算出它的宽度：
+    // mem.SystemAlloc 的句柄是单个 8 字节字，其余策略的 Self 要由调用方
+    // 带着参数交出，走 with_alloc / with_capacity。条件为假时整个分支不编译，
+    // 因此别的分配器实例上不存在 new。
+    let AllocCell = struct { handle: al.Self };
 
-    pub let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
-      return mem.SystemAlloc.alloc(h, bytes);
-    };
-
-    pub let free = func(h: Mut(Self), ptr: u64) -> u64 {
-      return mem.SystemAlloc.free(h, ptr);
-    };
-  });
-  let opt = option.Option(V);
-  return module {
-    pub let Opt = opt.Opt;
-    pub let Map = Inner.Map;
-    pub let Self = Inner.Self;
-
-    pub let new = func() -> Self {
-      return Inner.with_alloc(mem.SystemAlloc.new());
-    };
-
-    pub let with_capacity = func(cap: u64) -> Self {
-      return Inner.with_capacity(mem.SystemAlloc.new(), cap);
-    };
-
-    pub let len = func(m: Ref(Self)) -> u64 {
-      return Inner.len(m);
-    };
-
-    pub let cap = func(m: Ref(Self)) -> u64 {
-      return Inner.cap(m);
-    };
-
-    pub let is_empty = func(m: Ref(Self)) -> bool {
-      return Inner.is_empty(m);
-    };
-
-    pub let put = func(m: Mut(Self), key: u64, val: V) -> bool {
-      return Inner.put(m, key, val);
-    };
-
-    pub let has = func(m: Ref(Self), key: u64) -> bool {
-      return Inner.has(m, key);
-    };
-
-    pub let get = func(m: Ref(Self), key: u64, out: Mut(V)) -> bool {
-      return Inner.get(m, key, out);
-    };
-
-    pub let get_opt = func(m: Ref(Self), key: u64) -> opt.Opt {
-      return Inner.get_opt(m, key);
-    };
-
-    pub let clear = func(m: Mut(Self)) {
-      Inner.clear(m);
+    comptime if size_of(AllocCell) == 8 {
+      pub let new = func() -> Self {
+        return with_alloc(mem.SystemAlloc.new());
+      };
     };
   };
 };
