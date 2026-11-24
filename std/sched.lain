@@ -10,6 +10,7 @@
 //     调用点要让 `Scheduler` 这个名字可见（`open sched;`），
 //     并把选中的策略模块激活到当前作用域（`use sched.InlineScheduler;`
 //     或 `use sched.PoolScheduler;`），或直接写 `?{ sc: sched.PoolScheduler }`。
+let mem = import("std::mem");
 let pool = import("std::pool");
 
 // 一件待执行的工作：work 与 ctx 成对出现，next 串起同一批次。
@@ -153,22 +154,10 @@ let set_current_pool = func(p: Mut(pool.ThreadPool)) -> Mut(pool.ThreadPool) {
   return prev;
 };
 
-// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
-let ScopeHalt = struct { zero: u64 };
-
-let scope_halt_at = func(h: ScopeHalt) -> u64 {
-  return 1 / h.zero;
-};
-
-let scope_halt = func(cause: u64) -> u64 {
-  let h: ScopeHalt = ScopeHalt { zero: cause - cause };
-  return scope_halt_at(h);
-};
-
 pub let spawn_work = func(work: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> bool !{ Spawn } {
   let p: Mut(pool.ThreadPool) = current_pool();
   if is_null(p) {
-    let dead: u64 = scope_halt(1);
+    let dead: u64 = mem.halt_now(1);
     return dead == 1;
   }
   return pool.pool_submit(p, work, ctx);

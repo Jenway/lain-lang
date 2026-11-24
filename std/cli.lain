@@ -1,0 +1,100 @@
+// std::cli —— 命令行参数的查询入口。
+// arg / get_opt / positional 返回的切片都归调用方所有，用完后调用
+// os.free_bytes(s.ptr as u64) 归还；has_flag 与 count 不产生所有权。
+let option = import("std::option");
+let os = import("std::os");
+let str = import("std::str");
+
+pub let OptSlice = option.Option(Slice(u8));
+
+let empty = func() -> Slice(u8) {
+  return make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+};
+
+// 参数个数，含程序名 argv[0]。
+pub let count = func() -> u64 {
+  return os.argc();
+};
+
+// 第 i 个参数：拷进一块新分配的缓冲，越界回 None。
+pub let arg = func(i: u64) -> OptSlice.Opt {
+  if i >= os.argc() {
+    return OptSlice.Opt.None { };
+  }
+  let n: u64 = os.argv_len(i);
+  let cap: u64 = n + 1;
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 {
+    return OptSlice.Opt.None { };
+  }
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let got: u64 = os.argv_copy(i, dst);
+  return OptSlice.Opt.Some { make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got) };
+};
+
+let release = func(s: Slice(u8)) -> u64 {
+  return os.free_bytes(s.ptr as u64);
+};
+
+// 第 i 个参数是否恰好等于 flag。
+let flag_at = func(i: u64, flag: Slice(u8)) -> bool {
+  let a: OptSlice.Opt = arg(i);
+  if OptSlice.is_none(a) {
+    return false;
+  }
+  let s: Slice(u8) = OptSlice.unwrap_or(a, empty());
+  let same: bool = str.eq(s, flag);
+  release(s);
+  return same;
+};
+
+// 第 i 个参数是否是不以 '-' 开头的普通参数。
+let plain_at = func(i: u64) -> bool {
+  let a: OptSlice.Opt = arg(i);
+  if OptSlice.is_none(a) {
+    return false;
+  }
+  let s: Slice(u8) = OptSlice.unwrap_or(a, empty());
+  let plain: bool = if s.len == 0 { false } else { s[0] != 45 };
+  release(s);
+  return plain;
+};
+
+// 命令行里是否出现了 flag。
+pub let has_flag = func(flag: Slice(u8)) -> bool {
+  let n: u64 = os.argc();
+  let hit: bool = loop hf(i: u64 = 0, found: bool = false) while (i < n) and (found == false) {
+    if flag_at(i, flag) { found = true; }
+    i = i + 1;
+  };
+  return hit;
+};
+
+// flag 之后紧跟的那个参数；flag 缺席或没有后继参数时回 None。
+pub let get_opt = func(flag: Slice(u8)) -> OptSlice.Opt {
+  let n: u64 = os.argc();
+  let next: u64 = loop go(i: u64 = 0, at: u64 = 0) while (i < n) and (at == 0) {
+    if flag_at(i, flag) { at = i + 1; }
+    i = i + 1;
+  };
+  if next == 0 {
+    return OptSlice.Opt.None { };
+  }
+  return arg(next);
+};
+
+// 第 idx 个不以 '-' 开头的参数；程序名 argv[0] 不计入。
+pub let positional = func(idx: u64) -> OptSlice.Opt {
+  let n: u64 = os.argc();
+  let at: u64 = loop px(i: u64 = 1, seen: u64 = 0, hit: u64 = 0) while (i < n) and (hit == 0) {
+    if plain_at(i) {
+      if seen == idx { hit = i; }
+      seen = seen + 1;
+    }
+    i = i + 1;
+  };
+  if at == 0 {
+    return OptSlice.Opt.None { };
+  }
+  return arg(at);
+};

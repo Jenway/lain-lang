@@ -326,7 +326,11 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     let t: Mut(u64) = box(k);
     return flow.if_compile(k, g, i, want, out, t);
   }
-  if sym == s.k_loop() or sym == s.k_while() {
+  if sym == s.k_while() {
+    let t: Mut(u64) = box(k);
+    return sm.stmt_while(k, g, i, want, out, t);
+  }
+  if sym == s.k_loop() {
     let t: Mut(u64) = box(k);
     return flow.loop_compile(k, g, i, want, out, t);
   }
@@ -680,8 +684,116 @@ let arr_fill = func(k: Mut(st.State), g: u64, i: u64, idx: u64, base: u64, esz: 
   return arr_fill(k, g, j, idx + 1, base, esz, et, cnt);
 };
 
+// 重复字面量 [值; N] 的分号位置：返回分号之后的下标，没有分号回 0。
+let rep_sep = func(g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  if is_semi(g, i) == 1 { return i + 1; }
+  return rep_sep(g, i + 1, n);
+};
+
+// [值; N] 的 N：单个编译期整数常量（字面量或 comptime 绑定）。
+let rep_len = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
+  if i + 1 != n {
+    let m: Ref(u8) = "array repeat needs a compile-time length";
+    let d: u64 = ir.diag(k, 0, 1, m, 40);
+    st.st_fail(k, e_type());
+    return 0;
+  }
+  if is_digit_token(g, i) == 1 {
+    let h: u64 = n_at(g, i);
+    return num_value(lit_addr(h), lit_len(h));
+  }
+  if is_name(g, i) == 1 {
+    let cv: Mut(ctf.CtVal) = ctf.lookup(k, n_sym(g, i));
+    if is_null(cv) == 0 and ctf.v_kind(cv) == 0 { return ctf.v_a(cv); }
+  }
+  let m: Ref(u8) = "array repeat needs a compile-time length";
+  let d: u64 = ir.diag(k, 0, 1, m, 40);
+  st.st_fail(k, e_type());
+  return 0;
+};
+
+// 非零元素的重复：逐个元素写入，值只求值一次。
+let rep_fill = func(k: Mut(st.State), base: u64, cnt: u64, esz: u64,
+               val: Mut(ty.Val), et: Mut(ty.Ty)) -> u64 {
+  let done: u64 = loop f(j: u64 = 0) while j < cnt {
+    let s: u64 = agg.store_at(k, base, j * esz, val, et);
+    j = j + 1;
+  };
+  return done;
+};
+
+// [值; N]：元素类型取自标注的数组形状，没有标注时取值的类型。
+// 全零值时整块按字清零，不逐个元素发射 #store。
+let arr_rep = func(k: Mut(st.State), g: u64, i: u64, grp: u64, sep: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let n: u64 = n_count(grp);
+  let cnt: u64 = rep_len(k, grp, sep, n);
+  if st.st_ok(k) != 0 { return i + 1; }
+  if cnt == 0 {
+    let m: Ref(u8) = "array repeat length must be positive";
+    let d: u64 = ir.diag(k, 0, 1, m, 36);
+    st.st_fail(k, e_type());
+    return i + 1;
+  }
+  let wsh: u64 = ty.tsh(want);
+  let shaped: u64 = if wsh == 0 { 0 } else {
+    if agg.shp_kind(wsh) == agg.kind_array() { 1 } else { 0 }
+  };
+  let et: Mut(ty.Ty) = new_ty(k);
+  if shaped == 1 {
+    if agg.shp_len(wsh) != cnt {
+      let m: Ref(u8) = "array repeat length mismatch";
+      let d: u64 = ir.diag(k, 0, 1, m, 28);
+      st.st_fail(k, e_type());
+      return i + 1;
+    }
+    let elem: Mut(agg.Member) = agg.mem_index(wsh, 0);
+    let e1: u64 = agg.mem_ty(k, elem, et);
+  }
+  // 没有标注时用 i64 作提示：整数字面量据此定类型。
+  let hint: Mut(ty.Ty) = new_ty(k);
+  if shaped == 1 { ty.ty_at(hint, et); } else { ty.ty_bits(hint, 64, 1); }
+  let v: Mut(ty.Val) = new_val(k);
+  let j: u64 = expr(k, grp, 0, 0, hint, v);
+  if st.st_ok(k) != 0 { return i + 1; }
+  if shaped == 0 {
+    if ty.ty_known(ty.vty(v)) == 0 { st.st_fail(k, e_type()); return i + 1; }
+    ty.ty_at(et, ty.vty(v));
+  }
+  let esh: u64 = ty.tsh(et);
+  if agg.shp_has_drop(esh) == 1 {
+    let m: Ref(u8) = "array repeat element is not Copy";
+    let d: u64 = ir.diag(k, 0, 1, m, 32);
+    st.st_fail(k, e_type());
+    return i + 1;
+  }
+  let c: Mut(ty.Val) = new_val(k);
+  let c1: u64 = coerce(k, v, ty.vty(v), et, c);
+  if st.st_ok(k) != 0 { return i + 1; }
+  let sh: u64 = if shaped == 1 { wsh } else {
+    agg.array_new(k, agg.kind_array(), cnt, ty.tk(et), ty.tw(et), ty.tsg(et), ty.tsh(et))
+  };
+  let size: u64 = agg.shp_size(sh);
+  let objv: Mut(ty.Val) = new_val(k);
+  let base: u64 = agg.new_bytes(k, size, agg.shp_align(sh), objv);
+  let zero: u64 = if ty.vlit(c) == 1 and ty.vbits(c) == 0 { 1 } else { 0 };
+  if zero == 1 {
+    let z: u64 = agg.zero_at(k, base, 0, size);
+  } else {
+    let esz: u64 = agg.type_size(ty.tk(et), ty.tw(et), ty.tsh(et));
+    let filled: u64 = rep_fill(k, base, cnt, esz, c, et);
+  }
+  let at: Mut(ty.Ty) = new_ty(k);
+  ty.ty_addr(at);
+  ty.ty_set_sh(at, sh);
+  ty.val_ref(out, base, at);
+  return i + 1;
+};
+
 let arr_lit = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let grp: u64 = n_at(g, i);
+  let sep: u64 = rep_sep(grp, 0, n_count(grp));
+  if sep != 0 { return arr_rep(k, g, i, grp, sep, want, out); }
   let cnt: u64 = bi.table_cnt(grp, 0, n_count(grp), 0);
   let wsh: u64 = ty.tsh(want);
   let ok: u64 = if wsh == 0 { 0 } else {

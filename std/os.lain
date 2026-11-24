@@ -109,6 +109,21 @@ pub let free_bytes = func(ptr: u64) -> u64 {
   return 0;
 };
 
+// 带类型的分配入口：调用方拿到可写视图，无需自己做指针转换。
+// 字节数为 0 时回空视图，其余情况切一块空视图指向新缓冲。
+pub let alloc_slice = func(bytes: u64) -> MutSlice(u8) {
+  if bytes == 0 {
+    return make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
+  }
+  let p: Mut(u8) = ptr_cast(Mut(u8), alloc_bytes(bytes));
+  return make_slice(MutSlice(u8), p, bytes);
+};
+
+// 带类型的归还入口：接受视图，取缓冲地址后交给 free_bytes。
+pub let free_slice = func(s: MutSlice(u8)) -> u64 {
+  return free_bytes(s.ptr as u64);
+};
+
 // 整文件读取：成功回 Some(可写视图)，缓冲尾部补一个 0 字节；任何一步失败回 None。
 // 视图的所有权交给调用方，用完用 free_bytes(view.ptr) 归还。
 pub let read_file_slice = func(path: Slice(u8)) -> OptSlice.Opt {
@@ -213,6 +228,14 @@ pub let exec = func(cmd: Slice(u8)) -> u64 {
     return (128 + (rc & 0x7f)) as u64;
   }
   return raw;
+};
+
+// 效应入口：命令退出码非 0 就地发起 IoErr.fail(退出码)，不回到调用点。
+pub let exec_or_err = func(cmd: Slice(u8)) !{ IoErr } {
+  let rc: u64 = exec(cmd);
+  if rc != 0 {
+    perform IoErr.fail(rc);
+  }
 };
 
 pub let file_exists = func(path: Slice(u8)) -> bool {

@@ -50,9 +50,12 @@ let e_type = func() -> u64 { return ax.e_type(); };
 let e_unsup = func() -> u64 { return ax.e_unsup(); };
 let e_frame = func() -> u64 { return ax.e_frame(); };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
+let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
 let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
 let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.coerce(k, v, from, to, out); };
+let val_force = func(k: Mut(st.State), v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.val_force(k, v, tp); };
 let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.slot_put(k, j, v, tp); };
+let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.slot_get(k, j, tp, out); };
 let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
 let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
 let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
@@ -204,7 +207,10 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let mb: u64 = ct_module_rhs(k, g, e, name);
   if mb != 0 { return mb; }
   let v: Mut(ty.Val) = new_val(k);
-  let nj: u64 = core_expr(k, g, e, 0, t, v);
+  // 没有标注时用 i64 作提示：整数字面量据此定类型，推不出来再报错。
+  let hint: Mut(ty.Ty) = new_ty(k);
+  if ty.ty_known(t) == 1 { ty.ty_at(hint, t); } else { ty.ty_bits(hint, 64, 1); }
+  let nj: u64 = core_expr(k, g, e, 0, hint, v);
   if st.st_ok(k) != 0 { return nj; }
   if ef.take_aborts(k) == 1 { return skip_semi(g, nj); }
   let vt: Mut(ty.Ty) = new_ty(k);
@@ -619,6 +625,73 @@ let stmt_ctif = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
   return skip_semi(g, d.next_i);
 };
 
+// 语句位置上被丢掉的值：Copy 值（u64 / bool / 指针等）直接不要；
+// 带 drop 的值在语句位置上无法确定所有权，要求调用方显式绑定。
+let stmt_discard = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 {
+  let sh: u64 = ty.tsh(ty.vty(v));
+  if agg.shp_has_drop(sh) == 0 { return 0; }
+  let m: Ref(u8) = "discarded !Copy value; bind it with let";
+  let d: u64 = ir.diag(k, 0, 1, m, 39);
+  st.st_fail(k, e_type());
+  return 0;
+};
+
+// while <条件> { 体 }：条件每轮重求，break/continue 与 loop ... while 完全一致。
+// 语句位置与表达式位置共用这一条实现（core 的 expr_prefix 直接调它）。
+pub let stmt_while = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
+  let n: u64 = n_count(g);
+  let d: u64 = st.st_loopdepth(k);
+  if d >= 8 { st.st_fail(k, e_frame()); return i + 1; }
+  let label: u64 = ir.fresh_l(k);
+  let f: Mut(st.LoopFrame) = st.st_lf(k, d);
+  st.st_set_loopdepth(k, d + 1);
+  st.st_set_lf_label(f, label);
+  st.st_set_lf_np(f, 0);
+  let mark: u64 = env.env_mark(k);
+  st.st_set_lf_mark(f, mark);
+  let wt: Mut(ty.Ty) = new_ty(k);
+  if ty.ty_known(want) == 1 { ty.ty_at(wt, want); }
+  let resj: u64 = if ty.ty_known(wt) == 1 { cx.alloc_res_slot(k) } else { no_slot() };
+  st.st_set_lf_res(f, resj);
+  let noty: Mut(ty.Ty) = tnone(k);
+  let ct: Mut(ty.Ty) = tbool(k);
+  let r0: u64 = ir.region_begin(k);
+  let cv: Mut(ty.Val) = new_val(k);
+  let cj: u64 = core_expr(k, g, i + 1, 0, noty, cv);
+  if st.st_ok(k) != 0 { return cj; }
+  let cb: Mut(ty.Val) = new_val(k);
+  coerce(k, cv, ty.vty(cv), ct, cb);
+  if st.st_ok(k) != 0 { return cj; }
+  let cn: u64 = val_force(k, cb, ct);
+  let body_ok: u64 = if cj < n {
+    if is_group(g, cj) == 1 and (ax.delim_of(g, cj) == dl_brace()) { 1 } else { 0 }
+  } else { 0 };
+  if body_ok == 0 {
+    let m: Ref(u8) = "while needs a body";
+    let dg: u64 = ir.diag(k, 0, 1, m, 18);
+    st.st_fail(k, e_ast());
+    return cj;
+  }
+  let bg: u64 = n_at(g, cj);
+  let bt: Mut(u64) = box(k);
+  let r1: u64 = ir.region_begin(k);
+  let body_next: u64 = block_mode(k, bg, 0, bt, no_slot(), noty);
+  if box_get(bt) == 0 {
+    ir.args_reset(k);
+    ir.emit_jump(k, codes.INST_CONTINUE(), label);
+  }
+  let r1e: u64 = ir.region_end(k);
+  ir.emit_if(k, 0, cn, r1e, 0);
+  ir.args_reset(k);
+  ir.emit_jump(k, codes.INST_BREAK(), label);
+  let r2: u64 = ir.region_end(k);
+  ir.emit_loop(k, 0, label, r2);
+  st.st_set_loopdepth(k, d);
+  env.env_release(k, mark);
+  if resj != no_slot() { slot_get(k, resj, wt, out); } else { ty.val_none(out); }
+  return cj + 1;
+};
+
 let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
@@ -656,7 +729,18 @@ let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
     }
     return skip_semi(g, j);
   }
-  if sym == s.k_while() or sym == s.k_loop() {
+  if sym == s.k_while() {
+    let v: Mut(ty.Val) = new_val(k);
+    let nt: Mut(ty.Ty) = tnone(k);
+    let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
+    let j: u64 = stmt_while(k, g, i, hint, v, term);
+    if st.st_ok(k) != 0 { return j; }
+    if slot != no_slot() and ty.val_known(v) == 1 {
+      slot_put(k, slot, v, ty.vty(v));
+    }
+    return skip_semi(g, j);
+  }
+  if sym == s.k_loop() {
     let v: Mut(ty.Val) = new_val(k);
     let nt: Mut(ty.Ty) = tnone(k);
     let hint: Mut(ty.Ty) = if slot == no_slot() { nt } else { tp };
@@ -716,6 +800,8 @@ let stmt_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
     let dst_t: Mut(ty.Ty) = if ty.ty_known(tp) == 1 { tp } else { ty.vty(v) };
     coerce(k, v, ty.vty(v), dst_t, cv);
     slot_put(k, slot, cv, dst_t);
+  } else {
+    let dv: u64 = stmt_discard(k, v);
   }
   return skip_semi(g, j);
 };
