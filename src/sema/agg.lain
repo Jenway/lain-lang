@@ -1,6 +1,7 @@
 // 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
 // 形状记录 112 字节头，成员记录在独立数组里（每项 64 字节）。
-// 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、11 Fn、12 Type。
+// 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、
+// 10 Uninit、11 Fn、12 Type。
 // 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
 // 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("src::driver::state");
@@ -44,6 +45,8 @@ pub let kind_ref = func() -> u64 { return 6; };
 pub let kind_mut = func() -> u64 { return 7; };
 pub let kind_slice = func() -> u64 { return 8; };
 pub let kind_mutslice = func() -> u64 { return 9; };
+// 未初始化存储：物理上与 Mut 一样是一个指针字，但解引用被拒绝。
+pub let kind_uninit = func() -> u64 { return 10; };
 pub let kind_fn = func() -> u64 { return 11; };
 pub let kind_type = func() -> u64 { return 12; };
 
@@ -425,6 +428,31 @@ pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out
   let a: u64 = ir.arg_ref(k, p);
   let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, tp, 0);
   return ty.val_ref(out, res, tp);
+};
+
+// 把 obj + off 起 size 字节清零：先按 8 字节字写 0，尾部逐字节写 0。
+pub let zero_at = func(k: Mut(st.State), obj: u64, off: u64, size: u64) -> u64 {
+  let t64: Mut(ty.Ty) = ir.tbits(k, 64);
+  let words: u64 = size / 8;
+  let wdone: u64 = loop w(j: u64 = 0) while j < words {
+    let dp: u64 = off_of(k, obj, off + j * 8);
+    let rc0: u64 = ir.args_reset(k);
+    let a0: u64 = ir.arg_int(k, 0);
+    let a1: u64 = ir.arg_ref(k, dp);
+    let s0: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t64, 0);
+    j = j + 1;
+  };
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  let rest: u64 = size - words * 8;
+  let bdone: u64 = loop b(j: u64 = 0) while j < rest {
+    let dp: u64 = off_of(k, obj, words * 8 + j);
+    let rc1: u64 = ir.args_reset(k);
+    let a2: u64 = ir.arg_int(k, 0);
+    let a3: u64 = ir.arg_ref(k, dp);
+    let s1: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    j = j + 1;
+  };
+  return size;
 };
 
 // 读枚举标签（一个字节）。

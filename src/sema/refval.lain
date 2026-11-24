@@ -1,4 +1,5 @@
-// refval.lain —— 引用、切片与 Fn 值：形状判定、ref_of/mut_of、deref、slice_of、len、fn_of。
+// refval.lain —— 引用、切片与 Fn 值：形状判定、ref_of/mut_of、deref、slice_of、len、fn_of，
+// 以及未初始化存储的 init_at / init_zero / drop_at。
 // 这些处理器要递归求值实参，回跳经 core 的外部链接。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
@@ -34,6 +35,15 @@ let is_ref_shape = func(sh: u64) -> u64 {
   if sh == 0 { return 0; }
   let kd: u64 = agg.shp_kind(sh);
   if kd == agg.kind_ref() or kd == agg.kind_mut() { return 1; }
+  return 0;
+};
+
+// 可持有地址的字形：Ref / Mut / Uninit。ptr_cast 与 null_ref 只关心它，
+// 未初始化存储也是合法的指针目标。
+let is_ptr_shape = func(sh: u64) -> u64 {
+  if sh == 0 { return 0; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd == agg.kind_ref() or kd == agg.kind_mut() or kd == agg.kind_uninit() { return 1; }
   return 0;
 };
 
@@ -319,7 +329,7 @@ let ptr_cast_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
   let rt: Mut(ty.Ty) = ax.new_ty(k);
   let j1: u64 = cx.parse_type(k, argsg, 0, rt);
   if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
-  if is_ref_shape(ty.tsh(rt)) == 0 {
+  if is_ptr_shape(ty.tsh(rt)) == 0 {
     st.st_fail(k, ax.e_type());
     ty.val_none(out);
     return i + 2;
@@ -349,7 +359,7 @@ let null_ref_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
   let j1: u64 = cx.parse_type(k, argsg, 0, rt);
   let ignored: u64 = j1;
   if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
-  if is_ref_shape(ty.tsh(rt)) == 0 {
+  if is_ptr_shape(ty.tsh(rt)) == 0 {
     st.st_fail(k, ax.e_type());
     ty.val_none(out);
     return i + 2;
@@ -402,6 +412,88 @@ let is_null_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out:
   return i + 2;
 };
 
+// 把地址 name 重新标成 elem 的引用字形：0 为 Ref、1 为 Mut、2 为 Uninit，再强制到 want。
+let retag_ptr = func(k: Mut(st.State), eid: u64, name: u64, kind: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let id: u64 = if kind == 2 { ct.uninit_t(k, eid) } else { ct.ref_t(k, eid, kind) };
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  let p: u64 = ireg.project(k, id, t);
+  let rv: Mut(ty.Val) = ax.new_val(k);
+  let r: u64 = ty.val_ref(rv, name, t);
+  let c: Mut(ty.Val) = ax.new_val(k);
+  coerce(k, rv, t, want, c);
+  ty.val_at(out, c);
+  return 0;
+};
+
+// 指针值的形状校验：种类必须等于 want_kind，命中时回形状号，否则报错回 0。
+let ptr_check = func(k: Mut(st.State), v: Mut(ty.Val), want_kind: u64, msg: Ref(u8), msglen: u64) -> u64 {
+  let sh: u64 = ty.tsh(ty.vty(v));
+  if sh != 0 and agg.shp_kind(sh) == want_kind { return sh; }
+  let d: u64 = ir.diag(k, 0, 1, msg, msglen);
+  st.st_fail(k, ax.e_type());
+  return 0;
+};
+
+// init_at(dst, val)：把 val 直接写进 dst 指向的未初始化存储，回 Mut(T)。
+let init_at_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if bi.arg_count(argsg) != 2 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  let dv: Mut(ty.Val) = ax.new_val(k);
+  let j1: u64 = core_expr(k, argsg, 0, 0, tnone(k), dv);
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let m: Ref(u8) = "init_at-nonuninit";
+  let sh: u64 = ptr_check(k, dv, agg.kind_uninit(), m, 17);
+  if sh == 0 { ty.val_none(out); return i + 2; }
+  let eid: u64 = ct.elem_tid(k, sh);
+  let et: Mut(ty.Ty) = ax.new_ty(k);
+  let pr: u64 = ireg.project(k, eid, et);
+  let bc: u64 = if ax.is_comma(argsg, j1) == 1 { j1 + 1 } else { j1 };
+  let vv: Mut(ty.Val) = ax.new_val(k);
+  let j2: u64 = core_expr(k, argsg, bc, 0, et, vv);
+  let ignored: u64 = j2;
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let cv: Mut(ty.Val) = ax.new_val(k);
+  coerce(k, vv, ty.vty(vv), et, cv);
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let s: u64 = agg.store_at(k, ty.vn(dv), 0, cv, et);
+  let r: u64 = retag_ptr(k, eid, ty.vn(dv), 1, want, out);
+  return i + 2;
+};
+
+// init_zero(dst)：把 dst 起 size_of(T) 字节清零，回 Mut(T)。
+let init_zero_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if bi.arg_count(argsg) != 1 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  let dv: Mut(ty.Val) = ax.new_val(k);
+  let j: u64 = core_expr(k, argsg, 0, 0, tnone(k), dv);
+  let ignored: u64 = j;
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let m: Ref(u8) = "init_zero-nonuninit";
+  let sh: u64 = ptr_check(k, dv, agg.kind_uninit(), m, 19);
+  if sh == 0 { ty.val_none(out); return i + 2; }
+  let eid: u64 = ct.elem_tid(k, sh);
+  let size: u64 = ireg.size_of(k, eid);
+  let z: u64 = agg.zero_at(k, ty.vn(dv), 0, size);
+  let r: u64 = retag_ptr(k, eid, ty.vn(dv), 1, want, out);
+  return i + 2;
+};
+
+// drop_at(p)：交出 Mut(T) 持有的存储，回 Uninit(T)。
+let drop_at_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if bi.arg_count(argsg) != 1 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  let pv: Mut(ty.Val) = ax.new_val(k);
+  let j: u64 = core_expr(k, argsg, 0, 0, tnone(k), pv);
+  let ignored: u64 = j;
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let m: Ref(u8) = "drop_at-nonmut";
+  let sh: u64 = ptr_check(k, pv, agg.kind_mut(), m, 14);
+  if sh == 0 { ty.val_none(out); return i + 2; }
+  let eid: u64 = ct.elem_tid(k, sh);
+  let r: u64 = retag_ptr(k, eid, ty.vn(pv), 2, want, out);
+  return i + 2;
+};
+
 let make_slice_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let argsg: u64 = ax.n_at(g, i + 1);
   if ax.n_count(argsg) < 5 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
@@ -451,6 +543,9 @@ pub let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
   if name == s.b_null_ref() { return null_ref_call(k, g, i, want, out); }
   if name == s.b_is_null() { return is_null_call(k, g, i, want, out); }
   if name == s.b_make_slice() { return make_slice_call(k, g, i, want, out); }
+  if name == s.b_init_at() { return init_at_call(k, g, i, want, out); }
+  if name == s.b_init_zero() { return init_zero_call(k, g, i, want, out); }
+  if name == s.b_drop_at() { return drop_at_call(k, g, i, want, out); }
   return 0;
 };
 

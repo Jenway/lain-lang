@@ -1,4 +1,4 @@
-// ctypes.lain —— 复合类型工厂与转换判定：Ref / Mut / Slice / MutSlice / Array / Fn。
+// ctypes.lain —— 复合类型工厂与转换判定：Ref / Mut / Uninit / Slice / MutSlice / Array / Fn。
 // 一切编号与物理投影都在 tyreg，这里只负责造形状、查重、判可转换性与切片的
 // 16 字节头构造。不 import ctx / core，避免环。
 let st = import("src::driver::state");
@@ -69,8 +69,9 @@ let scan_fn = func(k: Mut(st.State), ret: u64, np: u64, sig: u64, i: u64, n: u64
 };
 
 // --- 工厂 ---------------------------------------------------------------
-pub let ref_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
-  let kind: u64 = if mutv == 1 { agg.kind_mut() } else { agg.kind_ref() };
+// 指针字形：Ref / Mut / Uninit 物理上都是一个 8 字节指针字，
+// 逻辑身份由种类与元素 TypeId 共同决定。
+let ptr_like_t = func(k: Mut(st.State), kind: u64, elem: u64) -> u64 {
   let hit: u64 = scan_kind_elem(k, kind, elem, 0, shapes_used(k));
   if hit != 0 { return hit; }
   let sh: u64 = agg.shp_new(k, kind, 0, st.st_src(k));
@@ -81,6 +82,15 @@ pub let ref_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
   let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(kind), 0, 0, sh);
   let t1: u64 = agg.shp_set_tid(sh, id);
   return id;
+};
+
+pub let ref_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
+  let kind: u64 = if mutv == 1 { agg.kind_mut() } else { agg.kind_ref() };
+  return ptr_like_t(k, kind, elem);
+};
+
+pub let uninit_t = func(k: Mut(st.State), elem: u64) -> u64 {
+  return ptr_like_t(k, agg.kind_uninit(), elem);
 };
 
 pub let slice_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
@@ -201,6 +211,8 @@ pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> 
   let te: u64 = agg.shp_elem(tsh);
   // 引用之间的元素差异只影响解引用时怎么解释这 8 个字节，物理上都是指针：
   // 允许改标注（Ref(T) 与 Ref(U) 之间、Ref 与 Mut 的只读方向），禁止 Ref→Mut。
+  // 未初始化存储只能由 drop_at 交出、由 init_at / init_zero 写满：隐式转换一律拒绝。
+  if tk == agg.kind_uninit() or fk == agg.kind_uninit() { return 9; }
   if tk == agg.kind_mut() {
     if fk == agg.kind_ref() { return 9; }
     if fk != agg.kind_mut() { return 9; }
