@@ -1,5 +1,5 @@
 // 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
-// 形状记录 112 字节头，成员记录在独立数组里（每项 64 字节）。
+// 形状记录 128 字节头，成员记录在独立数组里（每项 64 字节）。
 // 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、
 // 10 Uninit、11 Fn、12 Type。
 // 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
@@ -34,7 +34,9 @@ pub let Shape = struct {
   ret_tid: u64,
   sig: u64,
   mem: Mut(Member),
-  memcap: u64
+  memcap: u64,
+  drop_q: u64,
+  has_drop: u64
 };
 
 pub let kind_struct = func() -> u64 { return 1; };
@@ -52,13 +54,13 @@ pub let kind_type = func() -> u64 { return 12; };
 
 pub let shp_ptr = func(sh: u64) -> Mut(Shape) { return ptr_cast(Mut(Shape), sh); };
 
-// 一条形状记录的字节数（成员不内联，这 112 字节只是头部）。
-pub let shp_rec = func() -> u64 { return 112; };
+// 一条形状记录的字节数（成员不内联，这 128 字节只是头部）。
+pub let shp_rec = func() -> u64 { return 128; };
 
 // 形状表下标换算。
 pub let shape_at = func(k: Mut(st.State), i: u64) -> u64 {
   let b: Mut(u8) = st.st_shpbase(k);
-  return (b + i * 112) as u64;
+  return (b + i * shp_rec()) as u64;
 };
 
 // 成员区初始槽数。
@@ -83,6 +85,8 @@ pub let shp_new = func(s: Mut(st.State), kind: u64, name: u64, m: u64) -> u64 {
   p.elem = 0;
   p.ret_tid = 0;
   p.sig = 0;
+  p.drop_q = 0;
+  p.has_drop = 0;
   let ms: Mut(Member) = ptr_cast(Mut(Member), st.st_ralloc(s, mem_init() * 64));
   p.mem = ms;
   p.memcap = mem_init();
@@ -112,6 +116,14 @@ pub let shp_ret = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return
 pub let shp_set_ret = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.ret_tid = v; return v; };
 pub let shp_sig = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.sig; };
 pub let shp_set_sig = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.sig = v; return v; };
+pub let shp_drop_q = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.drop_q; };
+pub let shp_set_drop_q = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.drop_q = v; return v; };
+pub let shp_has_drop = func(sh: u64) -> u64 {
+  if sh == 0 { return 0; }
+  let p: Mut(Shape) = shp_ptr(sh);
+  return p.has_drop;
+};
+pub let shp_set_has_drop = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.has_drop = v; return v; };
 
 // 成员区在独立的持久块里，按需扩容。
 pub let mem_at = func(sh: u64, i: u64) -> Mut(Member) {
@@ -210,6 +222,7 @@ pub let field_add = func(s: Mut(st.State), sh: u64, name: u64, k: u64, w: u64, s
   let off: u64 = align_up(p.size, a);
   let sz: u64 = type_size(k, w, sub);
   p.size = off + sz;
+  if sub != 0 and shp_has_drop(sub) == 1 { p.has_drop = 1; }
   return add_member(s, sh, name, off, 0, 1, k, w, sg, sub);
 };
 
@@ -562,4 +575,35 @@ pub let copy_block = func(k: Mut(st.State), dst: u64, src: u64, size: u64) -> u6
   let rest: u64 = size - words * 8;
   if rest == 0 { return size; }
   return copy_tail(k, dst, src, words * 8, rest);
+};
+
+// --- Drop 发射 -----------------------------------------------------------
+// 在 obj 指向的那块存储上依次执行本身的 drop 过程与各字段的 drop，
+// 字段按声明逆序处理，与局部量的出块顺序一致。
+let drop_member_at = func(k: Mut(st.State), sh: u64, obj: u64, i: u64) -> u64 {
+  if i == 0 { return 0; }
+  let idx: u64 = i - 1;
+  let m: Mut(Member) = mem_at(sh, idx);
+  let hs: u64 = m.sh;
+  if m.has == 1 and hs != 0 and shp_has_drop(hs) == 1 {
+    let faddr: u64 = off_of(k, obj, m.off);
+    let r: u64 = drop_value_at(k, hs, faddr);
+  }
+  return drop_member_at(k, sh, obj, idx);
+};
+
+pub let drop_value_at = func(k: Mut(st.State), sh: u64, obj: u64) -> u64 {
+  if sh == 0 { return 0; }
+  if shp_has_drop(sh) == 0 { return 0; }
+  let q: u64 = shp_drop_q(sh);
+  if q != 0 {
+    ir.args_reset(k);
+    let a: u64 = ir.arg_ref(k, obj);
+    let c: u64 = ir.emit_call(k, 0, q, 0);
+  }
+  if shp_kind(sh) == kind_struct() {
+    let n: u64 = shp_count(sh);
+    let r: u64 = drop_member_at(k, sh, obj, n);
+  }
+  return 0;
 };

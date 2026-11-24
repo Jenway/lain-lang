@@ -12,6 +12,7 @@ let env = import("src::sema::env");
 let ireg = import("src::sema::tyreg");
 let tb = import("src::sema::tbuild");
 let ctf = import("src::comptime::ctfor");
+let drop = import("src::sema::drop");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
@@ -215,6 +216,13 @@ pub let call_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64,
   let n: u64 = ax.n_count(g);
   if i >= n { return i; }
   if idx >= arity { return i; }
+  let ca: u64 = drop.bare_local(k, g, i);
+  if ca != 0 and env.env_is_noncopy(k, ca) == 1 {
+    let m: Ref(u8) = "implicit copy of !Copy";
+    let d: u64 = ir.diag(k, 0, 1, m, 22);
+    st.st_fail(k, ax.e_type());
+    return i;
+  }
   let pt: Mut(ty.Ty) = cx.ty_idx(paramp, idx);
   let v: Mut(ty.Val) = ax.new_val(k);
   let j: u64 = core_expr(k, g, i, 0, pt, v);
@@ -231,6 +239,13 @@ pub let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   let sym: u64 = ax.n_sym(g, i);
   let off: u64 = env.env_find(k, sym);
   if off != 0 {
+    if env.env_alive(k, off) == 0 {
+      let m: Ref(u8) = "use after reloc";
+      let d: u64 = ir.diag(k, 0, 1, m, 15);
+      st.st_fail(k, ax.e_type());
+      ty.val_none(out);
+      return i + 1;
+    }
     let t: Mut(ty.Ty) = ax.new_ty(k);
     env.env_ty(k, off, t);
     cx.slot_get(k, env.env_slot(k, off), t, out);

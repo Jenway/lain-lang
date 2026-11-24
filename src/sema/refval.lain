@@ -16,6 +16,7 @@ let ireg = import("src::sema::tyreg");
 let ct = import("src::comptime::ctypes");
 let cl = import("src::sema::calls");
 let ctf = import("src::comptime::ctfor");
+let drop = import("src::sema::drop");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern core_tail(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_tail;
@@ -108,6 +109,13 @@ let ref_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut
     let nm: u64 = ax.n_sym(argsg, 0);
     let off: u64 = env.env_find(k, nm);
     if off != 0 {
+      if env.env_alive(k, off) == 0 {
+        let m: Ref(u8) = "use after reloc";
+        let d: u64 = ir.diag(k, 0, 1, m, 15);
+        st.st_fail(k, ax.e_type());
+        ty.val_none(out);
+        return i + 2;
+      }
       let vt: Mut(ty.Ty) = ax.new_ty(k);
       let g0: u64 = env.env_ty(k, off, vt);
       let rt: Mut(ty.Ty) = ref_ty(k, ireg.tid_of(k, vt), mutv);
@@ -448,6 +456,14 @@ let init_at_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out:
   let et: Mut(ty.Ty) = ax.new_ty(k);
   let pr: u64 = ireg.project(k, eid, et);
   let bc: u64 = if ax.is_comma(argsg, j1) == 1 { j1 + 1 } else { j1 };
+  let ca: u64 = drop.bare_local(k, argsg, bc);
+  if ca != 0 and env.env_is_noncopy(k, ca) == 1 {
+    let cm: Ref(u8) = "implicit copy of !Copy";
+    let cd: u64 = ir.diag(k, 0, 1, cm, 22);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
   let vv: Mut(ty.Val) = ax.new_val(k);
   let j2: u64 = core_expr(k, argsg, bc, 0, et, vv);
   let ignored: u64 = j2;
@@ -472,6 +488,14 @@ let init_zero_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), ou
   let sh: u64 = ptr_check(k, dv, agg.kind_uninit(), m, 19);
   if sh == 0 { ty.val_none(out); return i + 2; }
   let eid: u64 = ct.elem_tid(k, sh);
+  let esh: u64 = ireg.ty_shape(k, eid);
+  if esh != 0 and agg.shp_has_drop(esh) == 1 {
+    let zm: Ref(u8) = "init_zero on !Copy";
+    let zd: u64 = ir.diag(k, 0, 1, zm, 18);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
   let size: u64 = ireg.size_of(k, eid);
   let z: u64 = agg.zero_at(k, ty.vn(dv), 0, size);
   let r: u64 = retag_ptr(k, eid, ty.vn(dv), 1, want, out);
@@ -490,7 +514,43 @@ let drop_at_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out:
   let sh: u64 = ptr_check(k, pv, agg.kind_mut(), m, 14);
   if sh == 0 { ty.val_none(out); return i + 2; }
   let eid: u64 = ct.elem_tid(k, sh);
+  let esh: u64 = ireg.ty_shape(k, eid);
+  if esh != 0 and agg.shp_has_drop(esh) == 1 {
+    let dr: u64 = agg.drop_value_at(k, esh, ty.vn(pv));
+  }
   let r: u64 = retag_ptr(k, eid, ty.vn(pv), 2, want, out);
+  return i + 2;
+};
+
+// reloc(x)：把局部左值里的值移出，局部立刻变成不可用；值本身按原类型交出。
+let reloc_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if bi.arg_count(argsg) != 1 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  if ax.is_name(argsg, 0) == 0 { st.st_fail(k, ax.e_type()); ty.val_none(out); return i + 2; }
+  let nm: u64 = ax.n_sym(argsg, 0);
+  let off: u64 = env.env_find(k, nm);
+  if off == 0 {
+    let m: Ref(u8) = "reloc-nonlocal";
+    let d: u64 = ir.diag(k, 0, 1, m, 14);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  if env.env_alive(k, off) == 0 {
+    let m: Ref(u8) = "use after reloc";
+    let d: u64 = ir.diag(k, 0, 1, m, 15);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  let vt: Mut(ty.Ty) = ax.new_ty(k);
+  let g0: u64 = env.env_ty(k, off, vt);
+  let v: Mut(ty.Val) = ax.new_val(k);
+  let sg: u64 = slot_get(k, env.env_slot(k, off), vt, v);
+  let c: Mut(ty.Val) = ax.new_val(k);
+  coerce(k, v, vt, want, c);
+  let rl: u64 = drop.mark_relocated(k, off);
+  ty.val_at(out, c);
   return i + 2;
 };
 
@@ -546,6 +606,7 @@ pub let typed_builtin = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
   if name == s.b_init_at() { return init_at_call(k, g, i, want, out); }
   if name == s.b_init_zero() { return init_zero_call(k, g, i, want, out); }
   if name == s.b_drop_at() { return drop_at_call(k, g, i, want, out); }
+  if name == s.b_reloc() { return reloc_call(k, g, i, want, out); }
   return 0;
 };
 

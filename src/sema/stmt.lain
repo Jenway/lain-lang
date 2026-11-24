@@ -21,6 +21,7 @@ let modules = import("src::sema::modules");
 let ctfn = import("src::comptime::ctfn");
 let ctp = import("src::comptime::ctprim");
 let ef = import("src::sema::effects");
+let drop = import("src::sema::drop");
 let hr = import("src::driver::host_rt");
 
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
@@ -98,8 +99,10 @@ let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
     let saved: u64 = st.st_vmod(k);
     st.st_set_vmod(k, vmod);
     let a: u64 = stmt_p1_group(k, bodyg);
+    if st.st_ok(k) == 0 { let bd0: u64 = drop.bind_self_drop(k, vmod); }
     if st.st_ok(k) == 0 { let b: u64 = stmt_p2_group(k, bodyg); }
     st.st_set_vmod(k, saved);
+    if st.st_ok(k) == 0 { let bd: u64 = drop.bind_self_drop(k, vmod); }
     if st.st_ok(k) == 0 { let bd: u64 = ctf.bind(k, name, 9, vmod, 0); }
     return skip_semi(g, e + 2);
   }
@@ -189,6 +192,13 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     return j;
   }
   let e: u64 = expect_sym(k, g, j, s.p_eq());
+  let cp: u64 = drop.bare_local(k, g, e);
+  if cp != 0 and env.env_is_noncopy(k, cp) == 1 {
+    let m: Ref(u8) = "implicit copy of !Copy";
+    let d: u64 = ir.diag(k, 0, 1, m, 22);
+    st.st_fail(k, e_type());
+    return skip_semi(g, e);
+  }
   let efj: u64 = ef.effect_rhs(k, g, e, name, 0);
   if efj != 0 { return skip_semi(g, efj); }
   let mb: u64 = ct_module_rhs(k, g, e, name);
@@ -237,6 +247,12 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let sl: u64 = st.st_next_slot(k);
   slot_put(k, sl, cv, ty.vty(cv));
   env.env_push(k, name, sl, vt);
+  let csh: u64 = ty.tsh(vt);
+  if csh != 0 and agg.shp_has_drop(csh) == 1 {
+    let fs: u64 = drop.new_alive_flag(k);
+    let noff: u64 = env.env_find(k, name);
+    env.env_set_alive_slot(k, noff, fs);
+  }
   return skip_semi(g, nj);
 };
 
@@ -264,19 +280,18 @@ let stmt_assign = func(k: Mut(st.State), g: u64, i: u64, eqj: u64) -> u64 {
   let c1: u64 = coerce(k, v, ty.vty(v), t, c);
   if st.st_ok(k) != 0 { return j; }
   let s0: u64 = lv.store_value(k, r, c);
+  if eqj == i + 1 and is_name(g, i) == 1 {
+    let off: u64 = env.env_find(k, n_sym(g, i));
+    if off != 0 and env.env_is_noncopy(k, off) == 1 { drop.mark_alive(k, off); }
+  }
   return skip_semi(g, j);
 };
 
-// 有值 return：算表达式并把实参推好，返回新下标。
-let ret_value = func(k: Mut(st.State), g: u64, j0: u64, rt: Mut(ty.Ty)) -> u64 {
-  let v: Mut(ty.Val) = new_val(k);
-  let j: u64 = core_expr(k, g, j0, 0, rt, v);
-  if st.st_ok(k) != 0 { return j; }
-  if ty.ty_known(rt) == 0 { st.st_fail(k, e_type()); return j; }
-  let c: Mut(ty.Val) = new_val(k);
-  coerce(k, v, ty.vty(v), rt, c);
-  push_val(k, c);
-  return j;
+// return 的表达式恰好是裸局部名时，!Copy 值按隐式 reloc 处理：所有权交给调用方。
+let return_local = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
+  let off: u64 = drop.bare_local(k, g, j0);
+  if off != 0 and env.env_is_noncopy(k, off) == 1 { return drop.mark_relocated(k, off); }
+  return 0;
 };
 
 let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
@@ -294,8 +309,10 @@ let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 
         coerce(k, v, ty.vty(v), ct, c);
         if st.st_ok(k) == 0 { slot_put(k, ins.slot, c, ct); }
       }
+      let rl: u64 = return_local(k, g, j0);
       ej
     } else { j0 };
+    drop.drop_all(k);
     ir.args_reset(k);
     ir.emit_jump(k, codes.INST_BREAK(), ins.label);
     return skip_semi(g, jj);
@@ -312,17 +329,34 @@ let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 
     let j: u64 = core_expr(k, g, j0, 0, rt, v);
     if st.st_ok(k) != 0 { return j; }
     if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
+    let rl: u64 = return_local(k, g, j0);
     let c: Mut(ty.Val) = new_val(k);
     let c1: u64 = coerce(k, v, ty.vty(v), rt, c);
     if st.st_ok(k) != 0 { return j; }
     let sz: u64 = agg.shp_size(ty.tsh(rt));
     let cp: u64 = agg.copy_block(k, rp, ty.vn(c), sz);
+    let dr: u64 = drop.drop_all(k);
     ir.args_reset(k);
     ir.emit_jump(k, codes.INST_RETURN(), 0);
     return skip_semi(g, j);
   }
-  ir.args_reset(k);
-  let j: u64 = if has == 1 { ret_value(k, g, j0, rt) } else { j0 };
+  let j: u64 = if has == 1 {
+    let v: Mut(ty.Val) = new_val(k);
+    let ej: u64 = core_expr(k, g, j0, 0, rt, v);
+    if st.st_ok(k) != 0 { return ej; }
+    if ty.ty_known(rt) == 0 { st.st_fail(k, e_type()); return ej; }
+    let rl: u64 = return_local(k, g, j0);
+    let c: Mut(ty.Val) = new_val(k);
+    coerce(k, v, ty.vty(v), rt, c);
+    drop.drop_all(k);
+    ir.args_reset(k);
+    push_val(k, c);
+    ej
+  } else {
+    drop.drop_all(k);
+    ir.args_reset(k);
+    j0
+  };
   if ef.take_aborts(k) == 1 { return skip_semi(g, j); }
   ir.emit_jump(k, codes.INST_RETURN(), 0);
   return skip_semi(g, j);
@@ -346,6 +380,7 @@ let stmt_break = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   let f: Mut(st.LoopFrame) = st.st_lf(k, fi);
   let resj: u64 = st.st_lf_res(f);
   let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { break_value(k, n_at(g, j), resj) } else { j };
+  let dr: u64 = drop.drop_from(k, st.st_lf_mark(f));
   ir.args_reset(k);
   ir.emit_jump(k, codes.INST_BREAK(), st.st_lf_label(f));
   return skip_semi(g, j2);
@@ -374,6 +409,7 @@ let stmt_continue = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u6
   let f: Mut(st.LoopFrame) = st.st_lf(k, fi);
   let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { cont_args(k, n_at(g, j), 0, 0, f) } else { j };
   if st.st_ok(k) != 0 { return j2; }
+  let dr: u64 = drop.drop_from(k, st.st_lf_mark(f));
   ir.args_reset(k);
   ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f));
   return skip_semi(g, j2);
@@ -697,7 +733,10 @@ let block_walk = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u6
 pub let block_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
   let gm: u64 = gv.mark(k);
   let ctm: u64 = ctf.mark(k);
+  let em: u64 = env.env_mark(k);
   let r: u64 = block_walk(k, g, i, term, slot, tp);
+  // 整块必然终结时不在返回指令之后再发 drop；路径上的 drop 已由 return 发过。
+  if box_get(term) == 0 { let dr: u64 = drop.drop_from(k, em); }
   gv.release(k, gm);
   ctf.release(k, ctm);
   return r;

@@ -1,0 +1,153 @@
+// drop.lain —— 值系统的析构部分：模块自带的 drop 绑定、!Copy 判定、
+// 局部量的存活旗标，以及按作用域逆序发射的 drop 调用。
+let st = import("src::driver::state");
+let ty = import("src::sema::types");
+let env = import("src::sema::env");
+let ir = import("src::ir::ir");
+let codes = import("src::ir::ir_codes");
+let s = import("src::driver::sym");
+let ax = import("src::syntax::ast");
+let agg = import("src::sema::agg");
+let modules = import("src::sema::modules");
+let cx = import("src::sema::ctx");
+
+let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
+let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
+
+// 模块在 phase2 结束后登记固有 drop：导出 pub let Self = struct/enum 且
+// 导出签名匹配的 pub let drop = func(x: Mut(Self)) -> () 时，把 drop 的
+// 限定名写进 Self 的形状。
+pub let bind_self_drop = func(k: Mut(st.State), modv: u64) -> u64 {
+  let self_e: Mut(modules.SymEntry) = modules.sym_find(k, modv, s.b_self_type());
+  if is_null(self_e) { return 0; }
+  if modules.sym_pub(self_e) == 0 { return 0; }
+  let kd: u64 = modules.sym_kind(self_e);
+  if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() { return 0; }
+  let sh: u64 = modules.sym_shape(self_e);
+  if sh == 0 { return 0; }
+  let de: Mut(modules.SymEntry) = modules.sym_find(k, modv, s.b_drop());
+  if is_null(de) { return 0; }
+  if modules.sym_pub(de) == 0 { return 0; }
+  if modules.sym_kind(de) != modules.sym_kind_func() { return 0; }
+  let sg: Mut(u8) = modules.sym_sig(de);
+  if cx.sig_np(sg) != 1 { return 0; }
+  let rt: Mut(ty.Ty) = cx.sig_ret(sg);
+  if ty.tk(rt) != 9 { return 0; }
+  let pt: Mut(ty.Ty) = cx.ty_idx(cx.sig_params(sg), 0);
+  let psh: u64 = ty.tsh(pt);
+  if psh == 0 { return 0; }
+  if agg.shp_kind(psh) != agg.kind_mut() { return 0; }
+  let q: u64 = modules.sym_qual(de);
+  agg.shp_set_drop_q(sh, q);
+  return agg.shp_set_has_drop(sh, 1);
+};
+
+// 运行期 1 字节存活旗标：初值 1。
+pub let new_alive_flag = func(k: Mut(st.State)) -> u64 {
+  let nm: u64 = ir.fresh_t(k);
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, 1);
+  let i0: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), nm, t8, 0);
+  ir.args_reset(k);
+  let b: u64 = ir.arg_int(k, 1);
+  let c: u64 = ir.arg_ref(k, nm);
+  let i1: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+  return nm;
+};
+
+pub let set_alive_flag = func(k: Mut(st.State), nm: u64, v: u64) -> u64 {
+  if nm == 0 { return 0; }
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_int(k, v);
+  let b: u64 = ir.arg_ref(k, nm);
+  return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+};
+
+let alive_cond = func(k: Mut(st.State), nm: u64) -> u64 {
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  let raw: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let a: u64 = ir.arg_ref(k, nm);
+  let i: u64 = ir.emit_mem(k, codes.INST_LOAD(), raw, t8, 0);
+  let cond: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let b: u64 = ir.arg_ref(k, raw);
+  let c: u64 = ir.arg_int(k, 0);
+  let n: u64 = ir.emit(k, codes.INST_NE(), cond, t8);
+  return cond;
+};
+
+// 代码生成时改静态存活状态，同时改运行期旗标。
+pub let mark_relocated = func(k: Mut(st.State), off: u64) -> u64 {
+  let a: u64 = env.env_set_alive(k, off, 0);
+  let sl: u64 = env.env_alive_slot(k, off);
+  return set_alive_flag(k, sl, 0);
+};
+
+pub let mark_alive = func(k: Mut(st.State), off: u64) -> u64 {
+  let a: u64 = env.env_set_alive(k, off, 1);
+  let sl: u64 = env.env_alive_slot(k, off);
+  return set_alive_flag(k, sl, 1);
+};
+
+// 把局部槽里的块地址取出来：值聚合的槽里存的就是那块存储的指针。
+let drop_obj = func(k: Mut(st.State), off: u64, t: Mut(ty.Ty)) -> u64 {
+  let v: Mut(ty.Val) = new_val(k);
+  let g: u64 = cx.slot_get(k, env.env_slot(k, off), t, v);
+  return ty.vn(v);
+};
+
+// 作用域里一个局部量的 drop：静态与运行期存活旗标都为真时调用。
+// 取值与调用一起放进 #if 区域，区域内的操作数都在区域内定义。
+pub let emit_drop_entry = func(k: Mut(st.State), off: u64) -> u64 {
+  let t: Mut(ty.Ty) = new_ty(k);
+  let a: u64 = env.env_ty(k, off, t);
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  if agg.shp_has_drop(sh) == 0 { return 0; }
+  let fs: u64 = env.env_alive_slot(k, off);
+  if fs != 0 {
+    let cond: u64 = alive_cond(k, fs);
+    let r: u64 = ir.region_begin(k);
+    let obj: u64 = drop_obj(k, off, t);
+    let d: u64 = agg.drop_value_at(k, sh, obj);
+    let re: u64 = ir.region_end(k);
+    let iff: u64 = ir.emit_if(k, 0, cond, re, 0);
+  } else {
+    let obj0: u64 = drop_obj(k, off, t);
+    let d0: u64 = agg.drop_value_at(k, sh, obj0);
+  }
+  let b: u64 = env.env_set_alive(k, off, 0);
+  return set_alive_flag(k, fs, 0);
+};
+
+// 从当前绑定栈顶向下 drop 到 stop（不含 stop），天然给出逆声明顺序。
+// off 是当前未处理区段的顶端，逐条减一个记录宽度向前走。
+let drop_walk = func(k: Mut(st.State), off: u64, stop: u64) -> u64 {
+  if off <= stop { return 0; }
+  let eoff: u64 = off - env.env_rec();
+  let d: u64 = emit_drop_entry(k, eoff + 1);
+  if st.st_ok(k) != 0 { return 0; }
+  return drop_walk(k, eoff, stop);
+};
+
+pub let drop_from = func(k: Mut(st.State), stop: u64) -> u64 {
+  return drop_walk(k, st.st_sp(k), stop);
+};
+
+pub let drop_all = func(k: Mut(st.State)) -> u64 {
+  return drop_from(k, 0);
+};
+
+// 当前参数组里从 i 起的表达式恰好是一个裸局部名（后面紧跟逗号、分号或结束）。
+pub let bare_local = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { return 0; }
+  if ax.is_name(g, i) == 0 { return 0; }
+  if i + 1 < n {
+    if ax.is_comma(g, i + 1) == 0 and ax.is_semi(g, i + 1) == 0 { return 0; }
+  }
+  return env.env_find(k, ax.n_sym(g, i));
+};

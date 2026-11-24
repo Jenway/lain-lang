@@ -26,6 +26,7 @@ let gn = import("src::sema::generics");
 let ex = import("src::syntax::expand");
 let ef = import("src::sema::effects");
 let sm = import("src::sema::stmt");
+let drop = import("src::sema::drop");
 let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
 
@@ -573,6 +574,8 @@ let p1_mod_lit = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64, 
   let a: u64 = phase1(k, bodyg, 0, n_count(bodyg));
   st.st_set_vmod(k, saved);
   if st.st_ok(k) != 0 { return skip_semi(g, e + 2); }
+  // 过程体要看到固有 drop，所以 Self/drop 的绑定在 phase1 之后立刻完成。
+  let bd: u64 = drop.bind_self_drop(k, vmod);
   let bm: u64 = bind_mod_alias(k, vmod, name, is_pub, sig_e, 0, bodyg);
   return skip_semi(g, e + 2);
 };
@@ -931,6 +934,9 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     st.st_set_vmod(k, modules.sym_qual(se));
     let r: u64 = phase2(k, bodyg, 0, n_count(bodyg));
     st.st_set_vmod(k, saved);
+    if st.st_ok(k) == 0 {
+      let bd: u64 = drop.bind_self_drop(k, modules.sym_qual(se));
+    }
     return skip_semi(g, e + 2);
   }
   let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
@@ -1212,8 +1218,10 @@ let lainc_compile_functor_mod = func(k: Mut(st.State), src: u64, bodyg: u64, par
   st.st_set_src(k, src);
   st.st_set_vmod(k, vmod);
   let a: u64 = phase1(k, bodyg, 0, n_count(bodyg));
+  if st.st_ok(k) == 0 { let bd: u64 = drop.bind_self_drop(k, vmod); }
   if st.st_ok(k) == 0 and st.st_in_proc(k) == 0 {
     let b: u64 = phase2(k, bodyg, 0, n_count(bodyg));
+    if st.st_ok(k) == 0 { let bd2: u64 = drop.bind_self_drop(k, vmod); }
   }
   if st.st_ok(k) == 0 and st.st_in_proc(k) != 0 {
     let cntp: Mut(u64) = box(k);
@@ -1250,6 +1258,7 @@ let lainc_compile_functor_mod_p2 = func(k: Mut(st.State), vmod: u64, src: u64, b
   st.st_set_src(k, src);
   st.st_set_vmod(k, vmod);
   let b: u64 = phase2(k, bodyg, 0, n_count(bodyg));
+  if st.st_ok(k) == 0 { let bd: u64 = drop.bind_self_drop(k, vmod); }
   ctf.release(k, cm);
   st.st_set_vmod(k, saved_vmod);
   st.st_set_src(k, saved_src);
