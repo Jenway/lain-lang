@@ -13,7 +13,9 @@ let ctfn = import("src::comptime::ctfn");
 pub let CtParamRec = struct {
   name: u64,
   ty_start: u64,
-  ty_end: u64
+  ty_end: u64,
+  def_start: u64,
+  def_end: u64
 };
 
 let WFieldRec = struct {
@@ -43,7 +45,7 @@ let MonoBlk = struct {
 };
 
 pub let ctparam_at = func(tbl: Mut(CtParamRec), idx: u64) -> Mut(CtParamRec) {
-  return ptr_cast(Mut(CtParamRec), ptr_cast(Mut(u8), tbl) + idx * 24);
+  return ptr_cast(Mut(CtParamRec), ptr_cast(Mut(u8), tbl) + idx * 40);
 };
 
 pub let val_at = func(vals: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
@@ -59,7 +61,15 @@ pub let ct_skip_ty = func(qg: u64, i: u64) -> u64 {
   let n: u64 = ax.n_count(qg);
   if i >= n { return i; }
   if ax.is_comma(qg, i) == 1 { return i; }
+  if ctf.has_tok(qg, i, s.p_eq()) == 1 { return i; }
   return ct_skip_ty(qg, i + 1);
+};
+
+let ct_skip_default = func(qg: u64, i: u64) -> u64 {
+  let n: u64 = ax.n_count(qg);
+  if i >= n { return i; }
+  if ax.is_comma(qg, i) == 1 { return i; }
+  return ct_skip_default(qg, i + 1);
 };
 
 pub let parse_ctparams = func(k: Mut(st.State), qg: u64, i: u64, out: Mut(CtParamRec), idx: u64) -> u64 {
@@ -76,6 +86,14 @@ pub let parse_ctparams = func(k: Mut(st.State), qg: u64, i: u64, out: Mut(CtPara
   p.name = ax.n_sym(qg, i);
   p.ty_start = i + 2;
   p.ty_end = te;
+  if te < n and ctf.has_tok(qg, te, s.p_eq()) == 1 {
+    let de: u64 = ct_skip_default(qg, te + 1);
+    p.def_start = te + 1;
+    p.def_end = de;
+    return parse_ctparams(k, qg, de, out, idx + 1);
+  }
+  p.def_start = 0;
+  p.def_end = 0;
   return parse_ctparams(k, qg, te, out, idx + 1);
 };
 

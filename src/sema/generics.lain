@@ -290,6 +290,40 @@ let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamR
   }
   let seal_box: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
   deref(seal_box) = 0;
+  let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
+  if p.def_start != 0 {
+    let modv_opt: u64 = gv.find_sig_implicit_opt(k, sig_e, self_tid, want_self, seal_box);
+    if st.st_ok(k) != 0 { return 0; }
+    if modv_opt != 0 {
+      tv.kind = 9;
+      tv.a = modv_opt;
+      tv.b = deref(seal_box);
+      deref(gu.word_at(bound, i)) = 1;
+      if has_self != 0 {
+        let st_tid2: u64 = gv.mod_self_tid(k, modv_opt);
+        if bind_self_param(k, ctp_tbl, nct, vals, bound, t_idx, i, st_tid2) == 0 { return 0; }
+      }
+      return 1;
+    }
+    let dj: u64 = gv.eval_mod_arg(k, qg, p.def_start, tv);
+    if st.st_ok(k) != 0 { return 0; }
+    if dj == 0 {
+      ctfn.ct_eval(k, qg, p.def_start, 0, tv);
+      if st.st_ok(k) != 0 { return 0; }
+    }
+    if tv.kind != 9 {
+      ctf.fail_msg(k, "default ?{} witness needs a module", 34, ax.e_type());
+      return 0;
+    }
+    if gv.check_mod_matches_sig(k, tv.a, sig_e, 1) == 0 { return 0; }
+    tv.b = seal_value;
+    deref(gu.word_at(bound, i)) = 1;
+    if has_self != 0 {
+      let st_tid3: u64 = gv.mod_self_tid(k, tv.a);
+      if bind_self_param(k, ctp_tbl, nct, vals, bound, t_idx, i, st_tid3) == 0 { return 0; }
+    }
+    return 1;
+  }
   let modv: u64 = gv.find_sig_implicit(k, sig_e, self_tid, want_self, seal_box);
   if modv == 0 { return 0; }
   tv.kind = 9;
@@ -331,6 +365,15 @@ let resolve_givens_rest = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtPara
       rv.kind = 0;
       rv.a = 0;
       rv.b = 0;
+      deref(gu.word_at(bound, i)) = 1;
+      return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
+    }
+    if p.def_start != 0 {
+      let cm0: u64 = ctf.mark(k);
+      push_bound(k, ctp_tbl, nct, vals, bound, 0);
+      ctfn.ct_eval(k, qg, p.def_start, 0, gu.val_at(vals, i));
+      ctf.release(k, cm0);
+      if st.st_ok(k) != 0 { return 0; }
       deref(gu.word_at(bound, i)) = 1;
       return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
     }
@@ -419,7 +462,7 @@ pub let call_generic = func(k: Mut(st.State), e: Mut(modules.SymEntry), g: u64, 
   let pg: u64 = ax.n_at(root, hdr.pg_i);
   let qg: u64 = ax.n_at(root, hdr.qg_i);
   let ret_i: u64 = hdr.ret_i;
-  let ctp_tbl: Mut(gu.CtParamRec) = ptr_cast(Mut(gu.CtParamRec), st.st_alloc(k, 192));
+  let ctp_tbl: Mut(gu.CtParamRec) = ptr_cast(Mut(gu.CtParamRec), st.st_alloc(k, 320));
   let nct: u64 = gu.parse_ctparams(k, qg, 0, ctp_tbl, 0);
   if st.st_ok(k) != 0 { return 0; }
   let vals: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 192));
@@ -458,4 +501,50 @@ pub let call_generic = func(k: Mut(st.State), e: Mut(modules.SymEntry), g: u64, 
   let mq: u64 = if is_null(hit) == 0 { hit.mangled_q } else { alloc_mangled(k, e, src, nct, ctp_tbl, vals, sg_raw) };
   if st.st_ok(k) != 0 { return 0; }
   return cl.emit_prepared(k, mq, sg.ret, np, ab, want, out);
+};
+
+let push_pos_ct = func(k: Mut(st.State), nms: Mut(u64), vals: Mut(ctf.CtVal), i: u64, n: u64) -> u64 {
+  if i >= n { return 1; }
+  let v: Mut(ctf.CtVal) = gu.val_at(vals, i);
+  ctf.bind(k, deref(gu.word_at(nms, i)), v.kind, v.a, v.b);
+  return push_pos_ct(k, nms, vals, i + 1, n);
+};
+
+let copy_resolved_q = func(ctp_tbl: Mut(gu.CtParamRec), vals: Mut(ctf.CtVal), out_nms: Mut(u64), out_vals: Mut(ctf.CtVal), i: u64, n: u64) -> u64 {
+  if i >= n { return n; }
+  let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
+  let src: Mut(ctf.CtVal) = gu.val_at(vals, i);
+  let dst: Mut(ctf.CtVal) = gu.val_at(out_vals, i);
+  deref(gu.word_at(out_nms, i)) = p.name;
+  dst.kind = src.kind;
+  dst.a = src.a;
+  dst.b = src.b;
+  return copy_resolved_q(ctp_tbl, vals, out_nms, out_vals, i + 1, n);
+};
+
+@root let lainc_resolve_factory_q = func(k: Mut(st.State), callee_src: u64, callee_vmod: u64, qg: u64, qag: u64,
+                                        npos: u64, pos_nms: Mut(u64), pos_vals: Mut(ctf.CtVal),
+                                        out_nms: Mut(u64), out_vals: Mut(ctf.CtVal)) -> u64 {
+  let ctp_tbl: Mut(gu.CtParamRec) = ptr_cast(Mut(gu.CtParamRec), st.st_alloc(k, 320));
+  let nct: u64 = gu.parse_ctparams(k, qg, 0, ctp_tbl, 0);
+  if st.st_ok(k) != 0 { return 0; }
+  let vals: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 192));
+  let bound: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
+  let bslice: MutSlice(u64) = make_slice(MutSlice(u64), bound, 8);
+  let zi: u64 = loop zb(z: u64 = 0) while z < 8 { bslice[z] = 0; z = z + 1; };
+  if qag != 0 {
+    if parse_explicit_q(k, qag, 0, ctp_tbl, nct, vals, bound) == 0 { return 0; }
+  }
+  let prev_src: u64 = st.st_src(k);
+  let prev_vmod: u64 = st.st_vmod(k);
+  let cm: u64 = ctf.mark(k);
+  st.st_set_src(k, callee_src);
+  st.st_set_vmod(k, callee_vmod);
+  push_pos_ct(k, pos_nms, pos_vals, 0, npos);
+  let ok: u64 = if st.st_ok(k) == 0 { resolve_givens(k, qg, ctp_tbl, nct, vals, bound, 0) } else { 0 };
+  ctf.release(k, cm);
+  st.st_set_vmod(k, prev_vmod);
+  st.st_set_src(k, prev_src);
+  if ok == 0 or st.st_ok(k) != 0 { return 0; }
+  return copy_resolved_q(ctp_tbl, vals, out_nms, out_vals, 0, nct);
 };

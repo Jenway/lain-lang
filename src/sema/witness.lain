@@ -348,8 +348,8 @@ let sig_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, sig_e: Mu
   return sig_scan(k, base, back, sig_e, self_tid, has_self, pick);
 };
 
-// 在当前见证记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
-pub let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
+// 在当前见证记录区里找唯一满足 sig_e 的模块见证；未命中时返回 0 而不报错（供默认值回退）。
+pub let find_sig_implicit_opt = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
   let pick: Mut(SigPick) = ptr_cast(Mut(SigPick), st.st_alloc(k, 32));
   pick.has = 0;
   pick.best = 0;
@@ -357,16 +357,24 @@ pub let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry),
   pick.count = 0;
   sig_scan(k, g_base(k), g_used(k), sig_e, self_tid, has_self, pick);
   if st.st_ok(k) != 0 { return 0; }
-  if pick.has == 0 {
-    ctf.fail_msg(k, "missing module witness", 22, ax.e_type());
-    return 0;
-  }
+  if pick.has == 0 { return 0; }
   if pick.count > 1 {
     ctf.fail_msg(k, "ambiguous module witness", 24, ax.e_type());
     return 0;
   }
   deref(out_seal) = modules.sym_qual(sig_e);
   return pick.best;
+};
+
+// 在当前见证记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
+pub let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
+  let mv: u64 = find_sig_implicit_opt(k, sig_e, self_tid, has_self, out_seal);
+  if st.st_ok(k) != 0 { return 0; }
+  if mv == 0 {
+    ctf.fail_msg(k, "missing module witness", 22, ax.e_type());
+    return 0;
+  }
+  return mv;
 };
 
 // --- ?{ m: Mod } 实参是模块时求出模块见证值 ---------------------------------
