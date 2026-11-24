@@ -22,27 +22,112 @@ pub let Cancel = effect {
   op cancelled() -> Never;
 };
 
-@extern(abi = "C", link = "CreateThread")
-let c_create_thread = func(sec: Mut(u8), stack: c_size, start: Fn((Mut(u8)) -> c_uint),
-                           arg: Mut(u8), flags: c_uint, tid: Mut(c_uint)) -> Mut(u8);
-
-@extern(abi = "C", link = "WaitForSingleObject")
-let c_wait_for_single_object = func(h: Mut(u8), ms: c_uint) -> c_uint;
-
-@extern(abi = "C", link = "CloseHandle")
-let c_close_handle = func(h: Mut(u8)) -> c_int;
-
-@extern(abi = "C", link = "GetTickCount64")
-let c_get_tick_count64 = func() -> u64;
-
-@extern(abi = "C", link = "Sleep")
-let c_sleep = func(ms: c_uint);
-
 pub let default_stack_size = func() -> u64 { return 131072; };
 
 let null_bytes = func() -> Mut(u8) {
   return ptr_cast(Mut(u8), 0 as u64);
 };
+
+// 宿主执行体与时钟：Windows 走 kernel32，Linux 与 macOS 走 pthread。
+comptime if is_windows() {
+  @extern(abi = "C", link = "CreateThread")
+  let c_create_thread = func(sec: Mut(u8), stack: c_size, start: Fn((Mut(u8)) -> c_uint),
+                             arg: Mut(u8), flags: c_uint, tid: Mut(c_uint)) -> Mut(u8);
+
+  @extern(abi = "C", link = "WaitForSingleObject")
+  let c_wait_for_single_object = func(h: Mut(u8), ms: c_uint) -> c_uint;
+
+  @extern(abi = "C", link = "CloseHandle")
+  let c_close_handle = func(h: Mut(u8)) -> c_int;
+
+  @extern(abi = "C", link = "GetTickCount64")
+  let c_get_tick_count64 = func() -> u64;
+
+  @extern(abi = "C", link = "Sleep")
+  let c_sleep = func(ms: c_uint);
+
+  let os_spawn_thread = func(start: Fn((Mut(u8)) -> c_uint), arg: Mut(u8)) -> Mut(u8) {
+    let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
+    return c_create_thread(null_bytes(), 0, start, arg, 0, tid);
+  };
+
+  // 无限等待执行体结束，随后关闭句柄。0 表示线程已经结束。
+  let wait_and_close_thread = func(h: Mut(u8)) -> u64 {
+    if is_null(h) {
+      return 1;
+    }
+    let ms: c_uint = 0xffffffff as c_uint;
+    let rc: c_uint = c_wait_for_single_object(h, ms);
+    c_close_handle(h);
+    return rc as u64;
+  };
+
+  let now_ms = func() -> u64 { return c_get_tick_count64(); };
+
+  let sleep_os_ms = func(ms: u64) -> u64 {
+    c_sleep(ms as c_uint);
+    return 0;
+  };
+
+  // Sleep(0) 交出本线程剩下的时间片，供会合循环让出处理器。
+  let yield_os = func() -> u64 {
+    c_sleep(0);
+    return 0;
+  };
+} else {
+  // pthread_t 的出参槽固定占 8 字节：Linux 上是 u64，macOS 上是指针。
+  @extern(abi = "C", link = "pthread_create")
+  let c_pthread_create = func(out: Mut(u64), attr: Mut(u8), start: Fn((Mut(u8)) -> c_uint),
+                              arg: Mut(u8)) -> c_int;
+
+  @extern(abi = "C", link = "pthread_join")
+  let c_pthread_join = func(thread: Mut(u8), ret: Mut(u8)) -> c_int;
+
+  @extern(abi = "C", link = "usleep")
+  let c_usleep = func(usec: c_uint) -> c_int;
+
+  @extern(abi = "C", link = "sched_yield")
+  let c_sched_yield = func() -> c_int;
+
+  // 单调时钟的纳秒值由 C99 前导的 lain_perf_nanos 兑现：
+  // Windows 走 QueryPerformanceCounter，POSIX 走 clock_gettime(CLOCK_MONOTONIC)。
+  extern perf_nanos() -> u64 = lain_perf_nanos;
+
+  let os_spawn_thread = func(start: Fn((Mut(u8)) -> c_uint), arg: Mut(u8)) -> Mut(u8) {
+    let slot: Array(u64, 1) = [0];
+    let out: Mut(u64) = mut_of(slot);
+    let rc: c_int = c_pthread_create(out, null_bytes(), start, arg);
+    if rc != 0 {
+      return null_bytes();
+    }
+    return ptr_cast(Mut(u8), deref(out));
+  };
+
+  // pthread_join 一直阻塞到执行体结束，0 表示成功。
+  let wait_and_close_thread = func(h: Mut(u8)) -> u64 {
+    if is_null(h) {
+      return 1;
+    }
+    return c_pthread_join(h, null_bytes()) as u64;
+  };
+
+  let now_ms = func() -> u64 { return perf_nanos() / 1000000; };
+
+  // usleep 的实参在部分系统上必须小于一百万微秒，按毫秒边界分块等待。
+  let sleep_os_ms = func(ms: u64) -> u64 {
+    loop chunk(left: u64 = ms) while left > 0 {
+      let step: u64 = if left > 1000 { 1000 } else { left };
+      c_usleep((step * 1000) as c_uint);
+      left = left - step;
+    };
+    return 0;
+  };
+
+  let yield_os = func() -> u64 {
+    c_sched_yield();
+    return 0;
+  };
+}
 
 // 会合字固定占 8 字节，分配后立即清零。
 let new_atomic = func() -> Mut(sync.AtomicU64) {
@@ -199,7 +284,7 @@ let sweep_sleepers = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   return loop sweep(n: u64 = 0) while (cur as u64) != 0 {
     if cur.state == st_sleep() {
-      let now: u64 = c_get_tick_count64();
+      let now: u64 = now_ms();
       if now >= cur.wake_at {
         enqueue_ready(s, cur);
         n = n + 1;
@@ -233,7 +318,7 @@ let wait_turn = func(turn: Mut(sync.AtomicU64), abort: Mut(sync.AtomicU64)) -> u
       if sync.atomic_u64_load(turn, sync.ACQUIRE()) == 1 {
         done = 1;
       } else {
-        c_sleep(0);
+        yield_os();
       }
     }
   };
@@ -245,7 +330,7 @@ let wait_release = func(turn: Mut(sync.AtomicU64)) -> u64 {
     if sync.atomic_u64_load(turn, sync.ACQUIRE()) == 0 {
       done = 1;
     } else {
-      c_sleep(0);
+      yield_os();
     }
   };
   return 1;
@@ -292,8 +377,7 @@ pub let spawn = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64 {
   t.all_next = s.all_head;
   s.all_head = ptr_cast(Mut(u8), t);
   s.next_id = s.next_id + 1;
-  let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
-  t.worker = c_create_thread(null_bytes(), 0, task_main, ptr_cast(Mut(u8), t), 0, tid);
+  t.worker = os_spawn_thread(task_main, ptr_cast(Mut(u8), t));
   enqueue_ready(s, t);
   return t.id;
 };
@@ -312,15 +396,15 @@ pub let sleep_ms = func(ms: u64) {
   let s: Mut(FiberSched) = sched_of();
   let t: Mut(CoroTask) = current_task();
   if is_null(s) {
-    c_sleep(ms as c_uint);
+    sleep_os_ms(ms);
     return;
   }
   if is_null(t) {
-    c_sleep(ms as c_uint);
+    sleep_os_ms(ms);
     return;
   }
   if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return; }
-  t.wake_at = c_get_tick_count64() + ms;
+  t.wake_at = now_ms() + ms;
   t.state = st_sleep();
   park_task(t);
 };
@@ -351,9 +435,7 @@ let cleanup_sched = func(s: Mut(FiberSched)) -> u64 {
       sync.atomic_u64_store(cur.turn, 1, sync.RELEASE());
     }
     if (cur.worker as u64) != 0 {
-      let ms: c_uint = 0xffffffff as c_uint;
-      c_wait_for_single_object(cur.worker, ms);
-      c_close_handle(cur.worker);
+      wait_and_close_thread(cur.worker);
     }
     free_atomic(cur.turn);
     free_atomic(cur.abort);
@@ -382,7 +464,7 @@ pub let run_fiber_local = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64
     let t: Mut(CoroTask) = pop_ready(s);
     if is_null(t) {
       if sleeping_count(s) > 0 {
-        c_sleep(1);
+        sleep_os_ms(1);
       } else {
         spins = 10000000;
       }
@@ -469,8 +551,7 @@ pub let Gen = func(T: Type) -> Module {
       g.ctx = ctx;
       g.produced = 0;
       g.finished = 0;
-      let tid: Mut(c_uint) = ptr_cast(Mut(c_uint), 0 as u64);
-      g.worker = c_create_thread(null_bytes(), 0, gen_main, ptr_cast(Mut(u8), g), 0, tid);
+      g.worker = os_spawn_thread(gen_main, ptr_cast(Mut(u8), g));
       return g;
     };
 
@@ -496,9 +577,7 @@ pub let Gen = func(T: Type) -> Module {
         sync.atomic_u64_store(g.turn, 1, sync.RELEASE());
       }
       if (g.worker as u64) != 0 {
-        let ms: c_uint = 0xffffffff as c_uint;
-        c_wait_for_single_object(g.worker, ms);
-        c_close_handle(g.worker);
+        wait_and_close_thread(g.worker);
       }
       free_atomic(g.turn);
       free_atomic(g.abort);

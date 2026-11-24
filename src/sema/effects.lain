@@ -1321,10 +1321,12 @@ let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(EffRow), cnt: u64) ->
         break it(n);
       }
       // 每个臂的候选效应来自 cand；找到定义后给出运行期 tag。
+      // tag 的身份参数是效应自身的类型实参，与操作负载类型无关。
       let owner: u64 = owner_effect(k, cand, nm, info);
+      let etid: u64 = owner_param(k, cand, owner);
       a.bodyg = owner;
-      a.tag = runtime_tag(k, owner, a.param_tid, info.index);
-      let pp: u64 = row_push(k, row, 0, owner, a.param_tid);
+      a.tag = runtime_tag(k, owner, etid, info.index);
+      let pp: u64 = row_push(k, row, 0, owner, etid);
       if a.has_resume == 1 and a.abortive == 0 { hr.has_resumable = 1; }
       hr.n = hr.n + 1;
       i = aend;
@@ -1332,6 +1334,38 @@ let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(EffRow), cnt: u64) ->
   };
   hr.row = row as u64;
   return hr;
+};
+
+// 效应身份参数：参数化效应取具体类型实参，非参数化效应为 0。
+// 操作负载类型只决定 payload 的表示，不参与运行期 tag。
+let owner_param = func(k: Mut(st.State), cand: Mut(EffRow), owner: u64) -> u64 {
+  let fb: Mut(u64) = box(k);
+  box_put(fb, 0);
+  if is_null(cand) == 0 {
+    let done: u64 = loop it(i: u64 = 0) while i < cand.n {
+      let p: Mut(u64) = item_at(cand, i);
+      let tag: u64 = deref(p);
+      let pa: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 8);
+      let pb: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + 16);
+      if (tag == 0) and (deref(pa) == owner) {
+        box_put(fb, deref(pb) + 1);
+        break it(i + 1);
+      }
+      i = i + 1;
+    };
+    let hit: u64 = box_get(fb);
+    if hit != 0 { return hit - 1; }
+  }
+  let cnt: u64 = modules.sym_count(k);
+  let res: u64 = loop sc(i: u64 = 0) while i < cnt {
+    let se: Mut(modules.SymEntry) = modules.sym_at(k, i);
+    if (modules.sym_kind(se) == kind_effect()) and (modules.sym_shape(se) == owner) {
+      break sc(modules.sym_qual(se) + 1);
+    }
+    i = i + 1;
+  };
+  if res == 0 { return 0; }
+  return res - 1;
 };
 
 // 找出 op 属于哪个具体效应：候选行里第一个定义了这个 op 的效应。
