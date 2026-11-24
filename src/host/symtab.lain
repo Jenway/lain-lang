@@ -8,18 +8,10 @@
 // 表，剩下的字节是一个共享区段。符号文本从区段低端向上增长，工作区分配从
 // 区段高端向下增长，两者相向而行，任何一方都不会预先占掉另一方用不上的
 // 空间。区段里的字节只增不减，构造过程中没有任何额外分配。
+let mem = import("std::mem");
 
 // --- 违例终止 ---------------------------------------------------------------
-// 容量不足、句柄越界、对齐非法一律就地终止。参数只用来让除数在运行期求成
-// 零，编译器无法把这条除法折叠成常数。
-let Halt = struct { zero: u64 };
-let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
-let halt = func(cause: u64) -> u64 {
-  let h: Halt = Halt { zero: cause - cause };
-  return halt_at(h);
-};
-
-// 没有登记钩子时的默认回调：什么都不做，终止照常由 halt 完成。
+// 没有登记钩子时的默认回调：什么都不做，终止照常由 mem.halt_now 完成。
 let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
 // --- 记录 -------------------------------------------------------------------
@@ -61,7 +53,7 @@ let trap_with = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
     let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
     let seen: u64 = f(msg.ptr, msg.len, detail);
   }
-  return halt(detail);
+  return mem.halt_now(detail);
 };
 
 pub let set_trap_hook = func(t: Mut(HostSymTab), cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
@@ -71,7 +63,7 @@ pub let set_trap_hook = func(t: Mut(HostSymTab), cb: Fn((Ref(u8), u64, u64) -> u
 };
 
 // 只报告、不终止：其它模块的违例出口借这张表上登记的钩子打一行说明，再由
-// 自己的 halt 就地终止。没登记钩子时什么都不做。
+// 自己的就地终止。没登记钩子时什么都不做。
 pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
   if t.has_hook == 0 { return 0; }
   let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
@@ -104,18 +96,18 @@ let pow2_floor = func(n: u64) -> u64 {
 };
 
 let check_total = func(total: u64) -> u64 {
-  if total < 2048 { return halt(total); }
+  if total < 2048 { return mem.halt_now(total); }
   return total;
 };
 
 // 条目下标必须能塞进 32 位桶表。
 let check_entry_cap = func(cap: u64) -> u64 {
-  if cap > 2147483647 { return halt(cap); }
+  if cap > 2147483647 { return mem.halt_now(cap); }
   return cap;
 };
 
 let check_region = func(total: u64, fixed: u64) -> u64 {
-  if fixed >= total { return halt(fixed); }
+  if fixed >= total { return mem.halt_now(fixed); }
   return total - fixed;
 };
 
@@ -330,8 +322,8 @@ pub let sym_len = func(t: Mut(HostSymTab), h: u64) -> u64 {
 // 对齐必须是 2 的幂且不超过 4096，0 表示取默认的 16。
 let check_align = func(align: u64) -> u64 {
   let a: u64 = loop f(x: u64 = align) while x == 0 { x = 16; };
-  if (a & (a - 1)) != 0 { return halt(align); }
-  if a > 4096 { return halt(align); }
+  if (a & (a - 1)) != 0 { return mem.halt_now(align); }
+  if a > 4096 { return mem.halt_now(align); }
   return a;
 };
 

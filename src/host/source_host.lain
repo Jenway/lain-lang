@@ -22,17 +22,9 @@
 let sym = import("src::host::symtab");
 let rd = import("src::frontend::reader");
 let ao = import("src::meta::ast_out");
+let mem = import("std::mem");
 
 // --- 违例终止 ---------------------------------------------------------------
-// 容量不足、句柄类别不符、下标越界、源码号越界一律就地终止。参数只用来让
-// 除数在运行期求成零，编译器无法把这条除法折叠成常数。
-let Halt = struct { zero: u64 };
-let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
-let halt = func(cause: u64) -> u64 {
-  let h: Halt = Halt { zero: cause - cause };
-  return halt_at(h);
-};
-
 // 未挂钩子时用的空回调：宿主默认行为就是直接终止。
 let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
@@ -73,7 +65,7 @@ let out_index_of = func(h: u64) -> u64 { return h & INDEX_MASK(); };
 
 let out_handle = func(index: u64) -> u64 {
   if index == ao.NO_NODE() { return NO_NODE(); }
-  if index > INDEX_MASK() { return halt(index); }
+  if index > INDEX_MASK() { return mem.halt_now(index); }
   return handle_ast_out(index);
 };
 
@@ -145,7 +137,7 @@ let trap_with = func(h: Mut(HostSources), msg: Slice(u8), detail: u64) -> u64 {
     let f: Fn((Ref(u8), u64, u64) -> u64) = h.hook;
     let dead: u64 = f(msg.ptr, msg.len, detail);
   }
-  return halt(detail);
+  return mem.halt_now(detail);
 };
 
 pub let last_err_msg = func(h: Mut(HostSources)) -> Slice(u8) {
@@ -178,8 +170,8 @@ let trap_ref = func(h: Mut(HostSources), msg: Slice(u8), cause: u64) -> Ref(u8) 
 // Arena 在 source_add 里按确切字节数单独切。
 pub let host_sources_new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut),
                                 source_cap: u64, kids_cap: u64) -> HostSources {
-  if source_cap == 0 { return halt(source_cap); }
-  if kids_cap == 0 { return halt(kids_cap); }
+  if source_cap == 0 { return mem.halt_now(source_cap); }
+  if kids_cap == 0 { return mem.halt_now(kids_cap); }
   let src_bytes: u64 = source_cap * size_of(Source);
   let kid_bytes: u64 = kids_cap * 4;
   let src_mem: Mut(u8) = sym.mem_alloc(syms, src_bytes, 8);
@@ -259,8 +251,8 @@ pub let source_add = func(h: Mut(HostSources), name: Slice(u8), text: Slice(u8))
   if need == 0 {
     return trap_with(h, "source_host: source_add empty arena need", need);
   }
-  let mem: Mut(u8) = sym.mem_alloc(h.syms, need, 8);
-  let arena: MutSlice(u8) = make_slice(MutSlice(u8), mem, need);
+  let block: Mut(u8) = sym.mem_alloc(h.syms, need, 8);
+  let arena: MutSlice(u8) = make_slice(MutSlice(u8), block, need);
   let ast: rd.RawAst = rd.parse(text, arena);
   if ast.kind != rd.RD_OK() {
     return trap_with(h, "source_host: source_add reparse failed", ast.kind);

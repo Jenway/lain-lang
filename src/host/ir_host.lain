@@ -11,6 +11,7 @@
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify");
 let c99 = import("src::backend::c99");
+let mem = import("std::mem");
 
 // --- 容量与句柄 -----------------------------------------------------------
 pub let MODULE_CAP = func() -> u64 { return 16; };
@@ -39,15 +40,6 @@ pub let HOST_ERR_TYPE = func() -> u64 { return 6; };
 pub let HOST_ERR_IR = func() -> u64 { return 7; };
 
 // --- 违例终止 ---------------------------------------------------------------
-// 容量不足、句柄不符、状态错位一律就地终止：参数只用来让除数在运行期求成零，
-// 编译器无法把这条除法折叠成常数。
-let Halt = struct { zero: u64 };
-let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
-let halt = func(cause: u64) -> u64 {
-  let h: Halt = Halt { zero: cause - cause };
-  return halt_at(h);
-};
-
 // 未挂钩子时用的空回调：宿主默认行为就是直接终止。
 let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
@@ -194,7 +186,7 @@ let fail_msg = func(h: Mut(HostIr), msg: Slice(u8), code: u64) -> u64 {
     let f: Fn((Ref(u8), u64, u64) -> u64) = h.hook;
     let dead: u64 = f(msg.ptr, msg.len, code);
   }
-  return halt(code);
+  return mem.halt_now(code);
 };
 
 let msg_state = func() -> Slice(u8) { return "ir_host: state mismatch"; };
@@ -231,7 +223,7 @@ pub let last_err_detail = func(h: Mut(HostIr)) -> u64 {
 };
 
 let trap_host = func(cause: u64) -> Mut(HostIr) {
-  let dead: u64 = halt(cause);
+  let dead: u64 = mem.halt_now(cause);
   return null_ref(Mut(HostIr));
 };
 

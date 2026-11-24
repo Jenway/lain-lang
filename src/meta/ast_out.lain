@@ -7,6 +7,7 @@
 // 全部存储由调用方一次性交给 ast_out_init：在一块原始字节区里按固定容量
 // 切出节点表、紧排的 32 位孩子表、词文本池、驻留桶头、驻留链与事务检查点。
 // 构造过程中没有额外分配，节点生命周期完全由水位决定。
+let mem = import("std::mem");
 
 // --- 节点类别与分隔符 -------------------------------------------------------
 pub let KIND_TOKEN = func() -> u64 { return 1; };
@@ -20,17 +21,7 @@ pub let DL_BRACE = func() -> u64 { return 123; };
 // 没有节点。节点下标从 0 起，节点表容量不允许达到这个值。
 pub let NO_NODE = func() -> u64 { return 4294967295; };
 
-// --- 违例终止 ---------------------------------------------------------------
-// 容量不足、下标越界、事务状态不符一律就地终止。参数只用来让除数在运行期
-// 求成零，编译器无法把这条除法折叠成常数。
-let Halt = struct { zero: u64 };
-let halt_at = func(h: Halt) -> u64 { return 1 / h.zero; };
-let halt = func(cause: u64) -> u64 {
-  let h: Halt = Halt { zero: cause - cause };
-  return halt_at(h);
-};
-
-// 没有登记钩子时的默认回调：什么都不做，终止照常由 halt 完成。
+// 没有登记钩子时的默认回调：什么都不做，终止照常由 mem.halt_now 完成。
 let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
 // --- 记录 -------------------------------------------------------------------
@@ -93,7 +84,7 @@ let trap_with = func(a: Mut(AstOut), msg: Slice(u8), detail: u64) -> u64 {
     let f: Fn((Ref(u8), u64, u64) -> u64) = a.hook;
     let seen: u64 = f(msg.ptr, msg.len, detail);
   }
-  return halt(detail);
+  return mem.halt_now(detail);
 };
 
 pub let set_trap_hook = func(a: Mut(AstOut), cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
@@ -154,7 +145,7 @@ pub let ast_out_bytes = func(node_cap: u64, kid_cap: u64, pool_cap: u64, mark_ca
 
 // 节点下标必须能塞进 32 位孩子表，且不能撞上 NO_NODE。
 let check_node_cap = func(node_cap: u64) -> u64 {
-  if node_cap > NO_NODE() { return halt(node_cap); }
+  if node_cap > NO_NODE() { return mem.halt_now(node_cap); }
   return node_cap;
 };
 
@@ -201,12 +192,12 @@ pub let ast_out_init = func(arena: Mut(u8), node_cap: u64, kid_cap: u64, pool_ca
 
 // 整块缓冲区的最小容量：至少能切出 16 个节点、32 个孩子与 8 层检查点。
 let check_arena = func(total: u64) -> u64 {
-  if total < 2048 { return halt(total); }
+  if total < 2048 { return mem.halt_now(total); }
   return total;
 };
 
 let check_spare = func(total: u64, fixed: u64) -> u64 {
-  if fixed >= total { return halt(fixed); }
+  if fixed >= total { return mem.halt_now(fixed); }
   return total - fixed;
 };
 
@@ -499,7 +490,7 @@ let check_delim = func(delim: u64) -> u64 {
   if delim == DL_PAREN() { return delim; }
   if delim == DL_BRACKET() { return delim; }
   if delim == DL_BRACE() { return delim; }
-  return halt(delim);
+  return mem.halt_now(delim);
 };
 
 // 孩子只能指向已经完整构造好的活节点，正常构造因此天然无环。
