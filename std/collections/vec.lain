@@ -1,82 +1,383 @@
-// std::collections::vec —— 定长容量的泛型向量函子。
+// std::collections::vec —— 分配器策略驱动的可增长向量函子。
 //
-// 函子只依赖语言核心（Array / loop / 引用族）与 std::mem 的静态 arena
-// 切块原语，因此同一份源码在 lainir-run 虚拟机与 C99 后端上有完全一致的行为。
+// 存储完全交给调用方给出的分配器模块：增长时经 Alloc.alloc 领取新块，
+// 增长之后与析构时经 Alloc.free 归还旧块。宿主堆、线性 arena 与记账分配器
+// 因此共用同一份向量实现，各自的分配语义原样生效。
 //
-// 存储：LAINIR 里的 Array 与 struct 都是「指向块的指针」，函数返回时只拷指针字，
-// 被调过程调用帧里的块随返回失效。因此容器块统一从本模块的静态 arena 切分，
-// 每调用一次 new 就占用一段互不重叠的块，块的生命期与进程相同。
-// arena 容量固定，耗尽时由 mem.carve 立即中止。
+// 分配器模块的构造：编译期 Module 值只能来自返回 Module 的工厂调用，
+// 所以本文件把 std::mem 的三份策略各包一层 SystemAlloc / ArenaAlloc /
+// BudgetAlloc 函子，调用点写作 VecIn(u64, ArenaAlloc(u64))。
+//
+// 所有权：值参数在过程返回时由语言按所有权值析构，因此 push / set 的
+// 元素参数在过程内以内容拷贝写进容器存储；调用方交出的原值在过程返回时
+// 析构，容器持有的是与它互相独立的副本。Copy 元素的行为与拷贝完全一致。
+//
+// 函子只依赖语言核心（struct / loop / 引用族 / Uninit）与 std::mem 的
+// Allocator 约定，同一份源码在 lainir-run 虚拟机与 C99 后端上行为一致。
 let mem = import("std::mem");
-
-let ArenaBacking = struct {
-  bytes: Array(u8, 16384),
-};
-
-// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
-// 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
-let arena_backing: ArenaBacking = ArenaBacking { };
-
-// 从静态 arena 切出 bytes 字节，块起点由 mem.carve 回。
-let arena_take = func(bytes: u64) -> u64 {
-  return mem.carve(ptr_of(arena_backing), 16384, bytes);
-};
+let option = import("std::option");
 
 // ---------------------------------------------------------------------------
-// ArenaVec：定长数组 + 长度计数。
+// 三份分配器策略的函子包装。
+//
+// 每份都满足 mem.Allocator：导出 Self、alloc(Mut(Self), u64) -> u64 与
+// free(Mut(Self), u64) -> u64。类型参数只为让调用点具备编译期实参。
 // ---------------------------------------------------------------------------
-pub let ArenaVec = func(T: Type, Cap: u64) -> Module {
+pub let SystemAlloc = func(T: Type) -> Module {
   return module {
-    pub let Vec = struct {
-      data: Array(T, Cap),
+    pub let Self = mem.SystemHandle;
+
+    pub let new = func() -> Self {
+      return mem.SystemAlloc.new();
+    };
+
+    pub let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
+      return mem.SystemAlloc.alloc(h, bytes);
+    };
+
+    pub let free = func(h: Mut(Self), ptr: u64) -> u64 {
+      return mem.SystemAlloc.free(h, ptr);
+    };
+  };
+};
+
+pub let ArenaAlloc = func(T: Type) -> Module {
+  return module {
+    pub let Self = mem.BumpArena.Arena;
+
+    pub let new = func() -> Self {
+      return mem.BumpArena.new();
+    };
+
+    pub let over = func(base: u64, cap: u64) -> Self {
+      return mem.BumpArena.over(base, cap);
+    };
+
+    pub let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
+      return mem.BumpArena.alloc(h, bytes);
+    };
+
+    pub let free = func(h: Mut(Self), ptr: u64) -> u64 {
+      return mem.BumpArena.free(h, ptr);
+    };
+  };
+};
+
+pub let BudgetAlloc = func(T: Type) -> Module {
+  return module {
+    pub let Self = mem.BudgetTracker.Tracker;
+
+    pub let new = func(limit: u64) -> Self {
+      return mem.BudgetTracker.new(limit);
+    };
+
+    pub let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
+      return mem.BudgetTracker.alloc(h, bytes);
+    };
+
+    pub let free = func(h: Mut(Self), ptr: u64) -> u64 {
+      return mem.BudgetTracker.free(h, ptr);
+    };
+
+    pub let leaked = func(h: Ref(Self)) -> u64 {
+      return mem.BudgetTracker.leaked(h);
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// VecIn：元素类型 T + 分配器策略 Alloc。
+// ---------------------------------------------------------------------------
+pub let VecIn = func(T: Type, Alloc: Module) -> Module {
+  return module {
+    let opt = option.Option(T);
+
+    pub let Opt = opt.Opt;
+
+    pub let Self = struct {
+      ptr: Mut(T),
       len: u64,
+      cap: u64,
+      alloc: Alloc.Self,
     };
 
-    pub let Self = Vec;
+    pub let Vec = Self;
 
-    // 空容器：每个聚合字段从 arena 切一块，长度归零。
-    pub let new = func() -> Vec {
-      let v: Vec = Vec { len: 0 };
-      comptime for f in fields_of(Vec) {
-        let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(v) + (f.offset as u64));
-        deref(dst) = arena_take(size_of(f.type) as u64);
-      }
-      v.len = 0;
-      return v;
+    // 距块起点第 i 个元素的地址。
+    let elem_at = func(base: u64, i: u64) -> Mut(T) {
+      return ptr_cast(Mut(T), base + i * (size_of(T) as u64));
     };
 
-    pub let count = func(v: Ref(Vec)) -> u64 {
+    let elem_bytes = func() -> u64 {
+      return size_of(T) as u64;
+    };
+
+    pub let len = func(v: Ref(Self)) -> u64 {
       return deref(v).len;
     };
 
-    // 容量未满时追加到尾部，返回 1；满了返回 0。
-    pub let push = func(v: Mut(Vec), item: T) -> u64 {
-      if deref(v).len >= Cap {
-        return 0;
+    pub let cap = func(v: Ref(Self)) -> u64 {
+      return deref(v).cap;
+    };
+
+    pub let is_empty = func(v: Ref(Self)) -> bool {
+      return deref(v).len == 0;
+    };
+
+    // 第 i 个元素的地址：供外层默认真例直接写入元素。
+    pub let slot_at = func(v: Mut(Self), i: u64) -> Mut(T) {
+      return elem_at(deref(v).ptr as u64, i);
+    };
+
+    pub let set_len = func(v: Mut(Self), n: u64) {
+      deref(v).len = n;
+    };
+
+    // 保证容量至少为 need；增长时按两倍申请，分配失败回 false 且容器保持原样。
+    pub let reserve = func(v: Mut(Self), need: u64) -> bool {
+      if deref(v).cap >= need {
+        return true;
       }
-      deref(v).data[deref(v).len] = item;
-      deref(v).len = deref(v).len + 1;
-      return 1;
-    };
-
-    // 有效区间内按下标读取；调用方保证 i < count。
-    pub let get = func(v: Ref(Vec), i: u64) -> T {
-      return deref(v).data[i];
-    };
-
-    // 覆盖有效区间内的元素，返回 1；越界返回 0。
-    pub let set = func(v: Mut(Vec), i: u64, item: T) -> u64 {
-      if i >= deref(v).len {
-        return 0;
+      let esz: u64 = elem_bytes();
+      let wanted: u64 = if deref(v).cap == 0 { 8 } else { deref(v).cap * 2 };
+      let h: Mut(Alloc.Self) = mut_of(deref(v).alloc);
+      let block: u64 = Alloc.alloc(h, wanted * esz);
+      if block == 0 {
+        return false;
       }
-      deref(v).data[i] = item;
-      return 1;
+      let n: u64 = deref(v).len;
+      let old: u64 = deref(v).ptr as u64;
+      if old != 0 {
+        let src: Mut(u8) = ptr_cast(Mut(u8), old);
+        let dst: Mut(u8) = ptr_cast(Mut(u8), block);
+        loop copy(i: u64 = 0) while i < n * esz {
+          deref(dst + i) = deref(src + i);
+          i = i + 1;
+        };
+        let hf: Mut(Alloc.Self) = mut_of(deref(v).alloc);
+        let freed: u64 = Alloc.free(hf, old);
+      }
+      deref(v).ptr = ptr_cast(Mut(T), block);
+      deref(v).cap = wanted;
+      return true;
     };
 
-    // 清空只回退长度，底层槽位保留。
-    pub let clear = func(v: Mut(Vec)) -> u64 {
+    // 不领取任何块的空容器：第一次 push 时才向分配器申请。
+    pub let with_alloc = func(a: Alloc.Self) -> Self {
+      return Self { ptr: null_ref(Mut(T)), len: 0, cap: 0, alloc: a };
+    };
+
+    // 预领 wanted 个元素的空间；分配器拒绝时回退成空容器。
+    pub let with_capacity = func(a: Alloc.Self, wanted: u64) -> Self {
+      if wanted == 0 {
+        return Self { ptr: null_ref(Mut(T)), len: 0, cap: 0, alloc: a };
+      }
+      let h: Mut(Alloc.Self) = mut_of(a);
+      let block: u64 = Alloc.alloc(h, wanted * elem_bytes());
+      if block == 0 {
+        return Self { ptr: null_ref(Mut(T)), len: 0, cap: 0, alloc: a };
+      }
+      return Self { ptr: ptr_cast(Mut(T), block), len: 0, cap: wanted, alloc: a };
+    };
+
+    // 逐元素析构，然后归还整块存储并清零三个字段。
+    pub let drop = func(v: Mut(Self)) {
+      let n: u64 = deref(v).len;
+      let base: u64 = deref(v).ptr as u64;
+      loop rel(i: u64 = 0) while i < n {
+        let elem: Mut(T) = elem_at(base, i);
+        let gone: Uninit(T) = drop_at(elem);
+        i = i + 1;
+      };
+      if base != 0 {
+        let h: Mut(Alloc.Self) = mut_of(deref(v).alloc);
+        let freed: u64 = Alloc.free(h, base);
+      }
+      deref(v).ptr = null_ref(Mut(T));
       deref(v).len = 0;
-      return 1;
+      deref(v).cap = 0;
+    };
+
+    // 尾部追加：先备足容量，再把元素内容写进新槽位。
+    pub let push = func(v: Mut(Self), item: T) -> bool {
+      let n: u64 = deref(v).len;
+      let ok: bool = reserve(v, n + 1);
+      if ok {
+        let slot: Mut(T) = elem_at(deref(v).ptr as u64, n);
+        deref(slot) = item;
+        deref(v).len = n + 1;
+      }
+      return ok;
+    };
+
+    // 尾部取出一个元素，所有权交给调用方；空容器回 None。
+    pub let pop = func(v: Mut(Self)) -> opt.Opt {
+      let n: u64 = deref(v).len;
+      if n == 0 {
+        return opt.none();
+      }
+      deref(v).len = n - 1;
+      let slot: Mut(T) = elem_at(deref(v).ptr as u64, n - 1);
+      return opt.some(deref(slot));
+    };
+
+    // 有效区间内按下标读取；调用方保证 i < len。
+    pub let get = func(v: Ref(Self), i: u64) -> T {
+      let slot: Mut(T) = elem_at(deref(v).ptr as u64, i);
+      return deref(slot);
+    };
+
+    pub let get_ref = func(v: Ref(Self), i: u64) -> Ref(T) {
+      let slot: Mut(T) = elem_at(deref(v).ptr as u64, i);
+      return ptr_cast(Ref(T), slot as u64);
+    };
+
+    pub let get_mut = func(v: Mut(Self), i: u64) -> Mut(T) {
+      return elem_at(deref(v).ptr as u64, i);
+    };
+
+    pub let get_opt = func(v: Ref(Self), i: u64) -> opt.Opt {
+      if i >= deref(v).len {
+        return opt.none();
+      }
+      return opt.some(deref(elem_at(deref(v).ptr as u64, i)));
+    };
+
+    // 覆盖有效区间内的元素：旧元素先析构，新元素内容接管该槽位。
+    pub let set = func(v: Mut(Self), i: u64, item: T) -> bool {
+      let ok: bool = i < deref(v).len;
+      if ok {
+        let old: Mut(T) = elem_at(deref(v).ptr as u64, i);
+        let free_slot: Uninit(T) = drop_at(old);
+        let dst: Mut(T) = elem_at(deref(v).ptr as u64, i);
+        deref(dst) = item;
+      }
+      return ok;
+    };
+
+    // 清空：逐元素析构，块本身留给后续 push 复用。
+    pub let clear = func(v: Mut(Self)) {
+      let n: u64 = deref(v).len;
+      let base: u64 = deref(v).ptr as u64;
+      loop wipe(i: u64 = 0) while i < n {
+        let slot: Mut(T) = elem_at(base, i);
+        let gone: Uninit(T) = drop_at(slot);
+        i = i + 1;
+      };
+      deref(v).len = 0;
+    };
+
+    pub let as_slice = func(v: Ref(Self)) -> Slice(T) {
+      if deref(v).len == 0 {
+        return make_slice(Slice(T), null_ref(Ref(T)), 0);
+      }
+      return make_slice(Slice(T), ptr_cast(Ref(T), deref(v).ptr), deref(v).len);
+    };
+
+    pub let as_mut_slice = func(v: Mut(Self)) -> MutSlice(T) {
+      if deref(v).len == 0 {
+        return make_slice(MutSlice(T), null_ref(Mut(T)), 0);
+      }
+      return make_slice(MutSlice(T), deref(v).ptr, deref(v).len);
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Vec：宿主堆上的默认实例，额外提供无参 new 与单参 with_capacity。
+//
+// push / set 直接经 VecIn 的 reserve + slot_at 落位：它们的元素参数在本过程
+// 返回时析构，若再转发给内层过程就会让同一个值被析构两次。
+// ---------------------------------------------------------------------------
+pub let Vec = func(T: Type) -> Module {
+  let Inner = VecIn(T, SystemAlloc(T));
+  return module {
+    pub let Self = Inner.Self;
+
+    pub let Vec = Inner.Vec;
+
+    pub let Opt = Inner.Opt;
+
+    pub let new = func() -> Self {
+      return Inner.with_alloc(mem.SystemAlloc.new());
+    };
+
+    pub let with_alloc = func(a: mem.SystemHandle) -> Self {
+      return Inner.with_alloc(a);
+    };
+
+    pub let with_capacity = func(wanted: u64) -> Self {
+      return Inner.with_capacity(mem.SystemAlloc.new(), wanted);
+    };
+
+    pub let len = func(v: Ref(Self)) -> u64 {
+      return Inner.len(v);
+    };
+
+    pub let cap = func(v: Ref(Self)) -> u64 {
+      return Inner.cap(v);
+    };
+
+    pub let is_empty = func(v: Ref(Self)) -> bool {
+      return Inner.is_empty(v);
+    };
+
+    pub let drop = func(v: Mut(Self)) {
+      Inner.drop(v);
+    };
+
+    pub let push = func(v: Mut(Self), item: T) -> bool {
+      let n: u64 = Inner.len(v);
+      let ok: bool = Inner.reserve(v, n + 1);
+      if ok {
+        let slot: Mut(T) = Inner.slot_at(v, n);
+        deref(slot) = item;
+        Inner.set_len(v, n + 1);
+      }
+      return ok;
+    };
+
+    pub let pop = func(v: Mut(Self)) -> Inner.Opt {
+      return Inner.pop(v);
+    };
+
+    pub let get = func(v: Ref(Self), i: u64) -> T {
+      return Inner.get(v, i);
+    };
+
+    pub let get_ref = func(v: Ref(Self), i: u64) -> Ref(T) {
+      return Inner.get_ref(v, i);
+    };
+
+    pub let get_mut = func(v: Mut(Self), i: u64) -> Mut(T) {
+      return Inner.get_mut(v, i);
+    };
+
+    pub let get_opt = func(v: Ref(Self), i: u64) -> Inner.Opt {
+      return Inner.get_opt(v, i);
+    };
+
+    pub let set = func(v: Mut(Self), i: u64, item: T) -> bool {
+      let ok: bool = i < Inner.len(v);
+      if ok {
+        let old: Mut(T) = Inner.slot_at(v, i);
+        let free_slot: Uninit(T) = drop_at(old);
+        let dst: Mut(T) = Inner.slot_at(v, i);
+        deref(dst) = item;
+      }
+      return ok;
+    };
+
+    pub let clear = func(v: Mut(Self)) {
+      Inner.clear(v);
+    };
+
+    pub let as_slice = func(v: Ref(Self)) -> Slice(T) {
+      return Inner.as_slice(v);
+    };
+
+    pub let as_mut_slice = func(v: Mut(Self)) -> MutSlice(T) {
+      return Inner.as_mut_slice(v);
     };
   };
 };

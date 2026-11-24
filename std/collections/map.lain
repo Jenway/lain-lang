@@ -1,45 +1,29 @@
-// std::collections::map —— u64 键的定长开放寻址哈希表函子。
+// std::collections::map —— u64 键的开放寻址哈希表函子。
 //
-// 函子只依赖语言核心（Array / loop / 引用族）、std::mem 的静态 arena
-// 切块原语与 std::option，因此同一份源码在 lainir-run 虚拟机与 C99 后端上
-// 有完全一致的行为。
-//
-// 存储：LAINIR 里的 Array 与 struct 都是「指向块的指针」，函数返回时只拷指针字，
-// 被调过程调用帧里的块随返回失效。因此容器块统一从本模块的静态 arena 切分，
-// 每调用一次 new 就占用一段互不重叠的块，块的生命期与进程相同。
-// arena 容量固定，耗尽时由 mem.carve 立即中止。
+// 存储由调用方给出的分配器策略负责：Alloc 满足 std::mem.Allocator 的
+// Alloc.Self / Alloc.alloc / Alloc.free 三个成员。容量随载荷增长，
+// 装载因子超过七成时按两倍扩容并整表重排。
+// 容器类型自带固有 drop：离开作用域时先析构占用槽位里的值，再把三块存储
+// 归还给分配器，并把指针复位成空引用，所以重复调用 drop 不会二次释放。
 let mem = import("std::mem");
 let option = import("std::option");
 
-let ArenaBacking = struct {
-  bytes: Array(u8, 16384),
-};
-
-// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
-// 块的首字是已用字节数（游标），有效载荷从第 8 字节起。
-let arena_backing: ArenaBacking = ArenaBacking { };
-
-// 从静态 arena 切出 bytes 字节，块起点由 mem.carve 回。
-let arena_take = func(bytes: u64) -> u64 {
-  return mem.carve(ptr_of(arena_backing), 16384, bytes);
-};
-
-// ---------------------------------------------------------------------------
-// HashMapU64：u64 键的开放寻址哈希表（线性探测）。
-// ---------------------------------------------------------------------------
-pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
+pub let HashMapU64In = func(V: Type, Alloc: Module) -> Module {
   let opt = option.Option(V);
   return module {
     pub let Opt = opt.Opt;
 
-    pub let Map = struct {
-      keys: Array(u64, Cap),
-      used: Array(bool, Cap),
-      vals: Array(V, Cap),
+    // Self 直接声明成结构体，固有 drop 才能在 phase2 绑到形状上；Map 是它的别名。
+    pub let Self = struct {
+      keys: Mut(u64),
+      used: Mut(bool),
+      vals: Mut(V),
       len: u64,
+      cap: u64,
+      alloc: Alloc.Self,
     };
 
-    pub let Self = Map;
+    pub let Map = Self;
 
     // splitmix64 的一轮混合：把连续键打散成近似均匀的槽位。
     let mix = func(key: u64) -> u64 {
@@ -47,108 +31,327 @@ pub let HashMapU64 = func(V: Type, Cap: u64) -> Module {
       return x * 0xbf58476d1ce4e5b9;
     };
 
-    let slot_of = func(key: u64) -> u64 {
-      return mix(key) % Cap;
+    let slot_of = func(key: u64, cap: u64) -> u64 {
+      return mix(key) % cap;
     };
 
-    // 命中返回槽位，未命中返回 Cap。
-    let find_used = func(m: Ref(Map), key: u64) -> u64 {
-      let start: u64 = slot_of(key);
-      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
-        let idx: u64 = (start + i) % Cap;
-        if deref(m).used[idx] {
-          if deref(m).keys[idx] == key {
-            slot = idx;
-            i = Cap;
+    let elem_bytes = func() -> u64 {
+      return size_of(V) as u64;
+    };
+
+    let used_get = func(base: Mut(bool), i: u64) -> bool {
+      let p: Mut(bool) = ptr_cast(Mut(bool), (base as u64) + i * (size_of(bool) as u64));
+      return deref(p);
+    };
+
+    let used_set = func(base: Mut(bool), i: u64, v: bool) {
+      let p: Mut(bool) = ptr_cast(Mut(bool), (base as u64) + i * (size_of(bool) as u64));
+      deref(p) = v;
+    };
+
+    let key_get = func(base: Mut(u64), i: u64) -> u64 {
+      let p: Mut(u64) = ptr_cast(Mut(u64), (base as u64) + i * 8);
+      return deref(p);
+    };
+
+    let key_set = func(base: Mut(u64), i: u64, v: u64) {
+      let p: Mut(u64) = ptr_cast(Mut(u64), (base as u64) + i * 8);
+      deref(p) = v;
+    };
+
+    let val_at = func(base: Mut(V), i: u64) -> Mut(V) {
+      return ptr_cast(Mut(V), (base as u64) + i * elem_bytes());
+    };
+
+    let zero_used = func(base: Mut(bool), cap: u64) {
+      loop z(i: u64 = 0) while i < cap {
+        used_set(base, i, false);
+        i = i + 1;
+      };
+    };
+
+    // 命中回槽位，未命中回 cap。
+    let find_used_in = func(keys: Mut(u64), used: Mut(bool), cap: u64, key: u64) -> u64 {
+      let start: u64 = slot_of(key, cap);
+      let slot: u64 = loop s(i: u64 = 0, out: u64 = cap) while i < cap {
+        let idx: u64 = (start + i) % cap;
+        if used_get(used, idx) {
+          if key_get(keys, idx) == key {
+            out = idx;
+            i = cap;
           } else {
             i = i + 1;
           }
         } else {
-          i = Cap;
+          i = cap;
         }
       };
       return slot;
     };
 
-    // 沿着探测链找第一个空槽，整张表满了返回 Cap。
-    let find_free = func(m: Ref(Map), key: u64) -> u64 {
-      let start: u64 = slot_of(key);
-      let slot: u64 = loop s(i: u64 = 0, slot: u64 = Cap) while i < Cap {
-        let idx: u64 = (start + i) % Cap;
-        if deref(m).used[idx] {
+    // 探测链上的第一个空槽；表满回 cap。
+    let find_free_in = func(used: Mut(bool), cap: u64, key: u64) -> u64 {
+      let start: u64 = slot_of(key, cap);
+      let slot: u64 = loop s(i: u64 = 0, out: u64 = cap) while i < cap {
+        let idx: u64 = (start + i) % cap;
+        if used_get(used, idx) {
           i = i + 1;
         } else {
-          slot = idx;
-          i = Cap;
+          out = idx;
+          i = cap;
         }
       };
       return slot;
     };
 
-    // keys / used / vals 三块数据从 arena 切分；len 槽随后覆盖回 0。
-    pub let new = func() -> Map {
-      let m: Map = Map { len: 0 };
-      comptime for f in fields_of(Map) {
-        let dst: Mut(u64) = ptr_cast(Mut(u64), ptr_of(m) + (f.offset as u64));
-        deref(dst) = arena_take(size_of(f.type) as u64);
+    // 分配器回 0 时没有可继续的路径，就地终止程序。
+    let alloc_bytes = func(a: Mut(Alloc.Self), bytes: u64) -> u64 {
+      let raw: u64 = Alloc.alloc(a, bytes);
+      if raw == 0 {
+        let dead: u64 = mem.halt_now(bytes);
       }
-      m.len = 0;
-      comptime for i in 0..Cap {
-        m.used[i] = false;
-      }
-      return m;
+      return raw;
     };
 
-    pub let count = func(m: Ref(Map)) -> u64 {
+    pub let with_capacity = func(a: Alloc.Self, cap: u64) -> Self {
+      if cap == 0 {
+        return Self {
+          keys: null_ref(Mut(u64)),
+          used: null_ref(Mut(bool)),
+          vals: null_ref(Mut(V)),
+          len: 0,
+          cap: 0,
+          alloc: a,
+        };
+      }
+      let ap: Mut(Alloc.Self) = mut_of(a);
+      let keys_raw: u64 = alloc_bytes(ap, cap * 8);
+      let used_raw: u64 = alloc_bytes(ap, cap * (size_of(bool) as u64));
+      let vals_raw: u64 = alloc_bytes(ap, cap * elem_bytes());
+      let keys: Mut(u64) = ptr_cast(Mut(u64), keys_raw);
+      let used: Mut(bool) = ptr_cast(Mut(bool), used_raw);
+      let vals: Mut(V) = ptr_cast(Mut(V), vals_raw);
+      zero_used(used, cap);
+      return Self { keys: keys, used: used, vals: vals, len: 0, cap: cap, alloc: a };
+    };
+
+    pub let with_alloc = func(a: Alloc.Self) -> Self {
+      return with_capacity(a, 16);
+    };
+
+    // 两倍扩容：新开三块存储，把占用的键值重排进去，再归还旧的三块。
+    let grow = func(m: Mut(Self)) {
+      let old_cap: u64 = deref(m).cap;
+      let new_cap: u64 = if old_cap == 0 { 16 } else { old_cap * 2 };
+      let a: Mut(Alloc.Self) = mut_of(deref(m).alloc);
+      let keys_raw: u64 = alloc_bytes(a, new_cap * 8);
+      let used_raw: u64 = alloc_bytes(a, new_cap * (size_of(bool) as u64));
+      let vals_raw: u64 = alloc_bytes(a, new_cap * elem_bytes());
+      let new_keys: Mut(u64) = ptr_cast(Mut(u64), keys_raw);
+      let new_used: Mut(bool) = ptr_cast(Mut(bool), used_raw);
+      let new_vals: Mut(V) = ptr_cast(Mut(V), vals_raw);
+      zero_used(new_used, new_cap);
+      let old_keys: Mut(u64) = deref(m).keys;
+      let old_used: Mut(bool) = deref(m).used;
+      let old_vals: Mut(V) = deref(m).vals;
+      loop rehash(i: u64 = 0) while i < old_cap {
+        if used_get(old_used, i) {
+          let k: u64 = key_get(old_keys, i);
+          let spot: u64 = find_free_in(new_used, new_cap, k);
+          key_set(new_keys, spot, k);
+          used_set(new_used, spot, true);
+          deref(val_at(new_vals, spot)) = deref(val_at(old_vals, i));
+        }
+        i = i + 1;
+      };
+      if is_null(old_keys) == false {
+        let f0: u64 = Alloc.free(a, old_keys as u64);
+      }
+      if is_null(old_used) == false {
+        let f1: u64 = Alloc.free(a, old_used as u64);
+      }
+      if is_null(old_vals) == false {
+        let f2: u64 = Alloc.free(a, old_vals as u64);
+      }
+      deref(m).keys = new_keys;
+      deref(m).used = new_used;
+      deref(m).vals = new_vals;
+      deref(m).cap = new_cap;
+    };
+
+    pub let drop = func(m: Mut(Self)) {
+      let cap0: u64 = deref(m).cap;
+      let used: Mut(bool) = deref(m).used;
+      let vals: Mut(V) = deref(m).vals;
+      loop release(i: u64 = 0) while i < cap0 {
+        if used_get(used, i) {
+          drop_at(val_at(vals, i));
+        }
+        i = i + 1;
+      };
+      let a: Mut(Alloc.Self) = mut_of(deref(m).alloc);
+      let keys: Mut(u64) = deref(m).keys;
+      if is_null(keys) == false {
+        let f0: u64 = Alloc.free(a, keys as u64);
+      }
+      if is_null(used) == false {
+        let f1: u64 = Alloc.free(a, used as u64);
+      }
+      if is_null(vals) == false {
+        let f2: u64 = Alloc.free(a, vals as u64);
+      }
+      deref(m).keys = null_ref(Mut(u64));
+      deref(m).used = null_ref(Mut(bool));
+      deref(m).vals = null_ref(Mut(V));
+      deref(m).len = 0;
+      deref(m).cap = 0;
+    };
+
+    pub let len = func(m: Ref(Self)) -> u64 {
       return deref(m).len;
     };
 
-    // 已存在则更新，否则占用探测链上的第一个空槽；满表返回 0。
-    pub let put = func(m: Mut(Map), key: u64, val: V) -> u64 {
-      let mr: Ref(Map) = m;
-      let hit: u64 = find_used(mr, key);
-      if hit < Cap {
-        deref(m).vals[hit] = val;
-        return 1;
-      }
-      let spot: u64 = find_free(mr, key);
-      if spot >= Cap {
-        return 0;
-      }
-      deref(m).keys[spot] = key;
-      deref(m).used[spot] = true;
-      deref(m).vals[spot] = val;
-      deref(m).len = deref(m).len + 1;
-      return 1;
+    pub let cap = func(m: Ref(Self)) -> u64 {
+      return deref(m).cap;
     };
 
-    pub let has = func(m: Ref(Map), key: u64) -> u64 {
-      let found: bool = find_used(m, key) < Cap;
-      if found {
-        return 1;
-      }
-      return 0;
+    pub let is_empty = func(m: Ref(Self)) -> bool {
+      return deref(m).len == 0;
     };
 
-    // 命中时把值写进 out 并返回 1，否则返回 0。
-    pub let get = func(m: Ref(Map), key: u64, out: Mut(V)) -> u64 {
-      let hit: u64 = find_used(m, key);
-      let found: bool = hit < Cap;
-      if found {
-        deref(out) = deref(m).vals[hit];
-        return 1;
+    // 新键插入回 true，已有键覆盖回 false。旧值先就地析构，再把新值移进槽位。
+    pub let put = func(m: Mut(Self), key: u64, val: V) -> bool {
+      let grow_now: bool = (deref(m).cap == 0) or (((deref(m).len + 1) * 10) > (deref(m).cap * 7));
+      if grow_now {
+        grow(m);
       }
-      return 0;
+      let hit: u64 = find_used_in(deref(m).keys, deref(m).used, deref(m).cap, key);
+      let had_old: bool = hit < deref(m).cap;
+      let spot: u64 = if had_old { hit } else { find_free_in(deref(m).used, deref(m).cap, key) };
+      if had_old == false {
+        key_set(deref(m).keys, spot, key);
+        used_set(deref(m).used, spot, true);
+        deref(m).len = deref(m).len + 1;
+      }
+      let slot: Mut(V) = val_at(deref(m).vals, spot);
+      let raw: Uninit(V) = if had_old { drop_at(slot) } else { ptr_cast(Uninit(V), slot) };
+      init_at(raw, reloc(val));
+      return had_old == false;
     };
 
-    // 命中时直接回载荷，未命中回 None；调用方不需要自备输出槽。
-    pub let get_opt = func(m: Ref(Map), key: u64) -> opt.Opt {
-      let hit: u64 = find_used(m, key);
-      let found: bool = hit < Cap;
-      if found {
-        return opt.some(deref(m).vals[hit]);
+    pub let has = func(m: Ref(Self), key: u64) -> bool {
+      let cap0: u64 = deref(m).cap;
+      if cap0 == 0 {
+        return false;
+      }
+      let hit: u64 = find_used_in(deref(m).keys, deref(m).used, cap0, key);
+      return hit < cap0;
+    };
+
+    pub let get = func(m: Ref(Self), key: u64, out: Mut(V)) -> bool {
+      let cap0: u64 = deref(m).cap;
+      if cap0 == 0 {
+        return false;
+      }
+      let hit: u64 = find_used_in(deref(m).keys, deref(m).used, cap0, key);
+      if hit < cap0 {
+        deref(out) = deref(val_at(deref(m).vals, hit));
+        return true;
+      }
+      return false;
+    };
+
+    pub let get_opt = func(m: Ref(Self), key: u64) -> opt.Opt {
+      let cap0: u64 = deref(m).cap;
+      if cap0 == 0 {
+        return opt.none();
+      }
+      let hit: u64 = find_used_in(deref(m).keys, deref(m).used, cap0, key);
+      if hit < cap0 {
+        return opt.some(deref(val_at(deref(m).vals, hit)));
       }
       return opt.none();
+    };
+
+    // 清空保留容量：占用槽位里的值逐个析构，空槽标记复位，计数归零。
+    pub let clear = func(m: Mut(Self)) {
+      let cap0: u64 = deref(m).cap;
+      let used: Mut(bool) = deref(m).used;
+      let vals: Mut(V) = deref(m).vals;
+      loop wipe(i: u64 = 0) while i < cap0 {
+        if used_get(used, i) {
+          drop_at(val_at(vals, i));
+          used_set(used, i, false);
+        }
+        i = i + 1;
+      };
+      deref(m).len = 0;
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// HashMapU64：绑定宿主堆分配器的默认实例。
+//
+// 分配器以模块字面量交给函子：编译期实参求值只接受模块字面量与词法绑定，
+// 点号路径上的子模块（如 mem.SystemAlloc）要在函子内部再投影一次。
+// ---------------------------------------------------------------------------
+pub let HashMapU64 = func(V: Type) -> Module {
+  let Inner = HashMapU64In(V, module {
+    pub let Self = mem.SystemHandle;
+
+    pub let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
+      return mem.SystemAlloc.alloc(h, bytes);
+    };
+
+    pub let free = func(h: Mut(Self), ptr: u64) -> u64 {
+      return mem.SystemAlloc.free(h, ptr);
+    };
+  });
+  let opt = option.Option(V);
+  return module {
+    pub let Opt = opt.Opt;
+    pub let Map = Inner.Map;
+    pub let Self = Inner.Self;
+
+    pub let new = func() -> Self {
+      return Inner.with_alloc(mem.SystemAlloc.new());
+    };
+
+    pub let with_capacity = func(cap: u64) -> Self {
+      return Inner.with_capacity(mem.SystemAlloc.new(), cap);
+    };
+
+    pub let len = func(m: Ref(Self)) -> u64 {
+      return Inner.len(m);
+    };
+
+    pub let cap = func(m: Ref(Self)) -> u64 {
+      return Inner.cap(m);
+    };
+
+    pub let is_empty = func(m: Ref(Self)) -> bool {
+      return Inner.is_empty(m);
+    };
+
+    pub let put = func(m: Mut(Self), key: u64, val: V) -> bool {
+      return Inner.put(m, key, val);
+    };
+
+    pub let has = func(m: Ref(Self), key: u64) -> bool {
+      return Inner.has(m, key);
+    };
+
+    pub let get = func(m: Ref(Self), key: u64, out: Mut(V)) -> bool {
+      return Inner.get(m, key, out);
+    };
+
+    pub let get_opt = func(m: Ref(Self), key: u64) -> opt.Opt {
+      return Inner.get_opt(m, key);
+    };
+
+    pub let clear = func(m: Mut(Self)) {
+      Inner.clear(m);
     };
   };
 };

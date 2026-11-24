@@ -1,10 +1,12 @@
 // test.lain —— 根目录库级测试入口（类比 `go test ./...`）。
 // 聚合标准库与编译器核心套件，通过 `std::test` 输出统一 PASS/FAIL 汇总。
+let coro = import("std::coro");
 let io = import("std::io");
 let os = import("std::os");
 let t = import("std::test");
 let fs = import("std::fs");
 let col = import("std::collections");
+let algo = import("std::algo");
 let bld = import("std::build");
 let fmt = import("std::fmt");
 let opt = import("std::option");
@@ -15,15 +17,17 @@ let pool = import("std::pool");
 let sched = import("std::sched");
 let meta = import("std::meta");
 let ir_test = import("tests::ir_verify_test");
-let coro = import("std::coro");
 
 use bld;
 open mem;
 use mem.SystemAlloc;
 
-let Vec64 = col.ArenaVec(u64, 16);
-let Map64 = col.HashMapU64(u64, 32);
+let Vec64 = col.Vec(u64);
+let Map64 = col.HashMapU64(u64);
 let OptI64 = opt.Option(i64);
+let OptU64 = opt.Option(u64);
+let BudgetVec = col.VecIn(u64, col.BudgetAlloc(u64));
+let U64Iter = algo.SliceIter(u64);
 
 use Vec64;
 use Map64;
@@ -345,27 +349,119 @@ let run_comptime_suite = func() -> i64 {
 
 let run_collections_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::collections");
-  let v: Vec64.Vec = Vec64.new();
-  v.push(10);
-  v.push(20);
-  v.push(30);
-  t.eq_u64(mut_of(st), "vec count", v.count(), 3);
+  let v: Vec64.Self = Vec64.new();
+  t.eq_bool(mut_of(st), "vec push[0]", v.push(10), true);
+  t.eq_bool(mut_of(st), "vec push[1]", v.push(20), true);
+  t.eq_bool(mut_of(st), "vec push[2]", v.push(30), true);
+  t.eq_u64(mut_of(st), "vec len", Vec64.len(ref_of(v)), 3);
   t.eq_u64(mut_of(st), "vec get[1]", v.get(1), 20);
-  v.set(1, 99);
-  t.eq_u64(mut_of(st), "vec set[1]", v.get(1), 99);
-  v.clear();
-  t.eq_u64(mut_of(st), "vec clear", v.count(), 0);
+  t.eq_bool(mut_of(st), "vec set[1]", v.set(1, 99), true);
+  t.eq_u64(mut_of(st), "vec set[1] persisted", v.get(1), 99);
 
-  let m: Map64.Map = Map64.new();
-  m.put(101, 42);
-  m.put(202, 84);
-  t.eq_u64(mut_of(st), "map count", m.count(), 2);
-  t.eq_u64(mut_of(st), "map has 101", m.has(101), 1);
-  t.eq_u64(mut_of(st), "map has 999", m.has(999), 0);
-  let out_arr: Array(u64, 1) = [0];
-  let ok: u64 = m.get(202, ptr_cast(Mut(u64), mut_of(out_arr)));
-  t.eq_u64(mut_of(st), "map get ok", ok, 1);
-  t.eq_u64(mut_of(st), "map get val", out_arr[0], 84);
+  let pop_a: Vec64.Opt = Vec64.pop(mut_of(v));
+  t.eq_u64(mut_of(st), "vec pop tail", OptU64.unwrap_or(pop_a, 0), 30);
+  t.eq_u64(mut_of(st), "vec len after pop", Vec64.len(ref_of(v)), 2);
+  let pop_b: Vec64.Opt = Vec64.pop(mut_of(v));
+  let pop_c: Vec64.Opt = Vec64.pop(mut_of(v));
+  let pop_d: Vec64.Opt = Vec64.pop(mut_of(v));
+  t.eq_u64(mut_of(st), "vec pop order 99", OptU64.unwrap_or(pop_b, 0), 99);
+  t.eq_u64(mut_of(st), "vec pop order 10", OptU64.unwrap_or(pop_c, 0), 10);
+  t.eq_bool(mut_of(st), "vec pop empty", OptU64.is_none(pop_d), true);
+
+  let g: Vec64.Self = Vec64.new();
+  let grew: bool = loop f(i: u64 = 0, ok: bool = true) while i < 64 {
+    if g.push(i) == false { ok = false; }
+    i = i + 1;
+  };
+  t.eq_bool(mut_of(st), "vec dynamic growth", grew, true);
+  t.eq_u64(mut_of(st), "vec grown len", Vec64.len(ref_of(g)), 64);
+  t.eq_u64(mut_of(st), "vec grown tail", g.get(63), 63);
+  g.clear();
+  t.eq_u64(mut_of(st), "vec clear", Vec64.len(ref_of(g)), 0);
+
+  let m: Map64.Self = Map64.new();
+  t.eq_bool(mut_of(st), "map put 101", m.put(101, 42), true);
+  t.eq_bool(mut_of(st), "map put 202", m.put(202, 84), true);
+  t.eq_u64(mut_of(st), "map len", Map64.len(ref_of(m)), 2);
+  t.eq_bool(mut_of(st), "map has 101", m.has(101), true);
+  t.eq_bool(mut_of(st), "map has 999", m.has(999), false);
+  let out: u64 = 0;
+  t.eq_bool(mut_of(st), "map get ok", m.get(202, mut_of(out)), true);
+  t.eq_u64(mut_of(st), "map get val", out, 84);
+  let got_opt: Map64.Opt = Map64.get_opt(ref_of(m), 101);
+  t.eq_bool(mut_of(st), "map get_opt some", OptU64.is_some(got_opt), true);
+  t.eq_u64(mut_of(st), "map get_opt val", OptU64.unwrap_or(got_opt, 0), 42);
+  let miss_opt: Map64.Opt = Map64.get_opt(ref_of(m), 999);
+  t.eq_bool(mut_of(st), "map get_opt none", OptU64.is_none(miss_opt), true);
+
+  let btr: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(4096);
+  {
+    let bv: BudgetVec.Self = BudgetVec.with_alloc(btr);
+    let b0: bool = BudgetVec.push(mut_of(bv), 1);
+    let b1: bool = BudgetVec.push(mut_of(bv), 2);
+    let both: bool = b0 and b1;
+    t.eq_bool(mut_of(st), "budget vec push", both, true);
+  }
+  t.eq_u64(mut_of(st), "budget vec drop leaks nothing", mem.BudgetTracker.leaked(ref_of(btr)), 0);
+  return t.finish(mut_of(st));
+};
+
+let run_algo_suite = func() -> i64 {
+  let st: t.Suite = t.suite("std::algo");
+  let v: Vec64.Self = Vec64.new();
+  v.push(5);
+  v.push(3);
+  v.push(9);
+  v.push(1);
+  v.push(7);
+  v.push(2);
+  v.push(8);
+
+  t.eq_bool(mut_of(st), "algo is_sorted before", algo.is_sorted(Vec64.as_slice(ref_of(v))) ?{ o: algo.OrdU64 }, false);
+  algo.sort(Vec64.as_mut_slice(mut_of(v))) ?{ o: algo.OrdU64 };
+  t.eq_bool(mut_of(st), "algo sort", algo.is_sorted(Vec64.as_slice(ref_of(v))) ?{ o: algo.OrdU64 }, true);
+  t.eq_u64(mut_of(st), "algo sort head", v.get(0), 1);
+  t.eq_u64(mut_of(st), "algo sort tail", v.get(6), 9);
+
+  let seven: u64 = 7;
+  let hit: algo.IdxOpt = algo.binary_search(Vec64.as_slice(ref_of(v)), ref_of(seven)) ?{ o: algo.OrdU64 };
+  t.eq_u64(mut_of(st), "algo binary_search hit", OptU64.unwrap_or(hit, 100), 4);
+  let missing: u64 = 42;
+  let miss: algo.IdxOpt = algo.binary_search(Vec64.as_slice(ref_of(v)), ref_of(missing)) ?{ o: algo.OrdU64 };
+  t.eq_bool(mut_of(st), "algo binary_search miss", OptU64.is_none(miss), true);
+
+  let nine: u64 = 9;
+  let at: algo.IdxOpt = algo.find(Vec64.as_slice(ref_of(v)), ref_of(nine)) ?{ e: algo.EqU64 };
+  t.eq_u64(mut_of(st), "algo find hit", OptU64.unwrap_or(at, 100), 6);
+  t.eq_bool(mut_of(st), "algo contains hit", algo.contains(Vec64.as_slice(ref_of(v)), ref_of(seven)) ?{ e: algo.EqU64 }, true);
+  t.eq_bool(mut_of(st), "algo contains miss", algo.contains(Vec64.as_slice(ref_of(v)), ref_of(missing)) ?{ e: algo.EqU64 }, false);
+
+  let it: U64Iter.Self = U64Iter.from(Vec64.as_slice(ref_of(v)));
+  let sum: u64 = 0;
+  let step: u64 = loop walk(k: u64 = 0) while k < 7 {
+    let item: OptU64.Opt = U64Iter.next(mut_of(it));
+    sum = sum + OptU64.unwrap_or(item, 0);
+    k = k + 1;
+  };
+  let end: OptU64.Opt = U64Iter.next(mut_of(it));
+  t.eq_u64(mut_of(st), "algo SliceIter sum", sum, 35);
+  t.eq_bool(mut_of(st), "algo SliceIter end", OptU64.is_none(end), true);
+
+  let a1: Array(u64, 3) = [1, 2, 3];
+  let a2: Array(u64, 3) = [1, 2, 3];
+  let a3: Array(u64, 3) = [1, 2, 4];
+  t.eq_bool(mut_of(st), "algo equal same", algo.equal(slice_of(a1), slice_of(a2)) ?{ e: algo.EqU64 }, true);
+  t.eq_bool(mut_of(st), "algo equal diff", algo.equal(slice_of(a1), slice_of(a3)) ?{ e: algo.EqU64 }, false);
+
+  algo.reverse(Vec64.as_mut_slice(mut_of(v)));
+  t.eq_u64(mut_of(st), "algo reverse head", v.get(0), 9);
+  t.eq_u64(mut_of(st), "algo reverse tail", v.get(6), 1);
+
+  let braw: Array(u64, 4) = [0, 0, 0, 0];
+  let bs: MutSlice(u64) = slice_of(braw);
+  algo.fill(bs, 6);
+  t.eq_u64(mut_of(st), "algo fill head", braw[0], 6);
+  t.eq_u64(mut_of(st), "algo fill tail", braw[3], 6);
   return t.finish(mut_of(st));
 };
 
@@ -1122,7 +1218,8 @@ let main = func() -> i64 {
   let f9: i64 = run_coro_suite();
   let f10: i64 = run_comptime_suite();
   let f11: i64 = run_value_raii_suite();
-  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11;
+  let f12: i64 = run_algo_suite();
+  let total_fail: i64 = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12;
   if total_fail == 0 {
     io.println("ALL SUITES PASSED");
   } else {
