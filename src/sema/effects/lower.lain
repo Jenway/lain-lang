@@ -7,10 +7,10 @@
 // [处理器过程指针@0, 上一帧指针@8]。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
-let ir = import("src::ir::ir");
+let ir = import("src::sema::ir_emit");
 let codes = import("src::ir::ir_codes");
 let s = import("src::driver::sym");
-let ax = import("src::syntax::ast");
+let ax = import("src::sema::ast");
 let cx = import("src::sema::ctx");
 let agg = import("src::sema::agg");
 let modules = import("src::sema::modules");
@@ -123,7 +123,7 @@ let load_u64 = func(k: Mut(st.State), base: u64, off: u64) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, p);
-  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, res, t, 0);
   return res;
 };
 
@@ -224,12 +224,12 @@ let emit_trap = func(k: Mut(st.State), payload: Mut(ty.Val)) -> u64 {
   ir.args_reset(k);
   let a1: u64 = ir.op_val(k, pv);
   let a2: u64 = ir.op_val(k, pv);
-  let sub: u64 = ir.emit(k, codes.INST_SUB(), zero, t);
+  let sub: u64 = ir.emit(k, codes.InstKind.Sub as u64, zero, t);
   let res: u64 = ir.fresh_t(k);
   ir.args_reset(k);
   let b1: u64 = ir.arg_int(k, 1);
   let b2: u64 = ir.arg_ref(k, zero);
-  let div: u64 = ir.emit(k, codes.INST_UDIV(), res, t);
+  let div: u64 = ir.emit(k, codes.InstKind.UDiv as u64, res, t);
   let rv: Mut(ty.Val) = new_val(k);
   ty.val_ref(rv, res, t);
   let base: u64 = state_addr(k);
@@ -273,7 +273,7 @@ let add_imm = func(k: Mut(st.State), a: u64, imm: u64) -> u64 {
   ir.args_reset(k);
   let x: u64 = ir.arg_ref(k, a);
   let y: u64 = ir.arg_int(k, imm);
-  let ins: u64 = ir.emit(k, codes.INST_ADD(), res, t);
+  let ins: u64 = ir.emit(k, codes.InstKind.Add as u64, res, t);
   return res;
 };
 
@@ -295,11 +295,11 @@ let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
   ir.args_reset(k);
   let a: u64 = ir.arg_int(k, 8);
-  ir.emit_mem(k, codes.INST_ALLOCA(), nm, t8, 0);
+  ir.emit_mem(k, codes.InstKind.Alloca as u64, nm, t8, 0);
   ir.args_reset(k);
   let z: u64 = ir.arg_int(k, 0);
   let r: u64 = ir.arg_ref(k, nm);
-  ir.emit_mem(k, codes.INST_STORE(), 0, ir.tbits(k, 64), 0);
+  ir.emit_mem(k, codes.InstKind.Store as u64, 0, ir.tbits(k, 64), 0);
   return j;
 };
 
@@ -312,7 +312,7 @@ let push_eff_frame = func(k: Mut(st.State), fnname: u64) -> u64 {
   let u64t: Mut(ty.Ty) = t64(k);
   // 首次使用：游标指向帧区首地址。
   let cur0: u64 = load_u64(k, gc, 0);
-  let cinit: u64 = cond_u64(k, codes.INST_EQ(), cur0, 0);
+  let cinit: u64 = cond_u64(k, codes.InstKind.Eq as u64, cur0, 0);
   let ir0: u64 = ir.region_begin(k);
   let f0n: u64 = ir.fresh_t(k);
   let e0: u64 = ir.emit_lea(k, f0n, gf, 0, 1, 0);
@@ -359,7 +359,7 @@ pub let emit_default_return = func(k: Mut(st.State)) -> u64 {
   if sr == 0 and ty.ty_known(rt) == 1 {
     let c: u64 = ir.arg_int(k, 0);
   }
-  return ir.emit_jump(k, codes.INST_RETURN(), 0);
+  return ir.emit_jump(k, codes.InstKind.Return as u64, 0);
 };
 
 pub let propagate = func(k: Mut(st.State)) -> u64 {
@@ -370,7 +370,7 @@ pub let propagate = func(k: Mut(st.State)) -> u64 {
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, stv);
   let b: u64 = ir.arg_int(k, 0);
-  let cmp: u64 = ir.emit(k, codes.INST_NE(), cond, t);
+  let cmp: u64 = ir.emit(k, codes.InstKind.Ne as u64, cond, t);
   let r: u64 = ir.region_begin(k);
   let d: u64 = emit_default_return(k);
   let re: u64 = ir.region_end(k);
@@ -571,7 +571,7 @@ let resumable_dispatch = func(k: Mut(st.State), tag: u64, payload: Mut(ty.Val), 
   let topl: u64 = agg.load_at(k, g, 0, at, topa);
   let topu: Mut(ty.Val) = new_val(k);
   let topc: u64 = cx.coerce(k, topa, at, u64t, topu);
-  let cond: u64 = cond_u64(k, codes.INST_NE(), ty.vn(topu), 0);
+  let cond: u64 = cond_u64(k, codes.InstKind.Ne as u64, ty.vn(topu), 0);
   let slot: u64 = alloc_dyn_slot(k);
   let tr: u64 = ir.region_begin(k);
   // 派发成功就是一次正常求值：把状态通道上的旧 tag 清掉，
@@ -697,7 +697,7 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       // 环境 Trap：谁写不写 !{ Trap } 都一样。运行期有活跃的 Trap 处理器
       // 就把事件写进通道交出去；没人接时正常模式就地终止，--release-fast 跳过。
       let deep: u64 = trap_depth_load(k);
-      let active: u64 = cond_u64(k, codes.INST_NE(), deep, 0);
+      let active: u64 = cond_u64(k, codes.InstKind.Ne as u64, deep, 0);
       let tr: u64 = ir.region_begin(k);
       let t0: u64 = store_lit(k, base, 0, tag);
       let t1: u64 = store_val(k, base, 8, payload);
@@ -1129,7 +1129,7 @@ let disp_arm_region = func(k: Mut(st.State), ag: u64, ar: Mut(row.HArm), pay: Mu
   let rr: u64 = ir.region_result(k, u64t);
   let cn: u64 = cx.val_force(k, cv2, u64t);
   let an: u64 = ir.arg_ref(k, cn);
-  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   return ir.region_end(k);
 };
 
@@ -1205,7 +1205,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   };
   // 默认分支：本处理器不管这个 tag，交给上一帧；没有上一帧就记录未处理并回 0。
   let dr: u64 = ir.region_begin(k);
-  let has_prev: u64 = cond_u64(k, codes.INST_NE(), ty.vn(prevu), 0);
+  let has_prev: u64 = cond_u64(k, codes.InstKind.Ne as u64, ty.vn(prevu), 0);
   let pr: u64 = ir.region_begin(k);
   let pfn: Mut(ty.Val) = new_val(k);
   let pfl: u64 = agg.load_at(k, ty.vn(prev), 0, at, pfn);
@@ -1224,7 +1224,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let r1: u64 = ir.region_result(k, u64t);
   let qn: u64 = cx.val_force(k, qrv, u64t);
   let qo: u64 = ir.arg_ref(k, qn);
-  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   let pre: u64 = ir.region_end(k);
   let nr: u64 = ir.region_begin(k);
   let base: u64 = state_addr(k);
@@ -1235,7 +1235,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   ty.val_lit(z2, 0, u64t);
   let zn: u64 = cx.val_force(k, z2, u64t);
   let za: u64 = ir.arg_ref(k, zn);
-  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   let nre: u64 = ir.region_end(k);
   let pifv: u64 = ir.fresh_t(k);
   let pif: u64 = ir.emit_if(k, pifv, has_prev, pre, nre);
@@ -1246,7 +1246,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   ty.val_ref(pifv2, pifv, u64t);
   let pifn: u64 = cx.val_force(k, pifv2, u64t);
   let pifa: u64 = ir.arg_ref(k, pifn);
-  ir.emit_jump(k, codes.INST_YIELD(), 0);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   let dre: u64 = ir.region_end(k);
   let sw: u64 = ir.emit_switch(k, resname, tag, u64t, dre);
   let sw1: u64 = store_val(k, gtop, 0, framev);
@@ -1254,7 +1254,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let sv2: Mut(ty.Val) = new_val(k);
   ty.val_ref(sv2, resname, u64t);
   push_val(k, sv2);
-  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.emit_jump(k, codes.InstKind.Return as u64, 0);
   ir.region_end(k);
   ir.proc_end(k);
   let rip: u64 = st.st_set_in_proc(k, saved_ip);
@@ -1453,7 +1453,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   let cw: u64 = if gen_first == 1 { 0 } else { row.push_frame(k, caught) };
   let ph: u64 = if gen_first == 1 { 0 } else { push_handler(k, hr0) };
   let trap_arm: u64 = if gen_first == 1 { 0 } else { has_trap_arm(k, hr0) };
-  let td0: u64 = if trap_arm == 1 { trap_depth_step(k, codes.INST_ADD(), 1) } else { 0 };
+  let td0: u64 = if trap_arm == 1 { trap_depth_step(k, codes.InstKind.Add as u64, 1) } else { 0 };
   let prev: u64 = row.in_handle(k);
   let sh: u64 = row.set_in_handle(k, 1);
   let saved_ab: u64 = row.take_aborts(k);
@@ -1481,7 +1481,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     if gen_first == 0 { let pq: u64 = pop_handler(k); let pf: u64 = row.pop_frame(k); }
     return nx;
   }
-  let td1: u64 = if trap_arm == 1 { trap_depth_step(k, codes.INST_SUB(), 1) } else { 0 };
+  let td1: u64 = if trap_arm == 1 { trap_depth_step(k, codes.InstKind.Sub as u64, 1) } else { 0 };
   if dname != 0 { let po: u64 = pop_eff_frame(k, hs); }
   let rs2: u64 = row.set_in_handle(k, prev);
   if gen_first == 0 { let pq2: u64 = pop_handler(k); let pf2: u64 = row.pop_frame(k); };

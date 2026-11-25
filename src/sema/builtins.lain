@@ -2,11 +2,11 @@
 // 这样这里不需要知道表达式怎么算，core 也不用知道内建怎么写。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
-let ir = import("src::ir::ir");
+let ir = import("src::sema::ir_emit");
 let codes = import("src::ir::ir_codes");
 let agg = import("src::sema::agg");
 let sym = import("src::driver::sym");
-let ax = import("src::syntax::ast");
+let ax = import("src::sema::ast");
 let modules = import("src::sema::modules");
 let hr = import("src::driver::host_rt");
 
@@ -305,7 +305,7 @@ let load_ty = func(k: Mut(st.State), want: Mut(ty.Ty)) -> Mut(ty.Ty) {
 // 位宽不足一字节的整数类型（bool 只有 1 位，排除 TY_ADDR）在内存里占 1 字节：
 // 读回来先截到 tp，写出去先零扩满 1 字节。
 let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
-  if ty.tk(tp) != codes.TY_BITS() { return 0; }
+  if ty.tk(tp) != (codes.TyKind.Bits as u64) { return 0; }
   return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
 };
 
@@ -313,7 +313,7 @@ let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, raw);
-  let ins: u64 = ir.emit(k, codes.INST_TRUNC(), res, tp);
+  let ins: u64 = ir.emit(k, codes.InstKind.Trunc as u64, res, tp);
   return res;
 };
 
@@ -322,7 +322,7 @@ let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, ty.vn(v));
-  let ins: u64 = ir.emit(k, codes.INST_ZEXT(), res, t8);
+  let ins: u64 = ir.emit(k, codes.InstKind.ZExt as u64, res, t8);
   return ty.val_ref(out, res, t8);
 };
 
@@ -333,14 +333,14 @@ let do_load = func(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut
     let raw: u64 = ir.fresh_t(k);
     let rc: u64 = ir.args_reset(k);
     let a: u64 = ir.op_val(k, v0);
-    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), raw, t8, 0);
+    let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, raw, t8, 0);
     let res: u64 = narrow_byte(k, raw, t);
     return ty.val_ref(out, res, t);
   }
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
-  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, res, t, 0);
   return ty.val_ref(out, res, t);
 };
 
@@ -365,12 +365,12 @@ let do_store = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val)) -> u64 {
     let rc: u64 = ir.args_reset(k);
     let a: u64 = ir.op_val(k, w);
     let b: u64 = ir.op_val(k, v0);
-    return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
   }
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v1);
   let b: u64 = ir.op_val(k, v0);
-  return ir.emit_mem(k, codes.INST_STORE(), 0, t, 0);
+  return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t, 0);
 };
 
 // 原子指令的类型一律按 64 位字，内存序作整数操作数原地传入。
@@ -379,7 +379,7 @@ let do_atomic_fence = func(k: Mut(st.State), v0: Mut(ty.Val)) -> u64 {
   let nn: u64 = ty.ty_none(nt);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
-  return ir.emit(k, codes.INST_ATOMIC_FENCE(), 0, nt);
+  return ir.emit(k, codes.InstKind.AtomicFence as u64, 0, nt);
 };
 
 let do_atomic_load = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)) -> u64 {
@@ -388,7 +388,7 @@ let do_atomic_load = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), ou
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
   let b: u64 = ir.op_val(k, v1);
-  let ins: u64 = ir.emit(k, codes.INST_ATOMIC_LOAD(), res, t64);
+  let ins: u64 = ir.emit(k, codes.InstKind.AtomicLoad as u64, res, t64);
   return ty.val_ref(out, res, t64);
 };
 
@@ -398,7 +398,7 @@ let do_atomic_store = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), v
   let a: u64 = ir.op_val(k, v1);
   let b: u64 = ir.op_val(k, v0);
   let c: u64 = ir.op_val(k, v2);
-  return ir.emit(k, codes.INST_ATOMIC_STORE(), 0, t64);
+  return ir.emit(k, codes.InstKind.AtomicStore as u64, 0, t64);
 };
 
 let do_atomic_cas = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), v2: Mut(ty.Val), v3: Mut(ty.Val),
@@ -410,7 +410,7 @@ let do_atomic_cas = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), v2:
   let b: u64 = ir.op_val(k, v1);
   let c: u64 = ir.op_val(k, v2);
   let d: u64 = ir.op_val(k, v3);
-  let ins: u64 = ir.emit(k, codes.INST_CMPXCHG(), res, t64);
+  let ins: u64 = ir.emit(k, codes.InstKind.Cmpxchg as u64, res, t64);
   return ty.val_ref(out, res, t64);
 };
 
@@ -421,7 +421,7 @@ let do_atomic_add = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), v2:
   let a: u64 = ir.op_val(k, v0);
   let b: u64 = ir.op_val(k, v1);
   let c: u64 = ir.op_val(k, v2);
-  let ins: u64 = ir.emit(k, codes.INST_RMW_ADD(), res, t64);
+  let ins: u64 = ir.emit(k, codes.InstKind.RmwAdd as u64, res, t64);
   return ty.val_ref(out, res, t64);
 };
 
@@ -432,7 +432,7 @@ let do_lea = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(t
   let b: u64 = ir.op_val(k, v1);
   let c: u64 = ir.arg_int(k, 1);
   let d: u64 = ir.arg_int(k, 0);
-  let ins: u64 = ir.emit(k, codes.INST_LEA(), res, ir.taddr(k));
+  let ins: u64 = ir.emit(k, codes.InstKind.Lea as u64, res, ir.taddr(k));
   return ty.val_ref(out, res, ir.taddr(k));
 };
 

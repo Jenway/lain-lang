@@ -1,10 +1,10 @@
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
-let ir = import("src::ir::ir");
+let ir = import("src::sema::ir_emit");
 let codes = import("src::ir::ir_codes");
 let s = import("src::driver::sym");
-let ax = import("src::syntax::ast");
+let ax = import("src::sema::ast");
 let cx = import("src::sema::ctx");
 let agg = import("src::sema::agg");
 
@@ -170,12 +170,12 @@ let loop_while = func(k: Mut(st.State), g: u64, wh: u64, out: Mut(ty.Val), f: Mu
   let bt: Mut(u64) = box(k);
   let h1: u64 = ir.region_begin(k);
   flow_block(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f)); }
+  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
   let r1: u64 = ir.region_end(k);
   ir.emit_if(k, 0, cn, r1, 0);
   if resj != no_slot() and np > 0 { slot_copy(k, resj, st.st_lf_slot(f, np - 1)); }
   ir.args_reset(k);
-  ir.emit_jump(k, codes.INST_BREAK(), st.st_lf_label(f));
+  ir.emit_jump(k, codes.InstKind.Break as u64, st.st_lf_label(f));
   let r2: u64 = ir.region_end(k);
   ir.emit_loop(k, 0, st.st_lf_label(f), r2);
   st.st_set_loopdepth(k, d);
@@ -191,7 +191,7 @@ let loop_plain = func(k: Mut(st.State), g: u64, j: u64, out: Mut(ty.Val), f: Mut
   let bg: u64 = n_at(g, j);
   let bt: Mut(u64) = box(k);
   flow_block(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f)); }
+  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
   let r1: u64 = ir.region_end(k);
   ir.emit_loop(k, 0, st.st_lf_label(f), r1);
   st.st_set_loopdepth(k, d);
@@ -409,11 +409,11 @@ let alloc_match_slot = func(k: Mut(st.State)) -> u64 {
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
   ir.args_reset(k);
   let a: u64 = ir.arg_int(k, 8);
-  ir.emit_mem(k, codes.INST_ALLOCA(), nm, t8, 0);
+  ir.emit_mem(k, codes.InstKind.Alloca as u64, nm, t8, 0);
   ir.args_reset(k);
   ir.arg_int(k, 0);
   ir.arg_ref(k, nm);
-  ir.emit_mem(k, codes.INST_STORE(), 0, ir.tbits(k, 64), 0);
+  ir.emit_mem(k, codes.InstKind.Store as u64, 0, ir.tbits(k, 64), 0);
   return j;
 };
 
@@ -444,7 +444,7 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
       coerce(k, av, ty.vty(av), c.want, yv);
       ir.args_reset(k);
       push_val(k, yv);
-      ir.emit_jump(k, codes.INST_YIELD(), 0);
+      ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
     } else {
       if (st.st_ok(k) == 0) and (c.resj != no_slot()) and (ty.val_known(av) == 1) {
         slot_put(k, c.resj, av, ty.vty(av));
@@ -562,7 +562,7 @@ let match_selector = func(k: Mut(st.State), cv: Mut(ty.Val), sh: u64, sel_ty: Mu
     return ty.vn(tagv);
   }
   if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return 0; }
-  if ty.tk(vt) != codes.TY_BITS() {
+  if ty.tk(vt) != (codes.TyKind.Bits as u64) {
     let m: Ref(u8) = "match scrutinee must be an integer";
     let d: u64 = ir.diag(k, 0, 1, m, 34);
     st.st_fail(k, e_type());
@@ -632,7 +632,7 @@ pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
     let dr: u64 = ir.region_begin(k);
     if c.yields == 1 { ir.region_result(k, c.want); }
     ir.args_reset(k);
-    ir.emit_jump(k, codes.INST_UNREACHABLE(), 0);
+    ir.emit_jump(k, codes.InstKind.Unreachable as u64, 0);
     ir.region_end(k)
   };
   if c.allterm == 1 { box_put(term, 1); }

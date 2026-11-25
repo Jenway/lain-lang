@@ -1,0 +1,1709 @@
+// tools/lain_lsp.lain —— Lain 语言服务器（stdio JSON-RPC 2.0）。
+//
+// 帧格式：Content-Length: N\r\n\r\n<json>。服务器从标准输入读取请求，
+// 把响应与通知写回标准输出。文档内容保存在内存里，didOpen / didChange
+// 之后用 src::frontend::reader 做词法检查并发布诊断。
+//
+// 支持的能力：
+//   initialize / initialized / shutdown / exit
+//   textDocument/didOpen / didChange / didClose / didSave
+//   textDocument/documentSymbol
+//   textDocument/definition
+//   textDocument/hover
+let os = import("std::os");
+let str = import("std::str");
+let mem = import("std::mem");
+let json = import("std::json");
+let rd = import("src::frontend::reader");
+
+@extern(abi = "C", link = "read")
+let c_read = func(fd: c_int, buf: Mut(u8), n: c_size) -> c_long;
+
+@extern(abi = "C", link = "write")
+let c_write = func(fd: c_int, buf: Ref(u8), n: c_size) -> c_long;
+
+comptime if is_windows() {
+  @extern(abi = "C", link = "_setmode")
+  let c_setmode = func(fd: c_int, mode: c_int) -> c_int;
+}
+
+let set_binary = func(fd: c_int) {
+  comptime if is_windows() {
+    let rc: c_int = c_setmode(fd, 32768);
+    if rc < 0 {
+      let dead: u64 = mem.halt_now(3);
+    }
+  }
+};
+
+let NO_INDEX = func() -> u64 { return 18446744073709551615; };
+let MAX_DECLS = func() -> u64 { return 1024; };
+let DOC_CAP = func() -> u64 { return 64; };
+let IN_CAP = func() -> u64 { return 65536; };
+let OUT_CAP = func() -> u64 { return 1048576; };
+let ARENA_MIN = func() -> u64 { return 16777216; };
+
+// --- 输出缓冲 -------------------------------------------------------------
+let Out = struct {
+  buf: MutSlice(u8),
+  len: u64,
+};
+
+let out_new = func(cap: u64) -> Out {
+  let raw: u64 = os.alloc_bytes(cap);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(cap);
+  }
+  return Out { buf: make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap), len: 0 };
+};
+
+let out_reserve = func(o: Mut(Out), extra: u64) {
+  let need: u64 = o.len + extra;
+  if need <= o.buf.len {
+    return;
+  }
+  let next: u64 = loop grow(c: u64 = o.buf.len) while c < need {
+    c = c * 2;
+  };
+  let raw: u64 = os.alloc_bytes(next);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(next);
+  }
+  let fresh: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), next);
+  let old: MutSlice(u8) = o.buf;
+  loop cp(i: u64 = 0) while i < o.len {
+    fresh[i] = old[i];
+    i = i + 1;
+  };
+  let dead2: u64 = os.free_bytes(old.ptr as u64);
+  o.buf = fresh;
+};
+
+let out_char = func(o: Mut(Out), b: u64) {
+  out_reserve(o, 1);
+  o.buf[o.len] = b as u8;
+  o.len = o.len + 1;
+};
+
+let out_put = func(o: Mut(Out), s: Slice(u8)) {
+  out_reserve(o, s.len);
+  loop cp(i: u64 = 0) while i < s.len {
+    o.buf[o.len] = s[i];
+    o.len = o.len + 1;
+    i = i + 1;
+  };
+};
+
+let out_u64 = func(o: Mut(Out), v: u64) {
+  if v >= 10 {
+    out_u64(o, v / 10);
+  }
+  out_char(o, 48 + (v % 10));
+};
+
+let out_i64 = func(o: Mut(Out), v: i64) {
+  if v < 0 {
+    out_char(o, 45);
+    out_u64(o, (0 - v) as u64);
+    return;
+  }
+  out_u64(o, v as u64);
+};
+
+let hex_digit = func(v: u64) -> u8 {
+  let d: u64 = v % 16;
+  if d < 10 {
+    return (48 + d) as u8;
+  }
+  return (97 + (d - 10)) as u8;
+};
+
+let out_str = func(o: Mut(Out), s: Slice(u8)) {
+  out_char(o, 34);
+  loop cp(i: u64 = 0) while i < s.len {
+    let b: u64 = s[i] as u64;
+    if b == 34 {
+      out_put(o, "\\\"");
+    } else if b == 92 {
+      out_put(o, "\\\\");
+    } else if b == 8 {
+      out_put(o, "\\b");
+    } else if b == 9 {
+      out_put(o, "\\t");
+    } else if b == 10 {
+      out_put(o, "\\n");
+    } else if b == 12 {
+      out_put(o, "\\f");
+    } else if b == 13 {
+      out_put(o, "\\r");
+    } else if b < 32 {
+      out_put(o, "\\u00");
+      out_char(o, hex_digit(b / 16) as u64);
+      out_char(o, hex_digit(b % 16) as u64);
+    } else {
+      out_char(o, b);
+    }
+    i = i + 1;
+  };
+  out_char(o, 34);
+};
+
+// --- 位置与文档 -----------------------------------------------------------
+let Pos = struct {
+  line: u64,
+  character: u64,
+};
+
+let Line = struct {
+  len: u64,
+  eof: u64,
+};
+
+let Doc = struct {
+  uri: Slice(u8),
+  text: Slice(u8),
+};
+
+let Decl = struct {
+  name: Slice(u8),
+  name_off: u64,
+  name_len: u64,
+  start_off: u64,
+  end_off: u64,
+  sig_end_off: u64,
+  kind: u64,
+  is_pub: u64,
+  import_path: Slice(u8),
+};
+
+let Server = struct {
+  out: Mut(Out),
+  docs: MutSlice(Doc),
+  doc_count: u64,
+};
+
+let In = struct {
+  buf: MutSlice(u8),
+  pos: u64,
+  len: u64,
+  eof: u64,
+};
+
+// --- 宿主读写 -------------------------------------------------------------
+let write_all = func(s: Slice(u8)) {
+  let off: u64 = 0;
+  loop w(go: u64 = 1) while (go == 1) and (off < s.len) {
+    let rest: u64 = s.len - off;
+    let p: Ref(u8) = s.ptr + off;
+    let n: c_long = c_write(1, p, rest);
+    if n <= 0 {
+      let dead: u64 = mem.halt_now(rest);
+      go = 0;
+    } else {
+      off = off + (n as u64);
+    }
+  };
+};
+
+let in_fill = func(ip: Mut(In)) -> u64 {
+  if ip.pos < ip.len {
+    return 1;
+  }
+  let got: c_long = c_read(0, ip.buf.ptr, ip.buf.len);
+  if got <= 0 {
+    ip.eof = 1;
+    ip.pos = 0;
+    ip.len = 0;
+    return 0;
+  }
+  ip.pos = 0;
+  ip.len = got as u64;
+  return 1;
+};
+
+let in_byte = func(ip: Mut(In), out: Mut(u64)) -> u64 {
+  if in_fill(ip) == 0 {
+    return 0;
+  }
+  deref(out) = ip.buf[ip.pos] as u64;
+  ip.pos = ip.pos + 1;
+  return 1;
+};
+
+let read_header_line = func(ip: Mut(In), dst: MutSlice(u8)) -> Line {
+  let n: u64 = 0;
+  let eof: u64 = 0;
+  loop r(go: u64 = 1) while go == 1 {
+    let b: u64 = 0;
+    if in_byte(ip, mut_of(b)) == 0 {
+      eof = 1;
+      go = 0;
+    } else if b == 10 {
+      go = 0;
+    } else {
+      if n < dst.len {
+        dst[n] = b as u8;
+        n = n + 1;
+      }
+    }
+  };
+  if n > 0 {
+    if dst[n - 1] == 13 {
+      n = n - 1;
+    }
+  }
+  return Line { len: n, eof: eof };
+};
+
+let read_exact = func(ip: Mut(In), dst: MutSlice(u8), n: u64) -> u64 {
+  let got: u64 = 0;
+  loop r(go: u64 = 1) while (go == 1) and (got < n) {
+    let b: u64 = 0;
+    if in_byte(ip, mut_of(b)) == 0 {
+      go = 0;
+    } else {
+      dst[got] = b as u8;
+      got = got + 1;
+    }
+  };
+  return got;
+};
+
+let flush_message = func(s: Mut(Server)) {
+  let o: Mut(Out) = s.out;
+  let hdr0: Array(u8, 64) = [0; 64];
+  let hdr: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), mut_of(hdr0)), 64);
+  let head: Slice(u8) = "Content-Length: ";
+  let n: u64 = 0;
+  loop a(i: u64 = 0) while i < head.len {
+    hdr[n] = head[i];
+    n = n + 1;
+    i = i + 1;
+  };
+  let digits: u64 = 0;
+  let tmp: u64 = o.len;
+  if tmp == 0 {
+    hdr[n] = 48;
+    n = n + 1;
+  } else {
+    let rev: Array(u8, 32) = [0; 32];
+    loop b(go: u64 = 1) while go == 1 {
+      if tmp == 0 {
+        go = 0;
+      } else {
+        rev[digits] = (48 + (tmp % 10)) as u8;
+        digits = digits + 1;
+        tmp = tmp / 10;
+      }
+    };
+    loop c(k: u64 = digits) while k > 0 {
+      hdr[n] = rev[k - 1];
+      n = n + 1;
+      k = k - 1;
+    };
+  };
+  hdr[n] = 13;
+  hdr[n + 1] = 10;
+  hdr[n + 2] = 13;
+  hdr[n + 3] = 10;
+  n = n + 4;
+  write_all(make_slice(Slice(u8), ptr_cast(Ref(u8), hdr.ptr), n));
+  write_all(make_slice(Slice(u8), ptr_cast(Ref(u8), o.buf.ptr), o.len));
+  o.len = 0;
+};
+
+// --- JSON 读取 ------------------------------------------------------------
+let jnull = func() -> json.JsonVal {
+  return json.JsonVal {
+    kind: 0,
+    num: 0,
+    str_val: "",
+    key: "",
+    child: 0,
+    next: 0,
+    tail: 0,
+    count: 0,
+  };
+};
+
+let member_addr = func(v: json.JsonVal, key: Slice(u8)) -> u64 {
+  let cur: u64 = v.child;
+  loop c(go: u64 = 1) while go == 1 {
+    if cur == 0 {
+      go = 0;
+    } else {
+      let n: Ref(json.JsonVal) = ptr_cast(Ref(json.JsonVal), cur);
+      if str.eq(deref(n).key, key) {
+        return cur;
+      }
+      cur = deref(n).next;
+    }
+  };
+  return 0;
+};
+
+let jget = func(v: json.JsonVal, key: Slice(u8)) -> json.JsonVal {
+  let a: u64 = member_addr(v, key);
+  if a == 0 {
+    return jnull();
+  }
+  return deref(ptr_cast(Ref(json.JsonVal), a));
+};
+
+let jstr = func(v: json.JsonVal, key: Slice(u8)) -> Slice(u8) {
+  let got: json.JsonVal = jget(v, key);
+  return got.str_val;
+};
+
+let ju64 = func(v: json.JsonVal, key: Slice(u8)) -> u64 {
+  let got: json.JsonVal = jget(v, key);
+  if got.kind != 3 {
+    return 0;
+  }
+  return got.num as u64;
+};
+
+let lower_byte = func(c: u8) -> u8 {
+  if (c >= 65) and (c <= 90) {
+    return (c + 32) as u8;
+  }
+  return c;
+};
+
+let parse_content_length = func(line: Slice(u8), n: u64) -> u64 {
+  let prefix: Slice(u8) = "content-length:";
+  if n <= prefix.len {
+    return NO_INDEX();
+  }
+  let same: u64 = 1;
+  loop c(i: u64 = 0) while i < prefix.len {
+    if lower_byte(line[i]) != lower_byte(prefix[i]) {
+      same = 0;
+    }
+    i = i + 1;
+  };
+  if same == 0 {
+    return NO_INDEX();
+  }
+  let i: u64 = prefix.len;
+  loop s(go: u64 = 1) while (go == 1) and (i < n) {
+    if line[i] == 32 {
+      i = i + 1;
+    } else {
+      go = 0;
+    }
+  };
+  let v: u64 = 0;
+  let digits: u64 = 0;
+  loop d(go: u64 = 1) while (go == 1) and (i < n) {
+    let c: u8 = line[i];
+    if (c >= 48) and (c <= 57) {
+      v = v * 10 + ((c - 48) as u64);
+      digits = digits + 1;
+      i = i + 1;
+    } else {
+      go = 0;
+    }
+  };
+  if digits == 0 {
+    return NO_INDEX();
+  }
+  return v;
+};
+
+let hex_val = func(c: u8) -> u64 {
+  if (c >= 48) and (c <= 57) {
+    return (c - 48) as u64;
+  }
+  if (c >= 97) and (c <= 102) {
+    return ((c - 97) + 10) as u64;
+  }
+  if (c >= 65) and (c <= 70) {
+    return ((c - 65) + 10) as u64;
+  }
+  return 16;
+};
+
+let hex4 = func(buf: MutSlice(u8), at: u64) -> u64 {
+  let v: u64 = 0;
+  loop c(i: u64 = 0) while i < 4 {
+    let d: u64 = hex_val(buf[at + i]);
+    if d == 16 {
+      return 4294967295;
+    }
+    v = v * 16 + d;
+    i = i + 1;
+  };
+  return v;
+};
+
+let utf8_put = func(buf: MutSlice(u8), at: u64, cp: u64) -> u64 {
+  if cp < 128 {
+    buf[at] = cp as u8;
+    return at + 1;
+  }
+  if cp < 2048 {
+    buf[at] = (192 + (cp / 64)) as u8;
+    buf[at + 1] = (128 + (cp % 64)) as u8;
+    return at + 2;
+  }
+  if cp < 65536 {
+    buf[at] = (224 + (cp / 4096)) as u8;
+    buf[at + 1] = (128 + ((cp / 64) % 64)) as u8;
+    buf[at + 2] = (128 + (cp % 64)) as u8;
+    return at + 3;
+  }
+  buf[at] = (240 + (cp / 262144)) as u8;
+  buf[at + 1] = (128 + ((cp / 4096) % 64)) as u8;
+  buf[at + 2] = (128 + ((cp / 64) % 64)) as u8;
+  buf[at + 3] = (128 + (cp % 64)) as u8;
+  return at + 4;
+};
+
+// JSON 的 \uXXXX 转义展开成 UTF-8，其余字节原样保留。
+// 每个 \uXXXX 占六个字节，展开后至多四个字节，因此可以原地写入。
+let expand_unicode = func(buf: MutSlice(u8), n: u64) -> Slice(u8) {
+  let r: u64 = 0;
+  let w: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (r < n) {
+    let b: u8 = buf[r];
+    let is_uni: u64 = 0;
+    let cp: u64 = 0;
+    if b == 92 {
+      if r + 5 < n {
+        if buf[r + 1] == 117 {
+          cp = hex4(buf, r + 2);
+          if cp != 4294967295 {
+            is_uni = 1;
+          }
+        }
+      }
+    }
+    if is_uni == 1 {
+      r = r + 6;
+      let fixed: u64 = cp;
+      if (cp >= 55296) and (cp <= 56319) {
+        let pair: u64 = 0;
+        if r + 6 <= n {
+          if buf[r] == 92 {
+            if buf[r + 1] == 117 {
+              pair = hex4(buf, r + 2);
+            }
+          }
+        }
+        if (pair >= 56320) and (pair <= 57343) {
+          fixed = 65536 + ((cp - 55296) * 1024) + (pair - 56320);
+          r = r + 6;
+        } else {
+          fixed = 65533;
+        }
+      } else if (cp >= 56320) and (cp <= 57343) {
+        fixed = 65533;
+      }
+      w = utf8_put(buf, w, fixed);
+    } else {
+      buf[w] = b;
+      w = w + 1;
+      r = r + 1;
+      if b == 92 {
+        if r < n {
+          buf[w] = buf[r];
+          w = w + 1;
+          r = r + 1;
+        }
+      }
+    }
+  };
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), buf.ptr), w);
+};
+
+// --- 位置换算 -------------------------------------------------------------
+let byte_at = func(s: Slice(u8), i: u64) -> u8 {
+  if i >= s.len {
+    return 0;
+  }
+  return s[i];
+};
+
+let utf16_width = func(s: Slice(u8), i: u64) -> u64 {
+  let c: u64 = byte_at(s, i) as u64;
+  if c < 128 {
+    return 1;
+  }
+  if c < 224 {
+    return 1;
+  }
+  if c < 240 {
+    return 1;
+  }
+  return 2;
+};
+
+let utf8_step = func(s: Slice(u8), i: u64) -> u64 {
+  let c: u64 = byte_at(s, i) as u64;
+  if c < 128 {
+    return 1;
+  }
+  if c < 224 {
+    return 2;
+  }
+  if c < 240 {
+    return 3;
+  }
+  return 4;
+};
+
+let pos_at = func(text: Slice(u8), off: u64) -> Pos {
+  let line: u64 = 0;
+  let start: u64 = 0;
+  let i: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < off) {
+    if text[i] == 10 {
+      line = line + 1;
+      start = i + 1;
+    }
+    i = i + 1;
+  };
+  let ch: u64 = 0;
+  let k: u64 = start;
+  loop d(go: u64 = 1) while (go == 1) and (k < off) {
+    ch = ch + utf16_width(text, k);
+    k = k + utf8_step(text, k);
+  };
+  return Pos { line: line, character: ch };
+};
+
+let line_start = func(text: Slice(u8), line: u64) -> u64 {
+  let at: u64 = 0;
+  let seen: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (at < text.len) {
+    if seen == line {
+      go = 0;
+    } else if text[at] == 10 {
+      seen = seen + 1;
+      at = at + 1;
+    } else {
+      at = at + 1;
+    }
+  };
+  return at;
+};
+
+let offset_at = func(text: Slice(u8), line: u64, character: u64) -> u64 {
+  let at: u64 = line_start(text, line);
+  let ch: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (at < text.len) {
+    let w: u64 = utf16_width(text, at);
+    if (ch + w) > character {
+      go = 0;
+    } else if text[at] == 10 {
+      go = 0;
+    } else {
+      ch = ch + w;
+      at = at + utf8_step(text, at);
+    }
+  };
+  return at;
+};
+
+let is_ident = func(c: u8) -> bool {
+  if (c >= 97) and (c <= 122) {
+    return true;
+  }
+  if (c >= 65) and (c <= 90) {
+    return true;
+  }
+  if (c >= 48) and (c <= 57) {
+    return true;
+  }
+  if c == 95 {
+    return true;
+  }
+  if c >= 128 {
+    return true;
+  }
+  return false;
+};
+
+let is_space_byte = func(c: u8) -> bool {
+  if (c == 32) or (c == 9) or (c == 13) or (c == 10) {
+    return true;
+  }
+  return false;
+};
+
+let ident_span = func(text: Slice(u8), at: u64, out_start: Mut(u64), out_end: Mut(u64)) -> u64 {
+  let p: u64 = at;
+  if p >= text.len {
+    if p == 0 {
+      return 0;
+    }
+    p = p - 1;
+  }
+  if is_ident(text[p]) == false {
+    if p == 0 {
+      return 0;
+    }
+    p = p - 1;
+    if is_ident(text[p]) == false {
+      return 0;
+    }
+  }
+  let lo: u64 = p;
+  loop a(go: u64 = 1) while go == 1 {
+    if lo == 0 {
+      go = 0;
+    } else if is_ident(text[lo - 1]) {
+      lo = lo - 1;
+    } else {
+      go = 0;
+    }
+  };
+  let hi: u64 = p + 1;
+  loop b(go: u64 = 1) while go == 1 {
+    if hi >= text.len {
+      go = 0;
+    } else if is_ident(text[hi]) {
+      hi = hi + 1;
+    } else {
+      go = 0;
+    }
+  };
+  deref(out_start) = lo;
+  deref(out_end) = hi;
+  return 1;
+};
+
+// 光标前若紧跟 `.`，回退跳过空白再取一段标识符作为限定名。
+let qualifier_span = func(text: Slice(u8), ident_start: u64, out_start: Mut(u64), out_end: Mut(u64)) -> u64 {
+  if ident_start == 0 {
+    return 0;
+  }
+  let p: u64 = ident_start;
+  loop a(go: u64 = 1) while go == 1 {
+    if p == 0 {
+      go = 0;
+    } else if is_space_byte(text[p - 1]) {
+      p = p - 1;
+    } else {
+      go = 0;
+    }
+  };
+  if p == 0 {
+    return 0;
+  }
+  if text[p - 1] != 46 {
+    return 0;
+  }
+  let q: u64 = p - 1;
+  loop b(go2: u64 = 1) while go2 == 1 {
+    if q == 0 {
+      go2 = 0;
+    } else if is_space_byte(text[q - 1]) {
+      q = q - 1;
+    } else {
+      go2 = 0;
+    }
+  };
+  if q == 0 {
+    return 0;
+  }
+  if is_ident(text[q - 1]) == false {
+    return 0;
+  }
+  let hi: u64 = q;
+  let lo: u64 = q - 1;
+  loop c(go3: u64 = 1) while go3 == 1 {
+    if lo == 0 {
+      go3 = 0;
+    } else if is_ident(text[lo - 1]) {
+      lo = lo - 1;
+    } else {
+      go3 = 0;
+    }
+  };
+  deref(out_start) = lo;
+  deref(out_end) = hi;
+  return 1;
+};
+
+// --- 路径与 URI -----------------------------------------------------------
+let copy_text = func(src: Slice(u8)) -> Slice(u8) {
+  let raw: u64 = os.alloc_bytes(src.len + 1);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(src.len + 1);
+  }
+  let p: Mut(u8) = ptr_cast(Mut(u8), raw);
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), p, src.len + 1);
+  loop c(i: u64 = 0) while i < src.len {
+    dst[i] = src[i];
+    i = i + 1;
+  };
+  dst[src.len] = 0;
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), p), src.len);
+};
+
+let uri_to_path = func(ar: Mut(mem.BumpArena.Arena), uri: Slice(u8)) -> Slice(u8) {
+  let cap: u64 = uri.len + 8;
+  let raw: u64 = mem.BumpArena.alloc(ar, cap);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(cap);
+  }
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let start: u64 = if str.starts_with(uri, "file://") { 7 } else { 0 };
+  let i: u64 = start;
+  let n: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < uri.len) {
+    let b: u8 = uri[i];
+    if (b == 37) and (i + 2 < uri.len) {
+      dst[n] = (hex_val(uri[i + 1]) * 16 + hex_val(uri[i + 2])) as u8;
+      i = i + 3;
+    } else {
+      dst[n] = b;
+      i = i + 1;
+    }
+    n = n + 1;
+  };
+  if n > 2 {
+    if dst[0] == 47 {
+      if dst[2] == 58 {
+        loop d(k: u64 = 0) while k + 1 < n {
+          dst[k] = dst[k + 1];
+          k = k + 1;
+        };
+        n = n - 1;
+      }
+    }
+  }
+  dst[n] = 0;
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst.ptr), n);
+};
+
+let path_to_uri = func(ar: Mut(mem.BumpArena.Arena), path: Slice(u8)) -> Slice(u8) {
+  let absolute: u64 = 0;
+  if path.len > 0 {
+    if path[0] == 47 {
+      absolute = 1;
+    }
+  }
+  let prefix: Slice(u8) = if absolute == 1 { "file://" } else { "file:///" };
+  let cap: u64 = prefix.len + path.len + 2;
+  let raw: u64 = mem.BumpArena.alloc(ar, cap);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(cap);
+  }
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let n: u64 = 0;
+  loop a(i: u64 = 0) while i < prefix.len {
+    dst[n] = prefix[i];
+    n = n + 1;
+    i = i + 1;
+  };
+  loop b(i: u64 = 0) while i < path.len {
+    let c: u8 = path[i];
+    if c == 92 {
+      dst[n] = 47;
+    } else {
+      dst[n] = c;
+    }
+    n = n + 1;
+    i = i + 1;
+  };
+  dst[n] = 0;
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst.ptr), n);
+};
+
+let module_to_rel = func(ar: Mut(mem.BumpArena.Arena), path: Slice(u8)) -> Slice(u8) {
+  let cap: u64 = path.len * 2 + 8;
+  let raw: u64 = mem.BumpArena.alloc(ar, cap);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(cap);
+  }
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let i: u64 = 0;
+  let n: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < path.len) {
+    if (path[i] == 58) and (i + 1 < path.len) and (path[i + 1] == 58) {
+      dst[n] = 47;
+      n = n + 1;
+      i = i + 2;
+    } else {
+      dst[n] = path[i];
+      n = n + 1;
+      i = i + 1;
+    }
+  };
+  let tail: Slice(u8) = ".lain";
+  loop d(k: u64 = 0) while k < tail.len {
+    dst[n] = tail[k];
+    n = n + 1;
+    k = k + 1;
+  };
+  dst[n] = 0;
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst.ptr), n);
+};
+
+// 取文件路径向上 level 层之后的目录前缀长度（不含末尾斜杠）。
+let dir_prefix = func(path: Slice(u8), level: u64) -> u64 {
+  let cut: u64 = path.len;
+  loop a(go: u64 = 1) while go == 1 {
+    if cut == 0 {
+      go = 0;
+    } else if path[cut - 1] == 47 {
+      go = 0;
+    } else {
+      cut = cut - 1;
+    }
+  };
+  if cut > 0 {
+    cut = cut - 1;
+  }
+  let l: u64 = 0;
+  loop b(go2: u64 = 1) while (go2 == 1) and (l < level) {
+    if cut == 0 {
+      go2 = 0;
+    } else {
+      cut = cut - 1;
+      loop c(go3: u64 = 1) while go3 == 1 {
+        if cut == 0 {
+          go3 = 0;
+        } else if path[cut - 1] == 47 {
+          go3 = 0;
+        } else {
+          cut = cut - 1;
+        }
+      };
+      if cut > 0 {
+        cut = cut - 1;
+      }
+      l = l + 1;
+    }
+  };
+  return cut;
+};
+
+let join_path = func(ar: Mut(mem.BumpArena.Arena), dir: Slice(u8), rel: Slice(u8)) -> Slice(u8) {
+  let cap: u64 = dir.len + rel.len + 4;
+  let raw: u64 = mem.BumpArena.alloc(ar, cap);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(cap);
+  }
+  let dst: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let n: u64 = 0;
+  loop a(i: u64 = 0) while i < dir.len {
+    dst[n] = dir[i];
+    n = n + 1;
+    i = i + 1;
+  };
+  let need_slash: u64 = 1;
+  if dir.len > 0 {
+    if dir[dir.len - 1] == 47 {
+      need_slash = 0;
+    }
+  }
+  if need_slash == 1 {
+    dst[n] = 47;
+    n = n + 1;
+  }
+  loop b(i: u64 = 0) while i < rel.len {
+    dst[n] = rel[i];
+    n = n + 1;
+    i = i + 1;
+  };
+  dst[n] = 0;
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), dst.ptr), n);
+};
+
+// 从当前文档路径出发，逐层上溯，找到第一个存在的模块文件。
+let resolve_import = func(ar: Mut(mem.BumpArena.Arena), doc_uri: Slice(u8), mod_path: Slice(u8)) -> Slice(u8) {
+  let doc: Slice(u8) = uri_to_path(ar, doc_uri);
+  let rel: Slice(u8) = module_to_rel(ar, mod_path);
+  let found: Slice(u8) = "";
+  let level: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (level <= 8) {
+    let cut: u64 = dir_prefix(doc, level);
+    let dir: Slice(u8) = make_slice(Slice(u8), doc.ptr, cut);
+    let cand: Slice(u8) = join_path(ar, dir, rel);
+    if os.file_exists(cand) {
+      found = cand;
+      go = 0;
+    } else {
+      level = level + 1;
+    }
+  };
+  return found;
+};
+
+// --- Reader 解析与顶层声明 -------------------------------------------------
+let parse_source = func(text: Slice(u8), ar: Mut(mem.BumpArena.Arena)) -> rd.RawAst {
+  let hint: u64 = text.len * 8 + 65536;
+  let raw: u64 = mem.BumpArena.alloc(ar, hint);
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), hint);
+  let ast: rd.RawAst = rd.parse(text, buf);
+  if ast.kind == rd.RD_ERR_CAPACITY() {
+    let need: u64 = ast.needed + 8;
+    let raw2: u64 = mem.BumpArena.alloc(ar, need);
+    let buf2: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw2), need);
+    return rd.parse(text, buf2);
+  }
+  return ast;
+};
+
+let decl_buffer = func(ar: Mut(mem.BumpArena.Arena)) -> MutSlice(Decl) {
+  let bytes: u64 = MAX_DECLS() * size_of(Decl);
+  let raw: u64 = mem.BumpArena.alloc(ar, bytes);
+  if raw == 0 {
+    let dead: u64 = mem.halt_now(bytes);
+  }
+  return make_slice(MutSlice(Decl), ptr_cast(Mut(Decl), raw), MAX_DECLS());
+};
+
+let trim_right = func(s: Slice(u8)) -> Slice(u8) {
+  let end: u64 = s.len;
+  loop c(go: u64 = 1) while (go == 1) and (end > 0) {
+    let b: u8 = s[end - 1];
+    if (b == 32) or (b == 9) or (b == 13) or (b == 10) {
+      end = end - 1;
+    } else {
+      go = 0;
+    }
+  };
+  return make_slice(Slice(u8), s.ptr, end);
+};
+
+let kind_of_rhs = func(word: Slice(u8)) -> u64 {
+  if str.eq(word, "func") { return 12; }
+  if str.eq(word, "struct") { return 23; }
+  if str.eq(word, "enum") { return 13; }
+  if str.eq(word, "module") { return 2; }
+  if str.eq(word, "import") { return 2; }
+  if str.eq(word, "sig") { return 11; }
+  return 13;
+};
+
+let scan_decls = func(src: Slice(u8), ast: rd.RawAst, dst: MutSlice(Decl)) -> u64 {
+  let count: u64 = 0;
+  let root: u64 = ast.root;
+  let n: u64 = rd.node_get(ast.nodes, root).child_count;
+  let i: u64 = 0;
+  loop walk(go: u64 = 1) while (go == 1) and (i < n) {
+    let id: u64 = rd.child_id(ast, root, i);
+    let txt: Slice(u8) = rd.node_text(src, ast, id);
+    let let_i: u64 = NO_INDEX();
+    if str.eq(txt, "let") {
+      let_i = i;
+    } else if str.eq(txt, "pub") {
+      if i + 1 < n {
+        let nid: u64 = rd.child_id(ast, root, i + 1);
+        let ntx: Slice(u8) = rd.node_text(src, ast, nid);
+        if str.eq(ntx, "let") {
+          let_i = i + 1;
+        }
+      }
+    }
+    if (let_i == NO_INDEX()) or ((let_i + 1) >= n) or (count >= dst.len) {
+      i = i + 1;
+    } else {
+      let name_id: u64 = rd.child_id(ast, root, let_i + 1);
+      let name_node: rd.RawNode = rd.node_get(ast.nodes, name_id);
+      let name_txt: Slice(u8) = rd.node_text(src, ast, name_id);
+      if name_node.kind != rd.RAW_TOKEN_IDENT() {
+        i = i + 1;
+      } else {
+        let start_id: u64 = rd.child_id(ast, root, i);
+        let start_sp: rd.Span = rd.node_span(ast, start_id);
+        let name_sp: rd.Span = rd.node_span(ast, name_id);
+        let eq_i: u64 = let_i + 2;
+        loop eq(go2: u64 = 1) while (go2 == 1) and (eq_i < n) {
+          let eid: u64 = rd.child_id(ast, root, eq_i);
+          let etx: Slice(u8) = rd.node_text(src, ast, eid);
+          if str.eq(etx, "=") {
+            go2 = 0;
+          } else if str.eq(etx, ";") {
+            go2 = 0;
+          } else {
+            eq_i = eq_i + 1;
+          }
+        };
+        let semi_i: u64 = n;
+        if (eq_i < n) and (eq_i + 1 < n) {
+          semi_i = eq_i + 1;
+          loop sem(go3: u64 = 1) while (go3 == 1) and (semi_i < n) {
+            let sid: u64 = rd.child_id(ast, root, semi_i);
+            let stx: Slice(u8) = rd.node_text(src, ast, sid);
+            if str.eq(stx, ";") {
+              go3 = 0;
+            } else {
+              semi_i = semi_i + 1;
+            }
+          };
+        }
+        let end_off: u64 = 0;
+        if semi_i < n {
+          let esid: u64 = rd.child_id(ast, root, semi_i);
+          let esp: rd.Span = rd.node_span(ast, esid);
+          end_off = esp.offset + esp.len;
+        } else if n > 0 {
+          let lid: u64 = rd.child_id(ast, root, n - 1);
+          let lsp: rd.Span = rd.node_span(ast, lid);
+          end_off = lsp.offset + lsp.len;
+        } else {
+          end_off = start_sp.offset;
+        }
+        let rhs_word: Slice(u8) = "";
+        if (eq_i < n) and (eq_i + 1 < n) {
+          let rid: u64 = rd.child_id(ast, root, eq_i + 1);
+          rhs_word = rd.node_text(src, ast, rid);
+        }
+        let sig_end: u64 = end_off;
+        if semi_i < n {
+          let ssid: u64 = rd.child_id(ast, root, semi_i);
+          let ssp: rd.Span = rd.node_span(ast, ssid);
+          sig_end = ssp.offset;
+        }
+        let body_form: u64 = 1;
+        if (str.eq(rhs_word, "func") == false) and (str.eq(rhs_word, "struct") == false) and (str.eq(rhs_word, "enum") == false) and (str.eq(rhs_word, "module") == false) and (str.eq(rhs_word, "sig") == false) {
+          body_form = 0;
+        }
+        let brace_end: u64 = 0;
+        let have_brace: u64 = 0;
+        if body_form == 1 {
+          let limit: u64 = if semi_i < n { semi_i } else { n };
+          let j: u64 = eq_i + 1;
+          loop br(go4: u64 = 1) while (go4 == 1) and (j < limit) and (have_brace == 0) {
+            let bid: u64 = rd.child_id(ast, root, j);
+            let bnode: rd.RawNode = rd.node_get(ast.nodes, bid);
+            if bnode.kind == rd.RAW_GROUP_BRACE() {
+              let prev_ok: u64 = 1;
+              if j > eq_i + 1 {
+                let pid: u64 = rd.child_id(ast, root, j - 1);
+                let ptxt: Slice(u8) = rd.node_text(src, ast, pid);
+                if str.eq(ptxt, "?") {
+                  prev_ok = 0;
+                }
+              }
+              if prev_ok == 1 {
+                have_brace = 1;
+                let bsp: rd.Span = rd.node_span(ast, bid);
+                brace_end = bsp.offset;
+              }
+            }
+            j = j + 1;
+          };
+        }
+        let final_sig: u64 = if have_brace == 1 { brace_end } else { sig_end };
+        let import_rel: Slice(u8) = "";
+        if str.eq(rhs_word, "import") and (eq_i + 2 < n) {
+          let gid: u64 = rd.child_id(ast, root, eq_i + 2);
+          let gnode: rd.RawNode = rd.node_get(ast.nodes, gid);
+          if (gnode.kind == rd.RAW_GROUP_PAREN()) and (gnode.child_count > 0) {
+            let sid: u64 = rd.child_id(ast, gid, 0);
+            let stxt: Slice(u8) = rd.node_text(src, ast, sid);
+            if stxt.len >= 2 {
+              import_rel = str.sub(stxt, 1, stxt.len - 1);
+            }
+          }
+        };
+        dst[count] = Decl {
+          name: name_txt,
+          name_off: name_sp.offset,
+          name_len: name_sp.len,
+          start_off: start_sp.offset,
+          end_off: end_off,
+          sig_end_off: final_sig,
+          kind: kind_of_rhs(rhs_word),
+          is_pub: if str.eq(txt, "pub") { 1 } else { 0 },
+          import_path: import_rel,
+        };
+        count = count + 1;
+        if semi_i < n {
+          i = semi_i + 1;
+        } else {
+          i = n;
+        }
+      }
+    }
+  };
+  return count;
+};
+
+let find_decl = func(decls: MutSlice(Decl), count: u64, name: Slice(u8)) -> u64 {
+  let i: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < count) {
+    if str.eq(decls[i].name, name) {
+      return i;
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+// --- 文档存储 -------------------------------------------------------------
+let doc_index = func(s: Mut(Server), uri: Slice(u8)) -> u64 {
+  let i: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < s.doc_count) {
+    if str.eq(s.docs[i].uri, uri) {
+      return i;
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+let doc_upsert = func(s: Mut(Server), uri: Slice(u8), text: Slice(u8)) -> u64 {
+  let docs: MutSlice(Doc) = s.docs;
+  let idx: u64 = doc_index(s, uri);
+  if idx != NO_INDEX() {
+    let dead: u64 = os.free_bytes(docs[idx].text.ptr as u64);
+    docs[idx].text = copy_text(text);
+    return idx;
+  }
+  if s.doc_count >= docs.len {
+    let dead: u64 = mem.halt_now(s.doc_count + 1);
+  }
+  let slot: u64 = s.doc_count;
+  docs[slot] = Doc { uri: copy_text(uri), text: copy_text(text) };
+  s.doc_count = s.doc_count + 1;
+  return slot;
+};
+
+// --- 诊断 -----------------------------------------------------------------
+let err_message = func(kind: u64) -> Slice(u8) {
+  if kind == rd.RD_ERR_UNCLOSED() { return "unclosed delimiter"; }
+  if kind == rd.RD_ERR_MISMATCH() { return "mismatched closing delimiter"; }
+  if kind == rd.RD_ERR_STRING() { return "unterminated string literal"; }
+  if kind == rd.RD_ERR_DEPTH() { return "nesting too deep"; }
+  if kind == rd.RD_ERR_CAPACITY() { return "source too large to parse"; }
+  return "lexical error";
+};
+
+let publish_diagnostics = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), idx: u64) {
+  let o: Mut(Out) = s.out;
+  o.len = 0;
+  let text: Slice(u8) = s.docs[idx].text;
+  let ast: rd.RawAst = parse_source(text, ar);
+  out_put(o, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":");
+  out_str(o, s.docs[idx].uri);
+  out_put(o, ",\"diagnostics\":[");
+  if ast.kind != rd.RD_OK() {
+    let line: u64 = if ast.err_line > 0 { ast.err_line - 1 } else { 0 };
+    let col: u64 = if ast.err_col > 0 { ast.err_col - 1 } else { 0 };
+    out_put(o, "{\"range\":{\"start\":{\"line\":");
+    out_u64(o, line);
+    out_put(o, ",\"character\":");
+    out_u64(o, col);
+    out_put(o, "},\"end\":{\"line\":");
+    out_u64(o, line);
+    out_put(o, ",\"character\":");
+    out_u64(o, col + 1);
+    out_put(o, "}},\"severity\":1,\"source\":\"lain\",\"message\":");
+    out_str(o, err_message(ast.kind));
+    out_put(o, "}");
+  }
+  out_put(o, "]}}");
+  flush_message(s);
+};
+
+// --- LSP 输出辅助 ---------------------------------------------------------
+let out_pos = func(o: Mut(Out), p: Pos) {
+  out_put(o, "{\"line\":");
+  out_u64(o, p.line);
+  out_put(o, ",\"character\":");
+  out_u64(o, p.character);
+  out_put(o, "}");
+};
+
+let out_range = func(o: Mut(Out), a: Pos, b: Pos) {
+  out_put(o, "{\"start\":");
+  out_pos(o, a);
+  out_put(o, ",\"end\":");
+  out_pos(o, b);
+  out_put(o, "}");
+};
+
+let out_id = func(o: Mut(Out), idv: json.JsonVal) {
+  if idv.kind == 3 {
+    out_i64(o, idv.num);
+  } else if idv.kind == 4 {
+    out_str(o, idv.str_val);
+  } else {
+    out_put(o, "null");
+  }
+};
+
+let begin_response = func(s: Mut(Server), idv: json.JsonVal) {
+  let o: Mut(Out) = s.out;
+  o.len = 0;
+  out_put(o, "{\"jsonrpc\":\"2.0\",\"id\":");
+  out_id(o, idv);
+};
+
+let send_null = func(s: Mut(Server), idv: json.JsonVal) {
+  begin_response(s, idv);
+  out_put(s.out, ",\"result\":null}");
+  flush_message(s);
+};
+
+let send_error = func(s: Mut(Server), idv: json.JsonVal, code: i64, msg: Slice(u8)) {
+  begin_response(s, idv);
+  out_put(s.out, ",\"error\":{\"code\":");
+  out_i64(s.out, code);
+  out_put(s.out, ",\"message\":");
+  out_str(s.out, msg);
+  out_put(s.out, "}}");
+  flush_message(s);
+};
+
+let send_initialize = func(s: Mut(Server), idv: json.JsonVal) {
+  begin_response(s, idv);
+  let o: Mut(Out) = s.out;
+  out_put(o, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"documentSymbolProvider\":true,\"definitionProvider\":true,\"hoverProvider\":true},\"serverInfo\":{\"name\":\"lain-lsp\",\"version\":\"1.0\"}}}");
+  flush_message(s);
+};
+
+// --- 跨文件查找 -----------------------------------------------------------
+// 在指定模块文件里找声明；找到时把结果写到输出缓冲，文件缓冲由调用方释放。
+let write_import_location = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), path: Slice(u8),
+                                  name: Slice(u8), want_hover: u64) -> u64 {
+  let ptr: u64 = 0;
+  let len: u64 = 0;
+  let rc: u64 = os.read_file(path, mut_of(ptr), mut_of(len));
+  if rc != 0 {
+    return 0;
+  }
+  let src: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), ptr), len);
+  let ast: rd.RawAst = parse_source(src, ar);
+  let ok: u64 = 0;
+  if ast.kind == rd.RD_OK() {
+    let decls: MutSlice(Decl) = decl_buffer(ar);
+    let count: u64 = scan_decls(src, ast, decls);
+    let di: u64 = find_decl(decls, count, name);
+    if di != NO_INDEX() {
+      let d: Decl = decls[di];
+      let o: Mut(Out) = s.out;
+      if want_hover == 1 {
+        out_put(o, ",\"result\":{\"contents\":{\"kind\":\"plaintext\",\"value\":");
+        let sig: Slice(u8) = trim_right(make_slice(Slice(u8), src.ptr + d.start_off, d.sig_end_off - d.start_off));
+        out_str(o, sig);
+        out_put(o, "},\"range\":");
+        let a: Pos = pos_at(src, d.name_off);
+        let b: Pos = pos_at(src, d.name_off + d.name_len);
+        out_range(o, a, b);
+        out_put(o, "}");
+      } else {
+        let uri: Slice(u8) = path_to_uri(ar, path);
+        out_put(o, ",\"result\":{\"uri\":");
+        out_str(o, uri);
+        out_put(o, ",\"range\":");
+        let a: Pos = pos_at(src, d.name_off);
+        let b: Pos = pos_at(src, d.name_off + d.name_len);
+        out_range(o, a, b);
+        out_put(o, "}");
+      }
+      ok = 1;
+    }
+  }
+  let dead: u64 = os.free_bytes(ptr);
+  return ok;
+};
+
+// --- 请求处理 -------------------------------------------------------------
+let handle_open = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let text: Slice(u8) = jstr(td, "text");
+  let idx: u64 = doc_upsert(s, uri, text);
+  publish_diagnostics(s, ar, idx);
+};
+
+let handle_change = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let changes: json.JsonVal = jget(params, "contentChanges");
+  let text: Slice(u8) = "";
+  if changes.child != 0 {
+    let first: Ref(json.JsonVal) = ptr_cast(Ref(json.JsonVal), changes.child);
+    text = jstr(deref(first), "text");
+  }
+  let idx: u64 = doc_upsert(s, uri, text);
+  publish_diagnostics(s, ar, idx);
+};
+
+let handle_close = func(s: Mut(Server), root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let o: Mut(Out) = s.out;
+  o.len = 0;
+  out_put(o, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":");
+  out_str(o, uri);
+  out_put(o, ",\"diagnostics\":[]}}");
+  flush_message(s);
+  let idx: u64 = doc_index(s, uri);
+  if idx != NO_INDEX() {
+    let docs: MutSlice(Doc) = s.docs;
+    let dead1: u64 = os.free_bytes(docs[idx].uri.ptr as u64);
+    let dead2: u64 = os.free_bytes(docs[idx].text.ptr as u64);
+    let last: u64 = s.doc_count - 1;
+    if idx != last {
+      docs[idx] = docs[last];
+    }
+    s.doc_count = last;
+  }
+};
+
+let handle_symbols = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), idv: json.JsonVal, root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let idx: u64 = doc_index(s, uri);
+  begin_response(s, idv);
+  let o: Mut(Out) = s.out;
+  out_put(o, ",\"result\":[");
+  if idx != NO_INDEX() {
+    let text: Slice(u8) = s.docs[idx].text;
+    let ast: rd.RawAst = parse_source(text, ar);
+    if ast.kind == rd.RD_OK() {
+      let decls: MutSlice(Decl) = decl_buffer(ar);
+      let count: u64 = scan_decls(text, ast, decls);
+      let i: u64 = 0;
+      loop c(go: u64 = 1) while (go == 1) and (i < count) {
+        if i > 0 {
+          out_put(o, ",");
+        }
+        let d: Decl = decls[i];
+        out_put(o, "{\"name\":");
+        out_str(o, d.name);
+        out_put(o, ",\"detail\":");
+        let sig: Slice(u8) = trim_right(make_slice(Slice(u8), text.ptr + d.start_off, d.sig_end_off - d.start_off));
+        out_str(o, sig);
+        out_put(o, ",\"kind\":");
+        out_u64(o, d.kind);
+        out_put(o, ",\"range\":");
+        let ra: Pos = pos_at(text, d.start_off);
+        let rb: Pos = pos_at(text, d.end_off);
+        out_range(o, ra, rb);
+        out_put(o, ",\"selectionRange\":");
+        let sa: Pos = pos_at(text, d.name_off);
+        let sb: Pos = pos_at(text, d.name_off + d.name_len);
+        out_range(o, sa, sb);
+        out_put(o, "}");
+        i = i + 1;
+      }
+    }
+  }
+  out_put(o, "]}");
+  flush_message(s);
+};
+
+let handle_definition = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), idv: json.JsonVal, root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let pos: json.JsonVal = jget(params, "position");
+  let line: u64 = ju64(pos, "line");
+  let character: u64 = ju64(pos, "character");
+  let idx: u64 = doc_index(s, uri);
+  begin_response(s, idv);
+  let o: Mut(Out) = s.out;
+  let done: u64 = 0;
+  if idx != NO_INDEX() {
+    let text: Slice(u8) = s.docs[idx].text;
+    let off: u64 = offset_at(text, line, character);
+    let lo: u64 = 0;
+    let hi: u64 = 0;
+    if ident_span(text, off, mut_of(lo), mut_of(hi)) == 1 {
+      let name: Slice(u8) = make_slice(Slice(u8), text.ptr + lo, hi - lo);
+      let ast: rd.RawAst = parse_source(text, ar);
+      if ast.kind == rd.RD_OK() {
+        let decls: MutSlice(Decl) = decl_buffer(ar);
+        let count: u64 = scan_decls(text, ast, decls);
+        let di: u64 = find_decl(decls, count, name);
+        if di != NO_INDEX() {
+          let d: Decl = decls[di];
+          out_put(o, ",\"result\":{\"uri\":");
+          out_str(o, uri);
+          out_put(o, ",\"range\":");
+          let a: Pos = pos_at(text, d.name_off);
+          let b: Pos = pos_at(text, d.name_off + d.name_len);
+          out_range(o, a, b);
+          out_put(o, "}");
+          done = 1;
+        } else {
+          let qlo: u64 = 0;
+          let qhi: u64 = 0;
+          let has_q: u64 = qualifier_span(text, lo, mut_of(qlo), mut_of(qhi));
+          if has_q == 1 {
+            let qual: Slice(u8) = make_slice(Slice(u8), text.ptr + qlo, qhi - qlo);
+            let ii: u64 = find_import(decls, count, qual);
+            if ii != NO_INDEX() {
+              let mod_path: Slice(u8) = decls[ii].import_path;
+              if mod_path.len > 0 {
+                let path: Slice(u8) = resolve_import(ar, uri, mod_path);
+                if path.len > 0 {
+                  if write_import_location(s, ar, path, name, 0) == 1 {
+                    done = 1;
+                  }
+                }
+              }
+            }
+          } else {
+            let j: u64 = 0;
+            loop c(go: u64 = 1) while (go == 1) and (j < count) and (done == 0) {
+              if decls[j].import_path.len > 0 {
+                let path: Slice(u8) = resolve_import(ar, uri, decls[j].import_path);
+                if path.len > 0 {
+                  if write_import_location(s, ar, path, name, 0) == 1 {
+                    done = 1;
+                  }
+                }
+              }
+              j = j + 1;
+            };
+          }
+        }
+      }
+    }
+  }
+  if done == 0 {
+    out_put(o, ",\"result\":null");
+  }
+  out_put(o, "}");
+  flush_message(s);
+};
+
+let find_import = func(decls: MutSlice(Decl), count: u64, name: Slice(u8)) -> u64 {
+  let i: u64 = 0;
+  loop c(go: u64 = 1) while (go == 1) and (i < count) {
+    if (decls[i].import_path.len > 0) and (str.eq(decls[i].name, name)) {
+      return i;
+    }
+    i = i + 1;
+  };
+  return NO_INDEX();
+};
+
+let handle_hover = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), idv: json.JsonVal, root: json.JsonVal) {
+  let params: json.JsonVal = jget(root, "params");
+  let td: json.JsonVal = jget(params, "textDocument");
+  let uri: Slice(u8) = jstr(td, "uri");
+  let pos: json.JsonVal = jget(params, "position");
+  let line: u64 = ju64(pos, "line");
+  let character: u64 = ju64(pos, "character");
+  let idx: u64 = doc_index(s, uri);
+  begin_response(s, idv);
+  let o: Mut(Out) = s.out;
+  let done: u64 = 0;
+  if idx != NO_INDEX() {
+    let text: Slice(u8) = s.docs[idx].text;
+    let off: u64 = offset_at(text, line, character);
+    let lo: u64 = 0;
+    let hi: u64 = 0;
+    if ident_span(text, off, mut_of(lo), mut_of(hi)) == 1 {
+      let name: Slice(u8) = make_slice(Slice(u8), text.ptr + lo, hi - lo);
+      let ast: rd.RawAst = parse_source(text, ar);
+      if ast.kind == rd.RD_OK() {
+        let decls: MutSlice(Decl) = decl_buffer(ar);
+        let count: u64 = scan_decls(text, ast, decls);
+        let di: u64 = find_decl(decls, count, name);
+        if di != NO_INDEX() {
+          let d: Decl = decls[di];
+          out_put(o, ",\"result\":{\"contents\":{\"kind\":\"plaintext\",\"value\":");
+          let sig: Slice(u8) = trim_right(make_slice(Slice(u8), text.ptr + d.start_off, d.sig_end_off - d.start_off));
+          out_str(o, sig);
+          out_put(o, "},\"range\":");
+          let a: Pos = pos_at(text, d.name_off);
+          let b: Pos = pos_at(text, d.name_off + d.name_len);
+          out_range(o, a, b);
+          out_put(o, "}");
+          done = 1;
+        } else {
+          let qlo: u64 = 0;
+          let qhi: u64 = 0;
+          let has_q: u64 = qualifier_span(text, lo, mut_of(qlo), mut_of(qhi));
+          if has_q == 1 {
+            let qual: Slice(u8) = make_slice(Slice(u8), text.ptr + qlo, qhi - qlo);
+            let ii: u64 = find_import(decls, count, qual);
+            if ii != NO_INDEX() {
+              let mod_path: Slice(u8) = decls[ii].import_path;
+              if mod_path.len > 0 {
+                let path: Slice(u8) = resolve_import(ar, uri, mod_path);
+                if path.len > 0 {
+                  if write_import_location(s, ar, path, name, 1) == 1 {
+                    done = 1;
+                  }
+                }
+              }
+            }
+          } else {
+            let j: u64 = 0;
+            loop c(go: u64 = 1) while (go == 1) and (j < count) and (done == 0) {
+              if decls[j].import_path.len > 0 {
+                let path: Slice(u8) = resolve_import(ar, uri, decls[j].import_path);
+                if path.len > 0 {
+                  if write_import_location(s, ar, path, name, 1) == 1 {
+                    done = 1;
+                  }
+                }
+              }
+              j = j + 1;
+            };
+          }
+        }
+      }
+    }
+  }
+  if done == 0 {
+    out_put(o, ",\"result\":null");
+  }
+  out_put(o, "}");
+  flush_message(s);
+};
+
+let dispatch = func(s: Mut(Server), ar: Mut(mem.BumpArena.Arena), root: json.JsonVal, idv: json.JsonVal, has_id: u64) -> u64 {
+  let method: Slice(u8) = jstr(root, "method");
+  if str.eq(method, "initialize") {
+    send_initialize(s, idv);
+    return 1;
+  }
+  if str.eq(method, "initialized") {
+    return 1;
+  }
+  if str.eq(method, "shutdown") {
+    send_null(s, idv);
+    return 1;
+  }
+  if str.eq(method, "exit") {
+    return 0;
+  }
+  if str.eq(method, "$/cancelRequest") {
+    return 1;
+  }
+  if str.eq(method, "textDocument/didOpen") {
+    handle_open(s, ar, root);
+    return 1;
+  }
+  if str.eq(method, "textDocument/didChange") {
+    handle_change(s, ar, root);
+    return 1;
+  }
+  if str.eq(method, "textDocument/didSave") {
+    return 1;
+  }
+  if str.eq(method, "textDocument/didClose") {
+    handle_close(s, root);
+    return 1;
+  }
+  if str.eq(method, "textDocument/documentSymbol") {
+    handle_symbols(s, ar, idv, root);
+    return 1;
+  }
+  if str.eq(method, "textDocument/definition") {
+    handle_definition(s, ar, idv, root);
+    return 1;
+  }
+  if str.eq(method, "textDocument/hover") {
+    handle_hover(s, ar, idv, root);
+    return 1;
+  }
+  if has_id == 1 {
+    send_error(s, idv, -32601, "method not found");
+  }
+  return 1;
+};
+
+let process_message = func(s: Mut(Server), body: MutSlice(u8), n: u64) -> u64 {
+  let text: Slice(u8) = expand_unicode(body, n);
+  let scaled: u64 = text.len * 32 + 4194304;
+  let arena_bytes: u64 = if scaled > ARENA_MIN() { scaled } else { ARENA_MIN() };
+  let base: u64 = os.alloc_bytes(arena_bytes);
+  if base == 0 {
+    let dead: u64 = mem.halt_now(arena_bytes);
+  }
+  let ar0: mem.BumpArena.Arena = mem.BumpArena.over(base, arena_bytes);
+  let ar: Mut(mem.BumpArena.Arena) = mut_of(ar0);
+  let jv0: json.JsonVal = jnull();
+  let jv: Mut(json.JsonVal) = mut_of(jv0);
+  let ok: bool = json.parse(ar, text, jv);
+  let action: u64 = 1;
+  if ok == true {
+    let root: json.JsonVal = deref(jv);
+    let id_addr: u64 = member_addr(root, "id");
+    let idv: json.JsonVal = if id_addr != 0 {
+      deref(ptr_cast(Ref(json.JsonVal), id_addr))
+    } else {
+      jnull()
+    };
+    let has_id: u64 = if id_addr != 0 { 1 } else { 0 };
+    action = dispatch(s, ar, root, idv, has_id);
+  }
+  let dead: u64 = os.free_bytes(base);
+  return action;
+};
+
+// --- 入口 -----------------------------------------------------------------
+let main = func() -> i64 {
+  set_binary(0);
+  set_binary(1);
+  let out0: Out = out_new(OUT_CAP());
+  let outp: Mut(Out) = mut_of(out0);
+  let docs_raw: u64 = os.alloc_bytes(DOC_CAP() * size_of(Doc));
+  if docs_raw == 0 {
+    let dead: u64 = mem.halt_now(DOC_CAP() * size_of(Doc));
+  }
+  let docs: MutSlice(Doc) = make_slice(MutSlice(Doc), ptr_cast(Mut(Doc), docs_raw), DOC_CAP());
+  let s0: Server = Server { out: outp, docs: docs, doc_count: 0 };
+  let s: Mut(Server) = mut_of(s0);
+  let in_raw: u64 = os.alloc_bytes(IN_CAP());
+  if in_raw == 0 {
+    let dead: u64 = mem.halt_now(IN_CAP());
+  }
+  let in_buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), in_raw), IN_CAP());
+  let in0: In = In { buf: in_buf, pos: 0, len: 0, eof: 0 };
+  let ip: Mut(In) = mut_of(in0);
+  let hdr0: Array(u8, 256) = [0; 256];
+  let hdr: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), mut_of(hdr0)), 256);
+  loop serve(go: u64 = 1) while go == 1 {
+    let content_len: u64 = 0;
+    let eof: u64 = 0;
+    loop heads(go2: u64 = 1) while go2 == 1 {
+      let ln: Line = read_header_line(ip, hdr);
+      if ln.eof == 1 {
+        eof = 1;
+        go2 = 0;
+      } else if ln.len == 0 {
+        go2 = 0;
+      } else {
+        let v: u64 = parse_content_length(hdr, ln.len);
+        if v != NO_INDEX() {
+          content_len = v;
+        }
+      }
+    };
+    if eof == 1 {
+      go = 0;
+    } else if content_len == 0 {
+      go = 0;
+    } else {
+      let body_raw: u64 = os.alloc_bytes(content_len + 1);
+      if body_raw == 0 {
+        let dead: u64 = mem.halt_now(content_len + 1);
+      }
+      let body: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), body_raw), content_len);
+      let got: u64 = read_exact(ip, body, content_len);
+      if got < content_len {
+        let dead: u64 = os.free_bytes(body_raw);
+        go = 0;
+      } else {
+        let action: u64 = process_message(s, body, content_len);
+        let dead: u64 = os.free_bytes(body_raw);
+        if action == 0 {
+          go = 0;
+        }
+      }
+    }
+  };
+  return 0;
+};

@@ -1,0 +1,977 @@
+// tools/ast_codemod —— 在 reader 形式树之上做语义安全改写的工具。
+//
+// 用法：
+//   ast_codemod --pass loop-to-while --write <file.lain>
+//   ast_codemod --pass loop-to-while --dry-run <file.lain>
+//
+// 所有改写都落成一小组不重叠的 Edit，按字节偏移倒序贴回原文，编辑之外的
+// 空白、注释与排版逐字节保持不变。任何一处重叠立即报错并放弃写入。
+//
+// loop-to-while 的三种形态：
+//   A 语句位置且带状态绑定：
+//     loop lbl(a: T = init, ...) while cond { body };
+//     -> let a: T = init; ... while cond { body };
+//   B 绑定表达式位置且带状态绑定：
+//     let res: R = loop lbl(a: T = init, ... last: T2 = init2) while cond { body };
+//     -> let a: T = init; ... while cond { body }; let res: R = last;
+//   C 语句位置且没有状态绑定：
+//     loop lbl() while cond { body };  /  loop lbl while cond { body };
+//     -> while cond { body };
+//
+// 语义保护：
+//   * 体里出现 break lbl / continue lbl 时整条循环保留并报告；
+//   * B 形态只要体里出现任何 break 就保留（无值 break 的结果与原循环不同）；
+//   * 状态名在循环之后仍被使用（会被提升后的绑定捕获）时保留；
+//   * 循环处在表达式位置（除 B 形态的 let 绑定）时保留；
+//   * 状态名超过 8 个、形态无法识别时保留。
+let io = import("std::io");
+let os = import("std::os");
+let fs = import("std::fs");
+let option = import("std::option");
+let rd = import("src::frontend::reader");
+
+let OptSlice = option.Option(MutSlice(u8));
+
+let no_idx = func() -> u64 { return 4294967295; };
+
+// --- 数据 -----------------------------------------------------------------
+// head / tail 是源字节区间的左闭右开两端，rep 是替换文本。
+let Edit = struct {
+  head: u64,
+  tail: u64,
+  rep: Ref(u8),
+  rep_len: u64,
+};
+
+let Binder = struct {
+  name_off: u64,
+  name_len: u64,
+  text_off: u64,
+  text_len: u64,
+  type_off: u64,
+  type_len: u64,
+};
+
+let binder_at = func(base: Mut(Binder), i: u64) -> Mut(Binder) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Binder), raw + i * size_of(Binder));
+};
+
+let Range = struct {
+  from: u64,
+  to: u64,
+};
+
+// --- 可增长的字节缓冲 ------------------------------------------------------
+let Text = struct {
+  buf: MutSlice(u8),
+  len: u64,
+};
+
+let text_new = func(cap0: u64) -> Text {
+  let cap: u64 = if cap0 < 16 { 16 } else { cap0 };
+  let raw: u64 = os.alloc_bytes(cap);
+  let view: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  return Text { buf: view, len: 0 };
+};
+
+let text_reserve = func(t: Mut(Text), extra: u64) {
+  let need: u64 = t.len + extra;
+  if need <= t.buf.len { return; }
+  let next: u64 = loop grow(c: u64 = t.buf.len) while c < need {
+    c = c * 2;
+  };
+  let raw: u64 = os.alloc_bytes(next);
+  let fresh: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), next);
+  let old: MutSlice(u8) = t.buf;
+  loop cp(i: u64 = 0) while i < t.len {
+    fresh[i] = old[i];
+    i = i + 1;
+  };
+  let dead: u64 = os.free_bytes(old.ptr as u64);
+  t.buf = fresh;
+};
+
+let text_byte = func(t: Mut(Text), b: u8) {
+  text_reserve(t, 1);
+  t.buf[t.len] = b;
+  t.len = t.len + 1;
+};
+
+let text_put = func(t: Mut(Text), s: Slice(u8)) {
+  text_reserve(t, s.len);
+  loop cp(i: u64 = 0) while i < s.len {
+    t.buf[t.len] = s[i];
+    t.len = t.len + 1;
+    i = i + 1;
+  };
+};
+
+let text_span = func(t: Mut(Text), s: Slice(u8), from: u64, to: u64) {
+  text_reserve(t, to - from);
+  loop cp(i: u64 = from) while i < to {
+    t.buf[t.len] = s[i];
+    t.len = t.len + 1;
+    i = i + 1;
+  };
+};
+
+let text_ptr = func(t: Mut(Text), p: Ref(u8), n: u64) {
+  text_reserve(t, n);
+  let view: Slice(u8) = make_slice(Slice(u8), p, n);
+  loop cp(i: u64 = 0) while i < n {
+    t.buf[t.len] = view[i];
+    t.len = t.len + 1;
+    i = i + 1;
+  };
+};
+
+let text_span_back = func(t: Mut(Text), s: Slice(u8), from: u64, to: u64) {
+  text_reserve(t, to - from);
+  loop cp(i: u64 = to) while i > from {
+    t.buf[t.len] = s[i - 1];
+    t.len = t.len + 1;
+    i = i - 1;
+  };
+};
+
+let text_ptr_back = func(t: Mut(Text), p: Ref(u8), n: u64) {
+  text_reserve(t, n);
+  let view: Slice(u8) = make_slice(Slice(u8), p, n);
+  loop cp(i: u64 = n) while i > 0 {
+    t.buf[t.len] = view[i - 1];
+    t.len = t.len + 1;
+    i = i - 1;
+  };
+};
+
+// --- 字节比较 -------------------------------------------------------------
+let slice_eq = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  if a.len != b.len { return false; }
+  loop cp(i: u64 = 0) while i < a.len {
+    if a[i] != b[i] { return false; }
+    i = i + 1;
+  };
+  return true;
+};
+
+let is_hspace = func(c: u8) -> bool {
+  if c == 32 { return true; }
+  if c == 9 { return true; }
+  return false;
+};
+
+let is_space = func(c: u8) -> bool {
+  if c == 32 { return true; }
+  if (c == 9) or (c == 10) or (c == 13) or (c == 11) or (c == 12) { return true; }
+  return false;
+};
+
+let span_from = func(s: Slice(u8), from: u64) -> Slice(u8) {
+  return make_slice(Slice(u8), s.ptr + from, s.len - from);
+};
+
+// --- 节点访问 -------------------------------------------------------------
+let node_kind = func(ast: rd.RawAst, id: u64) -> u64 {
+  let n: rd.RawNode = rd.node_get(ast.nodes, id);
+  return n.kind;
+};
+
+let group_len = func(ast: rd.RawAst, id: u64) -> u64 {
+  let n: rd.RawNode = rd.node_get(ast.nodes, id);
+  return n.child_count;
+};
+
+let node_off = func(ast: rd.RawAst, id: u64) -> u64 {
+  let sp: rd.Span = rd.node_span(ast, id);
+  return sp.offset;
+};
+
+let node_stop = func(ast: rd.RawAst, id: u64) -> u64 {
+  let sp: rd.Span = rd.node_span(ast, id);
+  return sp.offset + sp.len;
+};
+
+let node_line = func(ast: rd.RawAst, id: u64) -> u64 {
+  let sp: rd.Span = rd.node_span(ast, id);
+  return sp.line;
+};
+
+let is_group = func(ast: rd.RawAst, id: u64) -> bool {
+  let k: u64 = node_kind(ast, id);
+  if (k == rd.RAW_GROUP_PAREN()) or (k == rd.RAW_GROUP_BRACKET()) or (k == rd.RAW_GROUP_BRACE()) {
+    return true;
+  }
+  return false;
+};
+
+let is_brace = func(ast: rd.RawAst, id: u64) -> bool {
+  return node_kind(ast, id) == rd.RAW_GROUP_BRACE();
+};
+
+let is_ident = func(ast: rd.RawAst, id: u64) -> bool {
+  return node_kind(ast, id) == rd.RAW_TOKEN_IDENT();
+};
+
+let ident_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, s: Slice(u8)) -> bool {
+  if is_ident(ast, id) == false { return false; }
+  let t: Slice(u8) = rd.node_text(src, ast, id);
+  return slice_eq(t, s);
+};
+
+let punct_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, c: u8) -> bool {
+  if node_kind(ast, id) != rd.RAW_TOKEN_PUNCT() { return false; }
+  let sp: rd.Span = rd.node_span(ast, id);
+  if sp.len != 1 { return false; }
+  return src[sp.offset] == c;
+};
+
+let ident_named = func(src: Slice(u8), ast: rd.RawAst, id: u64, off: u64, len: u64) -> bool {
+  if is_ident(ast, id) == false { return false; }
+  let sp: rd.Span = rd.node_span(ast, id);
+  if sp.len != len { return false; }
+  loop cp(i: u64 = 0) while i < len {
+    if src[sp.offset + i] != src[off + i] { return false; }
+    i = i + 1;
+  };
+  return true;
+};
+
+// --- 递归扫描 -------------------------------------------------------------
+// 体内是否出现 break <name> / continue <name>。
+let scan_ref_label = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nlen: u64) -> bool {
+  let n: u64 = group_len(ast, g);
+  loop it(k: u64 = 0) while k < n {
+    let id: u64 = rd.child_id(ast, g, k);
+    if is_ident(ast, id) {
+      if (ident_is(src, ast, id, "break") or ident_is(src, ast, id, "continue")) and ((k + 1) < n) {
+        let nx: u64 = rd.child_id(ast, g, k + 1);
+        if ident_named(src, ast, nx, noff, nlen) { return true; }
+      }
+    } else if is_group(ast, id) {
+      if scan_ref_label(src, ast, id, noff, nlen) { return true; }
+    }
+    k = k + 1;
+  };
+  return false;
+};
+
+// 体内任意位置是否出现 break（B 形态的结果值保护）。
+let scan_break = func(src: Slice(u8), ast: rd.RawAst, g: u64) -> bool {
+  let n: u64 = group_len(ast, g);
+  loop it(k: u64 = 0) while k < n {
+    let id: u64 = rd.child_id(ast, g, k);
+    if is_ident(ast, id) {
+      if ident_is(src, ast, id, "break") { return true; }
+    } else if is_group(ast, id) {
+      if scan_break(src, ast, id) { return true; }
+    }
+    k = k + 1;
+  };
+  return false;
+};
+
+// 子树里是否把某个名字当成标识符使用。
+let scan_name = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nlen: u64) -> bool {
+  let n: u64 = group_len(ast, g);
+  loop it(k: u64 = 0) while k < n {
+    let id: u64 = rd.child_id(ast, g, k);
+    if is_ident(ast, id) {
+      if ident_named(src, ast, id, noff, nlen) { return true; }
+    } else if is_group(ast, id) {
+      if scan_name(src, ast, id, noff, nlen) { return true; }
+    }
+    k = k + 1;
+  };
+  return false;
+};
+
+// --- 状态绑定 -------------------------------------------------------------
+let trim_range = func(src: Slice(u8), from0: u64, to0: u64) -> Range {
+  let from: u64 = loop lf(k: u64 = from0) while (k < to0) and is_space(src[k]) {
+    k = k + 1;
+  };
+  let to: u64 = loop lt(k: u64 = to0) while (k > from) and is_space(src[k - 1]) {
+    k = k - 1;
+  };
+  return Range { from: from, to: to };
+};
+
+// 在绑定区间 [start, stop) 里定位类型文本：冒号之后、等号之前。
+let binder_type = func(src: Slice(u8), ast: rd.RawAst, pg: u64, start: u64, stop: u64, b: Mut(Binder)) {
+  let colon: u64 = no_idx();
+  let eq: u64 = no_idx();
+  loop sc(k: u64 = start) while (k < stop) and (eq == no_idx()) {
+    let id: u64 = rd.child_id(ast, pg, k);
+    if (colon == no_idx()) and punct_is(src, ast, id, 58) { colon = k; }
+    if (colon != no_idx()) and punct_is(src, ast, id, 61) { eq = k; }
+    k = k + 1;
+  };
+  if (colon == no_idx()) or (eq == no_idx()) {
+    b.type_off = b.text_off;
+    b.type_len = 0;
+    return;
+  }
+  let cs: rd.Span = rd.node_span(ast, rd.child_id(ast, pg, colon));
+  let es: rd.Span = rd.node_span(ast, rd.child_id(ast, pg, eq));
+  let tr: Range = trim_range(src, cs.offset + cs.len, es.offset);
+  b.type_off = tr.from;
+  b.type_len = tr.to - tr.from;
+};
+
+// 小括号组里按顶层逗号切成一组 Binder；超过容量回 1000 表示放弃。
+let parse_binders = func(src: Slice(u8), ast: rd.RawAst, pg: u64, out: Mut(Binder), cap: u64) -> u64 {
+  let m: u64 = group_len(ast, pg);
+  let count: u64 = 0;
+  let start: u64 = 0;
+  let k: u64 = 0;
+  loop it(k: u64 = 0) while k < m {
+    let id: u64 = rd.child_id(ast, pg, k);
+    if punct_is(src, ast, id, 44) {
+      if k <= start { return 1000; }
+      if count >= cap { return 1000; }
+      let first: u64 = rd.child_id(ast, pg, start);
+      let last: u64 = rd.child_id(ast, pg, k - 1);
+      if is_ident(ast, first) == false { return 1000; }
+      let ns: rd.Span = rd.node_span(ast, first);
+      let le: rd.Span = rd.node_span(ast, last);
+      let b: Mut(Binder) = binder_at(out, count);
+      b.name_off = ns.offset;
+      b.name_len = ns.len;
+      b.text_off = ns.offset;
+      b.text_len = le.offset + le.len - ns.offset;
+      binder_type(src, ast, pg, start, k, b);
+      count = count + 1;
+      start = k + 1;
+    }
+    k = k + 1;
+  };
+  if m > start {
+    if count >= cap { return 1000; }
+    let first: u64 = rd.child_id(ast, pg, start);
+    let last: u64 = rd.child_id(ast, pg, m - 1);
+    if is_ident(ast, first) == false { return 1000; }
+    let ns: rd.Span = rd.node_span(ast, first);
+    let le: rd.Span = rd.node_span(ast, last);
+    let b: Mut(Binder) = binder_at(out, count);
+    b.name_off = ns.offset;
+    b.name_len = ns.len;
+    b.text_off = ns.offset;
+    b.text_len = le.offset + le.len - ns.offset;
+    binder_type(src, ast, pg, start, m, b);
+    count = count + 1;
+  }
+  return count;
+};
+
+// 行首缩进：loop 所在行从行首到第一个非水平空白字节。
+let line_indent = func(src: Slice(u8), off: u64) -> Range {
+  let ls: u64 = loop lb(k: u64 = off) while (k > 0) and (src[k - 1] != 10) {
+    k = k - 1;
+  };
+  let ie: u64 = loop lw(k: u64 = ls) while (k < off) and is_hspace(src[k]) {
+    k = k + 1;
+  };
+  if ie == off {
+    return Range { from: ls, to: off };
+  }
+  return Range { from: off, to: off };
+};
+
+// --- 编辑表 ---------------------------------------------------------------
+let State = struct {
+  ast: rd.RawAst,
+  src: Slice(u8),
+  edits: Mut(Edit),
+  edit_cap: u64,
+  edit_len: u64,
+  binders: Mut(Binder),
+  binder_cap: u64,
+  path: Slice(u8),
+  rewritten_a: u64,
+  rewritten_b: u64,
+  rewritten_c: u64,
+  kept_label: u64,
+  kept_escape: u64,
+  kept_position: u64,
+  kept_break: u64,
+  kept_shape: u64,
+};
+
+let edit_at = func(base: Mut(Edit), i: u64) -> Mut(Edit) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Edit), raw + i * size_of(Edit));
+};
+
+let edit_grow = func(st: Mut(State)) {
+  let next: u64 = st.edit_cap * 2;
+  let raw: u64 = os.alloc_bytes(next * size_of(Edit));
+  let fresh: Mut(Edit) = ptr_cast(Mut(Edit), raw);
+  let old: Mut(Edit) = st.edits;
+  let bytes: u64 = st.edit_len * size_of(Edit);
+  let from: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), old), bytes);
+  let to: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), fresh), bytes);
+  loop cp(i: u64 = 0) while i < bytes {
+    to[i] = from[i];
+    i = i + 1;
+  };
+  let dead: u64 = os.free_bytes(old as u64);
+  st.edits = fresh;
+  st.edit_cap = next;
+};
+
+let edit_add = func(st: Mut(State), head: u64, tail: u64, rep: Ref(u8), rep_len: u64) {
+  if st.edit_len >= st.edit_cap { edit_grow(st); }
+  let e: Mut(Edit) = edit_at(st.edits, st.edit_len);
+  e.head = head;
+  e.tail = tail;
+  e.rep = rep;
+  e.rep_len = rep_len;
+  st.edit_len = st.edit_len + 1;
+};
+
+// 提升语句：每个绑定一条 let，末行留给调用方接 while。
+let emit_hoist = func(t: Mut(Text), st: Mut(State), count: u64, indent: Range) {
+  loop it(i: u64 = 0) while i < count {
+    let b: Binder = deref(binder_at(st.binders, i));
+    text_put(t, "let ");
+    text_span(t, st.src, b.text_off, b.text_off + b.text_len);
+    text_put(t, ";");
+    text_byte(t, 10);
+    text_span(t, st.src, indent.from, indent.to);
+    i = i + 1;
+  };
+};
+
+let report = func(st: Mut(State), line: u64, label: Slice(u8), msg: Slice(u8)) {
+  let p: Slice(u8) = st.path;
+  io.println(f"{p}:{line}: loop '{label}': {msg}");
+};
+
+let label_of = func(st: Mut(State), label: u64) -> Slice(u8) {
+  let out: Slice(u8) = "";
+  if label != no_idx() {
+    out = rd.node_text(st.src, st.ast, label);
+  }
+  return out;
+};
+
+let escapes_after = func(st: Mut(State), g: u64, from_index: u64, count: u64) -> bool {
+  let n: u64 = group_len(st.ast, g);
+  loop it(j: u64 = from_index) while j < n {
+    let id: u64 = rd.child_id(st.ast, g, j);
+    loop nb(i: u64 = 0) while i < count {
+      let b: Binder = deref(binder_at(st.binders, i));
+      if is_ident(st.ast, id) {
+        if ident_named(st.src, st.ast, id, b.name_off, b.name_len) { return true; }
+      } else if is_group(st.ast, id) {
+        if scan_name(st.src, st.ast, id, b.name_off, b.name_len) { return true; }
+      }
+      i = i + 1;
+    };
+    j = j + 1;
+  };
+  return false;
+};
+
+// 从 eq 位置向前找同一个 let 语句的起始记号。
+let find_let = func(src: Slice(u8), ast: rd.RawAst, g: u64, from: u64) -> u64 {
+  if from == 0 { return no_idx(); }
+  let i: u64 = from - 1;
+  let id: u64 = rd.child_id(ast, g, i);
+  let k: u64 = node_kind(ast, id);
+  if ((k == rd.RAW_TOKEN_IDENT()) and ident_is(src, ast, id, "let")) { return i; }
+  if k == rd.RAW_TOKEN_PUNCT() {
+    let sp: rd.Span = rd.node_span(ast, id);
+    if (sp.len == 1) and (src[sp.offset] == 59) { return no_idx(); }
+  }
+  return find_let(src, ast, g, i);
+};
+
+// --- 形态分析与改写 -------------------------------------------------------
+let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
+  let ast: rd.RawAst = st.ast;
+  let src: Slice(u8) = st.src;
+  let loop_id: u64 = rd.child_id(ast, g, k);
+  let line: u64 = node_line(ast, loop_id);
+  let pk: u64 = node_kind(ast, g);
+  if (pk != rd.RAW_ROOT()) and (pk != rd.RAW_GROUP_BRACE()) {
+    st.kept_position = st.kept_position + 1;
+    report(st, line, "", "kept (not a statement group)");
+    return;
+  }
+
+  let label: u64 = no_idx();
+  let pg: u64 = no_idx();
+  let after_pg: u64 = no_idx();
+  let while_idx: u64 = no_idx();
+
+  if (k + 1) >= n {
+    st.kept_shape = st.kept_shape + 1;
+    report(st, line, "", "kept (empty loop)");
+    return;
+  }
+  let id1: u64 = rd.child_id(ast, g, k + 1);
+  let kind1: u64 = node_kind(ast, id1);
+  if kind1 == rd.RAW_GROUP_PAREN() {
+    pg = k + 1;
+    after_pg = k + 2;
+  } else if kind1 == rd.RAW_TOKEN_IDENT() {
+    let id2: u64 = 0;
+    let kind2: u64 = 0;
+    if (k + 2) < n {
+      id2 = rd.child_id(ast, g, k + 2);
+      kind2 = node_kind(ast, id2);
+    }
+    if kind2 == rd.RAW_GROUP_PAREN() {
+      label = id1;
+      pg = k + 2;
+      after_pg = k + 3;
+    } else if ident_is(src, ast, id1, "while") {
+      while_idx = k + 1;
+    } else if (k + 2) < n and ident_is(src, ast, id2, "while") {
+      // loop name while ...：名字后面没有小括号，构不成标签。
+      while_idx = k + 2;
+    } else {
+      st.kept_shape = st.kept_shape + 1;
+      report(st, line, "", "kept (unknown loop shape)");
+      return;
+    }
+  } else {
+    st.kept_shape = st.kept_shape + 1;
+    report(st, line, "", "kept (unknown loop shape)");
+    return;
+  }
+
+  if while_idx == no_idx() {
+    if (after_pg < n) and ident_is(src, ast, rd.child_id(ast, g, after_pg), "while") {
+      while_idx = after_pg;
+    } else {
+      st.kept_shape = st.kept_shape + 1;
+      report(st, line, "", "kept (no while clause)");
+      return;
+    }
+  }
+
+  let count: u64 = 0;
+  if pg != no_idx() {
+    let pgid: u64 = rd.child_id(ast, g, pg);
+    count = parse_binders(src, ast, pgid, st.binders, st.binder_cap);
+    if count == 1000 {
+      st.kept_shape = st.kept_shape + 1;
+      report(st, line, "", "kept (binder list too complex)");
+      return;
+    }
+  }
+
+  let cond_start: u64 = while_idx + 1;
+  let body_idx: u64 = no_idx();
+  loop find(k2: u64 = cond_start) while (k2 < n) and (body_idx == no_idx()) {
+    let id: u64 = rd.child_id(ast, g, k2);
+    if is_brace(ast, id) and ((k2 + 1 == n) or punct_is(src, ast, rd.child_id(ast, g, k2 + 1), 59)) {
+      body_idx = k2;
+    }
+    k2 = k2 + 1;
+  };
+  if body_idx == no_idx() {
+    st.kept_shape = st.kept_shape + 1;
+    report(st, line, "", "kept (no loop body)");
+    return;
+  }
+  let body_id: u64 = rd.child_id(ast, g, body_idx);
+  let has_semi: u64 = 0;
+  if (body_idx + 1) < n {
+    has_semi = 1;
+  }
+  let stmt_end: u64 = body_idx + 1 + has_semi;
+
+  // 标签引用检查对三种形态都成立。
+  if label != no_idx() {
+    let ls: rd.Span = rd.node_span(ast, label);
+    if scan_ref_label(src, ast, body_id, ls.offset, ls.len) {
+      st.kept_label = st.kept_label + 1;
+      report(st, line, label_of(st, label), "kept (referenced label)");
+      return;
+    }
+  }
+
+  // 位置判定。
+  let statement: u64 = 0;
+  let let_idx: u64 = no_idx();
+  if k == 0 {
+    statement = 1;
+  } else {
+    let prev: u64 = rd.child_id(ast, g, k - 1);
+    let prevk: u64 = node_kind(ast, prev);
+    if punct_is(src, ast, prev, 59) {
+      statement = 1;
+    } else if prevk == rd.RAW_GROUP_BRACE() {
+      statement = 1;
+    } else if punct_is(src, ast, prev, 61) {
+      let li: u64 = find_let(src, ast, g, k - 1);
+      if li == no_idx() {
+        st.kept_position = st.kept_position + 1;
+        report(st, line, label_of(st, label), "kept (assignment is not a let binding)");
+        return;
+      }
+      let_idx = li;
+    } else {
+      st.kept_position = st.kept_position + 1;
+      report(st, line, label_of(st, label), "kept (expression position)");
+      return;
+    }
+  }
+
+  let indent: Range = line_indent(src, node_off(ast, loop_id));
+
+  if statement == 1 {
+    if count == 0 {
+      let t0: Text = text_new(16);
+      let t: Mut(Text) = mut_of(t0);
+      text_put(t, "while");
+      edit_add(st, node_off(ast, loop_id), node_stop(ast, rd.child_id(ast, g, while_idx)),
+               ptr_cast(Ref(u8), t.buf.ptr), t.len);
+      st.rewritten_c = st.rewritten_c + 1;
+      report(st, line, label_of(st, label), "rewrote case C");
+      return;
+    }
+    if escapes_after(st, g, stmt_end, count) {
+      st.kept_escape = st.kept_escape + 1;
+      report(st, line, label_of(st, label), "kept (binder name escapes)");
+      return;
+    }
+    let t0: Text = text_new(64);
+    let t: Mut(Text) = mut_of(t0);
+    emit_hoist(t, st, count, indent);
+    text_put(t, "while");
+    edit_add(st, node_off(ast, loop_id), node_stop(ast, rd.child_id(ast, g, while_idx)),
+             ptr_cast(Ref(u8), t.buf.ptr), t.len);
+    st.rewritten_a = st.rewritten_a + 1;
+    report(st, line, label_of(st, label), "rewrote case A");
+    return;
+  }
+
+  // B 形态：let 名字 : 类型 = loop ...
+  if count == 0 {
+    st.kept_shape = st.kept_shape + 1;
+    report(st, line, label_of(st, label), "kept (empty binder list cannot produce a result)");
+    return;
+  }
+  let let_id: u64 = rd.child_id(ast, g, let_idx);
+  let eq_id: u64 = rd.child_id(ast, g, k - 1);
+  if (let_idx + 2) >= (k - 1) {
+    st.kept_position = st.kept_position + 1;
+    report(st, line, label_of(st, label), "kept (let binding lacks a type annotation)");
+    return;
+  }
+  let name_id: u64 = rd.child_id(ast, g, let_idx + 1);
+  let colon_id: u64 = rd.child_id(ast, g, let_idx + 2);
+  if (is_ident(ast, name_id) == false) or (punct_is(src, ast, colon_id, 58) == false) {
+    st.kept_position = st.kept_position + 1;
+    report(st, line, label_of(st, label), "kept (let binding lacks a type annotation)");
+    return;
+  }
+  if scan_break(src, ast, body_id) {
+    st.kept_break = st.kept_break + 1;
+    report(st, line, label_of(st, label), "kept (break in result loop)");
+    return;
+  }
+  if escapes_after(st, g, stmt_end, count) {
+    st.kept_escape = st.kept_escape + 1;
+    report(st, line, label_of(st, label), "kept (binder name escapes)");
+    return;
+  }
+
+  let body_off: u64 = node_off(ast, body_id);
+  let body_stop: u64 = node_stop(ast, body_id);
+  let while_stop: u64 = node_stop(ast, rd.child_id(ast, g, while_idx));
+  let let_stop: u64 = node_stop(ast, let_id);
+  let eq_off: u64 = node_off(ast, eq_id);
+  // let 语句本来就在这一行的缩进位置，提升语句沿用同一份缩进。
+  let bindent: Range = line_indent(src, node_off(ast, let_id));
+
+  let t0: Text = text_new(96);
+  let t: Mut(Text) = mut_of(t0);
+  emit_hoist(t, st, count, bindent);
+  text_put(t, "while");
+  text_span(t, src, while_stop, body_off);
+  edit_add(st, node_off(ast, let_id), body_off, ptr_cast(Ref(u8), t.buf.ptr), t.len);
+
+  let decl_sp: Range = trim_range(src, let_stop, eq_off);
+  let last: Binder = deref(binder_at(st.binders, count - 1));
+  // 结果类型必须与最后一个状态绑定的类型逐字节相同，否则赋值会引入隐式转换。
+  let type_sp: Range = trim_range(src, node_stop(ast, colon_id), eq_off);
+  let rt: Slice(u8) = make_slice(Slice(u8), src.ptr + type_sp.from, type_sp.to - type_sp.from);
+  let lt: Slice(u8) = make_slice(Slice(u8), src.ptr + last.type_off, last.type_len);
+  if slice_eq(rt, lt) == false {
+    st.kept_position = st.kept_position + 1;
+    report(st, line, label_of(st, label), "kept (result type differs from last state type)");
+    return;
+  }
+  let q0: Text = text_new(64);
+  let q: Mut(Text) = mut_of(q0);
+  text_put(q, ";");
+  text_byte(q, 10);
+  text_span(q, src, bindent.from, bindent.to);
+  text_put(q, "let ");
+  text_span(q, src, decl_sp.from, decl_sp.to);
+  text_put(q, " = ");
+  text_span(q, src, last.name_off, last.name_off + last.name_len);
+  text_put(q, ";");
+  let tail: u64 = body_stop;
+  if has_semi == 1 {
+    tail = node_stop(ast, rd.child_id(ast, g, body_idx + 1));
+  }
+  edit_add(st, body_stop, tail, ptr_cast(Ref(u8), q.buf.ptr), q.len);
+  st.rewritten_b = st.rewritten_b + 1;
+  report(st, line, label_of(st, label), "rewrote case B");
+};
+
+let walk_group = func(st: Mut(State), g: u64) {
+  let n: u64 = group_len(st.ast, g);
+  loop it(k: u64 = 0) while k < n {
+    let id: u64 = rd.child_id(st.ast, g, k);
+    if is_ident(st.ast, id) {
+      if ident_is(st.src, st.ast, id, "loop") {
+        analyze_loop(st, g, k, n);
+      }
+    } else if is_group(st.ast, id) {
+      walk_group(st, id);
+    }
+    k = k + 1;
+  };
+};
+
+// --- 排序、重叠检查与贴回 -------------------------------------------------
+let sort_edits = func(st: Mut(State)) {
+  let n: u64 = st.edit_len;
+  loop outer(i: u64 = 0) while i < n {
+    let min: u64 = i;
+    let j: u64 = i + 1;
+    loop inner(j: u64 = i + 1) while j < n {
+      let a: Edit = deref(edit_at(st.edits, j));
+      let b: Edit = deref(edit_at(st.edits, min));
+      if a.head < b.head { min = j; }
+      j = j + 1;
+    };
+    if min != i {
+      let x: Mut(Edit) = edit_at(st.edits, i);
+      let y: Mut(Edit) = edit_at(st.edits, min);
+      let tmp: Edit = deref(x);
+      deref(x) = deref(y);
+      deref(y) = tmp;
+    }
+    i = i + 1;
+  };
+};
+
+let has_overlap = func(st: Mut(State)) -> bool {
+  let n: u64 = st.edit_len;
+  loop chk(i: u64 = 1) while i < n {
+    let prev: Edit = deref(edit_at(st.edits, i - 1));
+    let cur: Edit = deref(edit_at(st.edits, i));
+    if prev.tail > cur.head { return true; }
+    i = i + 1;
+  };
+  return false;
+};
+
+let apply_edits = func(st: Mut(State)) -> Text {
+  let total: u64 = st.src.len;
+  loop sz(i: u64 = 0) while i < st.edit_len {
+    let e: Edit = deref(edit_at(st.edits, i));
+    total = total + e.rep_len;
+    total = total - (e.tail - e.head);
+    i = i + 1;
+  };
+  let o0: Text = text_new(total + 16);
+  let o: Mut(Text) = mut_of(o0);
+  // 按字节偏移倒序贴回：每段倒着写入，最后把整块缓冲反转。
+  let cursor: u64 = st.src.len;
+  loop ap(i: u64 = st.edit_len) while i > 0 {
+    let e: Edit = deref(edit_at(st.edits, i - 1));
+    text_span_back(o, st.src, e.tail, cursor);
+    text_ptr_back(o, e.rep, e.rep_len);
+    cursor = e.head;
+    i = i - 1;
+  };
+  text_span_back(o, st.src, 0, cursor);
+  let view: MutSlice(u8) = o.buf;
+  let half: u64 = o.len / 2;
+  loop rv(i: u64 = 0) while i < half {
+    let j: u64 = o.len - 1 - i;
+    let tmp: u8 = view[i];
+    view[i] = view[j];
+    view[j] = tmp;
+    i = i + 1;
+  };
+  return o0;
+};
+
+// --- 命令行 ---------------------------------------------------------------
+let Cli = struct {
+  pass_loop: u64,
+  pending_pass: u64,
+  mode: u64,
+  have: u64,
+  help: u64,
+  bad: u64,
+  path: Slice(u8),
+};
+
+let usage = func() -> u64 {
+  let msg: Slice(u8) = "usage: ast_codemod --pass loop-to-while (--write | --dry-run) <file.lain>\n";
+  return os.eprint(msg);
+};
+
+let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
+  return slice_eq(a, b);
+};
+
+let take = func(c: Mut(Cli), a: Slice(u8)) {
+  if c.pending_pass == 1 {
+    if same(a, "loop-to-while") {
+      c.pass_loop = 1;
+    } else {
+      c.bad = 1;
+    }
+    c.pending_pass = 0;
+    return;
+  }
+  if same(a, "--pass") {
+    c.pending_pass = 1;
+    return;
+  }
+  if same(a, "--write") {
+    c.mode = 1;
+    return;
+  }
+  if same(a, "--dry-run") {
+    c.mode = 2;
+    return;
+  }
+  if (same(a, "--help")) or (same(a, "-h")) {
+    c.help = 1;
+    return;
+  }
+  if a.len > 0 and (a[0] == 45) {
+    c.bad = 1;
+    return;
+  }
+  if c.have == 1 {
+    c.bad = 1;
+    return;
+  }
+  c.path = a;
+  c.have = 1;
+};
+
+let arg = func(i: u64) -> Slice(u8) {
+  let n: u64 = os.argv_len(i);
+  let cap: u64 = n + 1;
+  let raw: u64 = os.alloc_bytes(cap);
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
+  let got: u64 = os.argv_copy(i, buf);
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got);
+};
+
+let fail_usage = func() -> i64 {
+  let rc: u64 = usage();
+  return 2;
+};
+
+let main = func() -> i64 {
+  let argc: u64 = os.argc();
+  let c0: Cli = Cli {
+    pass_loop: 0,
+    pending_pass: 0,
+    mode: 2,
+    have: 0,
+    help: 0,
+    bad: 0,
+    path: "",
+  };
+  let c: Mut(Cli) = mut_of(c0);
+  loop args(i: u64 = 1) while i < argc {
+    take(c, arg(i));
+    i = i + 1;
+  };
+  if c.help == 1 {
+    let rc: u64 = usage();
+    return 0;
+  }
+  if (c.bad == 1) or (c.have == 0) or (c.pass_loop == 0) {
+    return fail_usage();
+  }
+
+  let path: Slice(u8) = c.path;
+  let loaded: OptSlice.Opt = fs.read_bytes(path);
+  if OptSlice.is_none(loaded) {
+    os.eprint(f"ast_codemod: cannot read {path}\n");
+    return 2;
+  }
+  let src_mut: MutSlice(u8) = OptSlice.unwrap_or(loaded, make_slice(MutSlice(u8), null_ref(Mut(u8)), 0));
+  let src: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), src_mut.ptr), src_mut.len);
+
+  let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
+  let scan: rd.RawAst = rd.parse(src, probe);
+  if (scan.kind != rd.RD_ERR_CAPACITY()) and (scan.kind != rd.RD_OK()) {
+    os.eprint(f"ast_codemod: {path}:{scan.err_line}:{scan.err_col}: reader error {scan.kind}\n");
+    let dead: u64 = os.free_bytes(src_mut.ptr as u64);
+    return 2;
+  }
+  let need: u64 = scan.needed + 64;
+  let arena_raw: u64 = os.alloc_bytes(need);
+  let arena: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), arena_raw), need);
+  let ast: rd.RawAst = rd.parse(src, arena);
+  if ast.kind != rd.RD_OK() {
+    os.eprint(f"ast_codemod: {path}:{ast.err_line}:{ast.err_col}: reader error {ast.kind}\n");
+    let dead: u64 = os.free_bytes(arena_raw);
+    let dead2: u64 = os.free_bytes(src_mut.ptr as u64);
+    return 2;
+  }
+
+  let edits_raw: u64 = os.alloc_bytes(64 * size_of(Edit));
+  let binders_raw: u64 = os.alloc_bytes(8 * size_of(Binder));
+  let st0: State = State {
+    ast: ast,
+    src: src,
+    edits: ptr_cast(Mut(Edit), edits_raw),
+    edit_cap: 64,
+    edit_len: 0,
+    binders: ptr_cast(Mut(Binder), binders_raw),
+    binder_cap: 8,
+    path: path,
+    rewritten_a: 0,
+    rewritten_b: 0,
+    rewritten_c: 0,
+    kept_label: 0,
+    kept_escape: 0,
+    kept_position: 0,
+    kept_break: 0,
+    kept_shape: 0,
+  };
+  let st: Mut(State) = mut_of(st0);
+
+  walk_group(st, ast.root);
+  sort_edits(st);
+  if has_overlap(st) {
+    os.eprint(f"ast_codemod: {path}: overlapping edits produced, refusing to write\n");
+    return 2;
+  }
+
+  let out: Text = apply_edits(st);
+  let rewritten: u64 = st.rewritten_a + st.rewritten_b + st.rewritten_c;
+  let kept: u64 = st.kept_label + st.kept_escape + st.kept_position + st.kept_break + st.kept_shape;
+  io.println(f"{path}: rewritten {rewritten} (A={st.rewritten_a}, B={st.rewritten_b}, C={st.rewritten_c}); kept {kept} (referenced label={st.kept_label}, escapes={st.kept_escape}, position={st.kept_position}, break={st.kept_break}, shape={st.kept_shape})");
+
+  if c.mode == 1 {
+    let view: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), out.buf.ptr), out.len);
+    let ok: bool = fs.write_bytes(path, view);
+    if ok == false {
+      os.eprint(f"ast_codemod: cannot write {path}\n");
+      return 2;
+    }
+  }
+  return 0;
+};

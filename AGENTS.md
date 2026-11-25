@@ -19,4 +19,4 @@ READ THE FXXKING DOCS
   - Do NOT chain `.field` directly onto a call result (`foo().bar`); bind `let x = foo();` first.
   - Parenthesize comparisons combined with `and`/`or`: `(a.x == b.x) and (a.y == b.y)`.
   - Avoid `is_null(p) == 0` where `bool` vs integer comparison is strict; prefer `if is_null(p)` or `(p as u64) != 0`.
-- **IR Opcode Sync**: Whenever modifying `src/ir/ir_codes.lain`, keep `src/ir/verify.lain`, `src/ir/emit_text.lain`, `src/backend/c99.lain`, and `src/vm/engine.lain` in sync, and verify via `.\build\build_runner.exe --bootstrap`.
+- **IR Opcode Sync**: Whenever modifying `src/ir/ir_codes.lain`, keep `src/ir/verify/model.lain`, `src/ir/verify/checks.lain`, `src/ir/emit_text.lain`, `src/backend/c99.lain`, and `src/vm/engine.lain` in sync, and verify via `.\build\build_runner.exe --bootstrap`.

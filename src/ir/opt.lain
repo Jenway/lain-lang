@@ -2,7 +2,7 @@
 // 代数恒等式化简、路径敏感事实传播、局部存放与重复读出的转发、条件分支
 // 删除与过程内无用户纯指令删除。
 //
-// 折叠只改写模块自身的记录：能被替换的操作数就地换成 OP_INT，或把使用者
+// 折叠只改写模块自身的记录：能被替换的操作数就地换成 OperandKind.Int，或把使用者
 // 改写成恒等式另一侧的值名。改写之后冗余指令自然失去使用者，由删除趟按
 // 使用情况去掉。模块级 insts 数组里被删掉的记录保持原样：验证器只按区域
 // 序列行走，不会读到它们。
@@ -13,7 +13,7 @@
 // #if 的条件一旦是已知常量，未走的分支整段清空；#if 没有结果值时它只是
 // 控制流，清空未走分支不会影响任何结果值。
 let codes = import("src::ir::ir_codes");
-let vf = import("src::ir::verify");
+let vf = import("src::ir::verify::model");
 
 pub let OptStats = struct {
   folded: u64,
@@ -364,7 +364,7 @@ let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
     let ii: u64 = region_index(r, i);
     if ii < c.inst_count {
       let it: vf.IrInst = inst_read(c, ii);
-      if it.kind == codes.INST_ALLOCA() {
+      if it.kind == codes.InstKind.Alloca as u64 {
         let put: u64 = slots_add(c.slots, it.r0);
       }
       if it.body != vf.NO_REGION() {
@@ -389,9 +389,9 @@ let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
 
 // 可能会透过任意指针改动内存的指令。
 let mem_escape = func(k: u64) -> u64 {
-  if k == codes.INST_CALL() { return 1; }
-  if (k >= codes.INST_XCHG()) and (k <= codes.INST_RMW_XOR()) { return 1; }
-  if (k >= codes.INST_ATOMIC_LOAD()) and (k <= codes.INST_ATOMIC_FENCE()) { return 1; }
+  if k == codes.InstKind.Call as u64 { return 1; }
+  if (k >= codes.InstKind.Xchg as u64) and (k <= codes.InstKind.RmwXor as u64) { return 1; }
+  if (k >= codes.InstKind.AtomicLoad as u64) and (k <= codes.InstKind.AtomicFence as u64) { return 1; }
   return 0;
 };
 
@@ -405,34 +405,34 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
   let it: vf.IrInst = inst_read(c, ii);
   let mf: Mut(MemFacts) = c.mem;
   if mem_escape(it.kind) == 1 { return mem_clear(mf); }
-  if it.kind == codes.INST_STORE() {
+  if it.kind == codes.InstKind.Store as u64 {
     if it.operand_count < 2 { return mem_clear(mf); }
     let value: vf.IrOperand = vf.inst_op(it, 0);
     let dest: vf.IrOperand = vf.inst_op(it, 1);
-    if dest.kind != vf.OP_VALUE() { return mem_clear(mf); }
+    if dest.kind != codes.OperandKind.Value as u64 { return mem_clear(mf); }
     if dest.name == 0 { return mem_clear(mf); }
     if slots_has(c, dest.name) == 0 { return mem_clear(mf); }
     let key: u64 = mem_key(it);
-    if value.kind == vf.OP_INT() {
-      if it.ty_kind == vf.TY_BITS() {
+    if value.kind == codes.OperandKind.Int as u64 {
+      if it.ty_kind == codes.TyKind.Bits as u64 {
         let bits: u64 = mask_width(value.bits, it.ty_width);
         return mem_set(mf, dest.name, key, 1, bits);
       }
       let drop_int: u64 = mem_drop(mf, dest.name);
       return 0;
     }
-    if value.kind == vf.OP_VALUE() {
+    if value.kind == codes.OperandKind.Value as u64 {
       if value.name != 0 { return mem_set(mf, dest.name, key, 2, value.name); }
     }
     let drop_other: u64 = mem_drop(mf, dest.name);
     return 0;
   }
-  if it.kind == codes.INST_LOAD() {
+  if it.kind == codes.InstKind.Load as u64 {
     if it.operand_count != 1 { return 0; }
     if it.result_count != 1 { return 0; }
     if it.r0 == 0 { return 0; }
     let src: vf.IrOperand = vf.inst_op(it, 0);
-    if src.kind != vf.OP_VALUE() { return 0; }
+    if src.kind != codes.OperandKind.Value as u64 { return 0; }
     if src.name == 0 { return 0; }
     let key: u64 = mem_key(it);
     let at: u64 = mem_find(mf, src.name, key);
@@ -450,51 +450,51 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
   return 0;
 };
 
-// 可折叠的整数运算：两个 OP_INT 操作数、一条指令结果。除数为 0 与移位量
+// 可折叠的整数运算：两个 OperandKind.Int 操作数、一条指令结果。除数为 0 与移位量
 // 达到 64 的情况不折叠，留给运行期。
 let fold_inst = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
   if it.operand_count != 2 { return no_fold(); }
-  if it.op0_kind != vf.OP_INT() { return no_fold(); }
-  if it.op1_kind != vf.OP_INT() { return no_fold(); }
+  if it.op0_kind != codes.OperandKind.Int as u64 { return no_fold(); }
+  if it.op1_kind != codes.OperandKind.Int as u64 { return no_fold(); }
   let a: u64 = it.op0_bits;
   let b: u64 = it.op1_bits;
   let w: u64 = it.ty_width;
   let k: u64 = it.kind;
-  if k == codes.INST_ADD() { return fold_of(mask_width(a + b, w)); }
-  if k == codes.INST_SUB() { return fold_of(mask_width(a - b, w)); }
-  if k == codes.INST_MUL() { return fold_of(mask_width(a * b, w)); }
-  if k == codes.INST_AND() { return fold_of(mask_width(a & b, w)); }
-  if k == codes.INST_OR() { return fold_of(mask_width(a | b, w)); }
-  if k == codes.INST_XOR() { return fold_of(mask_width(a ^ b, w)); }
-  if k == codes.INST_EQ() {
+  if k == codes.InstKind.Add as u64 { return fold_of(mask_width(a + b, w)); }
+  if k == codes.InstKind.Sub as u64 { return fold_of(mask_width(a - b, w)); }
+  if k == codes.InstKind.Mul as u64 { return fold_of(mask_width(a * b, w)); }
+  if k == codes.InstKind.And as u64 { return fold_of(mask_width(a & b, w)); }
+  if k == codes.InstKind.Or as u64 { return fold_of(mask_width(a | b, w)); }
+  if k == codes.InstKind.Xor as u64 { return fold_of(mask_width(a ^ b, w)); }
+  if k == codes.InstKind.Eq as u64 {
     if a == b { return fold_of(1); }
     return fold_of(0);
   }
-  if k == codes.INST_NE() {
+  if k == codes.InstKind.Ne as u64 {
     if a != b { return fold_of(1); }
     return fold_of(0);
   }
-  if k == codes.INST_SLT() {
+  if k == codes.InstKind.SLt as u64 {
     let sa: i64 = sign_fill(a, w);
     let sb: i64 = sign_fill(b, w);
     if sa < sb { return fold_of(1); }
     return fold_of(0);
   }
-  if k == codes.INST_SGT() {
+  if k == codes.InstKind.SGt as u64 {
     let sa: i64 = sign_fill(a, w);
     let sb: i64 = sign_fill(b, w);
     if sa > sb { return fold_of(1); }
     return fold_of(0);
   }
-  if k == codes.INST_ULT() {
+  if k == codes.InstKind.ULt as u64 {
     let ua: u64 = mask_width(a, w);
     let ub: u64 = mask_width(b, w);
     if ua < ub { return fold_of(1); }
     return fold_of(0);
   }
-  if k == codes.INST_UGT() {
+  if k == codes.InstKind.UGt as u64 {
     let ua: u64 = mask_width(a, w);
     let ub: u64 = mask_width(b, w);
     if ua > ub { return fold_of(1); }
@@ -503,15 +503,15 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
   // 除法与取余在除数为 0 时不折叠：那是一次运行期陷阱，常量折叠不能把它
   // 提前成编译期的未定义行为。有符号除法与取余按操作数宽度做符号扩展，
   // 除数为 -1 时单独处理，避免最小负数取反溢出。
-  if k == codes.INST_UDIV() {
+  if k == codes.InstKind.UDiv as u64 {
     if b == 0 { return no_fold(); }
     return fold_of(mask_width(a / b, w));
   }
-  if k == codes.INST_UREM() {
+  if k == codes.InstKind.URem as u64 {
     if b == 0 { return no_fold(); }
     return fold_of(mask_width(a % b, w));
   }
-  if k == codes.INST_SDIV() {
+  if k == codes.InstKind.SDiv as u64 {
     let den: i64 = sign_fill(b, w);
     if den == 0 { return no_fold(); }
     if den == (0 - 1) { return fold_of(mask_width(0 - a, w)); }
@@ -519,7 +519,7 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
     let ratio: i64 = num / den;
     return fold_of(mask_width(ratio as u64, w));
   }
-  if k == codes.INST_SREM() {
+  if k == codes.InstKind.SRem as u64 {
     let den2: i64 = sign_fill(b, w);
     if den2 == 0 { return no_fold(); }
     if den2 == (0 - 1) { return fold_of(0); }
@@ -529,10 +529,10 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
   }
   // 移位量达到 64 时不折叠，同样交给运行期；左移与逻辑右移按操作数宽度
   // 取值，算术右移先做符号扩展再移位。
-  if (k == codes.INST_SHL()) or (k == codes.INST_LSHR()) or (k == codes.INST_ASHR()) {
+  if (k == codes.InstKind.Shl as u64) or (k == codes.InstKind.LShr as u64) or (k == codes.InstKind.AShr as u64) {
     if b >= 64 { return no_fold(); }
-    if k == codes.INST_SHL() { return fold_of(mask_width(a << b, w)); }
-    if k == codes.INST_LSHR() { return fold_of(mask_width(a, w) >> b); }
+    if k == codes.InstKind.Shl as u64 { return fold_of(mask_width(a << b, w)); }
+    if k == codes.InstKind.LShr as u64 { return fold_of(mask_width(a, w) >> b); }
     let wide: i64 = sign_fill(a, w);
     let amount: i64 = b as i64;
     let kept: i64 = wide >> amount;
@@ -545,12 +545,12 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
 // 源操作数宽度，而整数字面量不携带宽度，所以 #sext 不折叠。
 let fold_conv = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
-  if it.ty_kind != vf.TY_BITS() { return no_fold(); }
+  if it.ty_kind != codes.TyKind.Bits as u64 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
   if it.operand_count != 1 { return no_fold(); }
-  if it.op0_kind != vf.OP_INT() { return no_fold(); }
-  if it.kind == codes.INST_ZEXT() { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
-  if it.kind == codes.INST_TRUNC() { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
+  if it.op0_kind != codes.OperandKind.Int as u64 { return no_fold(); }
+  if it.kind == codes.InstKind.ZExt as u64 { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
+  if it.kind == codes.InstKind.Trunc as u64 { return fold_of(mask_width(it.op0_bits, it.ty_width)); }
   return no_fold();
 };
 
@@ -559,10 +559,10 @@ let fold_pick = func(a: Fold, b: Fold) -> Fold {
   return b;
 };
 
-// 操作数本身作为折叠结果：OP_INT 是常量，OP_VALUE 是别名。
+// 操作数本身作为折叠结果：OperandKind.Int 是常量，OperandKind.Value 是别名。
 let operand_fold = func(op: vf.IrOperand) -> Fold {
-  if op.kind == vf.OP_INT() { return fold_of(op.bits); }
-  if op.kind == vf.OP_VALUE() {
+  if op.kind == codes.OperandKind.Int as u64 { return fold_of(op.bits); }
+  if op.kind == codes.OperandKind.Value as u64 {
     if op.name == 0 { return no_fold(); }
     return alias_of(op.name);
   }
@@ -574,73 +574,73 @@ let fold_identity = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
   if it.operand_count != 2 { return no_fold(); }
-  if it.ty_kind != vf.TY_BITS() { return no_fold(); }
+  if it.ty_kind != codes.TyKind.Bits as u64 { return no_fold(); }
   let k: u64 = it.kind;
   let a: vf.IrOperand = vf.inst_op(it, 0);
   let b: vf.IrOperand = vf.inst_op(it, 1);
-  let a_int: u64 = a.kind == vf.OP_INT();
-  let b_int: u64 = b.kind == vf.OP_INT();
+  let a_int: u64 = a.kind == codes.OperandKind.Int as u64;
+  let b_int: u64 = b.kind == codes.OperandKind.Int as u64;
   let a_zero: u64 = 0;
   let b_zero: u64 = 0;
   if a_int == 1 { if a.bits == 0 { a_zero = 1; } }
   if b_int == 1 { if b.bits == 0 { b_zero = 1; } }
   let same: u64 = 0;
-  if (a.kind == vf.OP_VALUE()) and (b.kind == vf.OP_VALUE()) {
+  if (a.kind == codes.OperandKind.Value as u64) and (b.kind == codes.OperandKind.Value as u64) {
     if (a.name != 0) and (a.name == b.name) { same = 1; }
   }
-  if k == codes.INST_ADD() {
+  if k == codes.InstKind.Add as u64 {
     if b_zero == 1 { return operand_fold(a); }
     if a_zero == 1 { return operand_fold(b); }
   }
-  if k == codes.INST_SUB() {
+  if k == codes.InstKind.Sub as u64 {
     if b_zero == 1 { return operand_fold(a); }
     if same == 1 { return fold_of(0); }
   }
-  if k == codes.INST_MUL() {
+  if k == codes.InstKind.Mul as u64 {
     if a_zero == 1 { return fold_of(0); }
     if b_zero == 1 { return fold_of(0); }
     if (b_int == 1) and (b.bits == 1) { return operand_fold(a); }
     if (a_int == 1) and (a.bits == 1) { return operand_fold(b); }
   }
-  if k == codes.INST_AND() {
+  if k == codes.InstKind.And as u64 {
     if a_zero == 1 { return fold_of(0); }
     if b_zero == 1 { return fold_of(0); }
     if same == 1 { return operand_fold(a); }
   }
-  if k == codes.INST_OR() {
+  if k == codes.InstKind.Or as u64 {
     if b_zero == 1 { return operand_fold(a); }
     if a_zero == 1 { return operand_fold(b); }
     if same == 1 { return operand_fold(a); }
   }
-  if k == codes.INST_XOR() {
+  if k == codes.InstKind.Xor as u64 {
     if b_zero == 1 { return operand_fold(a); }
     if a_zero == 1 { return operand_fold(b); }
     if same == 1 { return fold_of(0); }
   }
-  if (k == codes.INST_SHL()) or (k == codes.INST_LSHR()) or (k == codes.INST_ASHR()) {
+  if (k == codes.InstKind.Shl as u64) or (k == codes.InstKind.LShr as u64) or (k == codes.InstKind.AShr as u64) {
     if b_zero == 1 { return operand_fold(a); }
   }
-  if k == codes.INST_EQ() {
+  if k == codes.InstKind.Eq as u64 {
     if same == 1 { return fold_of(1); }
   }
-  if k == codes.INST_NE() {
+  if k == codes.InstKind.Ne as u64 {
     if same == 1 { return fold_of(0); }
   }
   return no_fold();
 };
 
-// 这些指令的所有操作数位置都接受 OP_INT 常量：整数运算、整数比较与整数
+// 这些指令的所有操作数位置都接受 OperandKind.Int 常量：整数运算、整数比较与整数
 // 转换。其余位置（#if 条件、#switch 选择子、#return 实参、地址操作数、
-// 调用目标）必须保持 OP_VALUE。
+// 调用目标）必须保持 OperandKind.Value。
 let subst_ok = func(k: u64) -> u64 {
-  if (k >= codes.INST_ADD()) and (k <= codes.INST_ASHR()) { return 1; }
-  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return 1; }
-  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return 1; }
+  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.AShr as u64) { return 1; }
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return 1; }
+  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return 1; }
   return 0;
 };
 
 let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
-  let kind: u64 = vf.OP_INT();
+  let kind: u64 = codes.OperandKind.Int as u64;
   if i == 0 { it.op0_kind = kind; it.op0_name = 0; it.op0_bits = value; return 0; }
   if i == 1 { it.op1_kind = kind; it.op1_name = 0; it.op1_bits = value; return 0; }
   if i == 2 { it.op2_kind = kind; it.op2_name = 0; it.op2_bits = value; return 0; }
@@ -660,7 +660,7 @@ let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
   return 0;
 };
 
-// 把第 i 个操作数改成指向另一个值名，操作数种类保持 OP_VALUE。
+// 把第 i 个操作数改成指向另一个值名，操作数种类保持 OperandKind.Value。
 let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
   if i == 0 { it.op0_name = name; return 0; }
   if i == 1 { it.op1_name = name; return 0; }
@@ -681,7 +681,7 @@ let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
   return 0;
 };
 
-// 把一条指令里的操作数按事实表就地改写：已知常量落成 OP_INT（只在接受
+// 把一条指令里的操作数按事实表就地改写：已知常量落成 OperandKind.Int（只在接受
 // 整数字面量的位置），别名顺着链改写成最终值名。
 let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let copy: vf.IrInst = inst_read(c, ii);
@@ -689,7 +689,7 @@ let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -
   let lit: u64 = subst_ok(copy.kind);
   let changed: u64 = loop lp(i: u64 = 0, acc: u64 = 0) while i < n {
     let op: vf.IrOperand = vf.inst_op(copy, i);
-    if (op.kind == vf.OP_VALUE()) and (op.name != 0) {
+    if (op.kind == codes.OperandKind.Value as u64) and (op.name != 0) {
       let resolved: u64 = facts_resolve(f, op.name, 0);
       let cf: Fold = facts_const(f, op.name, 0);
       if (cf.ok == 1) and (lit == 1) {
@@ -731,11 +731,11 @@ let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats),
   let has: u64 = 0;
   let truth: u64 = 0;
   let named: u64 = 0;
-  if cond.kind == vf.OP_INT() {
+  if cond.kind == codes.OperandKind.Int as u64 {
     has = 1;
     truth = cond.bits & 1;
   }
-  if cond.kind == vf.OP_VALUE() {
+  if cond.kind == codes.OperandKind.Value as u64 {
     if cond.name != 0 {
       let cf: Fold = facts_const(f, cond.name, 0);
       if cf.ok == 1 {
@@ -780,7 +780,7 @@ let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats),
 // 子区域各自折叠。除 #if 之外的结构（循环体、#switch 分支等）在入口处
 // 记下事实表长度，退出时截回，区域内学到的事实不会漏到结构之外。
 let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
-  if it.kind == codes.INST_IF() { return fold_if(c, it, f, st, depth); }
+  if it.kind == codes.InstKind.If as u64 { return fold_if(c, it, f, st, depth); }
   let saved: u64 = f.count;
   if it.body != vf.NO_REGION() {
     let a: u64 = fold_region(c, it.body, f, st, depth + 1);
@@ -835,8 +835,8 @@ let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), d
 
 // --- 删除趟：过程内无用户纯指令删除 ---------------------------------------
 let is_pure = func(k: u64) -> u64 {
-  if k <= codes.INST_VCMPGT() { return 1; }
-  if k == codes.INST_LEA() { return 1; }
+  if k <= codes.InstKind.VCmpGt as u64 { return 1; }
+  if k == codes.InstKind.Lea as u64 { return 1; }
   return 0;
 };
 
@@ -844,7 +844,7 @@ let inst_uses = func(it: vf.IrInst, name: u64) -> u64 {
   let n: u64 = it.operand_count;
   let hit: u64 = loop lp(i: u64 = 0, found: u64 = 0) while (i < n) and (found == 0) {
     let op: vf.IrOperand = vf.inst_op(it, i);
-    if (op.kind == vf.OP_VALUE()) and (op.name == name) { found = 1; }
+    if (op.kind == codes.OperandKind.Value as u64) and (op.name == name) { found = 1; }
     i = i + 1;
   };
   return hit;
@@ -868,7 +868,7 @@ let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> u64 {
   return hit;
 };
 
-// 名字是否在该区域及其子区域里作为 OP_VALUE 操作数出现。判定按名字做，
+// 名字是否在该区域及其子区域里作为 OperandKind.Value 操作数出现。判定按名字做，
 // 兄弟区域里同名的另一种定义也让它显示为活的：这是保守判定。
 let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
   if ri >= c.region_count { return 0; }
@@ -892,10 +892,10 @@ let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
 // 从本过程已知局部槽读出的 #load 不会碰到无效地址，结果没有使用者时
 // 可以整条去掉；读写其它地址的指令保留。
 let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> u64 {
-  if it.kind != codes.INST_LOAD() { return 0; }
+  if it.kind != codes.InstKind.Load as u64 { return 0; }
   if it.operand_count != 1 { return 0; }
   let src: vf.IrOperand = vf.inst_op(it, 0);
-  if src.kind != vf.OP_VALUE() { return 0; }
+  if src.kind != codes.OperandKind.Value as u64 { return 0; }
   return slots_has(c, src.name);
 };
 

@@ -1,6 +1,9 @@
 // build.lain —— 纯 Lain 自举构建与全量验证入口（类比 `build.zig`）。
 // 零 Python / 零 CMake / 零 seed C 工具链：直接编排 Stage-1 -> Stage-2 -> Stage-3 固定点，
 // 再跑 examples/overhaul_showcase.lain 冒烟与 test.lain 全量回归。
+// C 侧一律走 `--split-c`：编译器把一个程序切成共享头、数据定义、若干过程分片与入口文件，
+// 构建脚本把 manifest 当作 clang 的响应文件，一次编译并链接成可执行文件。
+// 分片编译必须开 LTO：跨单元之后链接期要重新拿回整程序视域。
 // 默认走快速模式：build/lainc 已存在就直接复用它跑两套用例；
 // 加上 --bootstrap 才完整重跑 Stage-1/2/3 固定点校验。
 let os = import("std::os");
@@ -38,11 +41,23 @@ let test_bin = func() -> Slice(u8) {
   return p;
 };
 
-// clang 的 C99 编译命令；Windows 额外预留 16 MiB 栈。
+// 链接期需要的平台选项；Windows 额外预留 16 MiB 栈。
+let link_flags = func() -> Slice(u8) {
+  let f: Slice(u8) = "";
+  comptime if is_windows() { f = "-Wl,/STACK:16777216 "; };
+  return f;
+};
+
+// clang 的整文件 C99 编译命令；只有 Stage-1 的 bootstrap/lainc_boot.c 用它。
 let compile_c = func(src: Slice(u8), out: Slice(u8)) -> Slice(u8) {
-  let stack: Slice(u8) = "";
-  comptime if is_windows() { stack = "-Wl,/STACK:16777216 "; };
-  return f"clang -std=c99 -O2 {stack}{src} -o {out}";
+  return f"clang -std=c99 -O2 {link_flags()}{src} -o {out}";
+};
+
+// 分片 C99 的编译命令：manifest 每行一个 .c 路径，clang 直接把它当响应文件读。
+// 分片把一份程序拆成多个编译单元，跨单元调用失去单单元的全局可见性，所以打开 LTO 让
+// 链接期重新获得整程序视域；缺了它，编译出来的编译器自身会在部分输入上崩溃。
+let compile_split = func(manifest: Slice(u8), out: Slice(u8)) -> Slice(u8) {
+  return f"clang -std=c99 -O2 -flto -fuse-ld=lld {link_flags()}@{manifest} -o {out}";
 };
 
 // lainc 的编译命令；with_entry 为真时显式指定入口 main。
@@ -51,6 +66,11 @@ let lainc_run = func(compiler: Slice(u8), src: Slice(u8), with_entry: bool, out:
   if with_entry { entry = " --entry main"; }
   return f"{compiler} {src}{entry} --out {out}";
 };
+
+// 分片目录：每个程序各自一块，避免同名分片互相覆盖。
+let stage2_units = func() -> Slice(u8) { return "build/stage2_c/unit"; };
+let showcase_units = func() -> Slice(u8) { return "build/showcase_c/unit"; };
+let test_units = func() -> Slice(u8) { return "build/test_c/unit"; };
 
 // --- 步骤播报与退出码判定 --------------------------------------------------
 let fail_step = func(label: Slice(u8), code: u64) -> u64 {
@@ -79,10 +99,14 @@ let expect_exit = func(label: Slice(u8), cmd: Slice(u8), want: u64) -> u64 {
   return 0;
 };
 
+let make_dir = func(path: Slice(u8)) -> u64 {
+  let cmd: Slice(u8) = f"mkdir -p {path}";
+  comptime if is_windows() { cmd = f"cmd /c if not exist \"{path}\" mkdir \"{path}\""; };
+  return run_step(f"prepare directory {path}", cmd);
+};
+
 let prepare_build_dir = func() -> u64 {
-  let cmd: Slice(u8) = "mkdir -p build";
-  comptime if is_windows() { cmd = "cmd /c if not exist build mkdir build"; };
-  return run_step("prepare build directory", cmd);
+  return make_dir("build");
 };
 
 // --- 文件比较 --------------------------------------------------------------
@@ -125,17 +149,25 @@ let files_equal = func(a: Slice(u8), b: Slice(u8)) -> bool {
   };
 };
 
+// --- 分片 C99 --------------------------------------------------------------
+// 读 manifest 并把它列出的分片编成 out_bin；manifest 缺失或编译失败都就地终止。
+let build_split_program = func(prefix: Slice(u8), out_bin: Slice(u8)) -> u64 {
+  let mf: Slice(u8) = f"{prefix}_manifest.txt";
+  if fs.exists(mf) == false {
+    log.fail("split C99", "manifest not found");
+    return 1;
+  }
+  return run_step(f"Compile split C99: {mf} -> {out_bin}", compile_split(mf, out_bin));
+};
+
 // --- 自举固定点 ------------------------------------------------------------
 // Stage-1 冷启动 -> Stage-2 -> Stage-3，并校验 stage2.l1 与 stage3.l1 字节一致。
 let run_bootstrap = func() -> u64 {
   if run_step("Stage-1: compile lainc_boot.c",
               compile_c("bootstrap/lainc_boot.c", lainc_bin())) != 0 { return 1; }
-  if run_step("Stage-2 IR: lainc src/driver/entry.lain -> build/stage2.l1",
-              lainc_run(lainc_bin(), "src/driver/entry.lain", false, "build/stage2.l1")) != 0 { return 1; }
-  if run_step("Stage-2 C99: lainc src/driver/entry.lain -> build/stage2.c",
-              lainc_run(lainc_bin(), "src/driver/entry.lain", true, "build/stage2.c")) != 0 { return 1; }
-  if run_step("Stage-2 bin: compile build/stage2.c",
-              compile_c("build/stage2.c", stage2_bin())) != 0 { return 1; }
+  if run_step("Stage-2 IR + split C99: lainc src/driver/entry.lain -> build/stage2.l1, build/stage2_c/unit",
+              f"{lainc_bin()} src/driver/entry.lain --entry main --out build/stage2.l1 --split-c {stage2_units()}") != 0 { return 1; }
+  if build_split_program(stage2_units(), stage2_bin()) != 0 { return 1; }
   if run_step("Stage-3 IR: lainc_stage2 src/driver/entry.lain -> build/stage3.l1",
               lainc_run(stage2_bin(), "src/driver/entry.lain", false, "build/stage3.l1")) != 0 { return 1; }
 
@@ -150,21 +182,22 @@ let run_bootstrap = func() -> u64 {
 // --- 冒烟与全量回归 --------------------------------------------------------
 let run_suites = func(compiler: Slice(u8)) -> u64 {
   // 冒烟：examples/overhaul_showcase.lain 的约定退出码是 126
-  if run_step("Showcase C99: examples/overhaul_showcase.lain -> build/showcase.c",
-              lainc_run(compiler, "examples/overhaul_showcase.lain", false, "build/showcase.c")) != 0 { return 1; }
-  if run_step("Showcase bin: compile build/showcase.c",
-              compile_c("build/showcase.c", showcase_bin())) != 0 { return 1; }
+  if run_step("Showcase split C99: examples/overhaul_showcase.lain -> build/showcase_c/unit",
+              f"{compiler} examples/overhaul_showcase.lain --split-c {showcase_units()}") != 0 { return 1; }
+  if build_split_program(showcase_units(), showcase_bin()) != 0 { return 1; }
   if expect_exit("Run examples/overhaul_showcase.lain", showcase_bin(), 126) != 0 { return 1; }
 
   // 全量回归：test.lain
-  if run_step("Tests C99: test.lain -> build/test_runner.c",
-              lainc_run(compiler, "test.lain", false, "build/test_runner.c")) != 0 { return 1; }
-  if run_step("Tests bin: compile build/test_runner.c",
-              compile_c("build/test_runner.c", test_bin())) != 0 { return 1; }
+  if run_step("Tests split C99: test.lain -> build/test_c/unit",
+              f"{compiler} test.lain --split-c {test_units()}") != 0 { return 1; }
+  if build_split_program(test_units(), test_bin()) != 0 { return 1; }
   if run_step("Run test.lain", test_bin()) != 0 { return 1; }
   return 0;
 };
 
+// @root 把本文件的 main 登记为程序入口：分片 C99 发射按入口名找过程，
+// 没有它只给 --out 或 --split-c 都会找不到入口。
+@root
 let main = func() -> i64 {
   let bootstrap = cli.has_flag("--bootstrap");
 
@@ -186,6 +219,9 @@ let main = func() -> i64 {
   log.info("build.lain", f"graph steps={steps}, edges={edges}");
 
   if prepare_build_dir() != 0 { return 1; }
+  if make_dir(stage2_units()) != 0 { return 1; }
+  if make_dir(showcase_units()) != 0 { return 1; }
+  if make_dir(test_units()) != 0 { return 1; }
 
   if bootstrap {
     if run_bootstrap() != 0 { return 1; }

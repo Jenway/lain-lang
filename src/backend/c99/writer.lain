@@ -1,6 +1,6 @@
 // C99 写入器与查询基础：输出缓冲、符号名、类型文本、过程索引、C ABI 原型表与可达性分析。
 let codes = import("src::ir::ir_codes");
-let vf = import("src::ir::verify");
+let vf = import("src::ir::verify::model");
 let tab = import("src::host::symtab");
 let os = import("std::os");
 
@@ -143,14 +143,14 @@ pub let put_u64_lit = func(w: Mut(C99Writer), v: u64) -> u64 {
 
 // --- C99 类型 -------------------------------------------------------------
 pub let c_type_name = func(t: vf.IrType) -> Slice(u8) {
-  if t.kind == vf.TY_VOID() { return "void"; }
-  if t.kind == vf.TY_ADDR() { return "void *"; }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == vf.IR_TYPE_VOID { return "void"; }
+  if t.kind == codes.TyKind.Addr as u64 { return "void *"; }
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 { return "float"; }
     return "double";
   }
-  if t.kind == vf.TY_BOOL() { return "uint8_t"; }
-  if t.kind == vf.TY_VEC() { return "uint64_t"; }
+  if t.kind == vf.IR_TYPE_BOOL { return "uint8_t"; }
+  if t.kind == codes.TyKind.Vec as u64 { return "uint64_t"; }
   if t.width <= 8 { return "uint8_t"; }
   if t.width <= 16 { return "uint16_t"; }
   if t.width <= 32 { return "uint32_t"; }
@@ -163,8 +163,8 @@ pub let emit_type = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
 };
 
 pub let type_width = func(t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_ADDR() { return 64; }
-  if t.kind == vf.TY_VOID() { return 0; }
+  if t.kind == codes.TyKind.Addr as u64 { return 64; }
+  if t.kind == vf.IR_TYPE_VOID { return 0; }
   return t.width;
 };
 
@@ -246,7 +246,7 @@ pub let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
 };
 
 // 模块级数据符号与局部值共用同一个 C 名字空间：两者都是 v<句柄>，句柄在同一个
-// 符号表里唯一，所以 OP_VALUE 引用任何一个都落到同一个 C 标识符上。
+// 符号表里唯一，所以 OperandKind.Value 引用任何一个都落到同一个 C 标识符上。
 pub let emit_data_name = func(w: Mut(C99Writer), h: u64) -> u64 {
   let rc: u64 = put_str(w, "v");
   return put_u64_dec(w, h);
@@ -295,7 +295,7 @@ let find_proc_linear = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
   return found;
 };
 
-// O(1) 过程名哈希索引：emit_value_ref 在每条指令的每个 OP_VALUE 上都要查一次
+// O(1) 过程名哈希索引：emit_value_ref 在每条指令的每个 OperandKind.Value 上都要查一次
 // find_proc，线性扫描在大型模块上会退化成数十亿次结构体拷贝。
 let PIDX_CAP = func() -> u64 { return 16384; };
 let g_pidx_meta: Array(u64, 4) = [0, 0, 0, 0];
@@ -435,29 +435,29 @@ pub let proc_param = func(p: vf.IrProc, i: u64) -> vf.IrParam {
 
 pub let result_type = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> vf.IrType {
   let k: u64 = it.kind;
-  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return vf.type_bool(); }
-  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return vf.type_bool(); }
-  if k == codes.INST_LEA() { return vf.type_addr(); }
-  if k == codes.INST_ALLOCA() { return vf.type_addr(); }
-  if k == codes.INST_IF() {
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return vf.type_bool(); }
+  if (k >= codes.InstKind.FOEq as u64) and (k <= codes.InstKind.FUGe as u64) { return vf.type_bool(); }
+  if k == codes.InstKind.Lea as u64 { return vf.type_addr(); }
+  if k == codes.InstKind.Alloca as u64 { return vf.type_addr(); }
+  if k == codes.InstKind.If as u64 {
     if it.body == vf.NO_REGION() { return vf.type_void(); }
     let r: vf.IrRegion = region_at(m, it.body);
     if i >= r.result_count { return vf.type_void(); }
     return region_type(r, i);
   }
-  if k == codes.INST_LOOP() {
+  if k == codes.InstKind.Loop as u64 {
     if it.body == vf.NO_REGION() { return vf.type_void(); }
     let r: vf.IrRegion = region_at(m, it.body);
     if i >= r.result_count { return vf.type_void(); }
     return region_type(r, i);
   }
-  if k == codes.INST_SWITCH() {
+  if k == codes.InstKind.Switch as u64 {
     if it.default_body == vf.NO_REGION() { return vf.type_void(); }
     let r: vf.IrRegion = region_at(m, it.default_body);
     if i >= r.result_count { return vf.type_void(); }
     return region_type(r, i);
   }
-  if k == codes.INST_CALL() {
+  if k == codes.InstKind.Call as u64 {
     if it.symbol != 0 {
       let pi: u64 = find_proc(m, it.symbol);
       if pi == vf.NO_REGION() { return vf.type_void(); }
@@ -589,7 +589,7 @@ pub let extern_link_seen = func(m: Ref(vf.IrModule), link: u64, limit: u64) -> u
 
 // --- 死过程剪除 -----------------------------------------------------------
 // 过程在 LAINIR 里只有两种引用形态：INST_CALL 的 symbol 记录的直接调用目标，以及任
-// 何指令操作数里能被解析成过程的 OP_VALUE（取函数地址、间接调用的目标）。模块级数据
+// 何指令操作数里能被解析成过程的 OperandKind.Value（取函数地址、间接调用的目标）。模块级数据
 // 只有原始字节、没有重定位表，数据段无法持有过程引用，所以除入口之外不存在根。
 // 可达性用标记表加队列做广度优先扩散：标记表某格为 1 表示对应过程可达。
 // 标记表长度交回 0 表示无法判定（过程数为零或容量申请失败），此时调用方按
@@ -621,7 +621,7 @@ let scan_inst_procs = func(m: Ref(vf.IrModule), it: vf.IrInst, mark: MutSlice(u6
   let t0: u64 = mark_proc_ref(m, it.symbol, mark, queue, tail);
   let out: u64 = loop c(i: u64 = 0, t: u64 = t0) while i < it.operand_count {
     let op: vf.IrOperand = vf.inst_op(it, i);
-    if op.kind == vf.OP_VALUE() {
+    if op.kind == codes.OperandKind.Value as u64 {
       t = mark_proc_ref(m, op.name, mark, queue, t);
     }
     i = i + 1;

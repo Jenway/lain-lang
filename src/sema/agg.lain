@@ -6,7 +6,7 @@
 // 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
-let ir = import("src::ir::ir");
+let ir = import("src::sema::ir_emit");
 let codes = import("src::ir::ir_codes");
 
 pub let Member = struct {
@@ -302,7 +302,7 @@ pub let cenum_variant_add = func(s: Mut(st.State), sh: u64, name: u64, value: u6
 pub let cenum_ty = func(sh: u64, out: Mut(ty.Ty)) -> u64 {
   let w: u64 = shp_und_w(sh);
   let sg: u64 = shp_und_sg(sh);
-  ty.ty_save(out, codes.TY_BITS(), w, sg);
+  ty.ty_save(out, codes.TyKind.Bits as u64, w, sg);
   return ty.ty_set_sh(out, sh);
 };
 
@@ -361,7 +361,7 @@ pub let new_obj = func(k: Mut(st.State), sh: u64, out: Mut(ty.Val)) -> u64 {
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_int(k, size);
   let tv: Mut(ty.Ty) = ir.tbits(k, 8);
-  let ins: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), res, tv, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Alloca as u64, res, tv, 0);
   let at: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let ta: u64 = ty.ty_addr(at);
   let sh_set: u64 = ty.ty_set_sh(at, sh);
@@ -375,7 +375,7 @@ pub let new_bytes = func(k: Mut(st.State), n: u64, al: u64, out: Mut(ty.Val)) ->
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_int(k, n);
   let tv: Mut(ty.Ty) = ir.tbits(k, 8);
-  let ins: u64 = ir.emit_mem(k, codes.INST_ALLOCA(), res, tv, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Alloca as u64, res, tv, 0);
   let at: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let ta: u64 = ty.ty_addr(at);
   let v: u64 = ty.val_ref(out, res, at);
@@ -404,7 +404,7 @@ pub let is_value_shape = func(sh: u64) -> u64 {
 
 // tp 描述的是内联块（而不是一个机器字）。
 pub let is_value_agg = func(tp: Mut(ty.Ty)) -> u64 {
-  if ty.tk(tp) != codes.TY_ADDR() { return 0; }
+  if ty.tk(tp) != (codes.TyKind.Addr as u64) { return 0; }
   return is_value_shape(ty.tsh(tp));
 };
 
@@ -419,11 +419,11 @@ pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_p
     let wv: u64 = ir.fresh_t(k);
     let rc0: u64 = ir.args_reset(k);
     let a0: u64 = ir.arg_ref(k, sp);
-    let l0: u64 = ir.emit_mem(k, codes.INST_LOAD(), wv, t64, 0);
+    let l0: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, wv, t64, 0);
     let rc1: u64 = ir.args_reset(k);
     let a1: u64 = ir.arg_ref(k, wv);
     let a2: u64 = ir.arg_ref(k, dp);
-    let s0: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t64, 0);
+    let s0: u64 = ir.emit_mem(k, codes.InstKind.Store as u64, 0, t64, 0);
     j = j + 1;
   };
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
@@ -434,11 +434,11 @@ pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_p
     let bv: u64 = ir.fresh_t(k);
     let rc2: u64 = ir.args_reset(k);
     let a3: u64 = ir.arg_ref(k, sp);
-    let l1: u64 = ir.emit_mem(k, codes.INST_LOAD(), bv, t8, 0);
+    let l1: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, bv, t8, 0);
     let rc3: u64 = ir.args_reset(k);
     let a4: u64 = ir.arg_ref(k, bv);
     let a5: u64 = ir.arg_ref(k, dp);
-    let s1: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    let s1: u64 = ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
     j = j + 1;
   };
   return size;
@@ -446,7 +446,7 @@ pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_p
 
 // bool 这类位宽不足一字节的整数类型，在内存里统一按 1 字节存（排除 TY_ADDR 等 w==0 类型）。
 let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
-  if ty.tk(tp) != codes.TY_BITS() { return 0; }
+  if ty.tk(tp) != (codes.TyKind.Bits as u64) { return 0; }
   return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
 };
 
@@ -460,7 +460,7 @@ let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, ty.vn(v));
-  let ins: u64 = ir.emit(k, codes.INST_ZEXT(), res, t8);
+  let ins: u64 = ir.emit(k, codes.InstKind.ZExt as u64, res, t8);
   return ty.val_ref(out, res, t8);
 };
 
@@ -469,7 +469,7 @@ let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, raw);
-  let ins: u64 = ir.emit(k, codes.INST_TRUNC(), res, tp);
+  let ins: u64 = ir.emit(k, codes.InstKind.Trunc as u64, res, tp);
   return res;
 };
 
@@ -488,12 +488,12 @@ pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), 
     let rc: u64 = ir.args_reset(k);
     let a: u64 = ir.op_val(k, w);
     let b: u64 = ir.arg_ref(k, p);
-    return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
   }
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, val);
   let b: u64 = ir.arg_ref(k, p);
-  return ir.emit_mem(k, codes.INST_STORE(), 0, tp, 0);
+  return ir.emit_mem(k, codes.InstKind.Store as u64, 0, tp, 0);
 };
 
 // 从 obj + off 读一个 tp，结果放进 out。值聚合直接给那块的地址（内联视图）。
@@ -507,14 +507,14 @@ pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out
     let raw: u64 = ir.fresh_t(k);
     let rc: u64 = ir.args_reset(k);
     let a: u64 = ir.arg_ref(k, p);
-    let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), raw, t8, 0);
+    let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, raw, t8, 0);
     let res: u64 = narrow_byte(k, raw, tp);
     return ty.val_ref(out, res, tp);
   }
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, p);
-  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, tp, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, res, tp, 0);
   return ty.val_ref(out, res, tp);
 };
 
@@ -527,7 +527,7 @@ pub let zero_at = func(k: Mut(st.State), obj: u64, off: u64, size: u64) -> u64 {
     let rc0: u64 = ir.args_reset(k);
     let a0: u64 = ir.arg_int(k, 0);
     let a1: u64 = ir.arg_ref(k, dp);
-    let s0: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t64, 0);
+    let s0: u64 = ir.emit_mem(k, codes.InstKind.Store as u64, 0, t64, 0);
     j = j + 1;
   };
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
@@ -537,7 +537,7 @@ pub let zero_at = func(k: Mut(st.State), obj: u64, off: u64, size: u64) -> u64 {
     let rc1: u64 = ir.args_reset(k);
     let a2: u64 = ir.arg_int(k, 0);
     let a3: u64 = ir.arg_ref(k, dp);
-    let s1: u64 = ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+    let s1: u64 = ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
     j = j + 1;
   };
   return size;
@@ -549,7 +549,7 @@ let tag_read = func(k: Mut(st.State), obj: u64) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, obj);
-  let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t8, 0);
+  let ins: u64 = ir.emit_mem(k, codes.InstKind.Load as u64, res, t8, 0);
   return res;
 };
 
@@ -559,7 +559,7 @@ pub let tag_write = func(k: Mut(st.State), obj: u64, tag: u64) -> u64 {
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_int(k, tag);
   let b: u64 = ir.arg_ref(k, obj);
-  return ir.emit_mem(k, codes.INST_STORE(), 0, t8, 0);
+  return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
 };
 
 // 枚举投影：标签命中就读载荷，否则给 0。out 收一个 res_ty 值。
@@ -579,7 +579,7 @@ pub let variant_proj = func(k: Mut(st.State), sh: u64, obj: u64, name: u64, res_
   let rc0: u64 = ir.args_reset(k);
   let a0: u64 = ir.arg_ref(k, tg);
   let a1: u64 = ir.arg_int(k, tag);
-  let eqi: u64 = ir.emit(k, codes.INST_EQ(), ceq, t8);
+  let eqi: u64 = ir.emit(k, codes.InstKind.Eq as u64, ceq, t8);
   let h1: u64 = proj_then(k, m, obj, res_ty, mt);
   let h2: u64 = proj_zero(k, res_ty);
   let res: u64 = ir.fresh_t(k);
@@ -596,11 +596,11 @@ let proj_then = func(k: Mut(st.State), m: Mut(Member), obj: u64, res_ty: Mut(ty.
     let l: u64 = load_at(k, obj, mem_off(m), mt, lv);
     let rc2: u64 = ir.args_reset(k);
     let b: u64 = ir.op_val(k, lv);
-    let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+    let y: u64 = ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   } else {
     let rc: u64 = ir.args_reset(k);
     let a: u64 = ir.arg_int(k, 0);
-    let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+    let y: u64 = ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   }
   return ir.region_end(k);
 };
@@ -610,7 +610,7 @@ let proj_zero = func(k: Mut(st.State), res_ty: Mut(ty.Ty)) -> u64 {
   let rr: u64 = ir.region_result(k, res_ty);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_int(k, 0);
-  let y: u64 = ir.emit_jump(k, codes.INST_YIELD(), 0);
+  let y: u64 = ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
   return ir.region_end(k);
 };
 

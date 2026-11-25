@@ -1,6 +1,6 @@
 // C99 指令与数值发射：把 LAINIR 的每条指令写成 C99 语句或可内联的表达式。
 let codes = import("src::ir::ir_codes");
-let vf = import("src::ir::verify");
+let vf = import("src::ir::verify::model");
 let os = import("std::os");
 let wr = import("src::backend::c99::writer");
 
@@ -112,11 +112,11 @@ let inl_hash = func(name: u64, cap: u64) -> u64 {
 // 结果只被引用一次的纯标量指令种类：加减乘、位运算、移位、整数比较、整数转换。
 // 除法与求余会触发陷阱，保持在原位置发射。
 let inline_cand_kind = func(k: u64) -> u64 {
-  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return 1; }
-  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return 1; }
-  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return 1; }
-  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return 1; }
-  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return 1; }
+  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.Mul as u64) { return 1; }
+  if (k >= codes.InstKind.And as u64) and (k <= codes.InstKind.Xor as u64) { return 1; }
+  if (k >= codes.InstKind.Shl as u64) and (k <= codes.InstKind.AShr as u64) { return 1; }
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return 1; }
+  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return 1; }
   return 0;
 };
 
@@ -226,7 +226,7 @@ let inl_depth_sweep = func(m: Ref(vf.IrModule)) -> u64 {
       let d: u64 = loop c(j: u64 = 0, d: u64 = 1) while 1 {
         if j >= it.operand_count { break c(d); }
         let op: vf.IrOperand = vf.inst_op(it, j);
-        if op.kind == vf.OP_VALUE() {
+        if op.kind == codes.OperandKind.Value as u64 {
           let q: u64 = inl_slot_of(op.name);
           if q != INL_REJECT() {
             if (vals[q] != INL_REJECT()) and (vals[q] != 0) {
@@ -322,7 +322,7 @@ let inl_use_region = func(m: Ref(vf.IrModule), ri: u64) -> u64 {
     }
     let rc1: u64 = loop c(j: u64 = 0) while j < it.operand_count {
       let op: vf.IrOperand = vf.inst_op(it, j);
-      if op.kind == vf.OP_VALUE() {
+      if op.kind == codes.OperandKind.Value as u64 {
         let rj: u64 = inl_note_use(op.name, ri, at);
       }
       j = j + 1;
@@ -422,7 +422,7 @@ let next_temp = func(em: Mut(C99Emitter)) -> u64 {
   return v;
 };
 
-// OP_VALUE 的句柄可能是局部值，也可能是模块级名字：过程符号按取函数地址发射，
+// OperandKind.Value 的句柄可能是局部值，也可能是模块级名字：过程符号按取函数地址发射，
 // 数据符号与局部值一样直接写 v<句柄>。
 let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
   if em.inl_on == 1 {
@@ -446,15 +446,15 @@ let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
 
 // --- 操作数 ---------------------------------------------------------------
 let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) -> u64 {
-  if op.kind == vf.OP_VALUE() {
-    if want.kind == vf.TY_ADDR() {
+  if op.kind == codes.OperandKind.Value as u64 {
+    if want.kind == codes.TyKind.Addr as u64 {
       let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)");
       return emit_value_ref(em, op.name);
     }
     return emit_value_ref(em, op.name);
   }
-  if op.kind == vf.OP_FLOAT() {
-    if want.kind == vf.TY_FLOAT() {
+  if op.kind == codes.OperandKind.Float as u64 {
+    if want.kind == codes.TyKind.Floats as u64 {
       if want.width <= 32 {
         let a: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)");
         let b: u64 = wr.put_u64_lit(em.w, op.bits);
@@ -466,7 +466,7 @@ let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) 
     }
     return wr.put_u64_lit(em.w, op.bits);
   }
-  if want.kind == vf.TY_ADDR() {
+  if want.kind == codes.TyKind.Addr as u64 {
     let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)");
     return wr.put_u64_lit(em.w, op.bits);
   }
@@ -477,7 +477,7 @@ let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) 
 };
 
 let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
-  if op.kind == vf.OP_VALUE() {
+  if op.kind == codes.OperandKind.Value as u64 {
     let a: u64 = wr.put_str(em.w, "(uint64_t)(");
     let b: u64 = emit_value_ref(em, op.name);
     return wr.put_byte(em.w, 41);
@@ -487,8 +487,8 @@ let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
 
 // --- 声明辅助 -------------------------------------------------------------
 let emit_zero_value = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_ADDR() { return wr.put_str(w, "(void *)0"); }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Addr as u64 { return wr.put_str(w, "(void *)0"); }
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 { return wr.put_str(w, "0.0f"); }
     return wr.put_str(w, "0.0");
   }
@@ -550,35 +550,35 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
   }
   let k: u64 = it.kind;
   // 枚举顺序是加减乘、除法求余、位运算、移位四段，不能用一个连续区间判定。
-  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return emit_int_arith(em, it, k); }
-  if (k >= codes.INST_SDIV()) and (k <= codes.INST_UREM()) { return emit_int_div_shift(em, it, k); }
-  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return emit_int_arith(em, it, k); }
-  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return emit_int_div_shift(em, it, k); }
-  if (k >= codes.INST_FADD()) and (k <= codes.INST_FNEG()) { return emit_float_arith(em, it, k); }
-  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_int_compare(em, it, k); }
-  if (k >= codes.INST_FOEQ()) and (k <= codes.INST_FUGE()) { return emit_float_compare(em, it, k); }
-  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return emit_int_convert(em, it, k); }
-  if k == codes.INST_BITCAST() { return emit_bitcast(em, it); }
-  if (k >= codes.INST_FPEXT()) and (k <= codes.INST_UITOFP()) { return emit_float_convert(em, it, k); }
-  if k == codes.INST_LEA() { return emit_lea(em, it); }
-  if k == codes.INST_ATOMIC_FENCE() { return emit_atomic_fence(em, it); }
-  if k == codes.INST_ATOMIC_LOAD() { return emit_atomic_load(em, it); }
-  if k == codes.INST_ATOMIC_STORE() { return emit_atomic_store(em, it); }
-  if k == codes.INST_XCHG() { return emit_atomic_xchg(em, it); }
-  if k == codes.INST_CMPXCHG() { return emit_atomic_cmpxchg(em, it, ii); }
-  if (k >= codes.INST_RMW_ADD()) and (k <= codes.INST_RMW_XOR()) { return emit_atomic_rmw(em, it, k); }
-  if k == codes.INST_LOAD() { return emit_load(em, it); }
-  if k == codes.INST_STORE() { return emit_store(em, it); }
-  if k == codes.INST_ALLOCA() { return emit_alloca(em, it); }
-  if k == codes.INST_CALL() { return emit_call(em, it); }
-  if k == codes.INST_IF() { return emit_if(em, it, ii); }
-  if k == codes.INST_LOOP() { return emit_loop(em, it, ii); }
-  if k == codes.INST_SWITCH() { return emit_switch(em, it, ii); }
-  if k == codes.INST_YIELD() { return emit_yield(em, it, yield_inst, yield_region); }
-  if k == codes.INST_BREAK() { return emit_break(em, it); }
-  if k == codes.INST_CONTINUE() { return emit_continue(em, it); }
-  if k == codes.INST_RETURN() { return emit_return(em, it); }
-  if k == codes.INST_UNREACHABLE() { return emit_unreachable(em); }
+  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.Mul as u64) { return emit_int_arith(em, it, k); }
+  if (k >= codes.InstKind.SDiv as u64) and (k <= codes.InstKind.URem as u64) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.InstKind.And as u64) and (k <= codes.InstKind.Xor as u64) { return emit_int_arith(em, it, k); }
+  if (k >= codes.InstKind.Shl as u64) and (k <= codes.InstKind.AShr as u64) { return emit_int_div_shift(em, it, k); }
+  if (k >= codes.InstKind.FAdd as u64) and (k <= codes.InstKind.FNeg as u64) { return emit_float_arith(em, it, k); }
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return emit_int_compare(em, it, k); }
+  if (k >= codes.InstKind.FOEq as u64) and (k <= codes.InstKind.FUGe as u64) { return emit_float_compare(em, it, k); }
+  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return emit_int_convert(em, it, k); }
+  if k == codes.InstKind.Bitcast as u64 { return emit_bitcast(em, it); }
+  if (k >= codes.InstKind.FPExt as u64) and (k <= codes.InstKind.UIToFP as u64) { return emit_float_convert(em, it, k); }
+  if k == codes.InstKind.Lea as u64 { return emit_lea(em, it); }
+  if k == codes.InstKind.AtomicFence as u64 { return emit_atomic_fence(em, it); }
+  if k == codes.InstKind.AtomicLoad as u64 { return emit_atomic_load(em, it); }
+  if k == codes.InstKind.AtomicStore as u64 { return emit_atomic_store(em, it); }
+  if k == codes.InstKind.Xchg as u64 { return emit_atomic_xchg(em, it); }
+  if k == codes.InstKind.Cmpxchg as u64 { return emit_atomic_cmpxchg(em, it, ii); }
+  if (k >= codes.InstKind.RmwAdd as u64) and (k <= codes.InstKind.RmwXor as u64) { return emit_atomic_rmw(em, it, k); }
+  if k == codes.InstKind.Load as u64 { return emit_load(em, it); }
+  if k == codes.InstKind.Store as u64 { return emit_store(em, it); }
+  if k == codes.InstKind.Alloca as u64 { return emit_alloca(em, it); }
+  if k == codes.InstKind.Call as u64 { return emit_call(em, it); }
+  if k == codes.InstKind.If as u64 { return emit_if(em, it, ii); }
+  if k == codes.InstKind.Loop as u64 { return emit_loop(em, it, ii); }
+  if k == codes.InstKind.Switch as u64 { return emit_switch(em, it, ii); }
+  if k == codes.InstKind.Yield as u64 { return emit_yield(em, it, yield_inst, yield_region); }
+  if k == codes.InstKind.Break as u64 { return emit_break(em, it); }
+  if k == codes.InstKind.Continue as u64 { return emit_continue(em, it); }
+  if k == codes.InstKind.Return as u64 { return emit_return(em, it); }
+  if k == codes.InstKind.Unreachable as u64 { return emit_unreachable(em); }
   return 0;
 };
 
@@ -595,12 +595,12 @@ let IntArithOp = enum {
 };
 
 let int_arith_op = func(k: u64) -> IntArithOp {
-  if k == codes.INST_ADD() { return IntArithOp.Add { }; }
-  if k == codes.INST_SUB() { return IntArithOp.Sub { }; }
-  if k == codes.INST_MUL() { return IntArithOp.Mul { }; }
-  if k == codes.INST_AND() { return IntArithOp.And { }; }
-  if k == codes.INST_OR() { return IntArithOp.Or { }; }
-  if k == codes.INST_XOR() { return IntArithOp.Xor { }; }
+  if k == codes.InstKind.Add as u64 { return IntArithOp.Add { }; }
+  if k == codes.InstKind.Sub as u64 { return IntArithOp.Sub { }; }
+  if k == codes.InstKind.Mul as u64 { return IntArithOp.Mul { }; }
+  if k == codes.InstKind.And as u64 { return IntArithOp.And { }; }
+  if k == codes.InstKind.Or as u64 { return IntArithOp.Or { }; }
+  if k == codes.InstKind.Xor as u64 { return IntArithOp.Xor { }; }
   return IntArithOp.Unknown { };
 };
 
@@ -652,13 +652,13 @@ let DivShiftOp = enum {
 };
 
 let div_shift_op = func(k: u64) -> DivShiftOp {
-  if k == codes.INST_SDIV() { return DivShiftOp.Sdiv { }; }
-  if k == codes.INST_SREM() { return DivShiftOp.Srem { }; }
-  if k == codes.INST_UDIV() { return DivShiftOp.Udiv { }; }
-  if k == codes.INST_UREM() { return DivShiftOp.Urem { }; }
-  if k == codes.INST_SHL() { return DivShiftOp.Shl { }; }
-  if k == codes.INST_LSHR() { return DivShiftOp.Lshr { }; }
-  if k == codes.INST_ASHR() { return DivShiftOp.Ashr { }; }
+  if k == codes.InstKind.SDiv as u64 { return DivShiftOp.Sdiv { }; }
+  if k == codes.InstKind.SRem as u64 { return DivShiftOp.Srem { }; }
+  if k == codes.InstKind.UDiv as u64 { return DivShiftOp.Udiv { }; }
+  if k == codes.InstKind.URem as u64 { return DivShiftOp.Urem { }; }
+  if k == codes.InstKind.Shl as u64 { return DivShiftOp.Shl { }; }
+  if k == codes.InstKind.LShr as u64 { return DivShiftOp.Lshr { }; }
+  if k == codes.InstKind.AShr as u64 { return DivShiftOp.Ashr { }; }
   return DivShiftOp.Unknown { };
 };
 
@@ -708,11 +708,11 @@ let FloatArithOp = enum {
 };
 
 let float_arith_op = func(k: u64) -> FloatArithOp {
-  if k == codes.INST_FADD() { return FloatArithOp.Fadd { }; }
-  if k == codes.INST_FSUB() { return FloatArithOp.Fsub { }; }
-  if k == codes.INST_FMUL() { return FloatArithOp.Fmul { }; }
-  if k == codes.INST_FDIV() { return FloatArithOp.Fdiv { }; }
-  if k == codes.INST_FNEG() { return FloatArithOp.Fneg { }; }
+  if k == codes.InstKind.FAdd as u64 { return FloatArithOp.Fadd { }; }
+  if k == codes.InstKind.FSub as u64 { return FloatArithOp.Fsub { }; }
+  if k == codes.InstKind.FMul as u64 { return FloatArithOp.Fmul { }; }
+  if k == codes.InstKind.FDiv as u64 { return FloatArithOp.Fdiv { }; }
+  if k == codes.InstKind.FNeg as u64 { return FloatArithOp.Fneg { }; }
   return FloatArithOp.Unknown { };
 };
 
@@ -737,7 +737,7 @@ let emit_float_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let c: u64 = wr.put_str(em.w, " ");
   let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
   let e: u64 = wr.put_str(em.w, " = ");
-  if k == codes.INST_FNEG() {
+  if k == codes.InstKind.FNeg as u64 {
     let f: u64 = wr.put_str(em.w, "-(");
     let g: u64 = emit_operand(em, vf.inst_op(it, 0), t);
     let h: u64 = wr.put_str(em.w, ");\n");
@@ -764,12 +764,12 @@ let IntCmpOp = enum {
 };
 
 let int_cmp_op = func(k: u64) -> IntCmpOp {
-  if k == codes.INST_EQ() { return IntCmpOp.Eq { }; }
-  if k == codes.INST_NE() { return IntCmpOp.Ne { }; }
-  if k == codes.INST_ULT() { return IntCmpOp.Ult { }; }
-  if k == codes.INST_ULE() { return IntCmpOp.Ule { }; }
-  if k == codes.INST_UGT() { return IntCmpOp.Ugt { }; }
-  if k == codes.INST_UGE() { return IntCmpOp.Uge { }; }
+  if k == codes.InstKind.Eq as u64 { return IntCmpOp.Eq { }; }
+  if k == codes.InstKind.Ne as u64 { return IntCmpOp.Ne { }; }
+  if k == codes.InstKind.ULt as u64 { return IntCmpOp.Ult { }; }
+  if k == codes.InstKind.ULe as u64 { return IntCmpOp.Ule { }; }
+  if k == codes.InstKind.UGt as u64 { return IntCmpOp.Ugt { }; }
+  if k == codes.InstKind.UGe as u64 { return IntCmpOp.Uge { }; }
   return IntCmpOp.Unknown { };
 };
 
@@ -796,10 +796,10 @@ let SignedCmpOp = enum {
 };
 
 let signed_cmp_op = func(k: u64) -> SignedCmpOp {
-  if k == codes.INST_SLT() { return SignedCmpOp.Slt { }; }
-  if k == codes.INST_SLE() { return SignedCmpOp.Sle { }; }
-  if k == codes.INST_SGT() { return SignedCmpOp.Sgt { }; }
-  if k == codes.INST_SGE() { return SignedCmpOp.Sge { }; }
+  if k == codes.InstKind.SLt as u64 { return SignedCmpOp.Slt { }; }
+  if k == codes.InstKind.SLe as u64 { return SignedCmpOp.Sle { }; }
+  if k == codes.InstKind.SGt as u64 { return SignedCmpOp.Sgt { }; }
+  if k == codes.InstKind.SGe as u64 { return SignedCmpOp.Sge { }; }
   return SignedCmpOp.Unknown { };
 };
 
@@ -822,7 +822,7 @@ let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let b: u64 = wr.put_str(em.w, "uint8_t ");
   let c: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
   let d: u64 = wr.put_str(em.w, " = (uint8_t)(");
-  if (k >= codes.INST_SLT()) and (k <= codes.INST_SGE()) {
+  if (k >= codes.InstKind.SLt as u64) and (k <= codes.InstKind.SGe as u64) {
     let e: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
     let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
     let g: u64 = wr.put_str(em.w, "), ");
@@ -836,7 +836,7 @@ let emit_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
     let p: u64 = wr.put_str(em.w, "));\n");
     return 1;
   }
-  if ty.kind == vf.TY_ADDR() {
+  if ty.kind == codes.TyKind.Addr as u64 {
     let e: u64 = wr.put_str(em.w, "(uintptr_t)(");
     let f: u64 = emit_operand(em, vf.inst_op(it, 0), ty);
     let g: u64 = wr.put_str(em.w, ") ");
@@ -877,18 +877,18 @@ let FloatCmpOp = enum {
 };
 
 let float_cmp_op = func(k: u64) -> FloatCmpOp {
-  if k == codes.INST_FOEQ() { return FloatCmpOp.Oeq { }; }
-  if k == codes.INST_FONE() { return FloatCmpOp.One { }; }
-  if k == codes.INST_FOLT() { return FloatCmpOp.Olt { }; }
-  if k == codes.INST_FOLE() { return FloatCmpOp.Ole { }; }
-  if k == codes.INST_FOGT() { return FloatCmpOp.Ogt { }; }
-  if k == codes.INST_FOGE() { return FloatCmpOp.Oge { }; }
-  if k == codes.INST_FUEQ() { return FloatCmpOp.Ueq { }; }
-  if k == codes.INST_FUNE() { return FloatCmpOp.Une { }; }
-  if k == codes.INST_FULT() { return FloatCmpOp.Uelt { }; }
-  if k == codes.INST_FULE() { return FloatCmpOp.Uele { }; }
-  if k == codes.INST_FUGT() { return FloatCmpOp.Uegt { }; }
-  if k == codes.INST_FUGE() { return FloatCmpOp.Uege { }; }
+  if k == codes.InstKind.FOEq as u64 { return FloatCmpOp.Oeq { }; }
+  if k == codes.InstKind.FONe as u64 { return FloatCmpOp.One { }; }
+  if k == codes.InstKind.FOLt as u64 { return FloatCmpOp.Olt { }; }
+  if k == codes.InstKind.FOLe as u64 { return FloatCmpOp.Ole { }; }
+  if k == codes.InstKind.FOGt as u64 { return FloatCmpOp.Ogt { }; }
+  if k == codes.InstKind.FOGe as u64 { return FloatCmpOp.Oge { }; }
+  if k == codes.InstKind.FUEq as u64 { return FloatCmpOp.Ueq { }; }
+  if k == codes.InstKind.FUNe as u64 { return FloatCmpOp.Une { }; }
+  if k == codes.InstKind.FULt as u64 { return FloatCmpOp.Uelt { }; }
+  if k == codes.InstKind.FULE as u64 { return FloatCmpOp.Uele { }; }
+  if k == codes.InstKind.FUGt as u64 { return FloatCmpOp.Uegt { }; }
+  if k == codes.InstKind.FUGe as u64 { return FloatCmpOp.Uege { }; }
   return FloatCmpOp.Unknown { };
 };
 
@@ -914,7 +914,7 @@ let float_cmp_text = func(k: u64) -> Slice(u8) {
 
 let emit_float_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let t: vf.IrType = wr.it_ty(it);
-  let ordered: u64 = if k <= codes.INST_FOGE() { 1 } else { 0 };
+  let ordered: u64 = if k <= codes.InstKind.FOGe as u64 { 1 } else { 0 };
   let a: u64 = emit_indent(em, em.depth);
   let b: u64 = wr.put_str(em.w, "uint8_t ");
   let c: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
@@ -964,7 +964,7 @@ let emit_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let e: u64 = wr.put_str(em.w, " = (");
   let f: u64 = wr.emit_type(em.w, t);
   let g: u64 = wr.put_str(em.w, ")");
-  if k == codes.INST_SEXT() {
+  if k == codes.InstKind.SExt as u64 {
     let h: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
     let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
     let j: u64 = wr.put_str(em.w, "), ");
@@ -1020,7 +1020,7 @@ let emit_expr_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> 
   let ty: vf.IrType = wr.it_ty(it);
   let w: u64 = wr.type_width(ty);
   let a: u64 = wr.put_str(em.w, "(uint8_t)(");
-  if (k >= codes.INST_SLT()) and (k <= codes.INST_SGE()) {
+  if (k >= codes.InstKind.SLt as u64) and (k <= codes.InstKind.SGe as u64) {
     let e: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
     let f: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
     let g: u64 = wr.put_str(em.w, "), ");
@@ -1034,7 +1034,7 @@ let emit_expr_int_compare = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> 
     let p: u64 = wr.put_str(em.w, "))");
     return 1;
   }
-  if ty.kind == vf.TY_ADDR() {
+  if ty.kind == codes.TyKind.Addr as u64 {
     let e: u64 = wr.put_str(em.w, "(uintptr_t)(");
     let f: u64 = emit_operand(em, vf.inst_op(it, 0), ty);
     let g: u64 = wr.put_str(em.w, ") ");
@@ -1063,7 +1063,7 @@ let emit_expr_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> 
   let a: u64 = wr.put_byte(em.w, 40);
   let b: u64 = wr.emit_type(em.w, t);
   let c: u64 = wr.put_byte(em.w, 41);
-  if k == codes.INST_SEXT() {
+  if k == codes.InstKind.SExt as u64 {
     let h: u64 = wr.put_str(em.w, "lain_sext((uint64_t)(");
     let i: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
     let j: u64 = wr.put_str(em.w, "), ");
@@ -1082,11 +1082,11 @@ let emit_expr_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> 
 let emit_inline_expr = func(em: Mut(C99Emitter), ii: u64) -> u64 {
   let it: vf.IrInst = wr.inst_at(em.m, ii);
   let k: u64 = it.kind;
-  if (k >= codes.INST_ADD()) and (k <= codes.INST_MUL()) { return emit_expr_int_arith(em, it, k); }
-  if (k >= codes.INST_AND()) and (k <= codes.INST_XOR()) { return emit_expr_int_arith(em, it, k); }
-  if (k >= codes.INST_SHL()) and (k <= codes.INST_ASHR()) { return emit_expr_int_div_shift(em, it, k); }
-  if (k >= codes.INST_EQ()) and (k <= codes.INST_UGE()) { return emit_expr_int_compare(em, it, k); }
-  if (k >= codes.INST_ZEXT()) and (k <= codes.INST_TRUNC()) { return emit_expr_int_convert(em, it, k); }
+  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.Mul as u64) { return emit_expr_int_arith(em, it, k); }
+  if (k >= codes.InstKind.And as u64) and (k <= codes.InstKind.Xor as u64) { return emit_expr_int_arith(em, it, k); }
+  if (k >= codes.InstKind.Shl as u64) and (k <= codes.InstKind.AShr as u64) { return emit_expr_int_div_shift(em, it, k); }
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return emit_expr_int_compare(em, it, k); }
+  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return emit_expr_int_convert(em, it, k); }
   return 0;
 };
 
@@ -1098,13 +1098,13 @@ let emit_bitcast = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   let c: u64 = wr.put_str(em.w, " ");
   let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
   let e: u64 = wr.put_str(em.w, " = ");
-  if t.kind == vf.TY_ADDR() {
+  if t.kind == codes.TyKind.Addr as u64 {
     let f: u64 = wr.put_str(em.w, "(void *)(uintptr_t)(");
     let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_bits(64));
     let h: u64 = wr.put_str(em.w, ");\n");
     return 1;
   }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 {
       let f: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)(");
       let g: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
@@ -1116,7 +1116,7 @@ let emit_bitcast = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
     let h: u64 = wr.put_str(em.w, "));\n");
     return 1;
   }
-  if ot.kind == vf.TY_FLOAT() {
+  if ot.kind == codes.TyKind.Floats as u64 {
     if ot.width <= 32 {
       let f: u64 = wr.put_str(em.w, "(uint32_t)lain_bitcast_f32_u32(");
       let g: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
@@ -1148,12 +1148,12 @@ let emit_float_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64
   let e: u64 = wr.put_str(em.w, " = (");
   let f: u64 = wr.emit_type(em.w, t);
   let g: u64 = wr.put_str(em.w, ")(");
-  if (k == codes.INST_FPTOSI()) or (k == codes.INST_FPTOUI()) {
+  if (k == codes.InstKind.FPToSI as u64) or (k == codes.InstKind.FPToUI as u64) {
     let h: u64 = emit_operand(em, vf.inst_op(it, 0), ot);
     let i: u64 = wr.put_str(em.w, "));\n");
     return 1;
   }
-  if (k == codes.INST_SITOFP()) or (k == codes.INST_UITOFP()) {
+  if (k == codes.InstKind.SIToFP as u64) or (k == codes.InstKind.UIToFP as u64) {
     let h: u64 = emit_operand_u64(em, vf.inst_op(it, 0));
     let i: u64 = wr.put_str(em.w, "));\n");
     return 1;
@@ -1185,7 +1185,7 @@ let ops_use_name = func(it: vf.IrInst, name: u64, i: u64) -> u64 {
   let hit: u64 = loop c(at: u64 = i) while 1 {
     if at >= it.operand_count { break c(0); }
     let op: vf.IrOperand = vf.inst_op(it, at);
-    if (op.kind == vf.OP_VALUE()) and (op.name == name) { break c(1); }
+    if (op.kind == codes.OperandKind.Value as u64) and (op.name == name) { break c(1); }
     at = at + 1;
   };
   return hit;
@@ -1206,7 +1206,7 @@ let region_uses_from = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, i: u
     if at >= r.inst_count { break c(0); }
     let ii: u64 = wr.region_inst(r, at);
     let it: vf.IrInst = wr.inst_at(m, ii);
-    if it.kind != codes.INST_ALLOCA() {
+    if it.kind != codes.InstKind.Alloca as u64 {
       if it.symbol == name { break c(1); }
       if ops_use_name(it, name, 0) == 1 { break c(1); }
     }
@@ -1232,7 +1232,7 @@ let emit_alloca = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   if region_uses_name(em.m, p.body, rname) == 0 { return 1; }
   let bytes: u64 = wr.type_byte_size(wr.it_ty(it));
   let cnt_op: vf.IrOperand = vf.inst_op(it, 0);
-  if (em.depth == 1) and (em.loop_depth == 0) and (cnt_op.kind == vf.OP_INT()) {
+  if (em.depth == 1) and (em.loop_depth == 0) and (cnt_op.kind == codes.OperandKind.Int as u64) {
     let total: u64 = bytes * cnt_op.bits;
     let words: u64 = 1;
     if total > 0 { words = (total + 7) / 8; }
@@ -1268,13 +1268,13 @@ let emit_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   let c: u64 = wr.put_str(em.w, " ");
   let d: u64 = wr.emit_value_name(em.w, vf.inst_result_name(it, 0));
   let e: u64 = wr.put_str(em.w, " = ");
-  if t.kind == vf.TY_ADDR() {
+  if t.kind == codes.TyKind.Addr as u64 {
     let f: u64 = wr.put_str(em.w, "lain_load_addr(");
     let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
     let h: u64 = wr.put_str(em.w, ");\n");
     return 1;
   }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 {
       let f: u64 = wr.put_str(em.w, "lain_load_f32(");
       let g: u64 = emit_operand(em, vf.inst_op(it, 0), vf.type_addr());
@@ -1299,7 +1299,7 @@ let emit_load = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
 let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   let t: vf.IrType = wr.it_ty(it);
   let a: u64 = emit_indent(em, em.depth);
-  if t.kind == vf.TY_ADDR() {
+  if t.kind == codes.TyKind.Addr as u64 {
     let b: u64 = wr.put_str(em.w, "lain_store_addr(");
     let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
     let d: u64 = wr.put_str(em.w, ", ");
@@ -1307,7 +1307,7 @@ let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
     let f: u64 = wr.put_str(em.w, ");\n");
     return 1;
   }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 {
       let b: u64 = wr.put_str(em.w, "lain_store_f32(");
       let c: u64 = emit_operand(em, vf.inst_op(it, 1), vf.type_addr());
@@ -1347,7 +1347,7 @@ let c_memorder = func(order: u64) -> Slice(u8) {
 // 内存序操作数是常量时直接发射常量，是局部值时交给前导文本里的 lain_memorder
 // 在运行期换算，避免同一个表达式被求值多次。
 let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
-  if op.kind == vf.OP_INT() {
+  if op.kind == codes.OperandKind.Int as u64 {
     return wr.put_str(em.w, c_memorder(op.bits));
   }
   let a: u64 = wr.put_str(em.w, "lain_memorder((uint64_t)(");
@@ -1358,7 +1358,7 @@ let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
 
 // __atomic_* 只接受整数与指针类型，浮点按同宽的位模式参与。
 let atomic_c_type = func(t: vf.IrType) -> Slice(u8) {
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 { return "uint32_t"; }
     return "uint64_t";
   }
@@ -1373,7 +1373,7 @@ let emit_atomic_ptr = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) 
 };
 
 let emit_atomic_value = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 {
       let a: u64 = wr.put_str(em.w, "lain_bitcast_f32_u32((float)(");
       let b: u64 = emit_operand(em, op, vf.type_float(32));
@@ -1395,7 +1395,7 @@ let emit_atomic_value = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType
 
 // 指针类型的读改写加数在 C 里必须写成整数。
 let emit_atomic_addend = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_ADDR() {
+  if t.kind == codes.TyKind.Addr as u64 {
     let a: u64 = wr.put_str(em.w, "(uint64_t)(");
     let b: u64 = emit_operand(em, op, vf.type_addr());
     let c: u64 = wr.put_byte(em.w, 41);
@@ -1405,7 +1405,7 @@ let emit_atomic_addend = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrTyp
 };
 
 let emit_atomic_result_open = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 { return wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)"); }
     return wr.put_str(em.w, "lain_bitcast_u64_f64((uint64_t)");
   }
@@ -1413,7 +1413,7 @@ let emit_atomic_result_open = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
 };
 
 let emit_atomic_result_close = func(em: Mut(C99Emitter), t: vf.IrType) -> u64 {
-  if t.kind == vf.TY_FLOAT() { return wr.put_byte(em.w, 41); }
+  if t.kind == codes.TyKind.Floats as u64 { return wr.put_byte(em.w, 41); }
   return 1;
 };
 
@@ -1511,11 +1511,11 @@ let emit_atomic_cmpxchg = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u
 };
 
 let rmw_op_name = func(k: u64) -> Slice(u8) {
-  if k == codes.INST_RMW_ADD() { return "add"; }
-  if k == codes.INST_RMW_SUB() { return "sub"; }
-  if k == codes.INST_RMW_AND() { return "and"; }
-  if k == codes.INST_RMW_OR() { return "or"; }
-  if k == codes.INST_RMW_XOR() { return "xor"; }
+  if k == codes.InstKind.RmwAdd as u64 { return "add"; }
+  if k == codes.InstKind.RmwSub as u64 { return "sub"; }
+  if k == codes.InstKind.RmwAnd as u64 { return "and"; }
+  if k == codes.InstKind.RmwOr as u64 { return "or"; }
+  if k == codes.InstKind.RmwXor as u64 { return "xor"; }
   return "add";
 };
 
@@ -1566,13 +1566,13 @@ let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
 
 let emit_pair_expr = func(em: Mut(C99Emitter), t: vf.IrType, tmp: u64, which: u64) -> u64 {
   let field: Slice(u8) = if which == 0 { ".a" } else { ".b" };
-  if t.kind == vf.TY_ADDR() {
+  if t.kind == codes.TyKind.Addr as u64 {
     let a: u64 = wr.put_str(em.w, "(void *)(uintptr_t)_c");
     let b: u64 = wr.put_u64_dec(em.w, tmp);
     let c: u64 = wr.put_str(em.w, field);
     return 1;
   }
-  if t.kind == vf.TY_FLOAT() {
+  if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 {
       let a: u64 = wr.put_str(em.w, "lain_bitcast_u32_f32((uint32_t)_c");
       let b: u64 = wr.put_u64_dec(em.w, tmp);

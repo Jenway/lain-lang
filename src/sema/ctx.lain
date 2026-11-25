@@ -2,10 +2,10 @@
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
-let ir = import("src::ir::ir");
+let ir = import("src::sema::ir_emit");
 let codes = import("src::ir::ir_codes");
 let s = import("src::driver::sym");
-let ax = import("src::syntax::ast");
+let ax = import("src::sema::ast");
 let agg = import("src::sema::agg");
 let modules = import("src::sema::modules");
 let bi = import("src::sema::builtins");
@@ -92,7 +92,7 @@ pub let val_force = func(k: Mut(st.State), v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u6
   ir.arg_int(k, ty.vbits(v));
   ir.arg_int(k, 0);
   let res: u64 = ir.fresh_t(k);
-  ir.emit(k, codes.INST_ADD(), res, tp);
+  ir.emit(k, codes.InstKind.Add as u64, res, tp);
   return res;
 };
 
@@ -147,7 +147,7 @@ pub let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mu
 };
 
 let is_int_scalar = func(t: Mut(ty.Ty)) -> u64 {
-  if ty.tk(t) != codes.TY_BITS() { return 0; }
+  if ty.tk(t) != (codes.TyKind.Bits as u64) { return 0; }
   if ty.tw(t) == 0 { return 0; }
   if ty.tw(t) == 1 { return 0; }
   return 1;
@@ -169,7 +169,7 @@ pub let cast_value = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to
   if fw == tw { return ty.val_ref(out, ty.vn(v), to); }
   let nb: Mut(ty.Ty) = new_ty(k);
   ty.ty_bits(nb, tw, 0);
-  let kind: u64 = ty.cast_inst(codes.TY_BITS(), fw, ty.tsg(from), codes.TY_BITS(), tw);
+  let kind: u64 = ty.cast_inst(codes.TyKind.Bits as u64, fw, ty.tsg(from), codes.TyKind.Bits as u64, tw);
   if kind == 0 { return ty.val_ref(out, ty.vn(v), to); }
   ir.args_reset(k);
   ir.arg_ref(k, ty.vn(v));
@@ -191,7 +191,7 @@ pub let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)
   ir.args_reset(k);
   push_val(k, c);
   ir.arg_ref(k, ir.slot_name(k, j));
-  return ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+  return ir.emit_mem(k, codes.InstKind.Store as u64, 0, w, 0);
 };
 
 pub let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
@@ -199,7 +199,7 @@ pub let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Va
   ir.args_reset(k);
   ir.arg_ref(k, ir.slot_name(k, j));
   let res: u64 = ir.fresh_t(k);
-  ir.emit_mem(k, codes.INST_LOAD(), res, w, 0);
+  ir.emit_mem(k, codes.InstKind.Load as u64, res, w, 0);
   let v: Mut(ty.Val) = new_val(k);
   ty.val_ref(v, res, w);
   if is_cenum(k, tp) == 1 { return cast_value(k, v, w, tp, out); }
@@ -211,11 +211,11 @@ pub let slot_copy = func(k: Mut(st.State), dst: u64, src: u64) -> u64 {
   ir.args_reset(k);
   ir.arg_ref(k, ir.slot_name(k, src));
   let res: u64 = ir.fresh_t(k);
-  ir.emit_mem(k, codes.INST_LOAD(), res, w, 0);
+  ir.emit_mem(k, codes.InstKind.Load as u64, res, w, 0);
   ir.args_reset(k);
   ir.arg_ref(k, res);
   ir.arg_ref(k, ir.slot_name(k, dst));
-  return ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+  return ir.emit_mem(k, codes.InstKind.Store as u64, 0, w, 0);
 };
 
 let kw_weight = func(h: u64) -> u64 {
@@ -248,7 +248,7 @@ pub let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 {
   let done: u64 = loop w(idx: u64 = j) while idx < n {
     ir.args_reset(k);
     ir.arg_int(k, 8);
-    ir.emit_mem(k, codes.INST_ALLOCA(), ir.slot_name(k, idx), t, 0);
+    ir.emit_mem(k, codes.InstKind.Alloca as u64, ir.slot_name(k, idx), t, 0);
     idx = idx + 1;
   };
   return done;
@@ -678,7 +678,7 @@ pub let alloc_res_slot = func(k: Mut(st.State)) -> u64 {
   ir.args_reset(k);
   ir.arg_int(k, 0);
   ir.arg_ref(k, ir.slot_name(k, j));
-  ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+  ir.emit_mem(k, codes.InstKind.Store as u64, 0, w, 0);
   return j;
 };
 

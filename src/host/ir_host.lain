@@ -4,12 +4,13 @@
 //   模块句柄从 1 起，0 表示无效；
 //   区域句柄把模块序号与区域序号打包成一个整数；
 //   操作数邮箱跟着模块走，下一条 #inst* 取走并清空。
-// 这里只负责表示与追加，类型检查交给 src::ir::verify，C99 文本交给
+// 这里只负责表示与追加，类型检查交给 src::ir::verify::checks，C99 文本交给
 // src::backend::c99。容量、句柄、状态上的任何违例都在发生位置就地终止，
 // 终止之前把说明文本与细节值写进 HostIr，事后可用 last_err_msg /
 // last_err_detail 读出崩溃点上下文。诊断是普通输出，不写进失败状态。
 let codes = import("src::ir::ir_codes");
-let vf = import("src::ir::verify");
+let vf = import("src::ir::verify::model");
+let checks = import("src::ir::verify::checks");
 let c99 = import("src::backend::c99");
 let mem = import("std::mem");
 let tab = import("src::host::symtab");
@@ -22,13 +23,6 @@ pub let DIAG_MESSAGE_MAX = func() -> u64 { return 512; };
 pub let INIT_CAP = func() -> u64 { return 4; };
 pub let INIT_INST_CAP = func() -> u64 { return 16; };
 pub let HANDLE_STRIDE = func() -> u64 { return 4294967296; };
-
-// 内存序编号与 ir_codes 的 L1MemOrder 一致。
-pub let ORDER_RELAXED = func() -> u64 { return 0; };
-pub let ORDER_ACQUIRE = func() -> u64 { return 1; };
-pub let ORDER_RELEASE = func() -> u64 { return 2; };
-pub let ORDER_ACQ_REL = func() -> u64 { return 3; };
-pub let ORDER_SEQ_CST = func() -> u64 { return 4; };
 
 // 宿主错误码：只作为就地终止的原因值，不从 ir_* 的返回值里推断。
 pub let HOST_OK = func() -> u64 { return 0; };
@@ -728,7 +722,7 @@ let init_module = func(h: Mut(HostIr), slot: u64, name: u64) -> Mut(ModState) {
   let cr: Mut(u8) = arena_zero(h, pc * size_of(IrCaseCell), 8);
   m.cases = ptr_cast(Mut(vf.IrCase), cr);
   m.case_cap = pc;
-  let srf: Mut(u8) = arena_zero(h, vf.VF_SCRATCH() * size_of(u64), 8);
+  let srf: Mut(u8) = arena_zero(h, checks.VF_SCRATCH() * size_of(u64), 8);
   m.scratch = ptr_cast(Mut(u64), srf);
   let dr: Mut(u8) = arena_zero(h, pc * size_of(DataRec), 8);
   m.data = ptr_cast(Mut(DataRec), dr);
@@ -1050,7 +1044,7 @@ pub let ir_inst = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u64,
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let p: Mut(ProcState) = m.proc;
   if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
-  if kind >= codes.INST_COUNT() { return fail(h, HOST_ERR_ARG()); }
+  if kind >= codes.InstKind.Count as u64 { return fail(h, HOST_ERR_ARG()); }
   if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
   let it: Mut(vf.IrInst) = make_inst(h, m, kind);
   if is_null(it) { return 0; }
@@ -1073,7 +1067,7 @@ pub let ir_inst_if = func(h: Mut(HostIr), modv: u64, res: u64, cond: u64,
   if cond == 0 { return fail(h, HOST_ERR_ARG()); }
   let then_i: u64 = resolve_region(h, m, then_r);
   if then_i == vf.NO_REGION() { return 0; }
-  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_IF());
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.InstKind.If as u64);
   if is_null(it) { return 0; }
   if res != 0 {
     let rr: u64 = vf.inst_add_result(it, res);
@@ -1099,7 +1093,7 @@ pub let ir_inst_loop = func(h: Mut(HostIr), modv: u64, res: u64, label: u64,
   if label == 0 { return fail(h, HOST_ERR_ARG()); }
   let body_i: u64 = resolve_region(h, m, body);
   if body_i == vf.NO_REGION() { return 0; }
-  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_LOOP());
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.InstKind.Loop as u64);
   if is_null(it) { return 0; }
   if res != 0 {
     let rr: u64 = vf.inst_add_result(it, res);
@@ -1140,7 +1134,7 @@ pub let ir_inst_switch = func(h: Mut(HostIr), modv: u64, res: u64, selector: u64
   if def == 0 { return fail(h, HOST_ERR_ARG()); }
   let def_i: u64 = resolve_region(h, m, def);
   if def_i == vf.NO_REGION() { return 0; }
-  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_SWITCH());
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.InstKind.Switch as u64);
   if is_null(it) { return 0; }
   if res != 0 {
     let rr: u64 = vf.inst_add_result(it, res);
@@ -1179,11 +1173,11 @@ pub let ir_inst_jump = func(h: Mut(HostIr), modv: u64, kind: u64, label: u64) ->
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let p: Mut(ProcState) = m.proc;
   if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
-  if kind != codes.INST_BREAK() {
-    if kind != codes.INST_CONTINUE() {
-      if kind != codes.INST_RETURN() {
-        if kind != codes.INST_YIELD() {
-          if kind != codes.INST_UNREACHABLE() {
+  if kind != codes.InstKind.Break as u64 {
+    if kind != codes.InstKind.Continue as u64 {
+      if kind != codes.InstKind.Return as u64 {
+        if kind != codes.InstKind.Yield as u64 {
+          if kind != codes.InstKind.Unreachable as u64 {
             return fail(h, HOST_ERR_ARG());
           }
         }
@@ -1209,7 +1203,7 @@ pub let ir_inst_call = func(h: Mut(HostIr), modv: u64, res: u64, callee: u64,
   let p: Mut(ProcState) = m.proc;
   if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
   if callee == 0 { return fail(h, HOST_ERR_ARG()); }
-  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_CALL());
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.InstKind.Call as u64);
   if is_null(it) { return 0; }
   if res != 0 {
     let rr: u64 = vf.inst_add_result(it, res);
@@ -1234,7 +1228,7 @@ pub let ir_inst_call_indirect = func(h: Mut(HostIr), modv: u64, res: u64, k: u64
   if (k == 0) and (res != 0) { return fail(h, HOST_ERR_ARG()); }
   if (k != 0) and (res == 0) { return fail(h, HOST_ERR_ARG()); }
   if m.arg_count == 0 { return fail(h, HOST_ERR_ARG()); }
-  let it: Mut(vf.IrInst) = make_inst(h, m, codes.INST_CALL());
+  let it: Mut(vf.IrInst) = make_inst(h, m, codes.InstKind.Call as u64);
   if is_null(it) { return 0; }
   if res != 0 {
     let rr: u64 = vf.inst_add_result(it, res);
@@ -1253,12 +1247,12 @@ pub let ir_inst_mem = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u6
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let p: Mut(ProcState) = m.proc;
   if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
-  if kind != codes.INST_LOAD() {
-    if kind != codes.INST_STORE() {
-      if kind != codes.INST_ALLOCA() { return fail(h, HOST_ERR_ARG()); }
+  if kind != codes.InstKind.Load as u64 {
+    if kind != codes.InstKind.Store as u64 {
+      if kind != codes.InstKind.Alloca as u64 { return fail(h, HOST_ERR_ARG()); }
     }
   }
-  if order > ORDER_SEQ_CST() { return fail(h, HOST_ERR_ARG()); }
+  if order > codes.OrderKind.SeqCst as u64 { return fail(h, HOST_ERR_ARG()); }
   if type_code_ok(k) == 0 { return fail(h, HOST_ERR_TYPE()); }
   let it: Mut(vf.IrInst) = make_inst(h, m, kind);
   if is_null(it) { return 0; }
@@ -1279,7 +1273,7 @@ pub let ir_inst_symbol = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64,
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let p: Mut(ProcState) = m.proc;
   if (p.open == 0) or (m.depth == 0) { return fail(h, HOST_ERR_STATE()); }
-  if kind >= codes.INST_COUNT() { return fail(h, HOST_ERR_ARG()); }
+  if kind >= codes.InstKind.Count as u64 { return fail(h, HOST_ERR_ARG()); }
   if symbol == 0 { return fail(h, HOST_ERR_ARG()); }
   let it: Mut(vf.IrInst) = make_inst(h, m, kind);
   if is_null(it) { return 0; }
@@ -1299,7 +1293,7 @@ pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
   let modval: vf.IrModule = module_of(h, m);
   let code: u64 = 0;
   if m.data_count == 0 {
-    code = vf.verify_module_large(ref_of(modval));
+    code = checks.verify_module_large(ref_of(modval));
   } else {
     let raw: Mut(u8) = arena_take(h, m.data_count * size_of(u64), 8);
     if is_null(raw) {
@@ -1312,7 +1306,7 @@ pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
       syms[i] = d.symbol;
       i = i + 1;
     };
-    code = vf.verify_module_with_data(ref_of(modval), ptr_cast(Ref(u64), raw),
+    code = checks.verify_module_with_data(ref_of(modval), ptr_cast(Ref(u64), raw),
                                       m.data_count);
   }
   h.last_verify = code;
@@ -1446,7 +1440,7 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
   if is_null(m) { return fail(h, HOST_ERR_HANDLE()); }
   let modval: vf.IrModule = module_of(h, m);
   let mv: Ref(vf.IrModule) = ref_of(modval);
-  let code: u64 = vf.verify_module_large(mv);
+  let code: u64 = checks.verify_module_large(mv);
   h.last_verify = code;
   if code != 0 { return fail(h, HOST_ERR_IR()); }
   let w0: c99.C99Writer = c99.new_writer(buf);
