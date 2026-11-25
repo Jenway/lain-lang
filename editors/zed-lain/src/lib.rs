@@ -3,8 +3,8 @@
 use zed_extension_api::{self as zed, Command, LanguageServerId, Result, Worktree};
 
 const LANGUAGE_SERVER_ID: &str = "lain-lsp";
-const EXTENSION_BINARY: &str = "D:/codeFiles/lain-lang/build/lain_lsp.exe";
-const PATH_BINARY: &str = "lain-lsp";
+const LOCAL_BINARY: &str = "D:/codeFiles/lain-lang/build/lain_lsp.exe";
+const PATH_BINARY_NAMES: [&str; 2] = ["lain_lsp.exe", "lain-lsp"];
 
 struct LainExtension;
 
@@ -16,15 +16,15 @@ impl LainExtension {
         if let Some(path) = configured {
             return Ok(path);
         }
-        if std::fs::metadata(EXTENSION_BINARY).is_ok_and(|meta| meta.is_file()) {
-            return Ok(EXTENSION_BINARY.to_string());
+        if std::fs::metadata(LOCAL_BINARY).is_ok_and(|meta| meta.is_file()) {
+            return Ok(LOCAL_BINARY.to_string());
         }
-        match worktree.which(PATH_BINARY) {
-            Some(path) => Ok(path),
-            None => Err(format!(
-                "找不到 Lain 语言服务器：请把 {EXTENSION_BINARY} 编译出来，或把 lain-lsp 放进 PATH，或在 Zed 设置里写 {{\"lsp\": {{\"{LANGUAGE_SERVER_ID}\": {{\"binary\": {{\"path\": \"...\"}}}}}}}}"
-            )),
+        for name in PATH_BINARY_NAMES {
+            if let Some(path) = worktree.which(name) {
+                return Ok(path);
+            }
         }
+        Ok(LOCAL_BINARY.to_string())
     }
 }
 
@@ -41,9 +41,8 @@ impl zed::Extension for LainExtension {
         if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
             return Err(format!("未知的语言服务器：{language_server_id}"));
         }
-        let command = self.binary_path(worktree)?;
         Ok(Command {
-            command,
+            command: self.binary_path(worktree)?,
             args: Vec::new(),
             env: Default::default(),
         })

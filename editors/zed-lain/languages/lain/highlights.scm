@@ -35,29 +35,17 @@
   "for"
   "in"
   "loop"
+  "while"
+  "if"
+  "else"
+  "return"
+  "break"
+  "continue"
   "as"
   "and"
   "or"
 ] @keyword
 
-(if_expression
-  "if" @keyword.conditional
-  "else" @keyword.conditional)
-
-(while_statement "while" @keyword.repeat)
-(for_expression "for" @keyword.repeat)
-
-(return_statement "return" @keyword.return)
-(break_statement "break" @keyword)
-(continue_statement "continue" @keyword)
-
-(function_expression "func" @keyword.function)
-(function_signature "func" @keyword.function)
-(struct_expression "struct" @keyword)
-(enum_expression "enum" @keyword)
-(module_expression "module" @keyword)
-(effect_expression "effect" @keyword)
-(effect_operation "op" @keyword)
 (sig_expression keyword: (path (identifier) @keyword))
 (icall_expression "icall" @keyword)
 
@@ -82,7 +70,7 @@
   ])
 
 (let_declaration
-  name: (identifier) @module
+  name: (identifier) @type
   value: (module_expression))
 
 (extern_declaration name: (identifier) @function)
@@ -113,7 +101,6 @@
 ; --- 类型 -----------------------------------------------------------------
 (type_application name: (path (identifier) @type))
 (function_type "Fn" @type.builtin)
-(raw_function_type)
 (effect_row (path (identifier) @type))
 
 (function_expression return_type: (path (identifier) @type))
@@ -145,13 +132,9 @@
     variant: (path
       (identifier) @constructor)))
 
-(variant_pattern variant: (path))
-
 (wildcard_pattern) @variable.builtin
 
-(handle_expression "with" @keyword)
-
-; --- 中标点与运算符 -------------------------------------------------------
+; --- 标点与运算符 ---------------------------------------------------------
 [
   "+"
   "-"
