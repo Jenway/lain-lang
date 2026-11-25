@@ -32,9 +32,15 @@ let test_bin = func() -> Slice(u8) {
 };
 
 let link_flags = func() -> Slice(u8) {
-  let f: Slice(u8) = "";
+  let f: Slice(u8) = "-pthread ";
   comptime if is_windows() { f = "-Wl,/STACK:16777216 "; };
   return f;
+};
+
+let target_flag = func() -> Slice(u8) {
+  let t: Slice(u8) = " --target linux";
+  comptime if is_windows() { t = ""; };
+  return t;
 };
 
 let compile_c = func(src: Slice(u8), out: Slice(u8)) -> Slice(u8) {
@@ -48,7 +54,7 @@ let compile_split = func(manifest: Slice(u8), out: Slice(u8)) -> Slice(u8) {
 let lainc_run = func(compiler: Slice(u8), src: Slice(u8), with_entry: bool, out: Slice(u8)) -> Slice(u8) {
   let entry: Slice(u8) = "";
   if with_entry { entry = " --entry main"; }
-  return f"{compiler} {src}{entry} --out {out}";
+  return f"{compiler} {src}{target_flag()}{entry} --out {out}";
 };
 
 let stage2_units = func() -> Slice(u8) { return "build/stage2_c/unit"; };
@@ -138,7 +144,7 @@ let run_bootstrap = func() -> u64 {
   if run_step("Stage-1: compile lainc_boot.c",
               compile_c("bootstrap/lainc_boot.c", lainc_bin())) != 0 { return 1; }
   if run_step("Stage-2 IR + split C99: lainc src/driver/cli.lain -> build/stage2.l1, build/stage2_c/unit",
-              f"{lainc_bin()} src/driver/cli.lain --entry main --out build/stage2.l1 --split-c {stage2_units()}") != 0 { return 1; }
+              f"{lainc_bin()} src/driver/cli.lain{target_flag()} --entry main --out build/stage2.l1 --split-c {stage2_units()}") != 0 { return 1; }
   if build_split_program(stage2_units(), stage2_bin()) != 0 { return 1; }
   if run_step("Stage-3 IR: lainc_stage2 src/driver/cli.lain -> build/stage3.l1",
               lainc_run(stage2_bin(), "src/driver/cli.lain", false, "build/stage3.l1")) != 0 { return 1; }
@@ -154,12 +160,12 @@ let run_bootstrap = func() -> u64 {
 let run_suites = func(compiler: Slice(u8)) -> u64 {
 
   if run_step("Showcase split C99: examples/overhaul_showcase.lain -> build/showcase_c/unit",
-              f"{compiler} examples/overhaul_showcase.lain --split-c {showcase_units()}") != 0 { return 1; }
+              f"{compiler} examples/overhaul_showcase.lain{target_flag()} --split-c {showcase_units()}") != 0 { return 1; }
   if build_split_program(showcase_units(), showcase_bin()) != 0 { return 1; }
   if expect_exit("Run examples/overhaul_showcase.lain", showcase_bin(), 126) != 0 { return 1; }
 
   if run_step("Tests split C99: test.lain -> build/test_c/unit",
-              f"{compiler} test.lain --opt --split-c {test_units()}") != 0 { return 1; }
+              f"{compiler} test.lain{target_flag()} --opt --split-c {test_units()}") != 0 { return 1; }
   if build_split_program(test_units(), test_bin()) != 0 { return 1; }
   if run_step("Run test.lain", test_bin()) != 0 { return 1; }
   return 0;
