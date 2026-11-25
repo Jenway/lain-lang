@@ -145,6 +145,15 @@ let free_atomic = func(p: Mut(sync.AtomicU64)) -> u64 {
 // ---------------------------------------------------------------------------
 // 局部调度器。
 // ---------------------------------------------------------------------------
+// 任务状态：就绪、运行、按时间休眠、等待 join 目标、结束。
+pub let CoroState = enum(u64) {
+  Ready = 0,
+  Running = 1,
+  Sleep = 2,
+  Join = 3,
+  Done = 4
+};
+
 pub let CoroTask = struct {
   worker: Mut(u8),
   turn: Mut(sync.AtomicU64),
@@ -152,7 +161,7 @@ pub let CoroTask = struct {
   entry: Fn((Mut(u8)) -> u64),
   ctx: Mut(u8),
   id: u64,
-  state: u64,
+  state: CoroState,
   wake_at: u64,
   join_target: u64,
   result: u64,
@@ -168,12 +177,6 @@ pub let FiberSched = struct {
   next_id: u64,
   stack_size: u64,
 };
-
-let st_ready = func() -> u64 { return 0; };
-let st_running = func() -> u64 { return 1; };
-let st_sleep = func() -> u64 { return 2; };
-let st_join = func() -> u64 { return 3; };
-let st_done = func() -> u64 { return 4; };
 
 let null_task = func() -> Mut(CoroTask) {
   return ptr_cast(Mut(CoroTask), 0 as u64);
@@ -218,7 +221,7 @@ let task_all_next = func(t: Mut(CoroTask)) -> Mut(CoroTask) {
 
 let enqueue_ready = func(s: Mut(FiberSched), t: Mut(CoroTask)) -> u64 {
   t.ready_next = null_bytes();
-  t.state = st_ready();
+  t.state = CoroState.Ready;
   let tail: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.ready_tail);
   if is_null(tail) {
     s.ready_head = ptr_cast(Mut(u8), t);
@@ -263,7 +266,7 @@ let find_task = func(s: Mut(FiberSched), id: u64) -> Mut(CoroTask) {
 let pending_count = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   return loop count(n: u64 = 0) while (cur as u64) != 0 {
-    if cur.state != st_done() {
+    if cur.state != CoroState.Done {
       n = n + 1;
     }
     cur = task_all_next(cur);
@@ -273,7 +276,7 @@ let pending_count = func(s: Mut(FiberSched)) -> u64 {
 let sleeping_count = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   return loop count(n: u64 = 0) while (cur as u64) != 0 {
-    if cur.state == st_sleep() {
+    if cur.state == CoroState.Sleep {
       n = n + 1;
     }
     cur = task_all_next(cur);
@@ -283,7 +286,7 @@ let sleeping_count = func(s: Mut(FiberSched)) -> u64 {
 let sweep_sleepers = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   return loop sweep(n: u64 = 0) while (cur as u64) != 0 {
-    if cur.state == st_sleep() {
+    if cur.state == CoroState.Sleep {
       let now: u64 = now_ms();
       if now >= cur.wake_at {
         enqueue_ready(s, cur);
@@ -297,10 +300,10 @@ let sweep_sleepers = func(s: Mut(FiberSched)) -> u64 {
 let wake_joiners = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   return loop wake(n: u64 = 0) while (cur as u64) != 0 {
-    if cur.state == st_join() {
+    if cur.state == CoroState.Join {
       let target: Mut(CoroTask) = find_task(s, cur.join_target);
       if (target as u64) != 0 {
-        if target.state == st_done() {
+        if target.state == CoroState.Done {
           enqueue_ready(s, cur);
           n = n + 1;
         }
@@ -346,7 +349,7 @@ let task_main = func(raw: Mut(u8)) -> c_uint {
   wait_turn(t.turn, t.abort);
   if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 {
     t.result = 0;
-    t.state = st_done();
+    t.state = CoroState.Done;
     sync.atomic_u64_store(t.turn, 0, sync.RELEASE());
     return 0 as c_uint;
   }
@@ -354,7 +357,7 @@ let task_main = func(raw: Mut(u8)) -> c_uint {
   let ctx: Mut(u8) = t.ctx;
   let r: u64 = entry(ctx);
   t.result = r;
-  t.state = st_done();
+  t.state = CoroState.Done;
   sync.atomic_u64_store(t.turn, 0, sync.RELEASE());
   return 0 as c_uint;
 };
@@ -369,7 +372,7 @@ pub let spawn = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64 {
   t.entry = entry;
   t.ctx = ctx;
   t.id = s.next_id;
-  t.state = st_ready();
+  t.state = CoroState.Ready;
   t.wake_at = 0;
   t.join_target = 0;
   t.result = 0;
@@ -405,7 +408,7 @@ pub let sleep_ms = func(ms: u64) {
   }
   if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return; }
   t.wake_at = now_ms() + ms;
-  t.state = st_sleep();
+  t.state = CoroState.Sleep;
   park_task(t);
 };
 
@@ -416,9 +419,9 @@ pub let join = func(task_id: u64) -> u64 {
   if is_null(t) { return 0; }
   let target: Mut(CoroTask) = find_task(s, task_id);
   if is_null(target) { return 0; }
-  loop wait(rounds: u64 = 0) while (target.state != st_done()) and (rounds < 100000000) {
+  loop wait(rounds: u64 = 0) while (target.state != CoroState.Done) and (rounds < 100000000) {
     if sync.atomic_u64_load(t.abort, sync.ACQUIRE()) != 0 { return 0; }
-    t.state = st_join();
+    t.state = CoroState.Join;
     t.join_target = task_id;
     park_task(t);
     rounds = rounds + 1;
@@ -430,7 +433,7 @@ let cleanup_sched = func(s: Mut(FiberSched)) -> u64 {
   let cur: Mut(CoroTask) = ptr_cast(Mut(CoroTask), s.all_head);
   loop drop(i: u64 = 0) while (cur as u64) != 0 {
     let next: Mut(CoroTask) = task_all_next(cur);
-    if cur.state != st_done() {
+    if cur.state != CoroState.Done {
       sync.atomic_u64_store(cur.abort, 1, sync.RELEASE());
       sync.atomic_u64_store(cur.turn, 1, sync.RELEASE());
     }
@@ -469,7 +472,7 @@ pub let run_fiber_local = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64
         spins = 10000000;
       }
     } else {
-      t.state = st_running();
+      t.state = CoroState.Running;
       s.current = t;
       set_current_task(t);
       sync.atomic_u64_store(t.turn, 1, sync.RELEASE());

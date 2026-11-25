@@ -12,7 +12,6 @@
 // 容量与句柄上的任何违例都在发生位置就地终止，绝不返回半成品。
 
 let os = import("std::os");
-let fmt = import("std::fmt");
 let tr = import("std::trace");
 let err = import("src::driver::err");
 let symtab = import("src::host::symtab");
@@ -47,21 +46,6 @@ let die_mut = func(msg: Slice(u8), cause: u64) -> Mut(u8) {
 let note_fail = func(msg: Slice(u8)) -> u64 {
   os.eprint(msg);
   return 1;
-};
-
-// --- 违例钩子 ---------------------------------------------------------------
-// 下层四个宿主模块在就地终止之前把说明文本与细节值交给这个钩子，钩子把它们
-// 写成一行 "[host_trap] <msg> (detail=<u64>)\n" 交给标准错误。说明文本一律是
-// 静态字面量，格式化的落脚点只有 std::fmt 的静态字符池，所以递增区耗尽或堆
-// 分配失败的时候这一行仍然能打出来。
-let host_trap_cb = func(p: Ref(u8), n: u64, detail: u64) -> u64 {
-  let c0: fmt.Cursor = fmt.fmt_begin();
-  let c1: fmt.Cursor = fmt.write_str(c0, "[host_trap] ");
-  let c2: fmt.Cursor = fmt.write_str(c1, make_slice(Slice(u8), p, n));
-  let c3: fmt.Cursor = fmt.write_str(c2, " (detail=");
-  let c4: fmt.Cursor = fmt.write_u64(c3, detail);
-  let c5: fmt.Cursor = fmt.write_str(c4, ")\n");
-  return os.eprint(fmt.fmt_done(c5));
 };
 
 // --- 容量 -------------------------------------------------------------------
@@ -262,13 +246,6 @@ pub let rt_init = func() -> u64 {
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   let rc: u64 = c99.set_syms(h.syms);
   if rc != 0 { return die_u64("[host_rt] c99 symbol table wiring failed\n", rc); }
-  let cb: Fn((Ref(u8), u64, u64) -> u64) = fn_of(host_trap_cb);
-  let w0: u64 = symtab.set_trap_hook(h.syms, cb);
-  let w1: u64 = ao.set_trap_hook(h.ast_out, cb);
-  let w2: u64 = sh.set_trap_hook(h.sources, cb);
-  let w3: u64 = irh.set_trap_hook(h.ir, cb);
-  let wired: u64 = (w0 + w1) + (w2 + w3);
-  if wired != 0 { return die_u64("[host_rt] trap hook wiring failed\n", wired); }
   return raw_ptr;
 };
 

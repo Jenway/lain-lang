@@ -14,20 +14,30 @@
 // 的字节保持原样。
 //
 // 引擎侧的名字是 `VmSpace`；`StackLease` 是执行流向空间借来的一份栈。
-pub let MEM_READ = func() -> u64 { return 1; };
-pub let MEM_WRITE = func() -> u64 { return 2; };
-pub let MEM_CALL = func() -> u64 { return 4; };
+// 访存种类与窗口权限共用同一套位：1 读、2 写、4 调用。
+pub let Access = enum(u64) {
+  Read = 1,
+  Write = 2,
+  Call = 4
+};
 
-pub let PERM_READ = func() -> u64 { return 1; };
-pub let PERM_WRITE = func() -> u64 { return 2; };
-pub let PERM_CALL = func() -> u64 { return 4; };
+pub let MEM_READ = func() -> u64 { return Access.Read as u64; };
+pub let MEM_WRITE = func() -> u64 { return Access.Write as u64; };
+pub let MEM_CALL = func() -> u64 { return Access.Call as u64; };
 
-pub let TRAP_NONE = func() -> u64 { return 0; };
-pub let TRAP_MEM_BOUNDS = func() -> u64 { return 1; };
-pub let TRAP_MEM_PROT = func() -> u64 { return 2; };
-pub let TRAP_MEM_ALIGN = func() -> u64 { return 3; };
-pub let TRAP_MEM_MAP = func() -> u64 { return 4; };
-pub let TRAP_BAD_HANDLE = func() -> u64 { return 5; };
+// 一次映射或访存的唯一结局编码。
+pub let Trap = enum(u64) {
+  None = 0,
+  MemBounds = 1,
+  MemProt = 2,
+  MemAlign = 3,
+  MemMap = 4,
+  BadHandle = 5
+};
+
+pub let TRAP_NONE = func() -> u64 { return Trap.None as u64; };
+pub let TRAP_MEM_BOUNDS = func() -> u64 { return Trap.MemBounds as u64; };
+pub let TRAP_MEM_PROT = func() -> u64 { return Trap.MemProt as u64; };
 
 // 下标、区域号与符号号共用的"没有"哨兵。
 pub let NO_INDEX = func() -> u64 { return 4294967295; };
@@ -126,7 +136,7 @@ pub let vspace_new = func(mem: MutSlice(u8), windows: MutSlice(Window),
   out.live = 0;
   out.used = 0;
   out.next_base = STACK_BASE();
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 // 复用一块已经给过 mem / windows 的空间：只清窗口与计数，不动底座。
@@ -251,7 +261,7 @@ let range_rejected = func(space: Mut(VmSpace), base: u64, len: u64) -> u64 {
 pub let map_window_prefix = func(space: Mut(VmSpace), base: u64, len: u64,
                                  accessible: u64, perms: u64) -> Handle {
   if accessible > len { return no_handle(); }
-  if (perms & (PERM_READ() | PERM_WRITE() | PERM_CALL())) == 0 {
+  if (perms & ((Access.Read as u64) | (Access.Write as u64) | (Access.Call as u64))) == 0 {
     return no_handle();
   }
   if range_rejected(space, base, len) == 1 { return no_handle(); }
@@ -289,35 +299,35 @@ pub let map_window = func(space: Mut(VmSpace), base: u64, len: u64,
 // 只撤销授权：底层偏移不回收，别的窗口不受影响。
 pub let unmap_window = func(space: Mut(VmSpace), h: Handle) -> u64 {
   let slot: u64 = handle_slot(space, h);
-  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  if slot == NO_INDEX() { return Trap.BadHandle as u64; }
   let windows: MutSlice(Window) = space_windows(space);
   let w: Window = windows[slot];
-  if w.borrow_count != 0 { return TRAP_BAD_HANDLE(); }
+  if w.borrow_count != 0 { return Trap.BadHandle as u64; }
   w.alive = 0;
   windows[slot] = w;
   space.live = space.live - 1;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 // 窗口只收不放：缩小之后被收回的前缀立刻访问不了。
 pub let set_accessible = func(space: Mut(VmSpace), h: Handle, accessible: u64) -> u64 {
   let slot: u64 = handle_slot(space, h);
-  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  if slot == NO_INDEX() { return Trap.BadHandle as u64; }
   let windows: MutSlice(Window) = space_windows(space);
   let w: Window = windows[slot];
-  if accessible > w.len { return TRAP_MEM_MAP(); }
+  if accessible > w.len { return Trap.MemMap as u64; }
   w.accessible = accessible;
   windows[slot] = w;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 // 装载期初始化：把一段内容写进窗口的底层存储。它只受容量约束，不经过权限
 // 判定——映射完成之前的"写入"是装载器的特权动作，运行期访存仍走下面的接口。
 pub let init_window = func(space: Mut(VmSpace), h: Handle, data: Slice(u8)) -> u64 {
   let slot: u64 = handle_slot(space, h);
-  if slot == NO_INDEX() { return TRAP_BAD_HANDLE(); }
+  if slot == NO_INDEX() { return Trap.BadHandle as u64; }
   let w: Window = window_at(space, slot);
-  if data.len > w.len { return TRAP_MEM_MAP(); }
+  if data.len > w.len { return Trap.MemMap as u64; }
   let mem: MutSlice(u8) = space_mem(space);
   let base: Mut(u8) = mem.ptr;
   let dst: Mut(u8) = base + w.offset;
@@ -326,37 +336,37 @@ pub let init_window = func(space: Mut(VmSpace), h: Handle, data: Slice(u8)) -> u
     deref(q) = data[i];
     i = i + 1;
   };
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 // 一次访存的核心判定。成功时 value 是窗口下标，失败时 trap 说明原因。
 // size 必须是 2 的幂（1/2/4/8），它同时决定自然对齐要求。
 pub let access_window = func(space: Mut(VmSpace), where: u64, size: u64,
                              need: u64) -> MemResult {
-  if size == 0 { return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() }; }
-  if (where % size) != 0 { return MemResult { value: 0, trap: TRAP_MEM_ALIGN() }; }
+  if size == 0 { return MemResult { value: 0, trap: Trap.MemBounds as u64 }; }
+  if (where % size) != 0 { return MemResult { value: 0, trap: Trap.MemAlign as u64 }; }
   let index: u64 = find_window(space, where);
-  if index == NO_INDEX() { return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() }; }
+  if index == NO_INDEX() { return MemResult { value: 0, trap: Trap.MemBounds as u64 }; }
   let w: Window = window_at(space, index);
   let mem: MutSlice(u8) = space_mem(space);
   // 窗口自身不得越过底层存储：这是登记时的一次性约束，这里再核一次。
   if w.offset > mem.len {
-    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+    return MemResult { value: 0, trap: Trap.MemBounds as u64 };
   }
   if w.accessible > (mem.len - w.offset) {
-    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+    return MemResult { value: 0, trap: Trap.MemBounds as u64 };
   }
   if (w.perms & need) != need {
-    return MemResult { value: 0, trap: TRAP_MEM_PROT() };
+    return MemResult { value: 0, trap: Trap.MemProt as u64 };
   }
   let rel: u64 = where - w.base;
   if rel >= w.accessible {
-    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+    return MemResult { value: 0, trap: Trap.MemBounds as u64 };
   }
   if (w.accessible - rel) < size {
-    return MemResult { value: 0, trap: TRAP_MEM_BOUNDS() };
+    return MemResult { value: 0, trap: Trap.MemBounds as u64 };
   }
-  return MemResult { value: index, trap: TRAP_NONE() };
+  return MemResult { value: index, trap: Trap.None as u64 };
 };
 
 pub let check_access = func(space: Mut(VmSpace), where: u64, size: u64,
@@ -369,14 +379,14 @@ pub let check_access = func(space: Mut(VmSpace), where: u64, size: u64,
 // 物理范围没有越过底层切片。空地址（0）一律视为逃逸。
 pub let check_no_addr_escape = func(space: Mut(VmSpace), where: u64, size: u64,
                                     need: u64) -> u64 {
-  if where == 0 { return TRAP_MEM_BOUNDS(); }
+  if where == 0 { return Trap.MemBounds as u64; }
   return check_access(space, where, size, need);
 };
 
 // 引擎侧的布尔判定：能访问返回 1，否则 0。
 pub let vm_check = func(space: Mut(VmSpace), where: u64, size: u64, need: u64) -> u64 {
   let r: MemResult = access_window(space, where, size, need);
-  if r.trap != 0 { return 0; }
+  if r.trap != (Trap.None as u64) { return 0; }
   return 1;
 };
 
@@ -387,71 +397,71 @@ let byte_ptr = func(space: Mut(VmSpace), w: Window, where: u64) -> Mut(u8) {
 };
 
 pub let load_u64 = func(space: Mut(VmSpace), where: u64) -> MemResult {
-  let r: MemResult = access_window(space, where, 8, MEM_READ());
-  if r.trap != 0 { return r; }
+  let r: MemResult = access_window(space, where, 8, Access.Read as u64);
+  if r.trap != (Trap.None as u64) { return r; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u64) = ptr_cast(Mut(u64), byte_ptr(space, w, where));
-  return MemResult { value: deref(p), trap: TRAP_NONE() };
+  return MemResult { value: deref(p), trap: Trap.None as u64 };
 };
 
 pub let load_u32 = func(space: Mut(VmSpace), where: u64) -> MemResult {
-  let r: MemResult = access_window(space, where, 4, MEM_READ());
-  if r.trap != 0 { return r; }
+  let r: MemResult = access_window(space, where, 4, Access.Read as u64);
+  if r.trap != (Trap.None as u64) { return r; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u32) = ptr_cast(Mut(u32), byte_ptr(space, w, where));
-  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+  return MemResult { value: deref(p) as u64, trap: Trap.None as u64 };
 };
 
 pub let load_u16 = func(space: Mut(VmSpace), where: u64) -> MemResult {
-  let r: MemResult = access_window(space, where, 2, MEM_READ());
-  if r.trap != 0 { return r; }
+  let r: MemResult = access_window(space, where, 2, Access.Read as u64);
+  if r.trap != (Trap.None as u64) { return r; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u16) = ptr_cast(Mut(u16), byte_ptr(space, w, where));
-  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+  return MemResult { value: deref(p) as u64, trap: Trap.None as u64 };
 };
 
 pub let load_u8 = func(space: Mut(VmSpace), where: u64) -> MemResult {
-  let r: MemResult = access_window(space, where, 1, MEM_READ());
-  if r.trap != 0 { return r; }
+  let r: MemResult = access_window(space, where, 1, Access.Read as u64);
+  if r.trap != (Trap.None as u64) { return r; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u8) = byte_ptr(space, w, where);
-  return MemResult { value: deref(p) as u64, trap: TRAP_NONE() };
+  return MemResult { value: deref(p) as u64, trap: Trap.None as u64 };
 };
 
 pub let store_u64 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
-  let r: MemResult = access_window(space, where, 8, MEM_WRITE());
-  if r.trap != 0 { return r.trap; }
+  let r: MemResult = access_window(space, where, 8, Access.Write as u64);
+  if r.trap != (Trap.None as u64) { return r.trap; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u64) = ptr_cast(Mut(u64), byte_ptr(space, w, where));
   deref(p) = value;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 pub let store_u32 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
-  let r: MemResult = access_window(space, where, 4, MEM_WRITE());
-  if r.trap != 0 { return r.trap; }
+  let r: MemResult = access_window(space, where, 4, Access.Write as u64);
+  if r.trap != (Trap.None as u64) { return r.trap; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u32) = ptr_cast(Mut(u32), byte_ptr(space, w, where));
   deref(p) = value as u32;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 pub let store_u16 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
-  let r: MemResult = access_window(space, where, 2, MEM_WRITE());
-  if r.trap != 0 { return r.trap; }
+  let r: MemResult = access_window(space, where, 2, Access.Write as u64);
+  if r.trap != (Trap.None as u64) { return r.trap; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u16) = ptr_cast(Mut(u16), byte_ptr(space, w, where));
   deref(p) = value as u16;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 pub let store_u8 = func(space: Mut(VmSpace), where: u64, value: u64) -> u64 {
-  let r: MemResult = access_window(space, where, 1, MEM_WRITE());
-  if r.trap != 0 { return r.trap; }
+  let r: MemResult = access_window(space, where, 1, Access.Write as u64);
+  if r.trap != (Trap.None as u64) { return r.trap; }
   let w: Window = window_at(space, r.value);
   let p: Mut(u8) = byte_ptr(space, w, where);
   deref(p) = value as u8;
-  return TRAP_NONE();
+  return Trap.None as u64;
 };
 
 // 引擎侧的原始字读取：调用方已经用 vm_check 过了权限，这里按位宽取低 N 字节。
@@ -469,7 +479,7 @@ pub let vm_store = func(space: Mut(VmSpace), where: u64, size: u64, value: u64) 
   if size == 2 { return store_u16(space, where, value); }
   if size == 4 { return store_u32(space, where, value); }
   if size == 8 { return store_u64(space, where, value); }
-  return TRAP_MEM_BOUNDS();
+  return Trap.MemBounds as u64;
 };
 
 // --- 栈租约 ---------------------------------------------------------------
@@ -492,7 +502,7 @@ pub let vm_alloc_stack = func(space: Mut(VmSpace), bytes: u64, owner: u64) -> St
   if bytes == 0 { return vm_no_lease(); }
   let base: u64 = align_up(space.next_base, OFFSET_ALIGN());
   let h: Handle = map_window_prefix(space, base, bytes, 0,
-                                    MEM_READ() | MEM_WRITE());
+                                    (Access.Read as u64) | (Access.Write as u64));
   if handle_none(h) == 1 { return vm_no_lease(); }
   let slot: u64 = handle_slot(space, h);
   let windows: MutSlice(Window) = space_windows(space);

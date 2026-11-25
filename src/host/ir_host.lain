@@ -12,6 +12,7 @@ let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify");
 let c99 = import("src::backend::c99");
 let mem = import("std::mem");
+let tab = import("src::host::symtab");
 
 // --- 容量与句柄 -----------------------------------------------------------
 pub let MODULE_CAP = func() -> u64 { return 16; };
@@ -38,10 +39,6 @@ pub let HOST_ERR_CAPACITY = func() -> u64 { return 4; };
 pub let HOST_ERR_RANGE = func() -> u64 { return 5; };
 pub let HOST_ERR_TYPE = func() -> u64 { return 6; };
 pub let HOST_ERR_IR = func() -> u64 { return 7; };
-
-// --- 违例终止 ---------------------------------------------------------------
-// 未挂钩子时用的空回调：宿主默认行为就是直接终止。
-let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
 // --- 记录 -----------------------------------------------------------------
 pub let DataRec = struct {
@@ -131,8 +128,6 @@ pub let HostIr = struct {
   diags: Mut(Diag),
   diag_cap: u64,
   diag_count: u64,
-  has_hook: u64,
-  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
 
 // 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
@@ -168,24 +163,14 @@ let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return 0;
 };
 
-// 安装违例钩子。钩子收到说明文本与细节值，在终止之前被调用一次。
-pub let set_trap_hook = func(h: Mut(HostIr),
-                             cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
-  h.has_hook = 1;
-  h.hook = cb;
-  return 0;
-};
-
+// 违例出口：记下失败状态、打一行说明，再就地终止。
 let fail_msg = func(h: Mut(HostIr), msg: Slice(u8), code: u64) -> u64 {
   if h.err == 0 {
     h.err = code;
     h.err_msg = msg;
     h.err_detail = code;
   }
-  if h.has_hook != 0 {
-    let f: Fn((Ref(u8), u64, u64) -> u64) = h.hook;
-    let dead: u64 = f(msg.ptr, msg.len, code);
-  }
+  let seen: u64 = tab.trap_note(msg, code);
   return mem.halt_now(code);
 };
 
@@ -344,8 +329,6 @@ pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
     diags: null_ref(Mut(Diag)),
     diag_cap: 0,
     diag_count: 0,
-    has_hook: 0,
-    hook: noop_trap,
   };
   let mod_bytes: u64 = MODULE_CAP() * size_of(ModState);
   let mp: Mut(u8) = arena_zero(hp, mod_bytes, 8);

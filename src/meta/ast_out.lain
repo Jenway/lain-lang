@@ -12,6 +12,7 @@
 // 公开名字按原名重新导出，调用方从 ast_out 取这些名字照旧可用。
 let mem = import("std::mem");
 let ast = import("src::meta::ast");
+let tab = import("src::host::symtab");
 
 // --- 共享定义 ---------------------------------------------------------------
 pub let RawNode = ast.RawNode;
@@ -26,9 +27,6 @@ pub let DL_BRACE = func() -> u64 { return ast.DL_BRACE(); };
 
 // 没有节点。节点下标从 0 起，节点表容量不允许达到这个值。
 pub let NO_NODE = func() -> u64 { return ast.NO_NODE(); };
-
-// 没有登记钩子时的默认回调：什么都不做，终止照常由 mem.halt_now 完成。
-let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
 
 // 事务检查点：开事务瞬间的全部水位与当时的根节点。
 pub let Mark = struct {
@@ -60,29 +58,17 @@ pub let AstOut = struct {
   err_msg_ptr: Ref(u8),
   err_msg_len: u64,
   err_detail: u64,
-  has_hook: u64,
-  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
 
 // --- 违例出口 ---------------------------------------------------------------
-// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值；
-// has_hook / hook 是调用方登记的终止钩子，钩子非空时在崩溃之前先被调用一次。
+// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值。
 // 说明文本一律是静态字面量，生命周期不依赖调用方的帧。
 let trap_with = func(a: Mut(AstOut), msg: Slice(u8), detail: u64) -> u64 {
   a.err_msg_ptr = msg.ptr;
   a.err_msg_len = msg.len;
   a.err_detail = detail;
-  if a.has_hook != 0 {
-    let f: Fn((Ref(u8), u64, u64) -> u64) = a.hook;
-    let seen: u64 = f(msg.ptr, msg.len, detail);
-  }
+  let seen: u64 = tab.trap_note(msg, detail);
   return mem.halt_now(detail);
-};
-
-pub let set_trap_hook = func(a: Mut(AstOut), cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
-  a.has_hook = 1;
-  a.hook = cb;
-  return 0;
 };
 
 pub let last_err_msg = func(a: Mut(AstOut)) -> Slice(u8) {
@@ -177,8 +163,6 @@ pub let ast_out_init = func(arena: Mut(u8), node_cap: u64, kid_cap: u64, pool_ca
     err_msg_ptr: null_ref(Ref(u8)),
     err_msg_len: 0,
     err_detail: 0,
-    has_hook: 0,
-    hook: fn_of(noop_trap),
   };
 };
 

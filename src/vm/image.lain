@@ -19,19 +19,24 @@ pub let NO_REGION = func() -> u64 { return 4294967295; };
 let CODE_BASE = func() -> u64 { return 268435456; };
 let CODE_ENTRY_SIZE = func() -> u64 { return 8; };
 
-pub let ERR_OK = func() -> u64 { return 0; };
-pub let ERR_REGION_CAP = func() -> u64 { return 1; };
-pub let ERR_INST_CAP = func() -> u64 { return 2; };
-pub let ERR_OPERAND_CAP = func() -> u64 { return 3; };
-pub let ERR_RESULT_CAP = func() -> u64 { return 4; };
-pub let ERR_CASE_CAP = func() -> u64 { return 5; };
-pub let ERR_PROC_CAP = func() -> u64 { return 6; };
-pub let ERR_CASE_INDEX = func() -> u64 { return 7; };
-pub let ERR_UNDEFINED = func() -> u64 { return 8; };
-pub let ERR_BAD_REGION = func() -> u64 { return 9; };
-pub let ERR_MAP_RO = func() -> u64 { return 10; };
-pub let ERR_MAP_RW = func() -> u64 { return 11; };
-pub let ERR_MAP_CODE = func() -> u64 { return 12; };
+// 装载器的诊断码：0 表示装载成功，其余每一项对应一种容量或引用错误。
+pub let ImageErr = enum(u64) {
+  Ok = 0,
+  RegionCap = 1,
+  InstCap = 2,
+  OperandCap = 3,
+  ResultCap = 4,
+  CaseCap = 5,
+  ProcCap = 6,
+  CaseIndex = 7,
+  Undefined = 8,
+  BadRegion = 9,
+  MapRo = 10,
+  MapRw = 11,
+  MapCode = 12
+};
+
+pub let ERR_OK = func() -> u64 { return ImageErr.Ok as u64; };
 
 pub let ImageRegion = struct {
   image_id: u64,
@@ -477,7 +482,7 @@ let push_operand = func(c: Mut(Loader), op: OperandRef) -> u64 {
   let operands: MutSlice(OperandRef) = m_operands(img);
   let at: u64 = img.operand_count;
   if at >= operands.len {
-    c.err = ERR_OPERAND_CAP();
+    c.err = ImageErr.OperandCap as u64;
     return NO_INDEX();
   }
   operands[at] = op;
@@ -490,7 +495,7 @@ let push_result = func(c: Mut(Loader), slot: u64) -> u64 {
   let results: MutSlice(u64) = m_results(img);
   let at: u64 = img.result_count;
   if at >= results.len {
-    c.err = ERR_RESULT_CAP();
+    c.err = ImageErr.ResultCap as u64;
     return NO_INDEX();
   }
   results[at] = slot;
@@ -503,7 +508,7 @@ let push_case = func(c: Mut(Loader), value: u64, owner: u64, region: u64) -> u64
   let cases: MutSlice(CaseInfo) = m_cases(img);
   let at: u64 = img.case_count;
   if at >= cases.len {
-    c.err = ERR_CASE_CAP();
+    c.err = ImageErr.CaseCap as u64;
     return NO_INDEX();
   }
   let entry: CaseInfo = CaseInfo { value: value, owner: owner, region: region };
@@ -577,7 +582,7 @@ let load_operands = func(c: Mut(Loader), region_id: u64, it: vf.IrInst,
     push_operand(c, pref);
     return load_operands(c, region_id, it, k + 1);
   }
-  c.err = ERR_UNDEFINED();
+  c.err = ImageErr.Undefined as u64;
   return c.err;
 };
 
@@ -661,11 +666,11 @@ let add_region = func(c: Mut(Loader), region_id: u64, parent: u64, extra: u64,
   let regions: MutSlice(ImageRegion) = m_regions(img);
   let m: Ref(vf.IrModule) = c.m;
   if region_id >= m.region_count {
-    c.err = ERR_BAD_REGION();
+    c.err = ImageErr.BadRegion as u64;
     return NO_REGION();
   }
   if img.region_count >= regions.len {
-    c.err = ERR_REGION_CAP();
+    c.err = ImageErr.RegionCap as u64;
     return NO_REGION();
   }
   let r: vf.IrRegion = vf.region_at_ref(m.regions, region_id);
@@ -673,7 +678,7 @@ let add_region = func(c: Mut(Loader), region_id: u64, parent: u64, extra: u64,
   img.region_count = id + 1;
   let insts: MutSlice(InstMeta) = m_insts(img);
   if (img.inst_count + r.inst_count) > insts.len {
-    c.err = ERR_INST_CAP();
+    c.err = ImageErr.InstCap as u64;
     return NO_REGION();
   }
   let rec: ImageRegion = ImageRegion {
@@ -758,17 +763,17 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
   out.max_slots = 0;
 
   let sizes: ImageSizes = image_measure(m);
-  if layout.regions_len < sizes.regions { return ERR_REGION_CAP(); }
-  if layout.insts_len < sizes.insts { return ERR_INST_CAP(); }
-  if layout.operands_len < sizes.operands { return ERR_OPERAND_CAP(); }
-  if layout.results_len < sizes.results { return ERR_RESULT_CAP(); }
-  if layout.cases_len < sizes.cases { return ERR_CASE_CAP(); }
-  if layout.procs_len < sizes.procs { return ERR_PROC_CAP(); }
+  if layout.regions_len < sizes.regions { return ImageErr.RegionCap as u64; }
+  if layout.insts_len < sizes.insts { return ImageErr.InstCap as u64; }
+  if layout.operands_len < sizes.operands { return ImageErr.OperandCap as u64; }
+  if layout.results_len < sizes.results { return ImageErr.ResultCap as u64; }
+  if layout.cases_len < sizes.cases { return ImageErr.CaseCap as u64; }
+  if layout.procs_len < sizes.procs { return ImageErr.ProcCap as u64; }
   if sizes.cases > 0 {
-    if layout.case_index_len < sizes.case_index { return ERR_CASE_INDEX(); }
-    if layout.case_index_len == 0 { return ERR_CASE_INDEX(); }
+    if layout.case_index_len < sizes.case_index { return ImageErr.CaseIndex as u64; }
+    if layout.case_index_len == 0 { return ImageErr.CaseIndex as u64; }
     let pow2: u64 = layout.case_index_len & (layout.case_index_len - 1);
-    if pow2 != 0 { return ERR_CASE_INDEX(); }
+    if pow2 != 0 { return ImageErr.CaseIndex as u64; }
   }
   out.case_mask = if layout.case_index_len > 0 { layout.case_index_len - 1 } else { 0 };
   zero_cases(make_slice(MutSlice(u64), layout.case_index_ptr, layout.case_index_len));
@@ -820,7 +825,7 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
     let ro: vspace.Handle = vspace.map_window(space, layout.ro_base,
                                               layout.ro.len as u64,
                                               vspace.MEM_READ());
-    if vspace.handle_none(ro) == 1 { return ERR_MAP_RO(); }
+    if vspace.handle_none(ro) == 1 { return ImageErr.MapRo as u64; }
     ro_h = ro;
     let t: u64 = vspace.init_window(space, ro, layout.ro);
     if t != 0 { return t; }
@@ -831,7 +836,7 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
                                               vspace.MEM_READ() | vspace.MEM_WRITE());
     if vspace.handle_none(rw) == 1 {
       if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
-      return ERR_MAP_RW();
+      return ImageErr.MapRw as u64;
     }
     rw_h = rw;
     let t: u64 = vspace.init_window(space, rw, layout.rw);
@@ -846,10 +851,10 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
     if vspace.handle_none(code) == 1 {
       if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
       if layout.rw.len > 0 { vspace.unmap_window(space, rw_h); }
-      return ERR_MAP_CODE();
+      return ImageErr.MapCode as u64;
     }
   }
-  return ERR_OK();
+  return ImageErr.Ok as u64;
 };
 
 // --- 引擎查询 -------------------------------------------------------------

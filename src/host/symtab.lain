@@ -9,10 +9,8 @@
 // 区段高端向下增长，两者相向而行，任何一方都不会预先占掉另一方用不上的
 // 空间。区段里的字节只增不减，构造过程中没有任何额外分配。
 let mem = import("std::mem");
-
-// --- 违例终止 ---------------------------------------------------------------
-// 没有登记钩子时的默认回调：什么都不做，终止照常由 mem.halt_now 完成。
-let noop_trap = func(p: Ref(u8), n: u64, detail: u64) -> u64 { return 0; };
+let fmt = import("std::fmt");
+let os = import("std::os");
 
 // --- 记录 -------------------------------------------------------------------
 // 一个符号：原文在共享区段里的起点、字节数与整段原文的散列值。
@@ -22,8 +20,7 @@ pub let SymEntry = struct {
   hash: u64,
 };
 
-// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值；
-// has_hook / hook 是调用方登记的终止钩子，钩子非空时在崩溃之前先被调用一次。
+// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值。
 pub let HostSymTab = struct {
   buckets: Mut(u32),
   bucket_cap: u64,
@@ -38,36 +35,41 @@ pub let HostSymTab = struct {
   err_msg_ptr: Ref(u8),
   err_msg_len: u64,
   err_detail: u64,
-  has_hook: u64,
-  hook: Fn((Ref(u8), u64, u64) -> u64),
 };
 
 // --- 违例出口 ---------------------------------------------------------------
-// 说明文本一律是静态字面量，生命周期不依赖调用方的帧。先写记录、再调钩子，
-// 最后终止。
-let trap_with = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+// 全部宿主模块的违例出口都只做三件事：记下上下文、打一行说明、就地终止。
+// 说明文本一律是静态字面量，生命周期不依赖调用方的帧；说明行固定是
+// "[host_trap] <msg> (detail=<u64>)\n"，格式化的落脚点只有 std::fmt 的静态
+// 字符池，所以递增区耗尽或堆分配失败的时候这一行仍然打得出来。
+pub let trap_note = func(msg: Slice(u8), detail: u64) -> u64 {
+  let c0: fmt.Cursor = fmt.fmt_begin();
+  let c1: fmt.Cursor = fmt.write_str(c0, "[host_trap] ");
+  let c2: fmt.Cursor = fmt.write_str(c1, msg);
+  let c3: fmt.Cursor = fmt.write_str(c2, " (detail=");
+  let c4: fmt.Cursor = fmt.write_u64(c3, detail);
+  let c5: fmt.Cursor = fmt.write_str(c4, ")\n");
+  return os.eprint(fmt.fmt_done(c5));
+};
+
+let trap_record = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
   t.err_msg_ptr = msg.ptr;
   t.err_msg_len = msg.len;
   t.err_detail = detail;
-  if t.has_hook != 0 {
-    let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
-    let seen: u64 = f(msg.ptr, msg.len, detail);
-  }
-  return mem.halt_now(detail);
-};
-
-pub let set_trap_hook = func(t: Mut(HostSymTab), cb: Fn((Ref(u8), u64, u64) -> u64)) -> u64 {
-  t.has_hook = 1;
-  t.hook = cb;
   return 0;
 };
 
-// 只报告、不终止：其它模块的违例出口借这张表上登记的钩子打一行说明，再由
-// 自己的就地终止。没登记钩子时什么都不做。
+// 只报告、不终止：发射期等位置的违例出口记下上下文、打一行说明，再由自己的
+// 就地终止。
 pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
-  if t.has_hook == 0 { return 0; }
-  let f: Fn((Ref(u8), u64, u64) -> u64) = t.hook;
-  return f(msg.ptr, msg.len, detail);
+  let seen: u64 = trap_record(t, msg, detail);
+  return trap_note(msg, detail);
+};
+
+let trap_with = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+  let seen: u64 = trap_record(t, msg, detail);
+  let noted: u64 = trap_note(msg, detail);
+  return mem.halt_now(detail);
 };
 
 pub let last_err_msg = func(t: Mut(HostSymTab)) -> Slice(u8) {
@@ -142,8 +144,6 @@ pub let symtab_new = func(buf: MutSlice(u8)) -> HostSymTab {
     err_msg_ptr: null_ref(Ref(u8)),
     err_msg_len: 0,
     err_detail: 0,
-    has_hook: 0,
-    hook: fn_of(noop_trap),
   };
 };
 
