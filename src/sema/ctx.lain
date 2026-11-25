@@ -31,25 +31,6 @@ pub let LoopHeadOut = struct {
   label: u64
 };
 
-pub let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
-let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
-let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
-pub let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
-let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
-let node_count = func(h: u64) -> u64 { return ax.node_count(h); };
-let node_kind = func(h: u64) -> u64 { return ax.node_kind(h); };
-let is_group_node = func(h: u64) -> u64 { return ax.is_group_node(h); };
-let node_sym = func(h: u64) -> u64 { return ax.node_sym(h); };
-let dl_bracket = func() -> u64 { return ax.Delim.Bracket as u64; };
-let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
-let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
-pub let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
-let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
-let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
-let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
-let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
-let no_slot = func() -> u64 { return ax.no_slot(); };
-
 pub let ty_idx = func(base: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), base) + i * 32);
 };
@@ -59,22 +40,22 @@ pub let word_idx = func(base: Mut(u64), i: u64) -> Mut(u64) {
 };
 
 pub let t64 = func(k: Mut(st.State)) -> Mut(ty.Ty) {
-  let p: Mut(ty.Ty) = new_ty(k);
+  let p: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_u64(p);
   return p;
 };
 pub let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) {
-  let p: Mut(ty.Ty) = new_ty(k);
+  let p: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_bool(p);
   return p;
 };
 pub let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) {
-  let p: Mut(ty.Ty) = new_ty(k);
+  let p: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_none(p);
   return p;
 };
 pub let ti32 = func(k: Mut(st.State)) -> Mut(ty.Ty) {
-  let p: Mut(ty.Ty) = new_ty(k);
+  let p: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_i32(p);
   return p;
 };
@@ -94,7 +75,7 @@ pub let val_force = func(k: Mut(st.State), v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u6
 let conv_fail = func(k: Mut(st.State)) -> u64 {
   let m: Ref(u8) = "type mismatch";
   let d: u64 = ir.diag(k, 0, 1, m, 13);
-  return st.st_fail(k, e_type());
+  return st.st_fail(k, ax.FailKind.Type as u64);
 };
 
 pub let is_cenum = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
@@ -104,6 +85,18 @@ pub let is_cenum = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
   if sh < base or sh >= base + st.st_shpcap(k) { return 0; }
   if agg.shp_kind(sh) == agg.kind_cenum() { return 1; }
   return 0;
+};
+
+pub let ty_is_never = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
+  if ty.ty_known(t) == 0 { return 0; }
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  if sh == tb.never_shape(k) { return 1; }
+  return 0;
+};
+
+pub let val_is_never = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 {
+  return ty_is_never(k, ty.vty(v));
 };
 
 let cenum_mismatch = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> u64 {
@@ -154,7 +147,7 @@ pub let cast_value = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to
   let fw: u64 = ty.tw(from);
   let tw: u64 = ty.tw(to);
   if fw == tw { return ty.val_ref(out, ty.vn(v), to); }
-  let nb: Mut(ty.Ty) = new_ty(k);
+  let nb: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_bits(nb, tw, 0);
   let kind: u64 = ty.cast_inst(codes.TyKind.Bits as u64, fw, ty.tsg(from), codes.TyKind.Bits as u64, tw);
   if kind == 0 { return ty.val_ref(out, ty.vn(v), to); }
@@ -167,7 +160,7 @@ pub let cast_value = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to
 
 pub let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 {
   let w: Mut(ty.Ty) = t64(k);
-  let c: Mut(ty.Val) = new_val(k);
+  let c: Mut(ty.Val) = ax.new_val(k);
 
   if is_cenum(k, tp) == 1 {
     cast_value(k, v, tp, w, c);
@@ -186,7 +179,7 @@ pub let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Va
   ir.arg_ref(k, ir.slot_name(k, j));
   let res: u64 = ir.fresh_t(k);
   ir.emit_mem(k, codes.InstKind.Load as u64, res, w, 0);
-  let v: Mut(ty.Val) = new_val(k);
+  let v: Mut(ty.Val) = ax.new_val(k);
   ty.val_ref(v, res, w);
   if is_cenum(k, tp) == 1 { return cast_value(k, v, w, tp, out); }
   return coerce(k, v, w, tp, out);
@@ -205,8 +198,8 @@ pub let slot_copy = func(k: Mut(st.State), dst: u64, src: u64) -> u64 {
 };
 
 let kw_weight = func(h: u64) -> u64 {
-  if is_group_node(h) == 1 { return 0; }
-  let sym: u64 = node_sym(h);
+  if ax.is_group_node(h) == 1 { return 0; }
+  let sym: u64 = ax.node_sym(h);
   if sym == s.k_let() { return 1; }
   if sym == s.k_if() { return 2; }
   if sym == s.k_loop() { return 6; }
@@ -220,16 +213,16 @@ let kw_weight = func(h: u64) -> u64 {
 let count_list = func(h: u64, i: u64, n: u64, acc: u64) -> u64 {
   if i >= n { return acc; }
   let j: u64 = i + 1;
-  let h2: u64 = n_at(h, i);
+  let h2: u64 = ax.n_at(h, i);
   return count_list(h, j, n, count_tree(h2, acc));
 };
 
 pub let count_tree = func(h: u64, acc: u64) -> u64 {
-  return count_list(h, 0, node_count(h), acc + kw_weight(h));
+  return count_list(h, 0, ax.node_count(h), acc + kw_weight(h));
 };
 
 pub let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 {
-  let t: Mut(ty.Ty) = new_ty(k);
+  let t: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_u8(t);
   let done: u64 = loop w(idx: u64 = j) while idx < n {
     ir.args_reset(k);
@@ -241,21 +234,17 @@ pub let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 {
 };
 
 pub let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 {
-  if i < n_count(g) {
-    if n_sym(g, i) == sym { return i + 1; }
+  if i < ax.n_count(g) {
+    if ax.n_sym(g, i) == sym { return i + 1; }
   }
-  st.st_fail(k, e_ast());
+  st.st_fail(k, ax.FailKind.Ast as u64);
   return i + 1;
-};
-
-pub let mod_self_entry = func(k: Mut(st.State), modv: u64, seal: u64) -> Mut(modules.SymEntry) {
-  return modules.sym_lookup_in(k, modv, seal, s.b_self_type(), modules.cur(k));
 };
 
 pub let self_entry = func(k: Mut(st.State), e: Mut(modules.SymEntry)) -> Mut(modules.SymEntry) {
   if is_null(e) { return e; }
   if modules.sym_kind(e) != modules.sym_kind_mod() { return e; }
-  let se: Mut(modules.SymEntry) = mod_self_entry(k, modules.sym_qual(e), modules.sym_decl(e));
+  let se: Mut(modules.SymEntry) = modules.sym_lookup_in(k, modules.sym_qual(e), modules.sym_decl(e), s.b_self_type(), modules.cur(k));
   if is_null(se) { return e; }
   return se;
 };
@@ -287,8 +276,8 @@ let named_type = func(k: Mut(st.State), name: u64, out: Mut(ty.Ty)) -> u64 {
 };
 
 let seg_last = func(g: u64, pos: u64) -> u64 {
-  let n: u64 = n_count(g);
-  if pos + 2 < n and is_name(g, pos + 2) == 1 and n_sym(g, pos + 1) == s.p_dot() {
+  let n: u64 = ax.n_count(g);
+  if pos + 2 < n and ax.is_name(g, pos + 2) == 1 and ax.n_sym(g, pos + 1) == s.p_dot() {
     return seg_last(g, pos + 2);
   }
   return pos;
@@ -297,7 +286,7 @@ let seg_last = func(g: u64, pos: u64) -> u64 {
 let path_walk = func(k: Mut(st.State), g: u64, pos: u64, last: u64, m: u64, sn: Mut(u64)) -> u64 {
   if pos >= last { return m; }
   let nb: Mut(u64) = ax.box(k);
-  let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), n_sym(g, pos), modules.cur(k), nb);
+  let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), ax.n_sym(g, pos), modules.cur(k), nb);
   if nx == 0 { return 0; }
   deref(sn) = ax.box_get(nb);
   return path_walk(k, g, pos + 2, last, nx, sn);
@@ -306,19 +295,19 @@ let path_walk = func(k: Mut(st.State), g: u64, pos: u64, last: u64, m: u64, sn: 
 let qual_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
   let last: u64 = seg_last(g, i);
   let after: u64 = last + 1;
-  if after < n_count(g) and is_group(g, after) == 1 and delim_of(g, after) == dl_paren() {
+  if after < ax.n_count(g) and ax.is_group(g, after) == 1 and ax.delim_of(g, after) == ax.Delim.Paren as u64 {
     let cf: u64 = ctfn.type_from_call(k, g, i, out);
     if cf != 0 { return cf; }
     if st.st_ok(k) != 0 { return after + 1; }
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return after + 1;
   }
   let sn: Mut(u64) = ax.box(k);
-  let m0: u64 = ctf.find_used_mod(k, n_sym(g, i), sn);
-  if m0 == 0 { st.st_fail(k, e_type()); return after; }
+  let m0: u64 = ctf.find_used_mod(k, ax.n_sym(g, i), sn);
+  if m0 == 0 { st.st_fail(k, ax.FailKind.Type as u64); return after; }
   let m: u64 = path_walk(k, g, i + 2, last, m0, sn);
-  if m == 0 { st.st_fail(k, e_type()); return after; }
-  let target: u64 = n_sym(g, last);
+  if m == 0 { st.st_fail(k, ax.FailKind.Type as u64); return after; }
+  let target: u64 = ax.n_sym(g, last);
   let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), target, modules.cur(k));
   if is_null(e) {
     let pv: Mut(modules.SymEntry) = modules.sym_find(k, m, target);
@@ -326,19 +315,19 @@ let qual_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
       let pm: Ref(u8) = "private symbol";
       let pd: u64 = ir.diag(k, 0, 1, pm, 14);
     }
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return after;
   }
   let se: Mut(modules.SymEntry) = self_entry(k, e);
   if entry_type(k, se, out) == 1 { return after; }
-  st.st_fail(k, e_type());
+  st.st_fail(k, ax.FailKind.Type as u64);
   return after;
 };
 
 let factory_ref = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty), mutv: u64) -> u64 {
-  let grp: u64 = n_at(g, i + 1);
-  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let e: Mut(ty.Ty) = new_ty(k);
+  let grp: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(grp) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  let e: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, grp, 0, e);
   let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), mutv);
   let a: u64 = ireg.project(k, id, out);
@@ -346,9 +335,9 @@ let factory_ref = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty), mutv: 
 };
 
 let factory_uninit = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  let grp: u64 = n_at(g, i + 1);
-  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let e: Mut(ty.Ty) = new_ty(k);
+  let grp: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(grp) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  let e: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, grp, 0, e);
   let id: u64 = ct.uninit_t(k, ireg.tid_of(k, e));
   let a: u64 = ireg.project(k, id, out);
@@ -356,9 +345,9 @@ let factory_uninit = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> 
 };
 
 let factory_slice = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty), mutv: u64) -> u64 {
-  let grp: u64 = n_at(g, i + 1);
-  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let e: Mut(ty.Ty) = new_ty(k);
+  let grp: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(grp) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  let e: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, grp, 0, e);
   let id: u64 = ct.slice_t(k, ireg.tid_of(k, e), mutv);
   let a: u64 = ireg.project(k, id, out);
@@ -366,25 +355,25 @@ let factory_slice = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty), mutv
 };
 
 let count_at = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
-  if i >= n_count(g) { st.st_fail(k, e_type()); return 0; }
+  if i >= ax.n_count(g) { st.st_fail(k, ax.FailKind.Type as u64); return 0; }
   if ax.is_digit_token(g, i) == 1 {
-    let h: u64 = n_at(g, i);
+    let h: u64 = ax.n_at(g, i);
     return ax.num_value(ax.lit_addr(h), ax.lit_len(h));
   }
   let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
   let j: u64 = ctf.eval_expr(k, g, i, 0, v);
   if st.st_ok(k) != 0 { return 0; }
-  if j != n_count(g) or ctf.v_kind(v) != 0 { st.st_fail(k, e_type()); return 0; }
+  if j != ax.n_count(g) or ctf.v_kind(v) != 0 { st.st_fail(k, ax.FailKind.Type as u64); return 0; }
   return ctf.v_a(v);
 };
 
 let factory_array = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  let grp: u64 = n_at(g, i + 1);
-  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let e: Mut(ty.Ty) = new_ty(k);
+  let grp: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(grp) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  let e: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, grp, 0, e);
-  if j >= n_count(grp) { st.st_fail(k, e_type()); return i + 2; }
-  if is_comma(grp, j) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  if j >= ax.n_count(grp) { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  if ax.is_comma(grp, j) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
   let cnt: u64 = count_at(k, grp, j + 1);
   let id: u64 = ct.array_t(k, ireg.tid_of(k, e), cnt);
   let a: u64 = ireg.project(k, id, out);
@@ -392,31 +381,31 @@ let factory_array = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u
 };
 
 let fill_sig = func(k: Mut(st.State), g: u64, i: u64, idx: u64, sig: Mut(u64)) -> u64 {
-  if i >= n_count(g) { return idx; }
-  let t: Mut(ty.Ty) = new_ty(k);
+  if i >= ax.n_count(g) { return idx; }
+  let t: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, g, i, t);
   deref(word_idx(sig, idx)) = ireg.tid_of(k, t);
-  let nj: u64 = if is_comma(g, j) == 1 { j + 1 } else { j };
+  let nj: u64 = if ax.is_comma(g, j) == 1 { j + 1 } else { j };
   return fill_sig(k, g, nj, idx + 1, sig);
 };
 
 let fn_effect_tail = func(grp: u64, j: u64) -> u64 {
-  if j + 1 >= n_count(grp) { return j; }
-  if n_sym(grp, j) != s.p_bang() { return j; }
-  if is_group(grp, j + 1) == 0 { return j; }
-  if delim_of(grp, j + 1) != ax.Delim.Brace as u64 { return j; }
+  if j + 1 >= ax.n_count(grp) { return j; }
+  if ax.n_sym(grp, j) != s.p_bang() { return j; }
+  if ax.is_group(grp, j + 1) == 0 { return j; }
+  if ax.delim_of(grp, j + 1) != ax.Delim.Brace as u64 { return j; }
   return j + 2;
 };
 
 let factory_fn = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  let grp: u64 = n_at(g, i + 1);
-  if n_count(grp) < 3 { st.st_fail(k, e_type()); return i + 2; }
-  let pg: u64 = n_at(grp, 0);
-  if is_group_node(pg) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let grp: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(grp) < 3 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
+  let pg: u64 = ax.n_at(grp, 0);
+  if ax.is_group_node(pg) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
   let np: u64 = bi.arg_count(pg);
   let sig: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
   let got: u64 = fill_sig(k, pg, 0, 0, sig);
-  let ret: Mut(ty.Ty) = new_ty(k);
+  let ret: Mut(ty.Ty) = ax.new_ty(k);
   let rj: u64 = parse_type(k, grp, 2, ret);
   fn_effect_tail(grp, rj);
   let id: u64 = ct.fn_t(k, ireg.tid_of(k, ret), np, sig as u64);
@@ -425,7 +414,7 @@ let factory_fn = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 
 };
 
 let factory_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  let nm: u64 = n_sym(g, i);
+  let nm: u64 = ax.n_sym(g, i);
   if nm == s.t_mutslice() { return factory_slice(k, g, i, out, 1); }
   if nm == s.t_uninit() { return factory_uninit(k, g, i, out); }
   if nm == s.t_mut() { return factory_ref(k, g, i, out, 1); }
@@ -437,24 +426,24 @@ let factory_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u6
 };
 
 pub let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 {
-  if i >= n_count(g) { st.st_fail(k, e_ast()); return i + 1; }
-  let h: u64 = n_at(g, i);
-  if is_group_node(h) == 1 {
-    if ax.delim(h) == dl_bracket() {
-      let elem: Mut(ty.Ty) = new_ty(k);
+  if i >= ax.n_count(g) { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
+  let h: u64 = ax.n_at(g, i);
+  if ax.is_group_node(h) == 1 {
+    if ax.delim(h) == ax.Delim.Bracket as u64 {
+      let elem: Mut(ty.Ty) = ax.new_ty(k);
       let j: u64 = parse_type(k, h, 0, elem);
       let id: u64 = ct.array_t(k, ireg.tid_of(k, elem), 0);
       let a: u64 = ireg.project(k, id, out);
       return i + 1;
     }
-    if ax.delim(h) == dl_paren() and n_count(h) == 0 {
+    if ax.delim(h) == ax.Delim.Paren as u64 and ax.n_count(h) == 0 {
       ty.ty_none(out);
       return i + 1;
     }
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
-  let sym: u64 = node_sym(h);
+  let sym: u64 = ax.node_sym(h);
 
   if sym == s.t_type() {
     ty.ty_addr(out);
@@ -484,8 +473,8 @@ pub let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> 
     return i + 1;
   }
   if sym == s.k_ro() { return parse_type(k, g, i + 1, out); }
-  if is_name(g, i) == 1 and i + 1 < n_count(g) and is_group(g, i + 1) == 1 {
-    if delim_of(g, i + 1) == dl_paren() {
+  if ax.is_name(g, i) == 1 and i + 1 < ax.n_count(g) and ax.is_group(g, i + 1) == 1 {
+    if ax.delim_of(g, i + 1) == ax.Delim.Paren as u64 {
       let f: u64 = factory_type(k, g, i, out);
       if f != 0 { return f; }
       let cf: u64 = ctfn.type_from_call(k, g, i, out);
@@ -493,31 +482,31 @@ pub let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> 
     }
   }
   if sym == s.k_ref() {
-    let e: Mut(ty.Ty) = new_ty(k);
+    let e: Mut(ty.Ty) = ax.new_ty(k);
     let j: u64 = parse_type(k, g, i + 1, e);
     let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), 0);
     let a: u64 = ireg.project(k, id, out);
     return j;
   }
   if sym == s.k_slice() {
-    let e: Mut(ty.Ty) = new_ty(k);
+    let e: Mut(ty.Ty) = ax.new_ty(k);
     let j: u64 = parse_type(k, g, i + 1, e);
     let id: u64 = ct.slice_t(k, ireg.tid_of(k, e), 0);
     let a: u64 = ireg.project(k, id, out);
     return j;
   }
   if sym == s.k_mut() {
-    if i + 1 < n_count(g) and n_sym(g, i + 1) == s.k_ref() {
-      let e: Mut(ty.Ty) = new_ty(k);
+    if i + 1 < ax.n_count(g) and ax.n_sym(g, i + 1) == s.k_ref() {
+      let e: Mut(ty.Ty) = ax.new_ty(k);
       let j: u64 = parse_type(k, g, i + 2, e);
       let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), 1);
       let a: u64 = ireg.project(k, id, out);
       return j;
     }
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
-  if is_name(g, i) == 1 and i + 2 < n_count(g) and n_sym(g, i + 1) == s.p_dot() {
+  if ax.is_name(g, i) == 1 and i + 2 < ax.n_count(g) and ax.n_sym(g, i + 1) == s.p_dot() {
     return qual_type(k, g, i, out);
   }
   if ty.ty_of_sym(sym, out) == 1 { return i + 1; }
@@ -529,7 +518,7 @@ pub let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> 
     }
   }
   if named_type(k, sym, out) != 0 { return i + 1; }
-  st.st_fail(k, e_type());
+  st.st_fail(k, ax.FailKind.Type as u64);
   return i + 1;
 };
 
@@ -558,14 +547,14 @@ pub let sig_ret = func(sg: Mut(u8)) -> Mut(ty.Ty) { let p: Mut(SigRec) = ptr_cas
 pub let sig_params = func(sg: Mut(u8)) -> Mut(ty.Ty) { let p: Mut(SigRec) = ptr_cast(Mut(SigRec), sg); return p.params; };
 
 pub let parse_params = func(k: Mut(st.State), pg: u64, i: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 {
-  let n: u64 = n_count(pg);
+  let n: u64 = ax.n_count(pg);
   if i >= n { return idx; }
-  let sym: u64 = n_sym(pg, i);
+  let sym: u64 = ax.n_sym(pg, i);
   let a: u64 = expect_sym(k, pg, i + 1, s.p_colon());
   let t: Mut(ty.Ty) = ty_idx(tintbl, idx);
   let j: u64 = parse_type(k, pg, a, t);
   deref(word_idx(symtbl, idx)) = sym;
-  let nj: u64 = if is_comma(pg, j) == 1 { j + 1 } else { j };
+  let nj: u64 = if ax.is_comma(pg, j) == 1 { j + 1 } else { j };
   return parse_params(k, pg, nj, idx + 1, tintbl, symtbl);
 };
 
@@ -590,30 +579,30 @@ pub let sig_lookup = func(k: Mut(st.State), name: u64, retp: Mut(ty.Ty), paramp:
 };
 
 pub let icall_sig = func(k: Mut(st.State), sg: u64) -> Mut(u8) {
-  let n: u64 = n_count(sg);
-  if n < 3 { st.st_fail(k, e_type()); return null_ref(Mut(u8)); }
-  let pg: u64 = n_at(sg, 0);
-  if is_group_node(pg) != 1 { st.st_fail(k, e_type()); return null_ref(Mut(u8)); }
-  if n_sym(sg, 1) != s.p_arrow() { st.st_fail(k, e_type()); return null_ref(Mut(u8)); }
+  let n: u64 = ax.n_count(sg);
+  if n < 3 { st.st_fail(k, ax.FailKind.Type as u64); return null_ref(Mut(u8)); }
+  let pg: u64 = ax.n_at(sg, 0);
+  if ax.is_group_node(pg) != 1 { st.st_fail(k, ax.FailKind.Type as u64); return null_ref(Mut(u8)); }
+  if ax.n_sym(sg, 1) != s.p_arrow() { st.st_fail(k, ax.FailKind.Type as u64); return null_ref(Mut(u8)); }
   let np: u64 = bi.arg_count(pg);
   let tbl: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, np * 32 + 32));
   let got: u64 = sig_param_list(k, pg, 0, 0, tbl);
-  if got != np { st.st_fail(k, e_type()); return null_ref(Mut(u8)); }
-  let ret: Mut(ty.Ty) = new_ty(k);
+  if got != np { st.st_fail(k, ax.FailKind.Type as u64); return null_ref(Mut(u8)); }
+  let ret: Mut(ty.Ty) = ax.new_ty(k);
   let j: u64 = parse_type(k, sg, 2, ret);
-  if j < n { st.st_fail(k, e_type()); return null_ref(Mut(u8)); }
+  if j < n { st.st_fail(k, ax.FailKind.Type as u64); return null_ref(Mut(u8)); }
   return sig_new(k, ret, np, tbl);
 };
 
 let sig_param_list = func(k: Mut(st.State), pg: u64, i: u64, idx: u64, tbl: Mut(ty.Ty)) -> u64 {
-  if i >= n_count(pg) { return idx; }
+  if i >= ax.n_count(pg) { return idx; }
   let j: u64 = parse_type(k, pg, i, ty_idx(tbl, idx));
-  let nj: u64 = if is_comma(pg, j) == 1 { j + 1 } else { j };
+  let nj: u64 = if ax.is_comma(pg, j) == 1 { j + 1 } else { j };
   return sig_param_list(k, pg, nj, idx + 1, tbl);
 };
 
 let find_loop_at = func(k: Mut(st.State), label: u64, d: u64) -> u64 {
-  if d == 0 { return no_slot(); }
+  if d == 0 { return ax.no_slot(); }
   let f: Mut(st.LoopFrame) = st.st_lf(k, d - 1);
   if st.st_lf_label(f) == label { return d - 1; }
   return find_loop_at(k, label, d - 1);
@@ -621,7 +610,7 @@ let find_loop_at = func(k: Mut(st.State), label: u64, d: u64) -> u64 {
 
 pub let find_loop = func(k: Mut(st.State), label: u64, has_label: u64) -> u64 {
   let d: u64 = st.st_loopdepth(k);
-  if d == 0 { return no_slot(); }
+  if d == 0 { return ax.no_slot(); }
   if has_label == 0 { return d - 1; }
   return find_loop_at(k, label, d);
 };
@@ -637,11 +626,11 @@ pub let alloc_res_slot = func(k: Mut(st.State)) -> u64 {
 };
 
 pub let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(LoopHeadOut)) -> u64 {
-  let n: u64 = n_count(g);
+  let n: u64 = ax.n_count(g);
   ob.has = 0;
-  if j + 1 < n and is_name(g, j) == 1 and is_group(g, j + 1) == 1 and delim_of(g, j + 1) == dl_paren() {
+  if j + 1 < n and ax.is_name(g, j) == 1 and ax.is_group(g, j + 1) == 1 and ax.delim_of(g, j + 1) == ax.Delim.Paren as u64 {
     ob.has = 1;
-    ob.label = n_sym(g, j);
+    ob.label = ax.n_sym(g, j);
     return j + 1;
   }
   return j;

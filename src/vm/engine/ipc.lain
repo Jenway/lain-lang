@@ -1,0 +1,100 @@
+let st = import("src::vm::engine::state");
+
+pub let EpState = enum(u64) {
+  Idle = 0,
+  SenderParked = 1,
+  ReceiverParked = 2,
+  SenderDelivered = 3
+};
+
+pub let EpStatus = enum(u64) {
+  Ok = 0,
+  Blocked = 1,
+  Busy = 2
+};
+
+pub let Endpoint = module {
+  pub let Self = struct {
+    id: u64,
+    state: EpState,
+    peer: u64,
+    value_width: u64,
+    value_bits: u64,
+  };
+
+  let store = func(ep: Mut(Self), value: st.Value) -> u64 {
+    ep.value_width = value.width;
+    ep.value_bits = value.bits;
+    return 0;
+  };
+
+  let clear = func(ep: Mut(Self)) -> u64 {
+    ep.value_width = 64;
+    ep.value_bits = 0;
+    return 0;
+  };
+
+  pub let new = func(id: u64) -> Self {
+    return Self { id: id, state: EpState.Idle, peer: 0, value_width: 64, value_bits: 0 };
+  };
+
+  pub let state = func(ep: Ref(Self)) -> EpState { return ep.state; };
+
+  pub let peer = func(ep: Ref(Self)) -> u64 { return ep.peer; };
+
+  pub let send = func(ep: Mut(Self), who: u64, value: st.Value,
+                      out_who: Mut(u64)) -> EpStatus {
+    if (ep.state == EpState.ReceiverParked) {
+      let put: u64 = store(ep, value);
+      ep.state = EpState.SenderDelivered;
+      deref(out_who) = ep.peer;
+      return EpStatus.Ok;
+    }
+    if (ep.state == EpState.Idle) {
+      let put: u64 = store(ep, value);
+      ep.peer = who;
+      ep.state = EpState.SenderParked;
+      return EpStatus.Blocked;
+    }
+    return EpStatus.Busy;
+  };
+
+  pub let recv = func(ep: Mut(Self), who: u64, out: Mut(st.Value),
+                      out_who: Mut(u64)) -> EpStatus {
+    if (ep.state == EpState.SenderParked) {
+      deref(out) = st.Value { width: ep.value_width, bits: ep.value_bits };
+      let sender: u64 = ep.peer;
+      ep.state = EpState.Idle;
+      ep.peer = 0;
+      let cleared: u64 = clear(ep);
+      deref(out_who) = sender;
+      return EpStatus.Ok;
+    }
+    if (ep.state == EpState.SenderDelivered) {
+      deref(out) = st.Value { width: ep.value_width, bits: ep.value_bits };
+      let receiver: u64 = ep.peer;
+      ep.state = EpState.Idle;
+      ep.peer = 0;
+      let cleared: u64 = clear(ep);
+      deref(out_who) = receiver;
+      return EpStatus.Ok;
+    }
+    if (ep.state == EpState.Idle) {
+      ep.peer = who;
+      ep.state = EpState.ReceiverParked;
+      return EpStatus.Blocked;
+    }
+    return EpStatus.Busy;
+  };
+
+  pub let cancel = func(ep: Mut(Self), who: u64) -> u64 {
+    if ep.peer != who { return 0; }
+    if (ep.state == EpState.SenderParked) or (ep.state == EpState.ReceiverParked) {
+      ep.state = EpState.Idle;
+      ep.peer = 0;
+      let cleared: u64 = clear(ep);
+      return 1;
+    }
+    return 0;
+  };
+};

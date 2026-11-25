@@ -459,8 +459,8 @@ let build_divzero = func() -> vf.IrModule {
   return vf.builder_module(b, 92);
 };
 
-let run_image = func(m: vf.IrModule, quota: eng.Quota, caps: Mut(eng.VmCapTable),
-                     entry: u64, args: Slice(u64)) -> eng.VmResult {
+let run_image = func(m: vf.IrModule, quota: eng.Quota, caps: Mut(eng.CapTable),
+                     entry: u64, args: Slice(u64)) -> eng.Result {
   let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
   let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
   let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
@@ -499,17 +499,17 @@ let HostCapsSig = sig {
 };
 
 let HostCaps: HostCapsSig = module {
-  pub let Self = eng.VmCapTable;
+  pub let Self = eng.CapTable.Self;
   pub let invoke = func(self: Mut(Self), link_name: u64, args: Slice(u64)) -> u64 {
     let hit: u64 = eng.caps_find(self, link_name, 0);
     if hit == 0 { return 0; }
-    let e: Mut(eng.VmCapEntry) = self.entries + (hit - 1) * 32;
+    let e: Mut(eng.CapEntry) = self.entries + (hit - 1) * 32;
     let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
     return fn(e.context, args);
   };
 };
 
-let invoke_cap = func(table: Mut(eng.VmCapTable), link_name: u64,
+let invoke_cap = func(table: Mut(eng.CapTable), link_name: u64,
                       args: Slice(u64)) ?{ caps: HostCapsSig } -> u64 {
   return caps.invoke(table, link_name, args);
 };
@@ -518,10 +518,10 @@ let main = func() -> i64 {
   let host_add: Fn((u64, Slice(u64)) -> u64) = func(ctx: u64, args: Slice(u64)) -> u64 {
     return args[0] + 100;
   };
-  let entries: Mut(eng.VmCapEntry) = ptr_cast(Mut(eng.VmCapEntry), cap_ptr());
-  let caps0: eng.VmCapTable = eng.caps_new(entries, 8);
-  let caps: Mut(eng.VmCapTable) = mut_of(caps0);
-  let reg: u64 = eng.caps_register(caps, 707, eng.CAP_FUNCTION(), 0, host_add);
+  let entries: Mut(eng.CapEntry) = ptr_cast(Mut(eng.CapEntry), cap_ptr());
+  let caps0: eng.CapTable = eng.caps_new(entries, 8);
+  let caps: Mut(eng.CapTable) = mut_of(caps0);
+  let reg: u64 = eng.caps_register(caps, 707, eng.CapKind.Function, 0, host_add);
   let fz: u64 = eng.caps_freeze(caps);
   if reg != 1 { return 10; }
   if fz != 1 { return 11; }
@@ -537,7 +537,7 @@ let main = func() -> i64 {
   let quota: eng.Quota = eng.Quota.new(4000, 8192, 8);
   let argv: Array(u64, 1) = [4];
   let args: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(argv)), 1);
-  let ok: eng.VmResult = run_image(m, quota, caps, 0, args);
+  let ok: eng.Result = run_image(m, quota, caps, 0, args);
   if ok.status != eng.SliceStatus.Done { return 30; }
   if ok.trap_kind != eng.VmTrap.None { return 31; }
   if ok.result_val.bits != 63 { return 32; }
@@ -548,14 +548,14 @@ let main = func() -> i64 {
   let no_args: Array(u64, 1) = [0];
   let empty: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(no_args)), 0);
   let qf: eng.Quota = eng.Quota.new(64, 0, 4);
-  let rf: eng.VmResult = run_image(mf, qf, caps, 0, empty);
+  let rf: eng.Result = run_image(mf, qf, caps, 0, empty);
   if rf.status != eng.SliceStatus.Trapped { return 41; }
   if rf.trap_kind != eng.VmTrap.Fuel { return 42; }
 
   let mo: vf.IrModule = build_oob();
   let eo: u64 = checks.verify_module(ref_of(mo));
   if eo != 0 { return 50; }
-  let ro: eng.VmResult = run_image(mo, quota, caps, 0, empty);
+  let ro: eng.Result = run_image(mo, quota, caps, 0, empty);
   if ro.status != eng.SliceStatus.Trapped { return 51; }
   if ro.trap_kind != eng.VmTrap.MemoryOob { return 52; }
 
@@ -572,7 +572,7 @@ let main = func() -> i64 {
   let mz: vf.IrModule = build_divzero();
   let ez: u64 = checks.verify_module(ref_of(mz));
   if ez != 0 { return 70; }
-  let rz: eng.VmResult = run_image(mz, quota, caps, 0, empty);
+  let rz: eng.Result = run_image(mz, quota, caps, 0, empty);
   if rz.status != eng.SliceStatus.Trapped { return 71; }
   if rz.trap_kind != eng.VmTrap.ArithDomain { return 72; }
 

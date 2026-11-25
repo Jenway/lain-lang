@@ -3,17 +3,22 @@ let vf = import("src::ir::verify::model");
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
 let st = import("src::vm::engine::state");
+let caps = import("src::vm::engine::caps");
+let tcbmod = import("src::vm::engine::tcb");
 
-let signed_div_rem = func(tcb: Mut(st.TCB), x: u64, y: u64, width: u64,
+let TCB = tcbmod.TCB;
+let Frame = tcbmod.Frame;
+
+let signed_div_rem = func(tcb: Mut(TCB), x: u64, y: u64, width: u64,
                           want_rem: u64, out: Mut(u64)) -> u64 {
   let one: u64 = 1;
   let filled_x: u64 = st.sign_fill(x, width);
   let filled_y: u64 = st.sign_fill(y, width);
   let sx: i64 = filled_x as i64;
   let sy: i64 = filled_y as i64;
-  if sy == 0 { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
+  if sy == 0 { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
   if (sy == (0 - 1)) and (filled_x == (one << 63)) {
-    return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.IntOverflow);
+    return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.IntOverflow);
   }
   let q: i64 = sx / sy;
   let m: i64 = sx % sy;
@@ -22,69 +27,69 @@ let signed_div_rem = func(tcb: Mut(st.TCB), x: u64, y: u64, width: u64,
   return 0;
 };
 
-let op_int_bin = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_int_bin = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let width: u64 = st.type_width(inst.ty_kind, inst.ty_width);
-  let a: st.VmValue = st.value_zero();
-  let sa: u64 = st.op_read(tcb, inst, 0, mut_of(a));
+  let a: st.Value = st.value_zero();
+  let sa: u64 = TCB.read_operand(tcb, inst, 0, mut_of(a));
   if sa != 0 { return sa; }
-  let b: st.VmValue = st.value_zero();
-  let sb: u64 = st.op_read(tcb, inst, 1, mut_of(b));
+  let b: st.Value = st.value_zero();
+  let sb: u64 = TCB.read_operand(tcb, inst, 1, mut_of(b));
   if sb != 0 { return sb; }
   let x: u64 = a.bits;
   let y: u64 = b.bits;
   let k: u64 = inst.kind;
-  if k == codes.InstKind.Add as u64 { return st.write_result_bits(tcb, inst, 0, x + y, width); }
-  if k == codes.InstKind.Sub as u64 { return st.write_result_bits(tcb, inst, 0, x - y, width); }
-  if k == codes.InstKind.Mul as u64 { return st.write_result_bits(tcb, inst, 0, x * y, width); }
-  if k == codes.InstKind.And as u64 { return st.write_result_bits(tcb, inst, 0, x & y, width); }
-  if k == codes.InstKind.Or as u64 { return st.write_result_bits(tcb, inst, 0, x | y, width); }
-  if k == codes.InstKind.Xor as u64 { return st.write_result_bits(tcb, inst, 0, x ^ y, width); }
+  if k == codes.InstKind.Add as u64 { return TCB.write_result_bits(tcb, inst, 0, x + y, width); }
+  if k == codes.InstKind.Sub as u64 { return TCB.write_result_bits(tcb, inst, 0, x - y, width); }
+  if k == codes.InstKind.Mul as u64 { return TCB.write_result_bits(tcb, inst, 0, x * y, width); }
+  if k == codes.InstKind.And as u64 { return TCB.write_result_bits(tcb, inst, 0, x & y, width); }
+  if k == codes.InstKind.Or as u64 { return TCB.write_result_bits(tcb, inst, 0, x | y, width); }
+  if k == codes.InstKind.Xor as u64 { return TCB.write_result_bits(tcb, inst, 0, x ^ y, width); }
   if k == codes.InstKind.Shl as u64 {
-    if y >= width { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
-    return st.write_result_bits(tcb, inst, 0, x << y, width);
+    if y >= width { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
+    return TCB.write_result_bits(tcb, inst, 0, x << y, width);
   }
   if k == codes.InstKind.LShr as u64 {
-    if y >= width { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
-    return st.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) >> y, width);
+    if y >= width { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
+    return TCB.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) >> y, width);
   }
   if k == codes.InstKind.AShr as u64 {
-    if y >= width { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
+    if y >= width { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.ShiftTooWide); }
     let filled: u64 = st.sign_fill(x, width);
     let sx: i64 = filled as i64;
     let sy: i64 = y as i64;
     let shifted: i64 = sx >> sy;
-    return st.write_result_bits(tcb, inst, 0, shifted as u64, width);
+    return TCB.write_result_bits(tcb, inst, 0, shifted as u64, width);
   }
   if k == codes.InstKind.UDiv as u64 {
-    if y == 0 { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
-    return st.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) / (y & st.width_mask(width)), width);
+    if y == 0 { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
+    return TCB.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) / (y & st.width_mask(width)), width);
   }
   if k == codes.InstKind.URem as u64 {
-    if y == 0 { return st.trap_now(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
-    return st.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) % (y & st.width_mask(width)), width);
+    if y == 0 { return TCB.trap(tcb, st.VmTrap.ArithDomain, st.Subcode.DivideByZero); }
+    return TCB.write_result_bits(tcb, inst, 0, (x & st.width_mask(width)) % (y & st.width_mask(width)), width);
   }
   if k == codes.InstKind.SDiv as u64 {
     let q: u64 = 0;
     let s: u64 = signed_div_rem(tcb, x, y, width, 0, mut_of(q));
     if s != 0 { return s; }
-    return st.write_result_bits(tcb, inst, 0, q, width);
+    return TCB.write_result_bits(tcb, inst, 0, q, width);
   }
   if k == codes.InstKind.SRem as u64 {
     let q: u64 = 0;
     let s: u64 = signed_div_rem(tcb, x, y, width, 1, mut_of(q));
     if s != 0 { return s; }
-    return st.write_result_bits(tcb, inst, 0, q, width);
+    return TCB.write_result_bits(tcb, inst, 0, q, width);
   }
-  return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadBitsOp);
+  return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadBitsOp);
 };
 
-let op_int_cmp = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_int_cmp = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let width: u64 = st.type_width(inst.ty_kind, inst.ty_width);
-  let a: st.VmValue = st.value_zero();
-  let sa: u64 = st.op_read(tcb, inst, 0, mut_of(a));
+  let a: st.Value = st.value_zero();
+  let sa: u64 = TCB.read_operand(tcb, inst, 0, mut_of(a));
   if sa != 0 { return sa; }
-  let b: st.VmValue = st.value_zero();
-  let sb: u64 = st.op_read(tcb, inst, 1, mut_of(b));
+  let b: st.Value = st.value_zero();
+  let sb: u64 = TCB.read_operand(tcb, inst, 1, mut_of(b));
   if sb != 0 { return sb; }
   let mask: u64 = st.width_mask(width);
   let mx: u64 = a.bits & mask;
@@ -94,61 +99,61 @@ let op_int_cmp = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let sx: i64 = filled_x as i64;
   let sy: i64 = filled_y as i64;
   let k: u64 = inst.kind;
-  if k == codes.InstKind.Eq as u64 { return st.write_result_bits(tcb, inst, 0, if mx == my { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.Ne as u64 { return st.write_result_bits(tcb, inst, 0, if mx != my { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.SLt as u64 { return st.write_result_bits(tcb, inst, 0, if sx < sy { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.SLe as u64 { return st.write_result_bits(tcb, inst, 0, if sx <= sy { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.SGt as u64 { return st.write_result_bits(tcb, inst, 0, if sx > sy { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.SGe as u64 { return st.write_result_bits(tcb, inst, 0, if sx >= sy { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.ULt as u64 { return st.write_result_bits(tcb, inst, 0, if mx < my { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.ULe as u64 { return st.write_result_bits(tcb, inst, 0, if mx <= my { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.UGt as u64 { return st.write_result_bits(tcb, inst, 0, if mx > my { 1 } else { 0 }, 1); }
-  if k == codes.InstKind.UGe as u64 { return st.write_result_bits(tcb, inst, 0, if mx >= my { 1 } else { 0 }, 1); }
-  return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadCompareOp);
+  if k == codes.InstKind.Eq as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx == my { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.Ne as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx != my { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.SLt as u64 { return TCB.write_result_bits(tcb, inst, 0, if sx < sy { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.SLe as u64 { return TCB.write_result_bits(tcb, inst, 0, if sx <= sy { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.SGt as u64 { return TCB.write_result_bits(tcb, inst, 0, if sx > sy { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.SGe as u64 { return TCB.write_result_bits(tcb, inst, 0, if sx >= sy { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.ULt as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx < my { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.ULe as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx <= my { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.UGt as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx > my { 1 } else { 0 }, 1); }
+  if k == codes.InstKind.UGe as u64 { return TCB.write_result_bits(tcb, inst, 0, if mx >= my { 1 } else { 0 }, 1); }
+  return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadCompareOp);
 };
 
-let op_int_conv = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let a: st.VmValue = st.value_zero();
-  let sa: u64 = st.op_read(tcb, inst, 0, mut_of(a));
+let op_int_conv = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let a: st.Value = st.value_zero();
+  let sa: u64 = TCB.read_operand(tcb, inst, 0, mut_of(a));
   if sa != 0 { return sa; }
   let target: u64 = st.type_width(inst.ty_kind, inst.ty_width);
   let source: u64 = if a.width == 0 { target } else { a.width };
   let k: u64 = inst.kind;
   if k == codes.InstKind.ZExt as u64 {
-    return st.write_result_bits(tcb, inst, 0, a.bits & st.width_mask(source), target);
+    return TCB.write_result_bits(tcb, inst, 0, a.bits & st.width_mask(source), target);
   }
   if k == codes.InstKind.SExt as u64 {
-    return st.write_result_bits(tcb, inst, 0, st.sign_fill(a.bits, source), target);
+    return TCB.write_result_bits(tcb, inst, 0, st.sign_fill(a.bits, source), target);
   }
   if k == codes.InstKind.Trunc as u64 {
-    return st.write_result_bits(tcb, inst, 0, a.bits, target);
+    return TCB.write_result_bits(tcb, inst, 0, a.bits, target);
   }
   if k == codes.InstKind.Bitcast as u64 {
-    return st.write_result_bits(tcb, inst, 0, a.bits, target);
+    return TCB.write_result_bits(tcb, inst, 0, a.bits, target);
   }
-  return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadConvertOp);
+  return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadConvertOp);
 };
 
-let op_float_any = func(tcb: Mut(st.TCB)) -> u64 {
-  return st.trap_now(tcb, st.VmTrap.Unimplemented, st.Subcode.FloatUnsupported);
+let op_float_any = func(tcb: Mut(TCB)) -> u64 {
+  return TCB.trap(tcb, st.VmTrap.Unimplemented, st.Subcode.FloatUnsupported);
 };
 
-let op_vector_any = func(tcb: Mut(st.TCB)) -> u64 {
-  return st.trap_now(tcb, st.VmTrap.Unimplemented, st.Subcode.VectorUnsupported);
+let op_vector_any = func(tcb: Mut(TCB)) -> u64 {
+  return TCB.trap(tcb, st.VmTrap.Unimplemented, st.Subcode.VectorUnsupported);
 };
 
-let op_lea = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let base: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(base));
+let op_lea = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let base: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(base));
   if s0 != 0 { return s0; }
-  let index: st.VmValue = st.value_zero();
-  let s1: u64 = st.op_read(tcb, inst, 1, mut_of(index));
+  let index: st.Value = st.value_zero();
+  let s1: u64 = TCB.read_operand(tcb, inst, 1, mut_of(index));
   if s1 != 0 { return s1; }
-  let scale: st.VmValue = st.value_zero();
-  let s2: u64 = st.op_read(tcb, inst, 2, mut_of(scale));
+  let scale: st.Value = st.value_zero();
+  let s2: u64 = TCB.read_operand(tcb, inst, 2, mut_of(scale));
   if s2 != 0 { return s2; }
-  let displacement: st.VmValue = st.value_zero();
-  let s3: u64 = st.op_read(tcb, inst, 3, mut_of(displacement));
+  let displacement: st.Value = st.value_zero();
+  let s3: u64 = TCB.read_operand(tcb, inst, 3, mut_of(displacement));
   if s3 != 0 { return s3; }
 
   let bbits: u64 = base.bits;
@@ -156,7 +161,7 @@ let op_lea = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let sbits: u64 = scale.bits;
   let dbits: u64 = displacement.bits;
   let r: u64 = bbits + ibits * sbits + dbits;
-  return st.write_result_bits(tcb, inst, 0, r, 64);
+  return TCB.write_result_bits(tcb, inst, 0, r, 64);
 };
 
 let is_misaligned = func(align: u64, where: u64) -> u64 {
@@ -166,43 +171,43 @@ let is_misaligned = func(align: u64, where: u64) -> u64 {
   return 0;
 };
 
-let op_load = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let address: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(address));
+let op_load = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let address: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(address));
   if s0 != 0 { return s0; }
   let size: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   if size > 8 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
   }
   if is_misaligned(inst.align, address.bits) == 1 {
-    return st.trap_now(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
+    return TCB.trap(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
   }
   if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 0 {
-    return st.trap_now(tcb, st.VmTrap.MemoryOob, st.Subcode.LoadFault);
+    return TCB.trap(tcb, st.VmTrap.MemoryOob, st.Subcode.LoadFault);
   }
   let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
-  return st.write_result_bits(tcb, inst, 0, raw, st.type_width(inst.ty_kind, inst.ty_width));
+  return TCB.write_result_bits(tcb, inst, 0, raw, st.type_width(inst.ty_kind, inst.ty_width));
 };
 
-let op_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let value: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(value));
+let op_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let value: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(value));
   if s0 != 0 { return s0; }
-  let address: st.VmValue = st.value_zero();
-  let s1: u64 = st.op_read(tcb, inst, 1, mut_of(address));
+  let address: st.Value = st.value_zero();
+  let s1: u64 = TCB.read_operand(tcb, inst, 1, mut_of(address));
   if s1 != 0 { return s1; }
   let size: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   if size > 8 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
   }
   if is_misaligned(inst.align, address.bits) == 1 {
-    return st.trap_now(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
+    return TCB.trap(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
   }
   if vs.vm_check(tcb.space, address.bits, size, vs.Access.Write as u64) == 0 {
     if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 1 {
-      return st.trap_now(tcb, st.VmTrap.PermViolation, st.Subcode.ReadOnly);
+      return TCB.trap(tcb, st.VmTrap.PermViolation, st.Subcode.ReadOnly);
     }
-    return st.trap_now(tcb, st.VmTrap.MemoryOob, st.Subcode.StoreFault);
+    return TCB.trap(tcb, st.VmTrap.MemoryOob, st.Subcode.StoreFault);
   }
   let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
   return 0;
@@ -216,171 +221,171 @@ let atomic_order_ok = func(inst: vf.IrInst, index: u64) -> u64 {
   return 1;
 };
 
-let op_atomic_load = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_atomic_load = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let order_at: u64 = 1;
   if atomic_order_ok(inst, order_at) == 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
   }
-  let address: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(address));
+  let address: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(address));
   if s0 != 0 { return s0; }
   let size: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   if size > 8 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
   }
   if is_misaligned(inst.align, address.bits) == 1 {
-    return st.trap_now(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
+    return TCB.trap(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
   }
   if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 0 {
-    return st.trap_now(tcb, st.VmTrap.MemoryOob, st.Subcode.LoadFault);
+    return TCB.trap(tcb, st.VmTrap.MemoryOob, st.Subcode.LoadFault);
   }
   let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
-  return st.write_result_bits(tcb, inst, 0, raw, st.type_width(inst.ty_kind, inst.ty_width));
+  return TCB.write_result_bits(tcb, inst, 0, raw, st.type_width(inst.ty_kind, inst.ty_width));
 };
 
-let op_atomic_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_atomic_store = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let order_at: u64 = 2;
   if atomic_order_ok(inst, order_at) == 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
   }
-  let value: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(value));
+  let value: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(value));
   if s0 != 0 { return s0; }
-  let address: st.VmValue = st.value_zero();
-  let s1: u64 = st.op_read(tcb, inst, 1, mut_of(address));
+  let address: st.Value = st.value_zero();
+  let s1: u64 = TCB.read_operand(tcb, inst, 1, mut_of(address));
   if s1 != 0 { return s1; }
   let size: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   if size > 8 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BadMemoryWidth);
   }
   if is_misaligned(inst.align, address.bits) == 1 {
-    return st.trap_now(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
+    return TCB.trap(tcb, st.VmTrap.Alignment, st.Subcode.Alignment);
   }
   if vs.vm_check(tcb.space, address.bits, size, vs.Access.Write as u64) == 0 {
     if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 1 {
-      return st.trap_now(tcb, st.VmTrap.PermViolation, st.Subcode.ReadOnly);
+      return TCB.trap(tcb, st.VmTrap.PermViolation, st.Subcode.ReadOnly);
     }
-    return st.trap_now(tcb, st.VmTrap.MemoryOob, st.Subcode.StoreFault);
+    return TCB.trap(tcb, st.VmTrap.MemoryOob, st.Subcode.StoreFault);
   }
   let ok: u64 = vs.vm_store(tcb.space, address.bits, size, value.bits);
   return 0;
 };
 
-let op_atomic_any = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_atomic_any = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let k: u64 = inst.kind;
   if k == codes.InstKind.AtomicFence as u64 {
     if inst.operand_count != 1 {
-      return st.trap_now(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
+      return TCB.trap(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
     }
     if atomic_order_ok(inst, 0) == 0 {
-      return st.trap_now(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
+      return TCB.trap(tcb, st.VmTrap.State, st.Subcode.AtomicOrder);
     }
     return 0;
   }
   if k == codes.InstKind.AtomicLoad as u64 { return op_atomic_load(tcb, inst); }
   if k == codes.InstKind.AtomicStore as u64 { return op_atomic_store(tcb, inst); }
-  return st.trap_now(tcb, st.VmTrap.Unimplemented, st.Subcode.AtomicUnsupported);
+  return TCB.trap(tcb, st.VmTrap.Unimplemented, st.Subcode.AtomicUnsupported);
 };
 
-let op_alloca = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_alloca = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let count: u64 = inst.op0_bits;
   let element: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   let align: u64 = st.STACK_ALIGN;
-  let lease: vs.StackLease = st.tcb_lease(tcb);
+  let lease: vs.StackLease = TCB.lease(tcb);
   if vs.vm_lease_none(lease) != 0 {
-    return st.trap_now(tcb, st.VmTrap.CapacityExceeded, st.Subcode.StackUnavailable);
+    return TCB.trap(tcb, st.VmTrap.CapacityExceeded, st.Subcode.StackUnavailable);
   }
   let capacity: u64 = vs.vm_lease_capacity(tcb.space, lease);
   if capacity == 0 {
-    return st.trap_now(tcb, st.VmTrap.CapacityExceeded, st.Subcode.StackUnavailable);
+    return TCB.trap(tcb, st.VmTrap.CapacityExceeded, st.Subcode.StackUnavailable);
   }
   if (element != 0) and (count > st.max_u64() / element) {
-    return st.trap_now(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
+    return TCB.trap(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
   }
   let total: u64 = element * count;
   if tcb.stack_used > (st.max_u64() - (align - 1)) {
-    return st.trap_now(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
+    return TCB.trap(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
   }
   let used: u64 = st.align_to(tcb.stack_used, align);
   if total > (st.max_u64() - used) {
-    return st.trap_now(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
+    return TCB.trap(tcb, st.VmTrap.CapacityExceeded, st.Subcode.AllocaOverflow);
   }
   let limit: u64 = capacity;
   if (tcb.quota_stack_bytes != 0) and (tcb.quota_stack_bytes < limit) {
     limit = tcb.quota_stack_bytes;
   }
   if (used + total) > limit {
-    return st.trap_now(tcb, st.VmTrap.StackOverflow, st.Subcode.StackExhausted);
+    return TCB.trap(tcb, st.VmTrap.StackOverflow, st.Subcode.StackExhausted);
   }
   let previous: u64 = tcb.stack_used;
   tcb.stack_used = used + total;
   if tcb.stack_used > tcb.stack_peak { tcb.stack_peak = tcb.stack_used; }
-  if st.stack_window_sync(tcb) != 0 {
+  if TCB.sync_window(tcb) != 0 {
     tcb.stack_used = previous;
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.StackWindow);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.StackWindow);
   }
   let base_addr: u64 = vs.vm_lease_base(tcb.space, lease);
-  return st.write_result_bits(tcb, inst, 0, base_addr + used, 64);
+  return TCB.write_result_bits(tcb, inst, 0, base_addr + used, 64);
 };
 
-let cap_invoke = func(tcb: Mut(st.TCB), link_name: u64, args: Slice(u64),
-                      kind: u64, width: u64, out: Mut(st.VmValue)) -> u64 {
-  let hit: u64 = st.caps_find(tcb.caps, link_name, 0);
+let cap_invoke = func(tcb: Mut(TCB), link_name: u64, args: Slice(u64),
+                      kind: u64, width: u64, out: Mut(st.Value)) -> u64 {
+  let hit: u64 = caps.CapTable.find(tcb.caps, link_name, 0);
   if hit == 0 {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.CapUnresolved);
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.CapUnresolved);
   }
-  let e: Mut(st.VmCapEntry) = st.cap_entry_ptr(tcb.caps, hit - 1);
-  if e.kind != st.CAP_FUNCTION() {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.CapNotFunction);
+  let e: Mut(caps.CapEntry) = caps.CapTable.entry_at(tcb.caps, hit - 1);
+  if (e.kind as u64) != (caps.CapKind.Function as u64) {
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.CapNotFunction);
   }
   let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
   if (fn as u64) == 0 {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.CapNoFn);
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.CapNoFn);
   }
   let bits: u64 = fn(e.context, args);
   deref(out) = st.value_bits(bits, st.type_width(kind, width));
   return 0;
 };
 
-let collect_args = func(tcb: Mut(st.TCB), inst: vf.IrInst, params: Ref(vf.IrParam),
+let collect_args = func(tcb: Mut(TCB), inst: vf.IrInst, params: Ref(vf.IrParam),
                         param_count: u64, arg_base: u64, count: u64, i: u64) -> u64 {
   if i >= count { return 0; }
-  let cell: Mut(st.VmValue) = st.tcb_arg_slot(tcb, i);
+  let cell: Mut(st.Value) = TCB.arg_slot(tcb, i);
   let s: u64 = 0;
   if i < param_count {
     let ty: vf.IrType = st.param_type_at(params, i);
-    s = st.op_read_typed(tcb, inst, arg_base + i, ty.kind, ty.width, cell);
+    s = TCB.read_operand_typed(tcb, inst, arg_base + i, ty.kind, ty.width, cell);
   } else {
-    s = st.op_read_typed(tcb, inst, arg_base + i, codes.TyKind.Addr as u64, 64, cell);
+    s = TCB.read_operand_typed(tcb, inst, arg_base + i, codes.TyKind.Addr as u64, 64, cell);
   }
   if s != 0 { return s; }
-  let w: Mut(u64) = st.tcb_arg_word(tcb, i);
+  let w: Mut(u64) = TCB.arg_word(tcb, i);
   deref(w) = cell.bits;
   return collect_args(tcb, inst, params, param_count, arg_base, count, i + 1);
 };
 
-let bind_args = func(tcb: Mut(st.TCB), base: u64, count: u64, i: u64) -> u64 {
+let bind_args = func(tcb: Mut(TCB), base: u64, count: u64, i: u64) -> u64 {
   if i >= count { return 0; }
-  let src: Mut(st.VmValue) = st.tcb_arg_slot(tcb, i);
-  let dst: Mut(st.VmValue) = st.tcb_slot_ptr(tcb, base + i);
+  let src: Mut(st.Value) = TCB.arg_slot(tcb, i);
+  let dst: Mut(st.Value) = TCB.slot_at(tcb, base + i);
   dst.width = src.width;
   dst.bits = src.bits;
   return bind_args(tcb, base, count, i + 1);
 };
 
-let enter_extern = func(tcb: Mut(st.TCB), inst: vf.IrInst, sub_index: u64,
+let enter_extern = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
                         sub: im.SubInfo, arg_base: u64, arg_count: u64) -> u64 {
   if sub.is_variadic == 1 {
     if arg_count < sub.param_count {
-      return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallArity);
+      return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallArity);
     }
   } else {
     if arg_count != sub.param_count {
-      return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallArity);
+      return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallArity);
     }
   }
   if arg_count > st.MAX_OPERANDS {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallOperands);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallOperands);
   }
 
   if sub.link_name != 0 {
@@ -392,7 +397,7 @@ let enter_extern = func(tcb: Mut(st.TCB), inst: vf.IrInst, sub_index: u64,
   let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
   if collected != 0 { return collected; }
   let words: Slice(u64) = make_slice(Slice(u64), tcb.arg_words, arg_count);
-  let out: st.VmValue = st.value_zero();
+  let out: st.Value = st.value_zero();
   let kind: u64 = 0;
   let width: u64 = 0;
   if sub.result_count > 0 {
@@ -403,77 +408,77 @@ let enter_extern = func(tcb: Mut(st.TCB), inst: vf.IrInst, sub_index: u64,
   let invoked: u64 = cap_invoke(tcb, sub.link_name, words, kind, width, mut_of(out));
   if invoked != 0 { return invoked; }
   if inst.result_count == 0 { return 0; }
-  return st.write_result(tcb, inst, 0, out);
+  return TCB.write_result(tcb, inst, 0, out);
 };
 
-let enter_sub = func(tcb: Mut(st.TCB), inst: vf.IrInst, sub_index: u64,
+let enter_sub = func(tcb: Mut(TCB), inst: vf.IrInst, sub_index: u64,
                      arg_base: u64, arg_count: u64, parent_position: u64) -> u64 {
   if (sub_index == im.NO_INDEX()) or (sub_index >= im.vm_sub_count(tcb.image)) {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.CallNoSub);
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.CallNoSub);
   }
   let sub: im.SubInfo = im.vm_sub(tcb.image, sub_index);
   if sub.is_extern == 1 {
     return enter_extern(tcb, inst, sub_index, sub, arg_base, arg_count);
   }
   if sub.body_region == im.NO_REGION() {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.CallNoBody);
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.CallNoBody);
   }
   if arg_count != sub.param_count {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallArity);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallArity);
   }
   if arg_count > st.MAX_OPERANDS {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallOperands);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallOperands);
   }
   let collected: u64 = collect_args(tcb, inst, sub.params, sub.param_count, arg_base, arg_count, 0);
   if collected != 0 { return collected; }
-  let pushed: u64 = st.push_region(tcb, sub.body_region, parent_position, 0, 1);
+  let pushed: u64 = TCB.push_frame(tcb, sub.body_region, parent_position, 0, 1);
   if pushed != st.SliceStatus.Runnable as u64 { return pushed; }
-  let traced: u64 = st.trace_record(tcb, sub.name, st.TRACE_ENTER());
-  let callee: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+  let traced: u64 = TCB.record(tcb, sub.name, st.TraceKind.Enter);
+  let callee: Mut(Frame) = TCB.frame_at(tcb, tcb.frame_count - 1);
   return bind_args(tcb, callee.slot_base, arg_count, 0);
 };
 
-let op_call = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_call = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
   if inst.symbol != 0 {
     return enter_sub(tcb, inst, meta.sub_index, 0, inst.operand_count, tcb.cur_position);
   }
 
   if inst.operand_count == 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallOperands);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallOperands);
   }
-  let target: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read_typed(tcb, inst, 0, codes.TyKind.Addr as u64, 64, mut_of(target));
+  let target: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand_typed(tcb, inst, 0, codes.TyKind.Addr as u64, 64, mut_of(target));
   if s0 != 0 { return s0; }
   if vs.vm_check(tcb.space, target.bits, 8, vs.Access.Call as u64) == 0 {
-    return st.trap_now(tcb, st.VmTrap.MemoryOob, st.Subcode.IndirectNoCall);
+    return TCB.trap(tcb, st.VmTrap.MemoryOob, st.Subcode.IndirectNoCall);
   }
   let sub_index: u64 = im.vm_sub_at(tcb.image, target.bits);
   if sub_index == im.NO_INDEX() {
-    return st.trap_now(tcb, st.VmTrap.CapDenied, st.Subcode.IndirectNoSub);
+    return TCB.trap(tcb, st.VmTrap.CapDenied, st.Subcode.IndirectNoSub);
   }
   let sub: im.SubInfo = im.vm_sub(tcb.image, sub_index);
   if inst.operand_count != (sub.param_count + 1) {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallArity);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallArity);
   }
   return enter_sub(tcb, inst, sub_index, 1, inst.operand_count - 1, tcb.cur_position);
 };
 
-let op_if = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_if = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  let condition: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(condition));
+  let condition: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(condition));
   if s0 != 0 { return s0; }
   let truth: u64 = condition.bits & 1;
   let target: u64 = if truth == 1 { meta.then_region } else { meta.else_region };
   if target == im.NO_REGION() { return st.SliceStatus.Runnable as u64; }
-  return st.push_region(tcb, target, tcb.cur_position, 0, 0);
+  return TCB.push_frame(tcb, target, tcb.cur_position, 0, 0);
 };
 
-let op_switch = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_switch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
-  let selector: st.VmValue = st.value_zero();
-  let s0: u64 = st.op_read(tcb, inst, 0, mut_of(selector));
+  let selector: st.Value = st.value_zero();
+  let s0: u64 = TCB.read_operand(tcb, inst, 0, mut_of(selector));
   if s0 != 0 { return s0; }
   let width: u64 = if selector.width == 0 { 64 } else { selector.width };
   let effective: u64 = if inst.has_ty == 1 { st.type_width(inst.ty_kind, inst.ty_width) } else { width };
@@ -482,36 +487,36 @@ let op_switch = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let target: u64 = op_switch_case(tcb, inst, meta, raw, mask, 0);
   if (tcb.state as u64) != (st.VmStatus.Running as u64) { return tcb.slice as u64; }
   if target == im.NO_REGION() {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.SwitchNoDefault);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.SwitchNoDefault);
   }
-  return st.push_region(tcb, target, tcb.cur_position, 0, 0);
+  return TCB.push_frame(tcb, target, tcb.cur_position, 0, 0);
 };
 
-let op_switch_case = func(tcb: Mut(st.TCB), inst: vf.IrInst, meta: im.InstMeta,
+let op_switch_case = func(tcb: Mut(TCB), inst: vf.IrInst, meta: im.InstMeta,
                           raw: u64, mask: u64, i: u64) -> u64 {
   if i >= inst.case_count { return meta.default_region; }
   if meta.case_base == im.NO_INDEX() {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.SwitchNoCases);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.SwitchNoCases);
   }
   let kase: im.CaseInfo = im.vm_case(tcb.image, meta.case_base + i);
   if (kase.value & mask) == raw { return kase.region; }
   return op_switch_case(tcb, inst, meta, raw, mask, i + 1);
 };
 
-let op_loop = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_loop = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
   let rec: im.ImageRegion = im.vm_region(tcb.image, meta.loop_region);
   if rec.valid == 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.LoopNoRegion);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.LoopNoRegion);
   }
   if rec.param_count > st.MAX_OPERANDS {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.LoopParams);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.LoopParams);
   }
   let collected: u64 = collect_inits(tcb, meta.loop_region, rec, 0);
   if collected != 0 { return collected; }
-  let pushed: u64 = st.push_region(tcb, meta.loop_region, tcb.cur_position, inst.label, 0);
+  let pushed: u64 = TCB.push_frame(tcb, meta.loop_region, tcb.cur_position, inst.label, 0);
   if pushed != st.SliceStatus.Runnable as u64 { return pushed; }
-  let loop_frame: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+  let loop_frame: Mut(Frame) = TCB.frame_at(tcb, tcb.frame_count - 1);
   return bind_args(tcb, loop_frame.slot_base, rec.param_count, 0);
 };
 
@@ -526,89 +531,89 @@ let literal_operand_ref = func() -> im.OperandRef {
   };
 };
 
-let collect_inits = func(tcb: Mut(st.TCB), region_id: u64, rec: im.ImageRegion, i: u64) -> u64 {
+let collect_inits = func(tcb: Mut(TCB), region_id: u64, rec: im.ImageRegion, i: u64) -> u64 {
   if i >= rec.param_count { return 0; }
   let init: im.ParamInit = im.vm_param_init(tcb.image, region_id, i);
   let init_bits: u64 = init.bits;
   let ty: vf.IrType = st.param_type_at(rec.params, i);
-  let cell: Mut(st.VmValue) = st.tcb_arg_slot(tcb, i);
-  let s: u64 = st.read_slot_ref(tcb, literal_operand_ref(), init_bits, ty.kind, ty.width, cell);
+  let cell: Mut(st.Value) = TCB.arg_slot(tcb, i);
+  let s: u64 = TCB.read_slot(tcb, literal_operand_ref(), init_bits, ty.kind, ty.width, cell);
   if s != 0 { return s; }
   return collect_inits(tcb, region_id, rec, i + 1);
 };
 
-let op_yield = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+let op_yield = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let rec: im.ImageRegion = im.vm_region(tcb.image, tcb.cur_region);
   if inst.operand_count != rec.result_count {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.YieldResults);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.YieldResults);
   }
-  let v0: st.VmValue = st.value_zero();
-  let v1: st.VmValue = st.value_zero();
+  let v0: st.Value = st.value_zero();
+  let v1: st.Value = st.value_zero();
   if inst.operand_count > 0 {
     let ty: vf.IrType = st.result_type_at(rec.results, 0);
-    let s0: u64 = st.op_read_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
+    let s0: u64 = TCB.read_operand_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
     if s0 != 0 { return s0; }
   }
   if inst.operand_count > 1 {
     let ty: vf.IrType = st.result_type_at(rec.results, 1);
-    let s1: u64 = st.op_read_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
+    let s1: u64 = TCB.read_operand_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
     if s1 != 0 { return s1; }
   }
-  return st.leave_region(tcb, inst.operand_count, v0, v1);
+  return TCB.leave_frame(tcb, inst.operand_count, v0, v1);
 };
 
-let op_break = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let found: u64 = st.find_loop_frame(tcb, inst.label);
+let op_break = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let found: u64 = TCB.find_loop(tcb, inst.label);
   if (found == 0) or (found < 2) {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BreakNoLoop);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BreakNoLoop);
   }
   let loop_index: u64 = found - 1;
-  let loop_frame: Mut(st.Frame) = st.tcb_frame_ptr(tcb, loop_index);
+  let loop_frame: Mut(Frame) = TCB.frame_at(tcb, loop_index);
   let rec: im.ImageRegion = im.vm_region(tcb.image, loop_frame.region);
   if inst.operand_count != rec.result_count {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.BreakResults);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.BreakResults);
   }
-  let v0: st.VmValue = st.value_zero();
-  let v1: st.VmValue = st.value_zero();
+  let v0: st.Value = st.value_zero();
+  let v1: st.Value = st.value_zero();
   if inst.operand_count > 0 {
     let ty: vf.IrType = st.result_type_at(rec.results, 0);
-    let s0: u64 = st.op_read_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
+    let s0: u64 = TCB.read_operand_typed(tcb, inst, 0, ty.kind, ty.width, mut_of(v0));
     if s0 != 0 { return s0; }
   }
   if inst.operand_count > 1 {
     let ty: vf.IrType = st.result_type_at(rec.results, 1);
-    let s1: u64 = st.op_read_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
+    let s1: u64 = TCB.read_operand_typed(tcb, inst, 1, ty.kind, ty.width, mut_of(v1));
     if s1 != 0 { return s1; }
   }
-  let parent: Mut(st.Frame) = st.tcb_frame_ptr(tcb, loop_index - 1);
+  let parent: Mut(Frame) = TCB.frame_at(tcb, loop_index - 1);
   let at: u64 = loop_frame.parent_position;
   if inst.operand_count > 0 {
-    let s2: u64 = st.write_frame_result(tcb, parent, at, 0, v0, st.Subcode.BreakNoSlot);
+    let s2: u64 = TCB.write_frame_result(tcb, parent, at, 0, v0, st.Subcode.BreakNoSlot);
     if s2 != 0 { return s2; }
   }
   if inst.operand_count > 1 {
-    let s3: u64 = st.write_frame_result(tcb, parent, at, 1, v1, st.Subcode.BreakNoSlot);
+    let s3: u64 = TCB.write_frame_result(tcb, parent, at, 1, v1, st.Subcode.BreakNoSlot);
     if s3 != 0 { return s3; }
   }
   tcb.frame_count = loop_index;
   parent.position = at + 1;
-  st.recount_call_depth(tcb);
+  TCB.recount_depth(tcb);
   return st.SliceStatus.Runnable as u64;
 };
 
-let op_continue = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let found: u64 = st.find_loop_frame(tcb, inst.label);
+let op_continue = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let found: u64 = TCB.find_loop(tcb, inst.label);
   if found == 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.ContinueNoLoop);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.ContinueNoLoop);
   }
   let loop_index: u64 = found - 1;
-  let loop_frame: Mut(st.Frame) = st.tcb_frame_ptr(tcb, loop_index);
+  let loop_frame: Mut(Frame) = TCB.frame_at(tcb, loop_index);
   let rec: im.ImageRegion = im.vm_region(tcb.image, loop_frame.region);
   if inst.operand_count != rec.param_count {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.ContinueParams);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.ContinueParams);
   }
   if inst.operand_count > st.MAX_OPERANDS {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.CallOperands);
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.CallOperands);
   }
   let collected: u64 = collect_loop_args(tcb, inst, rec, 0);
   if collected != 0 { return collected; }
@@ -616,24 +621,24 @@ let op_continue = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if bound != 0 { return bound; }
   tcb.frame_count = loop_index + 1;
   loop_frame.position = 0;
-  st.recount_call_depth(tcb);
+  TCB.recount_depth(tcb);
   return st.SliceStatus.Runnable as u64;
 };
 
-let collect_loop_args = func(tcb: Mut(st.TCB), inst: vf.IrInst, rec: im.ImageRegion,
+let collect_loop_args = func(tcb: Mut(TCB), inst: vf.IrInst, rec: im.ImageRegion,
                              i: u64) -> u64 {
   if i >= inst.operand_count { return 0; }
   let ty: vf.IrType = st.param_type_at(rec.params, i);
-  let cell: Mut(st.VmValue) = st.tcb_arg_slot(tcb, i);
-  let s: u64 = st.op_read_typed(tcb, inst, i, ty.kind, ty.width, cell);
+  let cell: Mut(st.Value) = TCB.arg_slot(tcb, i);
+  let s: u64 = TCB.read_operand_typed(tcb, inst, i, ty.kind, ty.width, cell);
   if s != 0 { return s; }
   return collect_loop_args(tcb, inst, rec, i + 1);
 };
 
-let op_return = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  let leaving: u64 = st.frame_sub_symbol(tcb, tcb.frame_count - 1);
-  let traced: u64 = st.trace_record(tcb, leaving, st.TRACE_EXIT());
-  let value: st.VmValue = st.value_zero();
+let op_return = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
+  let leaving: u64 = TCB.frame_symbol(tcb, tcb.frame_count - 1);
+  let traced: u64 = TCB.record(tcb, leaving, st.TraceKind.Exit);
+  let value: st.Value = st.value_zero();
   if inst.operand_count > 0 {
     let rec: im.ImageRegion = im.vm_region(tcb.image, tcb.cur_region);
     let kind: u64 = 0;
@@ -646,10 +651,10 @@ let op_return = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
         width = ty.width;
       }
     }
-    let s0: u64 = st.op_read_typed(tcb, inst, 0, kind, width, mut_of(value));
+    let s0: u64 = TCB.read_operand_typed(tcb, inst, 0, kind, width, mut_of(value));
     if s0 != 0 { return s0; }
   }
-  let remaining: u64 = st.pop_to_call_frame(tcb);
+  let remaining: u64 = TCB.pop_frame(tcb);
   if remaining == 0 {
     tcb.has_result = 0;
     tcb.call_depth = 0;
@@ -657,13 +662,13 @@ let op_return = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
     tcb.slice = st.SliceStatus.Done;
     return st.SliceStatus.Done as u64;
   }
-  let callee: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+  let callee: Mut(Frame) = TCB.frame_at(tcb, tcb.frame_count - 1);
   tcb.stack_used = callee.stack_mark;
-  if st.stack_window_sync(tcb) != 0 {
-    return st.trap_now(tcb, st.VmTrap.State, st.Subcode.StackWindow);
+  if TCB.sync_window(tcb) != 0 {
+    return TCB.trap(tcb, st.VmTrap.State, st.Subcode.StackWindow);
   }
   tcb.frame_count = tcb.frame_count - 1;
-  st.recount_call_depth(tcb);
+  TCB.recount_depth(tcb);
   if tcb.frame_count == 0 {
     tcb.result_width = value.width;
     tcb.result_bits = value.bits;
@@ -672,17 +677,17 @@ let op_return = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
     tcb.slice = st.SliceStatus.Done;
     return st.SliceStatus.Done as u64;
   }
-  let caller: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
+  let caller: Mut(Frame) = TCB.frame_at(tcb, tcb.frame_count - 1);
   if inst.operand_count > 0 {
-    let s1: u64 = st.write_frame_result(tcb, caller, caller.position, 0, value, st.Subcode.ReturnNoSlot);
+    let s1: u64 = TCB.write_frame_result(tcb, caller, caller.position, 0, value, st.Subcode.ReturnNoSlot);
     if s1 != 0 { return s1; }
   }
   caller.position = caller.position + 1;
   return st.SliceStatus.Runnable as u64;
 };
 
-let op_unreachable = func(tcb: Mut(st.TCB)) -> u64 {
-  return st.trap_now(tcb, st.VmTrap.Unreachable, st.Subcode.UnknownInst);
+let op_unreachable = func(tcb: Mut(TCB)) -> u64 {
+  return TCB.trap(tcb, st.VmTrap.Unreachable, st.Subcode.UnknownInst);
 };
 
 let is_int_bin = func(k: u64) -> bool {
@@ -738,7 +743,7 @@ let is_atomic = func(k: u64) -> bool {
   return true;
 };
 
-pub let dispatch = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
+pub let dispatch = func(tcb: Mut(TCB), inst: vf.IrInst) -> u64 {
   let k: u64 = inst.kind;
   if is_int_bin(k) { return op_int_bin(tcb, inst); }
   if is_int_cmp(k) { return op_int_cmp(tcb, inst); }
@@ -760,5 +765,5 @@ pub let dispatch = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if k == codes.InstKind.Continue as u64 { return op_continue(tcb, inst); }
   if k == codes.InstKind.Return as u64 { return op_return(tcb, inst); }
   if k == codes.InstKind.Unreachable as u64 { return op_unreachable(tcb); }
-  return st.trap_now(tcb, st.VmTrap.State, st.Subcode.UnknownInst);
+  return TCB.trap(tcb, st.VmTrap.State, st.Subcode.UnknownInst);
 };

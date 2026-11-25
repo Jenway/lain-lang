@@ -1,7 +1,5 @@
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
-let vs = import("src::vm::vspace");
-let im = import("src::vm::image");
 
 pub let MAX_OPERANDS: u64 = 16;
 pub let MAX_RESULTS: u64 = 2;
@@ -109,17 +107,19 @@ pub let Quota = module {
   };
 };
 
-pub let VmValue = struct {
+pub let Value = struct {
   width: u64,
   bits: u64,
 };
 
-pub let value_zero = func() -> VmValue {
-  return VmValue { width: 64, bits: 0 };
+pub let VALUE_SIZE: u64 = size_of(Value);
+
+pub let value_zero = func() -> Value {
+  return Value { width: 64, bits: 0 };
 };
 
-pub let value_bits = func(bits: u64, width: u64) -> VmValue {
-  return VmValue { width: width, bits: bits & width_mask(width) };
+pub let value_bits = func(bits: u64, width: u64) -> Value {
+  return Value { width: width, bits: bits & width_mask(width) };
 };
 
 pub let max_u64 = func() -> u64 {
@@ -159,543 +159,44 @@ pub let align_to = func(n: u64, a: u64) -> u64 {
   return (n + mask) & (max_u64() ^ mask);
 };
 
-pub let CAP_FUNCTION = func() -> u64 { return 1; };
-
-pub let CAP_AST_TX_BEGIN = func() -> u64 { return 2; };
-pub let CAP_AST_TX_COMMIT = func() -> u64 { return 3; };
-pub let CAP_AST_TX_ROLLBACK = func() -> u64 { return 4; };
-pub let CAP_AST_MK_TOKEN = func() -> u64 { return 5; };
-pub let CAP_AST_MK_GROUP = func() -> u64 { return 6; };
-pub let CAP_TYPE_REC_BEGIN = func() -> u64 { return 7; };
-pub let CAP_TYPE_REC_ADD = func() -> u64 { return 8; };
-pub let CAP_TYPE_REC_END = func() -> u64 { return 9; };
-
-pub let cap_kind_callable = func(kind: u64) -> u64 {
-  if kind < CAP_FUNCTION() { return 0; }
-  if kind > CAP_TYPE_REC_END() { return 0; }
-  return 1;
+pub let TraceKind = enum(u64) {
+  None = 0,
+  Enter = 1,
+  Exit = 2,
+  Trap = 3
 };
 
-pub let VmCapEntry = struct {
-  link_name: u64,
-  kind: u64,
-  context: u64,
-  invoke_fn: Fn((u64, Slice(u64)) -> u64),
-};
-
-pub let VmCapTable = struct {
-  entries: Mut(VmCapEntry),
-  count: u64,
-  cap: u64,
-  frozen: u64,
-};
-
-pub let cap_entry_ptr = func(t: Mut(VmCapTable), i: u64) -> Mut(VmCapEntry) {
-  return t.entries + i * size_of(VmCapEntry);
-};
-
-pub let caps_new = func(entries: Mut(VmCapEntry), cap: u64) -> VmCapTable {
-  return VmCapTable { entries: entries, count: 0, cap: cap, frozen: 0 };
-};
-
-pub let caps_register = func(t: Mut(VmCapTable), link_name: u64, kind: u64, context: u64,
-                            invoke_fn: Fn((u64, Slice(u64)) -> u64)) -> u64 {
-  if t.frozen == 1 { return 0; }
-  if t.count >= t.cap { return 0; }
-  let p: Mut(VmCapEntry) = cap_entry_ptr(t, t.count);
-  p.link_name = link_name;
-  p.kind = kind;
-  p.context = context;
-  p.invoke_fn = invoke_fn;
-  t.count = t.count + 1;
-  return 1;
-};
-
-pub let caps_freeze = func(t: Mut(VmCapTable)) -> u64 {
-  t.frozen = 1;
-  return 1;
-};
-
-pub let caps_is_frozen = func(t: Mut(VmCapTable)) -> u64 { return t.frozen; };
-
-pub let caps_find = func(t: Mut(VmCapTable), link_name: u64, i: u64) -> u64 {
-  if i >= t.count { return 0; }
-  let entry: VmCapEntry = deref(cap_entry_ptr(t, i));
-  if entry.link_name == link_name { return i + 1; }
-  return caps_find(t, link_name, i + 1);
-};
-
-pub let caps_invoke = func(self: Mut(VmCapTable), link_name: u64, args: Slice(u64)) -> u64 {
-  let hit: u64 = caps_find(self, link_name, 0);
-  if hit == 0 { return 0; }
-  let e: Mut(VmCapEntry) = cap_entry_ptr(self, hit - 1);
-  if cap_kind_callable(e.kind) == 0 { return 0; }
-  let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
-  if (fn as u64) == 0 { return 0; }
-  return fn(e.context, args);
-};
-
-pub let EP_IDLE = func() -> u64 { return 0; };
-pub let EP_SENDER_PARKED = func() -> u64 { return 1; };
-pub let EP_RECEIVER_PARKED = func() -> u64 { return 2; };
-pub let EP_SENDER_DELIVERED = func() -> u64 { return 3; };
-
-pub let EP_OK = func() -> u64 { return 0; };
-pub let EP_BLOCKED = func() -> u64 { return 1; };
-pub let EP_BUSY = func() -> u64 { return 2; };
-
-pub let Endpoint = struct {
-  id: u64,
-  state: u64,
-  peer: u64,
-  value_width: u64,
-  value_bits: u64,
-};
-
-pub let endpoint_new = func(id: u64) -> Endpoint {
-  return Endpoint { id: id, state: EP_IDLE(), peer: 0, value_width: 64, value_bits: 0 };
-};
-
-pub let endpoint_state = func(ep: Ref(Endpoint)) -> u64 { return ep.state; };
-
-pub let endpoint_peer = func(ep: Ref(Endpoint)) -> u64 { return ep.peer; };
-
-let endpoint_store = func(ep: Mut(Endpoint), value: VmValue) -> u64 {
-  ep.value_width = value.width;
-  ep.value_bits = value.bits;
-  return 0;
-};
-
-let endpoint_clear = func(ep: Mut(Endpoint)) -> u64 {
-  ep.value_width = 64;
-  ep.value_bits = 0;
-  return 0;
-};
-
-pub let endpoint_send = func(ep: Mut(Endpoint), who: u64, value: VmValue,
-                             out_who: Mut(u64)) -> u64 {
-  if ep.state == EP_RECEIVER_PARKED() {
-    let put: u64 = endpoint_store(ep, value);
-    ep.state = EP_SENDER_DELIVERED();
-    deref(out_who) = ep.peer;
-    return EP_OK();
-  }
-  if ep.state == EP_IDLE() {
-    let put: u64 = endpoint_store(ep, value);
-    ep.peer = who;
-    ep.state = EP_SENDER_PARKED();
-    return EP_BLOCKED();
-  }
-  return EP_BUSY();
-};
-
-pub let endpoint_recv = func(ep: Mut(Endpoint), who: u64, out: Mut(VmValue),
-                             out_who: Mut(u64)) -> u64 {
-  if ep.state == EP_SENDER_PARKED() {
-    deref(out) = VmValue { width: ep.value_width, bits: ep.value_bits };
-    let sender: u64 = ep.peer;
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    deref(out_who) = sender;
-    return EP_OK();
-  }
-  if ep.state == EP_SENDER_DELIVERED() {
-    deref(out) = VmValue { width: ep.value_width, bits: ep.value_bits };
-    let receiver: u64 = ep.peer;
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    deref(out_who) = receiver;
-    return EP_OK();
-  }
-  if ep.state == EP_IDLE() {
-    ep.peer = who;
-    ep.state = EP_RECEIVER_PARKED();
-    return EP_BLOCKED();
-  }
-  return EP_BUSY();
-};
-
-pub let endpoint_cancel = func(ep: Mut(Endpoint), who: u64) -> u64 {
-  if ep.peer != who { return 0; }
-  if (ep.state == EP_SENDER_PARKED()) or (ep.state == EP_RECEIVER_PARKED()) {
-    ep.state = EP_IDLE();
-    ep.peer = 0;
-    let cleared: u64 = endpoint_clear(ep);
-    return 1;
-  }
-  return 0;
-};
-
-pub let VmTraceEvent = struct {
+pub let TraceEvent = struct {
   sub_sym: u64,
   depth: u64,
   steps: u64,
-  kind: u64,
+  kind: TraceKind,
 };
 
-pub let TRACE_ENTER = func() -> u64 { return 1; };
-pub let TRACE_EXIT = func() -> u64 { return 2; };
-pub let TRACE_TRAP = func() -> u64 { return 3; };
+pub let TRACE_EVENT_SIZE: u64 = size_of(TraceEvent);
 
-pub let Frame = struct {
-  region: u64,
-  position: u64,
-  slot_base: u64,
-  slot_count: u64,
-  parent_position: u64,
-  label: u64,
-  is_call_frame: u64,
-  stack_mark: u64,
+pub let trace_none = func() -> TraceEvent {
+  return TraceEvent { sub_sym: 0, depth: 0, steps: 0, kind: TraceKind.None };
 };
 
-pub let TCB = struct {
-  image: Ref(im.VmImage),
-  space: Mut(vs.VmSpace),
-  caps: Mut(VmCapTable),
-  lease_index: u64,
-  lease_generation: u64,
-  owner: u64,
-  quota_steps: u64,
-  quota_stack_bytes: u64,
-  quota_call_depth: u64,
-  frames: Mut(Frame),
-  frame_cap: u64,
-  frame_count: u64,
-  slots: Mut(VmValue),
-  slot_cap: u64,
-  args: Mut(VmValue),
-  arg_words: Mut(u64),
-  call_depth: u64,
-  stack_used: u64,
-  stack_peak: u64,
-  steps: u64,
-  state: VmStatus,
-  slice: SliceStatus,
-  trap_kind: VmTrap,
-  trap_status: Subcode,
-  trap_region: u64,
-  trap_position: u64,
-  has_result: u64,
-  result_width: u64,
-  result_bits: u64,
-  result_cell: Mut(VmValue),
-  cur_region: u64,
-  cur_position: u64,
-  trace_buf: Mut(VmTraceEvent),
-  trace_cap: u64,
-  trace_count: Mut(u64),
-};
-
-pub let Self = TCB;
-
-pub let tcb_lease = func(tcb: Mut(TCB)) -> vs.StackLease {
-  return vs.StackLease { index: tcb.lease_index, generation: tcb.lease_generation };
-};
-
-pub let VmResult = struct {
+pub let Result = struct {
   status: u64,
   steps_used: u64,
   result_width: u64,
   result_bits: u64,
-  result_val: Mut(VmValue),
+  result_val: Mut(Value),
   trap_kind: u64,
   trap_status: u64,
 };
 
 let trap_cell: Array(u64, 2) = [64, 0];
 
-let trap_value_ptr = func() -> Mut(VmValue) {
-  return ptr_cast(Mut(VmValue), mut_of(trap_cell));
+let trap_value_ptr = func() -> Mut(Value) {
+  return ptr_cast(Mut(Value), mut_of(trap_cell));
 };
 
-pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return tcb.state as u64; };
-pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return tcb.steps; };
-pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return tcb.stack_peak; };
-pub let vm_tcb_has_result = func(tcb: Ref(TCB)) -> u64 { return tcb.has_result; };
-pub let vm_tcb_result = func(tcb: Ref(TCB)) -> VmValue {
-  return VmValue { width: tcb.result_width, bits: tcb.result_bits };
-};
-pub let vm_tcb_trap_kind = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_kind as u64; };
-pub let vm_tcb_trap_status = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_status as u64; };
-pub let vm_tcb_trap_region = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_region; };
-pub let vm_tcb_trap_position = func(tcb: Ref(TCB)) -> u64 { return tcb.trap_position; };
-pub let vm_tcb_current_region = func(tcb: Ref(TCB)) -> u64 { return tcb.cur_region; };
-pub let vm_tcb_call_depth = func(tcb: Ref(TCB)) -> u64 { return tcb.call_depth; };
-pub let vm_tcb_frame_count = func(tcb: Ref(TCB)) -> u64 { return tcb.frame_count; };
-
-pub let ref_frame_ptr = func(tcb: Ref(TCB), i: u64) -> Ref(Frame) {
-  let base: Ref(u8) = ptr_cast(Ref(u8), tcb.frames);
-  return ptr_cast(Ref(Frame), base + i * size_of(Frame));
-};
-
-pub let vm_tcb_frame_region = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.region;
-};
-
-pub let vm_tcb_frame_position = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.position;
-};
-
-pub let vm_tcb_frame_slot_base = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.slot_base;
-};
-
-pub let vm_tcb_frame_slot_count = func(tcb: Ref(TCB), i: u64) -> u64 {
-  let f: Ref(Frame) = ref_frame_ptr(tcb, i);
-  return f.slot_count;
-};
-
-pub let vm_tcb_slot = func(tcb: Ref(TCB), i: u64) -> VmValue {
-  let base: Ref(u8) = ptr_cast(Ref(u8), tcb.slots);
-  let p: Ref(VmValue) = ptr_cast(Ref(VmValue), base + i * size_of(VmValue));
-  return deref(p);
-};
-
-pub let vm_tcb_block = func(tcb: Mut(TCB)) -> u64 {
-  tcb.state = VmStatus.Blocked;
-  tcb.slice = SliceStatus.Blocked;
-  return SliceStatus.Blocked as u64;
-};
-
-pub let vm_tcb_wake = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VmStatus.Blocked { return 0; }
-  tcb.state = VmStatus.Running;
-  tcb.slice = SliceStatus.Runnable;
-  return 1;
-};
-
-pub let vm_tcb_yield = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VmStatus.Running { return 1; }
-  tcb.state = VmStatus.Blocked;
-  tcb.slice = SliceStatus.Blocked;
-  return 0;
-};
-
-pub let vm_tcb_resume = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.state != VmStatus.Blocked { return 1; }
-  tcb.state = VmStatus.Running;
-  tcb.slice = SliceStatus.Runnable;
-  return 0;
-};
-
-let UNLIMITED_DEPTH_FRAMES: u64 = 256;
-
-pub let frame_cap_of = func(image: Ref(im.VmImage), quota: Quota) -> u64 {
-  let depth: u64 = quota.max_call_depth;
-  let nesting: u64 = im.vm_max_region_depth(image) + 1;
-  if depth == 0 { return UNLIMITED_DEPTH_FRAMES * nesting; }
-  return depth * nesting;
-};
-
-pub let vm_tcb_bytes = func(image: Ref(im.VmImage), quota: Quota) -> u64 {
-  let frames: u64 = frame_cap_of(image, quota);
-  let slots: u64 = frames * im.vm_max_slots(image);
-  return align_to(frames * size_of(Frame), 8) +
-         align_to(slots * size_of(VmValue), 8) +
-         align_to(MAX_OPERANDS * size_of(VmValue), 8) +
-         align_to(MAX_OPERANDS * 8, 8) +
-         align_to(size_of(VmValue), 8);
-};
-
-pub let tcb_frame_ptr = func(tcb: Mut(TCB), i: u64) -> Mut(Frame) {
-  return tcb.frames + i * size_of(Frame);
-};
-
-pub let tcb_slot_ptr = func(tcb: Mut(TCB), i: u64) -> Mut(VmValue) {
-  return tcb.slots + i * size_of(VmValue);
-};
-
-pub let tcb_arg_slot = func(tcb: Mut(TCB), i: u64) -> Mut(VmValue) {
-  return tcb.args + i * size_of(VmValue);
-};
-
-pub let tcb_arg_word = func(tcb: Mut(TCB), i: u64) -> Mut(u64) {
-  return tcb.arg_words + i * size_of(u64);
-};
-
-pub let vm_tcb_blank = func() -> TCB {
-  return TCB {
-    image: null_ref(Ref(im.VmImage)),
-    space: null_ref(Mut(vs.VmSpace)),
-    caps: null_ref(Mut(VmCapTable)),
-    lease_index: vs.NO_INDEX(),
-    lease_generation: 0,
-    owner: 0,
-    quota_steps: 0,
-    quota_stack_bytes: 0,
-    quota_call_depth: 0,
-    frames: null_ref(Mut(Frame)),
-    frame_cap: 0,
-    frame_count: 0,
-    slots: null_ref(Mut(VmValue)),
-    slot_cap: 0,
-    args: null_ref(Mut(VmValue)),
-    arg_words: null_ref(Mut(u64)),
-    call_depth: 0,
-    stack_used: 0,
-    stack_peak: 0,
-    steps: 0,
-    state: VmStatus.Ready,
-    slice: SliceStatus.Runnable,
-    trap_kind: VmTrap.None,
-    trap_status: Subcode.None,
-    trap_region: 0,
-    trap_position: 0,
-    has_result: 0,
-    result_width: 64,
-    result_bits: 0,
-    result_cell: null_ref(Mut(VmValue)),
-    cur_region: 0,
-    cur_position: 0,
-    trace_buf: null_ref(Mut(VmTraceEvent)),
-    trace_cap: 0,
-    trace_count: null_ref(Mut(u64)),
-  };
-};
-
-pub let vm_tcb_new = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
-                          caps: Mut(VmCapTable), quota: Quota,
-                          lease: vs.StackLease, owner: u64,
-                          arena: MutSlice(u8), out: Mut(TCB)) -> u64 {
-  let frames: u64 = frame_cap_of(image, quota);
-  let frame_bytes: u64 = align_to(frames * size_of(Frame), 8);
-  let slot_cap: u64 = frames * im.vm_max_slots(image);
-  let slot_bytes: u64 = align_to(slot_cap * size_of(VmValue), 8);
-  let arg_bytes: u64 = align_to(MAX_OPERANDS * size_of(VmValue), 8);
-  let word_bytes: u64 = align_to(MAX_OPERANDS * 8, 8);
-  let cell_bytes: u64 = align_to(size_of(VmValue), 8);
-  let need: u64 = frame_bytes + slot_bytes + arg_bytes + word_bytes + cell_bytes;
-  if arena.len < need { return 0; }
-  let base: Mut(u8) = arena.ptr;
-  let slots_at: Mut(u8) = base + frame_bytes;
-  let args_at: Mut(u8) = slots_at + slot_bytes;
-  let words_at: Mut(u8) = args_at + arg_bytes;
-  let cell_at: Mut(u8) = words_at + word_bytes;
-  if vs.vm_lease_none(lease) == 0 {
-    let borrowed: u64 = vs.vm_borrow(space, lease);
-    if borrowed == 0 { return 0; }
-  }
-  deref(out) = TCB {
-    image: image,
-    space: space,
-    caps: caps,
-    lease_index: lease.index,
-    lease_generation: lease.generation,
-    owner: owner,
-    quota_steps: quota.max_steps,
-    quota_stack_bytes: quota.max_stack_bytes,
-    quota_call_depth: quota.max_call_depth,
-    frames: ptr_cast(Mut(Frame), base),
-    frame_cap: frames,
-    frame_count: 0,
-    slots: ptr_cast(Mut(VmValue), slots_at),
-    slot_cap: slot_cap,
-    args: ptr_cast(Mut(VmValue), args_at),
-    arg_words: ptr_cast(Mut(u64), words_at),
-    call_depth: 0,
-    stack_used: 0,
-    stack_peak: 0,
-    steps: 0,
-    state: VmStatus.Ready,
-    slice: SliceStatus.Runnable,
-    trap_kind: VmTrap.None,
-    trap_status: Subcode.None,
-    trap_region: 0,
-    trap_position: 0,
-    has_result: 0,
-    result_width: 64,
-    result_bits: 0,
-    result_cell: ptr_cast(Mut(VmValue), cell_at),
-    cur_region: 0,
-    cur_position: 0,
-    trace_buf: null_ref(Mut(VmTraceEvent)),
-    trace_cap: 0,
-    trace_count: null_ref(Mut(u64)),
-  };
-  return 1;
-};
-
-pub let vm_tcb_set_trace = func(tcb: Mut(TCB), buf: MutSlice(VmTraceEvent),
-                                count: Mut(u64)) -> u64 {
-  tcb.trace_buf = buf.ptr;
-  tcb.trace_cap = buf.len;
-  tcb.trace_count = count;
-  deref(count) = 0;
-  return buf.len;
-};
-
-pub let vm_tcb_trace_count = func(tcb: Ref(TCB)) -> u64 {
-  if is_null(tcb.trace_count) { return 0; }
-  return deref(tcb.trace_count);
-};
-
-pub let vm_tcb_trace_cap = func(tcb: Ref(TCB)) -> u64 { return tcb.trace_cap; };
-
-pub let trace_record = func(tcb: Mut(TCB), sub_sym: u64, kind: u64) -> u64 {
-  if tcb.trace_cap == 0 { return 0; }
-  let count: u64 = deref(tcb.trace_count);
-  if count >= tcb.trace_cap { return 0; }
-  let p: Mut(VmTraceEvent) = tcb.trace_buf + count * size_of(VmTraceEvent);
-  p.sub_sym = sub_sym;
-  p.depth = tcb.call_depth;
-  p.steps = tcb.steps;
-  p.kind = kind;
-  deref(tcb.trace_count) = count + 1;
-  return 1;
-};
-
-pub let frame_sub_symbol = func(tcb: Mut(TCB), index: u64) -> u64 {
-  if index >= tcb.frame_count { return 0; }
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, index);
-  let rec: im.ImageRegion = im.vm_region(tcb.image, f.region);
-  if rec.sub_index == im.NO_INDEX() { return 0; }
-  let sub: im.SubInfo = im.vm_sub(tcb.image, rec.sub_index);
-  return sub.name;
-};
-
-pub let vm_tcb_free = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) == 0 {
-    let cleared: u64 = vs.vm_set_accessible(tcb.space, lease, 0);
-    let released: u64 = vs.vm_end_borrow(tcb.space, lease);
-  }
-  tcb.frame_count = 0;
-  tcb.call_depth = 0;
-  tcb.state = VmStatus.Dead;
-  tcb.slice = SliceStatus.Done;
-  return SliceStatus.Done as u64;
-};
-
-pub let vm_reject = func(tcb: Mut(TCB), status: Subcode) -> u64 {
-  tcb.trap_kind = VmTrap.State;
-  tcb.trap_status = status;
-  tcb.state = VmStatus.Dead;
-  tcb.slice = SliceStatus.Trapped;
-  return SliceStatus.Trapped as u64;
-};
-
-pub let result_of = func(tcb: Mut(TCB)) -> VmResult {
-  let cell: Mut(VmValue) = tcb.result_cell;
-  cell.width = tcb.result_width;
-  cell.bits = tcb.result_bits;
-  return VmResult {
-    status: tcb.slice as u64,
-    steps_used: tcb.steps,
-    result_width: tcb.result_width,
-    result_bits: tcb.result_bits,
-    result_val: cell,
-    trap_kind: tcb.trap_kind as u64,
-    trap_status: tcb.trap_status as u64,
-  };
-};
-
-pub let vm_trap_result_bits = func(trap_kind: u64, trap_status: u64) -> VmResult {
-  return VmResult {
+pub let vm_trap_result_bits = func(trap_kind: u64, trap_status: u64) -> Result {
+  return Result {
     status: SliceStatus.Trapped as u64,
     steps_used: 0,
     result_width: 64,
@@ -706,97 +207,8 @@ pub let vm_trap_result_bits = func(trap_kind: u64, trap_status: u64) -> VmResult
   };
 };
 
-pub let vm_trap_result = func(trap_kind: VmTrap, trap_status: Subcode) -> VmResult {
+pub let vm_trap_result = func(trap_kind: VmTrap, trap_status: Subcode) -> Result {
   return vm_trap_result_bits(trap_kind as u64, trap_status as u64);
-};
-
-pub let clear_slots = func(tcb: Mut(TCB), base: u64, count: u64) -> u64 {
-  let cleared: u64 = loop clear(left: u64 = count) while left > 0 {
-    let p: Mut(VmValue) = tcb_slot_ptr(tcb, base + left - 1);
-    p.width = 64;
-    p.bits = 0;
-    left = left - 1;
-  };
-  return 0;
-};
-
-pub let read_slot_ref = func(tcb: Mut(TCB), r: im.OperandRef, literal: u64,
-                             kind: u64, width: u64, out: Mut(VmValue)) -> u64 {
-  let w: u64 = type_width(kind, width);
-  if r.is_literal == 1 {
-    deref(out) = value_bits(literal, w);
-    return 0;
-  }
-  if r.is_symbol == 1 {
-    deref(out) = value_bits(im.vm_symbol_addr(tcb.image, r.symbol_index), 64);
-    return 0;
-  }
-  if r.is_proc == 1 {
-    deref(out) = value_bits(im.vm_sub_addr(tcb.image, r.symbol_index), 64);
-    return 0;
-  }
-  if r.frame_distance >= tcb.frame_count {
-    return trap_now(tcb, VmTrap.State, Subcode.BadFrameDistance);
-  }
-  let fi: u64 = tcb.frame_count - 1 - r.frame_distance;
-  let frame: Mut(Frame) = tcb_frame_ptr(tcb, fi);
-  if r.slot >= frame.slot_count {
-    return trap_now(tcb, VmTrap.State, Subcode.BadFrameDistance);
-  }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, frame.slot_base + r.slot);
-  deref(out) = deref(p);
-  return 0;
-};
-
-pub let operand_bits_at = func(inst: vf.IrInst, i: u64) -> u64 {
-  if i >= MAX_OPERANDS { return 0; }
-  let op: vf.IrOperand = vf.inst_op(inst, i);
-  return op.bits;
-};
-
-pub let op_read = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                       out: Mut(VmValue)) -> u64 {
-  let r: im.OperandRef = im.vm_operand_ref(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  return read_slot_ref(tcb, r, operand_bits_at(inst, index), inst.ty_kind, inst.ty_width, out);
-};
-
-pub let op_read_typed = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                             kind: u64, width: u64, out: Mut(VmValue)) -> u64 {
-  let r: im.OperandRef = im.vm_operand_ref(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  return read_slot_ref(tcb, r, operand_bits_at(inst, index), kind, width, out);
-};
-
-pub let write_result = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                            value: VmValue) -> u64 {
-  let slot: u64 = im.vm_result_slot(tcb.image, tcb.cur_region, tcb.cur_position, index);
-  if slot == im.NO_INDEX() {
-    return trap_now(tcb, VmTrap.State, Subcode.ResultNoSlot);
-  }
-  let frame: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let at: u64 = frame.slot_base + slot;
-  if at >= tcb.slot_cap { return trap_now(tcb, VmTrap.State, Subcode.SlotOverflow); }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, at);
-  p.width = value.width;
-  p.bits = value.bits;
-  return 0;
-};
-
-pub let write_result_bits = func(tcb: Mut(TCB), inst: vf.IrInst, index: u64,
-                                 bits: u64, width: u64) -> u64 {
-  return write_result(tcb, inst, index, value_bits(bits, width));
-};
-
-pub let write_frame_result = func(tcb: Mut(TCB), frame: Mut(Frame), position: u64,
-                                  index: u64, value: VmValue, status: Subcode) -> u64 {
-  let slot: u64 = im.vm_result_slot(tcb.image, frame.region, position, index);
-  if slot == im.NO_INDEX() { return trap_now(tcb, VmTrap.State, status); }
-  if (frame.slot_base + slot) >= tcb.slot_cap {
-    return trap_now(tcb, VmTrap.State, Subcode.SlotOverflow);
-  }
-  let p: Mut(VmValue) = tcb_slot_ptr(tcb, frame.slot_base + slot);
-  p.width = value.width;
-  p.bits = value.bits;
-  return 0;
 };
 
 pub let param_type_at = func(params: Ref(vf.IrParam), i: u64) -> vf.IrType {
@@ -806,133 +218,4 @@ pub let param_type_at = func(params: Ref(vf.IrParam), i: u64) -> vf.IrType {
 
 pub let result_type_at = func(results: Ref(vf.IrType), i: u64) -> vf.IrType {
   return vf.type_at_ref(results, i);
-};
-
-let sub_result_type = func(image: Ref(im.VmImage), sub_index: u64, i: u64) -> vf.IrType {
-  let sub: im.SubInfo = im.vm_sub(image, sub_index);
-  return result_type_at(sub.results, i);
-};
-
-let clear_stack_window = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) == 0 {
-    let ok: u64 = vs.vm_set_accessible(tcb.space, lease, 0);
-    return ok;
-  }
-  return 1;
-};
-
-pub let trap_now = func(tcb: Mut(TCB), kind: VmTrap, status: Subcode) -> u64 {
-  let traced: u64 = trace_record(tcb, frame_sub_symbol(tcb, tcb.frame_count - 1), TRACE_TRAP());
-  tcb.trap_kind = kind;
-  tcb.trap_status = status;
-  if tcb.frame_count > 0 {
-    let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-    tcb.trap_region = f.region;
-    tcb.trap_position = f.position;
-  }
-  clear_stack_window(tcb);
-  tcb.state = VmStatus.Dead;
-  tcb.slice = SliceStatus.Trapped;
-  return SliceStatus.Trapped as u64;
-};
-
-pub let stack_window_sync = func(tcb: Mut(TCB)) -> u64 {
-  let lease: vs.StackLease = tcb_lease(tcb);
-  if vs.vm_lease_none(lease) != 0 { return 0; }
-  let ok: u64 = vs.vm_set_accessible(tcb.space, lease, tcb.stack_used);
-  if ok == 0 { return Subcode.StackWindow as u64; }
-  return 0;
-};
-
-pub let push_region = func(tcb: Mut(TCB), region_id: u64, parent_position: u64,
-                           label: u64, is_call: u64) -> u64 {
-  let rec: im.ImageRegion = im.vm_region(tcb.image, region_id);
-  if rec.valid == 0 {
-    return trap_now(tcb, VmTrap.State, Subcode.FrameNoRegion);
-  }
-  if tcb.frame_count >= tcb.frame_cap {
-    return trap_now(tcb, VmTrap.State, Subcode.FrameOverflow);
-  }
-  if is_call == 1 {
-    if (tcb.quota_call_depth != 0) and (tcb.call_depth >= tcb.quota_call_depth) {
-      return trap_now(tcb, VmTrap.CallDepth, Subcode.CallDepth);
-    }
-  }
-  let parent: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count);
-  f.region = region_id;
-  f.position = 0;
-  f.slot_base = parent.slot_base + parent.slot_count;
-  f.slot_count = rec.slot_count;
-  f.parent_position = parent_position;
-  f.label = label;
-  f.is_call_frame = is_call;
-  f.stack_mark = tcb.stack_used;
-  if (f.slot_base + f.slot_count) > tcb.slot_cap {
-    return trap_now(tcb, VmTrap.State, Subcode.SlotOverflow);
-  }
-  clear_slots(tcb, f.slot_base, f.slot_count);
-  tcb.frame_count = tcb.frame_count + 1;
-  if is_call == 1 { tcb.call_depth = tcb.call_depth + 1; }
-  return SliceStatus.Runnable as u64;
-};
-
-pub let recount_call_depth = func(tcb: Mut(TCB)) -> u64 {
-  let counted: u64 = loop scan(i: u64 = 0, depth: u64 = 0) while i < tcb.frame_count {
-    let f: Mut(Frame) = tcb_frame_ptr(tcb, i);
-    if f.is_call_frame == 1 { depth = depth + 1; }
-    i = i + 1;
-  };
-  tcb.call_depth = counted;
-  return counted;
-};
-
-let scan_loop_frame = func(tcb: Mut(TCB), label: u64, back: u64) -> u64 {
-  if back >= tcb.frame_count { return 0; }
-  let i: u64 = tcb.frame_count - 1 - back;
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, i);
-  if f.label == label { return i + 1; }
-  return scan_loop_frame(tcb, label, back + 1);
-};
-
-pub let find_loop_frame = func(tcb: Mut(TCB), label: u64) -> u64 {
-  if label == 0 { return 0; }
-  return scan_loop_frame(tcb, label, 0);
-};
-
-pub let leave_region = func(tcb: Mut(TCB), count: u64, v0: VmValue, v1: VmValue) -> u64 {
-  if tcb.frame_count < 2 {
-    tcb.stack_used = 0;
-    if stack_window_sync(tcb) != 0 {
-      return trap_now(tcb, VmTrap.State, Subcode.StackWindow);
-    }
-    tcb.has_result = 0;
-    tcb.state = VmStatus.Dead;
-    tcb.slice = SliceStatus.Done;
-    return SliceStatus.Done as u64;
-  }
-  let child: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  let parent: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 2);
-  let at: u64 = child.parent_position;
-  if count > 0 {
-    let s0: u64 = write_frame_result(tcb, parent, at, 0, v0, Subcode.ResultNoSlot);
-    if s0 != 0 { return s0; }
-  }
-  if count > 1 {
-    let s1: u64 = write_frame_result(tcb, parent, at, 1, v1, Subcode.ResultNoSlot);
-    if s1 != 0 { return s1; }
-  }
-  tcb.frame_count = tcb.frame_count - 1;
-  parent.position = at + 1;
-  recount_call_depth(tcb);
-  return SliceStatus.Runnable as u64;
-};
-
-pub let pop_to_call_frame = func(tcb: Mut(TCB)) -> u64 {
-  if tcb.frame_count == 0 { return 0; }
-  let f: Mut(Frame) = tcb_frame_ptr(tcb, tcb.frame_count - 1);
-  if f.is_call_frame == 1 { return tcb.frame_count; }
-  tcb.frame_count = tcb.frame_count - 1;
-  return pop_to_call_frame(tcb);
 };

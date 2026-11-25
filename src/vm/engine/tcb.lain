@@ -1,0 +1,557 @@
+let st = import("src::vm::engine::state");
+let caps = import("src::vm::engine::caps");
+let vs = import("src::vm::vspace");
+let im = import("src::vm::image");
+let vf = import("src::ir::verify::model");
+
+pub let Frame = struct {
+  region: u64,
+  position: u64,
+  slot_base: u64,
+  slot_count: u64,
+  parent_position: u64,
+  label: u64,
+  is_call_frame: u64,
+  stack_mark: u64,
+};
+
+let UNLIMITED_DEPTH_FRAMES: u64 = 256;
+
+pub let TCB = module {
+  pub let Self = struct {
+    image: Ref(im.VmImage),
+    space: Mut(vs.VmSpace),
+    caps: Mut(caps.CapTable),
+    lease_index: u64,
+    lease_generation: u64,
+    owner: u64,
+    quota_steps: u64,
+    quota_stack_bytes: u64,
+    quota_call_depth: u64,
+    frames: Mut(Frame),
+    frame_cap: u64,
+    frame_count: u64,
+    slots: Mut(st.Value),
+    slot_cap: u64,
+    args: Mut(st.Value),
+    arg_words: Mut(u64),
+    call_depth: u64,
+    stack_used: u64,
+    stack_peak: u64,
+    steps: u64,
+    state: st.VmStatus,
+    slice: st.SliceStatus,
+    trap_kind: st.VmTrap,
+    trap_status: st.Subcode,
+    trap_region: u64,
+    trap_position: u64,
+    has_result: u64,
+    result_width: u64,
+    result_bits: u64,
+    result_cell: Mut(st.Value),
+    cur_region: u64,
+    cur_position: u64,
+    trace_buf: Mut(st.TraceEvent),
+    trace_cap: u64,
+    trace_count: Mut(u64),
+  };
+
+  pub let frame_at = func(t: Mut(Self), i: u64) -> Mut(Frame) {
+    return t.frames + i * size_of(Frame);
+  };
+
+  let frame_ref = func(t: Ref(Self), i: u64) -> Ref(Frame) {
+    let base: Ref(u8) = ptr_cast(Ref(u8), t.frames);
+    return ptr_cast(Ref(Frame), base + i * size_of(Frame));
+  };
+
+  pub let slot_at = func(t: Mut(Self), i: u64) -> Mut(st.Value) {
+    return t.slots + i * st.VALUE_SIZE;
+  };
+
+  let clear_window = func(t: Mut(Self)) -> u64 {
+    let lease: vs.StackLease = lease(t);
+    if vs.vm_lease_none(lease) == 0 {
+      let ok: u64 = vs.vm_set_accessible(t.space, lease, 0);
+      return ok;
+    }
+    return 1;
+  };
+
+  let scan_loop = func(t: Mut(Self), label: u64, back: u64) -> u64 {
+    if back >= t.frame_count { return 0; }
+    let i: u64 = t.frame_count - 1 - back;
+    let f: Mut(Frame) = frame_at(t, i);
+    if f.label == label { return i + 1; }
+    return scan_loop(t, label, back + 1);
+  };
+
+  let operand_bits = func(inst: vf.IrInst, i: u64) -> u64 {
+    if i >= st.MAX_OPERANDS { return 0; }
+    let op: vf.IrOperand = vf.inst_op(inst, i);
+    return op.bits;
+  };
+
+  pub let lease = func(t: Mut(Self)) -> vs.StackLease {
+    return vs.StackLease { index: t.lease_index, generation: t.lease_generation };
+  };
+
+  pub let state = func(t: Ref(Self)) -> u64 { return t.state as u64; };
+  pub let steps = func(t: Ref(Self)) -> u64 { return t.steps; };
+  pub let stack_peak = func(t: Ref(Self)) -> u64 { return t.stack_peak; };
+  pub let has_result = func(t: Ref(Self)) -> u64 { return t.has_result; };
+  pub let result_value = func(t: Ref(Self)) -> st.Value {
+    return st.Value { width: t.result_width, bits: t.result_bits };
+  };
+  pub let trap_kind = func(t: Ref(Self)) -> u64 { return t.trap_kind as u64; };
+  pub let trap_status = func(t: Ref(Self)) -> u64 { return t.trap_status as u64; };
+  pub let trap_region = func(t: Ref(Self)) -> u64 { return t.trap_region; };
+  pub let trap_position = func(t: Ref(Self)) -> u64 { return t.trap_position; };
+  pub let current_region = func(t: Ref(Self)) -> u64 { return t.cur_region; };
+  pub let call_depth = func(t: Ref(Self)) -> u64 { return t.call_depth; };
+  pub let frame_count = func(t: Ref(Self)) -> u64 { return t.frame_count; };
+
+  pub let frame_region = func(t: Ref(Self), i: u64) -> u64 {
+    let f: Ref(Frame) = frame_ref(t, i);
+    return f.region;
+  };
+
+  pub let frame_position = func(t: Ref(Self), i: u64) -> u64 {
+    let f: Ref(Frame) = frame_ref(t, i);
+    return f.position;
+  };
+
+  pub let frame_slot_base = func(t: Ref(Self), i: u64) -> u64 {
+    let f: Ref(Frame) = frame_ref(t, i);
+    return f.slot_base;
+  };
+
+  pub let frame_slot_count = func(t: Ref(Self), i: u64) -> u64 {
+    let f: Ref(Frame) = frame_ref(t, i);
+    return f.slot_count;
+  };
+
+  pub let slot = func(t: Ref(Self), i: u64) -> st.Value {
+    let base: Ref(u8) = ptr_cast(Ref(u8), t.slots);
+    let p: Ref(st.Value) = ptr_cast(Ref(st.Value), base + i * st.VALUE_SIZE);
+    return deref(p);
+  };
+
+  pub let arg_slot = func(t: Mut(Self), i: u64) -> Mut(st.Value) {
+    return t.args + i * st.VALUE_SIZE;
+  };
+
+  pub let arg_word = func(t: Mut(Self), i: u64) -> Mut(u64) {
+    return t.arg_words + i * size_of(u64);
+  };
+
+  pub let block = func(t: Mut(Self)) -> u64 {
+    t.state = st.VmStatus.Blocked;
+    t.slice = st.SliceStatus.Blocked;
+    return st.SliceStatus.Blocked as u64;
+  };
+
+  pub let wake = func(t: Mut(Self)) -> u64 {
+    if (t.state as u64) != (st.VmStatus.Blocked as u64) { return 0; }
+    t.state = st.VmStatus.Running;
+    t.slice = st.SliceStatus.Runnable;
+    return 1;
+  };
+
+  pub let park = func(t: Mut(Self)) -> u64 {
+    if (t.state as u64) != (st.VmStatus.Running as u64) { return 1; }
+    t.state = st.VmStatus.Blocked;
+    t.slice = st.SliceStatus.Blocked;
+    return 0;
+  };
+
+  pub let resume = func(t: Mut(Self)) -> u64 {
+    if (t.state as u64) != (st.VmStatus.Blocked as u64) { return 1; }
+    t.state = st.VmStatus.Running;
+    t.slice = st.SliceStatus.Runnable;
+    return 0;
+  };
+
+  pub let capacity = func(image: Ref(im.VmImage), quota: st.Quota) -> u64 {
+    let depth: u64 = quota.max_call_depth;
+    let nesting: u64 = im.vm_max_region_depth(image) + 1;
+    if depth == 0 { return UNLIMITED_DEPTH_FRAMES * nesting; }
+    return depth * nesting;
+  };
+
+  pub let bytes = func(image: Ref(im.VmImage), quota: st.Quota) -> u64 {
+    let frames: u64 = capacity(image, quota);
+    let slots: u64 = frames * im.vm_max_slots(image);
+    return st.align_to(frames * size_of(Frame), 8) +
+           st.align_to(slots * st.VALUE_SIZE, 8) +
+           st.align_to(st.MAX_OPERANDS * st.VALUE_SIZE, 8) +
+           st.align_to(st.MAX_OPERANDS * 8, 8) +
+           st.align_to(st.VALUE_SIZE, 8);
+  };
+
+  pub let blank = func() -> Self {
+    return Self {
+      image: null_ref(Ref(im.VmImage)),
+      space: null_ref(Mut(vs.VmSpace)),
+      caps: null_ref(Mut(caps.CapTable)),
+      lease_index: vs.NO_INDEX(),
+      lease_generation: 0,
+      owner: 0,
+      quota_steps: 0,
+      quota_stack_bytes: 0,
+      quota_call_depth: 0,
+      frames: null_ref(Mut(Frame)),
+      frame_cap: 0,
+      frame_count: 0,
+      slots: null_ref(Mut(st.Value)),
+      slot_cap: 0,
+      args: null_ref(Mut(st.Value)),
+      arg_words: null_ref(Mut(u64)),
+      call_depth: 0,
+      stack_used: 0,
+      stack_peak: 0,
+      steps: 0,
+      state: st.VmStatus.Ready,
+      slice: st.SliceStatus.Runnable,
+      trap_kind: st.VmTrap.None,
+      trap_status: st.Subcode.None,
+      trap_region: 0,
+      trap_position: 0,
+      has_result: 0,
+      result_width: 64,
+      result_bits: 0,
+      result_cell: null_ref(Mut(st.Value)),
+      cur_region: 0,
+      cur_position: 0,
+      trace_buf: null_ref(Mut(st.TraceEvent)),
+      trace_cap: 0,
+      trace_count: null_ref(Mut(u64)),
+    };
+  };
+
+  pub let init = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
+                      table: Mut(caps.CapTable), quota: st.Quota,
+                      lease_token: vs.StackLease, owner: u64,
+                      arena: MutSlice(u8), out: Mut(Self)) -> u64 {
+    let frames: u64 = capacity(image, quota);
+    let frame_bytes: u64 = st.align_to(frames * size_of(Frame), 8);
+    let slot_cap: u64 = frames * im.vm_max_slots(image);
+    let slot_bytes: u64 = st.align_to(slot_cap * st.VALUE_SIZE, 8);
+    let arg_bytes: u64 = st.align_to(st.MAX_OPERANDS * st.VALUE_SIZE, 8);
+    let word_bytes: u64 = st.align_to(st.MAX_OPERANDS * 8, 8);
+    let cell_bytes: u64 = st.align_to(st.VALUE_SIZE, 8);
+    let need: u64 = frame_bytes + slot_bytes + arg_bytes + word_bytes + cell_bytes;
+    if arena.len < need { return 0; }
+    let base: Mut(u8) = arena.ptr;
+    let slots_at: Mut(u8) = base + frame_bytes;
+    let args_at: Mut(u8) = slots_at + slot_bytes;
+    let words_at: Mut(u8) = args_at + arg_bytes;
+    let cell_at: Mut(u8) = words_at + word_bytes;
+    if vs.vm_lease_none(lease_token) == 0 {
+      let borrowed: u64 = vs.vm_borrow(space, lease_token);
+      if borrowed == 0 { return 0; }
+    }
+    deref(out) = Self {
+      image: image,
+      space: space,
+      caps: table,
+      lease_index: lease_token.index,
+      lease_generation: lease_token.generation,
+      owner: owner,
+      quota_steps: quota.max_steps,
+      quota_stack_bytes: quota.max_stack_bytes,
+      quota_call_depth: quota.max_call_depth,
+      frames: ptr_cast(Mut(Frame), base),
+      frame_cap: frames,
+      frame_count: 0,
+      slots: ptr_cast(Mut(st.Value), slots_at),
+      slot_cap: slot_cap,
+      args: ptr_cast(Mut(st.Value), args_at),
+      arg_words: ptr_cast(Mut(u64), words_at),
+      call_depth: 0,
+      stack_used: 0,
+      stack_peak: 0,
+      steps: 0,
+      state: st.VmStatus.Ready,
+      slice: st.SliceStatus.Runnable,
+      trap_kind: st.VmTrap.None,
+      trap_status: st.Subcode.None,
+      trap_region: 0,
+      trap_position: 0,
+      has_result: 0,
+      result_width: 64,
+      result_bits: 0,
+      result_cell: ptr_cast(Mut(st.Value), cell_at),
+      cur_region: 0,
+      cur_position: 0,
+      trace_buf: null_ref(Mut(st.TraceEvent)),
+      trace_cap: 0,
+      trace_count: null_ref(Mut(u64)),
+    };
+    return 1;
+  };
+
+  pub let set_trace = func(t: Mut(Self), buf: MutSlice(st.TraceEvent),
+                           count: Mut(u64)) -> u64 {
+    t.trace_buf = buf.ptr;
+    t.trace_cap = buf.len;
+    t.trace_count = count;
+    deref(count) = 0;
+    return buf.len;
+  };
+
+  pub let trace_cap = func(t: Ref(Self)) -> u64 { return t.trace_cap; };
+
+  pub let trace_count = func(t: Ref(Self)) -> u64 {
+    if is_null(t.trace_count) { return 0; }
+    return deref(t.trace_count);
+  };
+
+  pub let record = func(t: Mut(Self), sub_sym: u64, kind: st.TraceKind) -> u64 {
+    if t.trace_cap == 0 { return 0; }
+    let count: u64 = deref(t.trace_count);
+    if count >= t.trace_cap { return 0; }
+    let p: Mut(st.TraceEvent) = t.trace_buf + count * st.TRACE_EVENT_SIZE;
+    p.sub_sym = sub_sym;
+    p.depth = t.call_depth;
+    p.steps = t.steps;
+    p.kind = kind;
+    deref(t.trace_count) = count + 1;
+    return 1;
+  };
+
+  pub let frame_symbol = func(t: Mut(Self), index: u64) -> u64 {
+    if index >= t.frame_count { return 0; }
+    let f: Mut(Frame) = frame_at(t, index);
+    let rec: im.ImageRegion = im.vm_region(t.image, f.region);
+    if rec.sub_index == im.NO_INDEX() { return 0; }
+    let sub: im.SubInfo = im.vm_sub(t.image, rec.sub_index);
+    return sub.name;
+  };
+
+  pub let trap = func(t: Mut(Self), kind: st.VmTrap, status: st.Subcode) -> u64 {
+    let traced: u64 = record(t, frame_symbol(t, t.frame_count - 1), st.TraceKind.Trap);
+    t.trap_kind = kind;
+    t.trap_status = status;
+    if t.frame_count > 0 {
+      let f: Mut(Frame) = frame_at(t, t.frame_count - 1);
+      t.trap_region = f.region;
+      t.trap_position = f.position;
+    }
+    clear_window(t);
+    t.state = st.VmStatus.Dead;
+    t.slice = st.SliceStatus.Trapped;
+    return st.SliceStatus.Trapped as u64;
+  };
+
+  pub let release = func(t: Mut(Self)) -> u64 {
+    let token: vs.StackLease = lease(t);
+    if vs.vm_lease_none(token) == 0 {
+      let cleared: u64 = vs.vm_set_accessible(t.space, token, 0);
+      let released: u64 = vs.vm_end_borrow(t.space, token);
+    }
+    t.frame_count = 0;
+    t.call_depth = 0;
+    t.state = st.VmStatus.Dead;
+    t.slice = st.SliceStatus.Done;
+    return st.SliceStatus.Done as u64;
+  };
+
+  pub let reject = func(t: Mut(Self), status: st.Subcode) -> u64 {
+    t.trap_kind = st.VmTrap.State;
+    t.trap_status = status;
+    t.state = st.VmStatus.Dead;
+    t.slice = st.SliceStatus.Trapped;
+    return st.SliceStatus.Trapped as u64;
+  };
+
+  pub let outcome = func(t: Mut(Self)) -> st.Result {
+    let cell: Mut(st.Value) = t.result_cell;
+    cell.width = t.result_width;
+    cell.bits = t.result_bits;
+    return st.Result {
+      status: t.slice as u64,
+      steps_used: t.steps,
+      result_width: t.result_width,
+      result_bits: t.result_bits,
+      result_val: cell,
+      trap_kind: t.trap_kind as u64,
+      trap_status: t.trap_status as u64,
+    };
+  };
+
+  pub let clear_slots = func(t: Mut(Self), base: u64, count: u64) -> u64 {
+    let cleared: u64 = loop clear(left: u64 = count) while left > 0 {
+      let p: Mut(st.Value) = slot_at(t, base + left - 1);
+      p.width = 64;
+      p.bits = 0;
+      left = left - 1;
+    };
+    return 0;
+  };
+
+  pub let read_slot = func(t: Mut(Self), r: im.OperandRef, literal: u64,
+                           kind: u64, width: u64, out: Mut(st.Value)) -> u64 {
+    let w: u64 = st.type_width(kind, width);
+    if r.is_literal == 1 {
+      deref(out) = st.value_bits(literal, w);
+      return 0;
+    }
+    if r.is_symbol == 1 {
+      deref(out) = st.value_bits(im.vm_symbol_addr(t.image, r.symbol_index), 64);
+      return 0;
+    }
+    if r.is_proc == 1 {
+      deref(out) = st.value_bits(im.vm_sub_addr(t.image, r.symbol_index), 64);
+      return 0;
+    }
+    if r.frame_distance >= t.frame_count {
+      return trap(t, st.VmTrap.State, st.Subcode.BadFrameDistance);
+    }
+    let fi: u64 = t.frame_count - 1 - r.frame_distance;
+    let frame: Mut(Frame) = frame_at(t, fi);
+    if r.slot >= frame.slot_count {
+      return trap(t, st.VmTrap.State, st.Subcode.BadFrameDistance);
+    }
+    let p: Mut(st.Value) = slot_at(t, frame.slot_base + r.slot);
+    deref(out) = deref(p);
+    return 0;
+  };
+
+  pub let read_operand = func(t: Mut(Self), inst: vf.IrInst, index: u64,
+                              out: Mut(st.Value)) -> u64 {
+    let r: im.OperandRef = im.vm_operand_ref(t.image, t.cur_region, t.cur_position, index);
+    return read_slot(t, r, operand_bits(inst, index), inst.ty_kind, inst.ty_width, out);
+  };
+
+  pub let read_operand_typed = func(t: Mut(Self), inst: vf.IrInst, index: u64,
+                                    kind: u64, width: u64, out: Mut(st.Value)) -> u64 {
+    let r: im.OperandRef = im.vm_operand_ref(t.image, t.cur_region, t.cur_position, index);
+    return read_slot(t, r, operand_bits(inst, index), kind, width, out);
+  };
+
+  pub let write_result = func(t: Mut(Self), inst: vf.IrInst, index: u64,
+                              value: st.Value) -> u64 {
+    let slot: u64 = im.vm_result_slot(t.image, t.cur_region, t.cur_position, index);
+    if slot == im.NO_INDEX() {
+      return trap(t, st.VmTrap.State, st.Subcode.ResultNoSlot);
+    }
+    let frame: Mut(Frame) = frame_at(t, t.frame_count - 1);
+    let at: u64 = frame.slot_base + slot;
+    if at >= t.slot_cap { return trap(t, st.VmTrap.State, st.Subcode.SlotOverflow); }
+    let p: Mut(st.Value) = slot_at(t, at);
+    p.width = value.width;
+    p.bits = value.bits;
+    return 0;
+  };
+
+  pub let write_result_bits = func(t: Mut(Self), inst: vf.IrInst, index: u64,
+                                   bits: u64, width: u64) -> u64 {
+    return write_result(t, inst, index, st.value_bits(bits, width));
+  };
+
+  pub let write_frame_result = func(t: Mut(Self), frame: Mut(Frame), position: u64,
+                                    index: u64, value: st.Value, status: st.Subcode) -> u64 {
+    let slot: u64 = im.vm_result_slot(t.image, frame.region, position, index);
+    if slot == im.NO_INDEX() { return trap(t, st.VmTrap.State, status); }
+    if (frame.slot_base + slot) >= t.slot_cap {
+      return trap(t, st.VmTrap.State, st.Subcode.SlotOverflow);
+    }
+    let p: Mut(st.Value) = slot_at(t, frame.slot_base + slot);
+    p.width = value.width;
+    p.bits = value.bits;
+    return 0;
+  };
+
+  pub let sync_window = func(t: Mut(Self)) -> u64 {
+    let token: vs.StackLease = lease(t);
+    if vs.vm_lease_none(token) != 0 { return 0; }
+    let ok: u64 = vs.vm_set_accessible(t.space, token, t.stack_used);
+    if ok == 0 { return st.Subcode.StackWindow as u64; }
+    return 0;
+  };
+
+  pub let push_frame = func(t: Mut(Self), region_id: u64, parent_position: u64,
+                            label: u64, is_call: u64) -> u64 {
+    let rec: im.ImageRegion = im.vm_region(t.image, region_id);
+    if rec.valid == 0 {
+      return trap(t, st.VmTrap.State, st.Subcode.FrameNoRegion);
+    }
+    if t.frame_count >= t.frame_cap {
+      return trap(t, st.VmTrap.State, st.Subcode.FrameOverflow);
+    }
+    if is_call == 1 {
+      if (t.quota_call_depth != 0) and (t.call_depth >= t.quota_call_depth) {
+        return trap(t, st.VmTrap.CallDepth, st.Subcode.CallDepth);
+      }
+    }
+    let parent: Mut(Frame) = frame_at(t, t.frame_count - 1);
+    let f: Mut(Frame) = frame_at(t, t.frame_count);
+    f.region = region_id;
+    f.position = 0;
+    f.slot_base = parent.slot_base + parent.slot_count;
+    f.slot_count = rec.slot_count;
+    f.parent_position = parent_position;
+    f.label = label;
+    f.is_call_frame = is_call;
+    f.stack_mark = t.stack_used;
+    if (f.slot_base + f.slot_count) > t.slot_cap {
+      return trap(t, st.VmTrap.State, st.Subcode.SlotOverflow);
+    }
+    clear_slots(t, f.slot_base, f.slot_count);
+    t.frame_count = t.frame_count + 1;
+    if is_call == 1 { t.call_depth = t.call_depth + 1; }
+    return st.SliceStatus.Runnable as u64;
+  };
+
+  pub let recount_depth = func(t: Mut(Self)) -> u64 {
+    let counted: u64 = loop scan(i: u64 = 0, depth: u64 = 0) while i < t.frame_count {
+      let f: Mut(Frame) = frame_at(t, i);
+      if f.is_call_frame == 1 { depth = depth + 1; }
+      i = i + 1;
+    };
+    t.call_depth = counted;
+    return counted;
+  };
+
+  pub let find_loop = func(t: Mut(Self), label: u64) -> u64 {
+    if label == 0 { return 0; }
+    return scan_loop(t, label, 0);
+  };
+
+  pub let leave_frame = func(t: Mut(Self), count: u64, v0: st.Value, v1: st.Value) -> u64 {
+    if t.frame_count < 2 {
+      t.stack_used = 0;
+      if sync_window(t) != 0 {
+        return trap(t, st.VmTrap.State, st.Subcode.StackWindow);
+      }
+      t.has_result = 0;
+      t.state = st.VmStatus.Dead;
+      t.slice = st.SliceStatus.Done;
+      return st.SliceStatus.Done as u64;
+    }
+    let child: Mut(Frame) = frame_at(t, t.frame_count - 1);
+    let parent: Mut(Frame) = frame_at(t, t.frame_count - 2);
+    let at: u64 = child.parent_position;
+    if count > 0 {
+      let s0: u64 = write_frame_result(t, parent, at, 0, v0, st.Subcode.ResultNoSlot);
+      if s0 != 0 { return s0; }
+    }
+    if count > 1 {
+      let s1: u64 = write_frame_result(t, parent, at, 1, v1, st.Subcode.ResultNoSlot);
+      if s1 != 0 { return s1; }
+    }
+    t.frame_count = t.frame_count - 1;
+    parent.position = at + 1;
+    recount_depth(t);
+    return st.SliceStatus.Runnable as u64;
+  };
+
+  pub let pop_frame = func(t: Mut(Self)) -> u64 {
+    if t.frame_count == 0 { return 0; }
+    let f: Mut(Frame) = frame_at(t, t.frame_count - 1);
+    if f.is_call_frame == 1 { return t.frame_count; }
+    t.frame_count = t.frame_count - 1;
+    return pop_frame(t);
+  };
+};

@@ -3,21 +3,17 @@ let vf = import("src::ir::verify::model");
 let tab = import("src::host::symtab");
 let os = import("std::os");
 
-let g_syms: Array(u64, 1) = [0];
-
-let syms_cells = func() -> MutSlice(u64) {
-  return make_slice(MutSlice(u64), mut_of(g_syms), 1);
-};
+let g_syms: Array(Mut(tab.HostSymTab), 1) = [0];
 
 pub let set_syms = func(s: Mut(tab.HostSymTab)) -> u64 {
-  let cells: MutSlice(u64) = syms_cells();
-  cells[0] = s as u64;
+  let cell: Mut(Mut(tab.HostSymTab)) = ptr_cast(Mut(Mut(tab.HostSymTab)), mut_of(g_syms));
+  deref(cell) = s;
   return 0;
 };
 
 let syms_get = func() -> Mut(tab.HostSymTab) {
-  let cells: MutSlice(u64) = syms_cells();
-  return ptr_cast(Mut(tab.HostSymTab), cells[0]);
+  let cell: Mut(Mut(tab.HostSymTab)) = ptr_cast(Mut(Mut(tab.HostSymTab)), mut_of(g_syms));
+  return deref(cell);
 };
 
 pub let C99Writer = struct {
@@ -75,15 +71,15 @@ pub let put_line = func(w: Mut(C99Writer), s: Slice(u8)) -> u64 {
   return put_byte(w, 10);
 };
 
-let put_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
+let put_digit = func(w: Mut(C99Writer), d: u64) -> () {
   let b: u8 = (48 + d) as u8;
-  return put_byte(w, b);
+  put_byte(w, b);
 };
 
-let put_hex_digit = func(w: Mut(C99Writer), d: u64) -> u64 {
-  if d < 10 { return put_digit(w, d); }
+let put_hex_digit = func(w: Mut(C99Writer), d: u64) -> () {
+  if d < 10 { put_digit(w, d); return; }
   let b: u8 = (87 + d) as u8;
-  return put_byte(w, b);
+  put_byte(w, b);
 };
 
 pub let put_u64_dec = func(w: Mut(C99Writer), v: u64) -> u64 {
@@ -91,39 +87,42 @@ pub let put_u64_dec = func(w: Mut(C99Writer), v: u64) -> u64 {
     if d > v / 10 { break c(d); }
     d = d * 10;
   };
-  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
-    let rc: u64 = put_digit(w, n / d);
+  loop c(n: u64 = v, d: u64 = d) while 1 {
+    put_digit(w, n / d);
     n = n - n / d * d;
     if d <= 1 { break c(1); }
     d = d / 10;
   };
-  return ok;
+  if w.ok == 0 { return 0; }
+  return 1;
 };
 
-let put_u64_hex_digits = func(w: Mut(C99Writer), v: u64) -> u64 {
+let put_u64_hex_digits = func(w: Mut(C99Writer), v: u64) -> () {
   let d: u64 = loop c(d: u64 = 1) while 1 {
     if d > v / 16 { break c(d); }
     d = d * 16;
   };
-  let ok: u64 = loop c(n: u64 = v, d: u64 = d) while 1 {
-    let rc: u64 = put_hex_digit(w, n / d);
+  loop c(n: u64 = v, d: u64 = d) while 1 {
+    put_hex_digit(w, n / d);
     n = n - n / d * d;
     if d <= 1 { break c(1); }
     d = d / 16;
   };
-  return ok;
 };
 
 pub let put_u64_hex = func(w: Mut(C99Writer), v: u64) -> u64 {
   let rc: u64 = put_str(w, "0x");
-  return put_u64_hex_digits(w, v);
+  put_u64_hex_digits(w, v);
+  return 1;
 };
 
 pub let put_hex2 = func(w: Mut(C99Writer), v: u64) -> u64 {
   let hi: u64 = v / 16;
   let lo: u64 = v - hi * 16;
-  let a: u64 = put_hex_digit(w, hi);
-  return put_hex_digit(w, lo);
+  put_hex_digit(w, hi);
+  put_hex_digit(w, lo);
+  if w.ok == 0 { return 0; }
+  return 1;
 };
 
 pub let put_u64_lit = func(w: Mut(C99Writer), v: u64) -> u64 {
@@ -287,8 +286,8 @@ let pidx_hash = func(name: u64) -> u64 {
   return h & 16383;
 };
 
-let pidx_put_if_absent = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64, idx: u64) -> u64 {
-  if name == 0 { return 0; }
+let pidx_put_if_absent = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64, idx: u64) -> () {
+  if name == 0 { return; }
   let mask: u64 = 16383;
   let slot: u64 = pidx_hash(name);
   loop p(step: u64 = 0, s: u64 = slot) while step < 16384 {
@@ -296,13 +295,12 @@ let pidx_put_if_absent = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u6
     if k == 0 {
       keys[s] = name;
       vals[s] = idx + 1;
-      return 1;
+      return;
     }
-    if k == name { return 0; }
+    if k == name { return; }
     s = (s + 1) & mask;
     step = step + 1;
   };
-  return 0;
 };
 
 let pidx_lookup_raw = func(keys: MutSlice(u64), vals: MutSlice(u64), name: u64) -> u64 {

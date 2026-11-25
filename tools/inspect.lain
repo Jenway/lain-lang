@@ -1,0 +1,324 @@
+let cmp = import("src::compiler");
+let st = import("src::driver::state");
+let ax = import("src::sema::ast");
+let io = import("std::io");
+let fm = import("std::fmt");
+let os = import("std::os");
+
+let file_handle: Mut(u8) = null_ref(Mut(u8));
+let file_failed: u64 = 0;
+
+let handle_slot = func() -> Mut(Mut(u8)) {
+  return ptr_cast(Mut(Mut(u8)), ptr_of(file_handle));
+};
+
+let failed_slot = func() -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_of(file_failed));
+};
+
+pub let file_open = func(path: Slice(u8)) -> bool {
+  let f: Mut(u8) = os.open_file(path, "wb");
+  deref(handle_slot()) = f;
+  deref(failed_slot()) = 0;
+  if is_null(f) {
+    return false;
+  }
+  return true;
+};
+
+let write_bytes = func(s: Slice(u8)) -> () {
+  let f: Mut(u8) = deref(handle_slot());
+  if is_null(f) {
+    return;
+  }
+  let n: c_size = os.c_fwrite(s.ptr, 1, s.len, f);
+  if n != s.len {
+    deref(failed_slot()) = 1;
+  }
+};
+
+pub let file_close = func() -> bool {
+  let f: Mut(u8) = deref(handle_slot());
+  if is_null(f) {
+    return false;
+  }
+  let rc: c_int = os.c_fclose(f);
+  deref(handle_slot()) = null_ref(Mut(u8));
+  if rc != 0 {
+    return false;
+  }
+  return deref(failed_slot()) == 0;
+};
+
+pub let FileSink = module {
+  pub let write = func(s: Slice(u8)) -> () {
+    write_bytes(s);
+  };
+};
+
+let Char = enum(u64) {
+  Space = 32,
+  Paren = 40,
+  ParenClose = 41,
+  Comma = 44,
+  Dot = 46,
+  Colon = 58,
+  Semi = 59,
+  Question = 63,
+  Bracket = 91,
+  BracketClose = 93,
+  Backtick = 96,
+  Brace = 123,
+  BraceClose = 125,
+};
+
+let Gap = struct {
+  started: u64,
+  last: u64,
+  written: u64,
+};
+
+let gap_new = func() -> Gap {
+  return Gap { started: 0, last: 0, written: 0 };
+};
+
+let gap_after = func(b: u64) -> bool {
+  if b == Char.Paren as u64 { return false; }
+  if b == Char.Bracket as u64 { return false; }
+  if b == Char.Brace as u64 { return false; }
+  if b == Char.Question as u64 { return false; }
+  if b == Char.Dot as u64 { return false; }
+  if b == Char.Backtick as u64 { return false; }
+  return true;
+};
+
+let gap_before = func(b: u64) -> bool {
+  if b == Char.ParenClose as u64 { return false; }
+  if b == Char.BracketClose as u64 { return false; }
+  if b == Char.BraceClose as u64 { return false; }
+  if b == Char.Comma as u64 { return false; }
+  if b == Char.Semi as u64 { return false; }
+  if b == Char.Colon as u64 { return false; }
+  if b == Char.Dot as u64 { return false; }
+  if b == Char.Paren as u64 { return false; }
+  if b == Char.Bracket as u64 { return false; }
+  return true;
+};
+
+let put_gap = func(g: Mut(Gap), first: u64) ?{ out: io.Sink } -> () {
+  if g.started == 0 {
+    return;
+  }
+  if (gap_after(g.last)) and (gap_before(first)) {
+    out.write(" ");
+    g.written = g.written + 1;
+  }
+};
+
+let emit_token = func(s: Slice(u8), g: Mut(Gap)) ?{ out: io.Sink } -> () {
+  if s.len == 0 {
+    return;
+  }
+  let first: u64 = s[0] as u64;
+  put_gap(g, first);
+  out.write(s);
+  g.written = g.written + s.len;
+  g.started = 1;
+  g.last = s[s.len - 1] as u64;
+};
+
+let open_delim = func(d: u64) -> Slice(u8) {
+  if d == ax.Delim.Paren as u64 { return "("; }
+  if d == ax.Delim.Bracket as u64 { return "["; }
+  return "{";
+};
+
+let close_delim = func(d: u64) -> Slice(u8) {
+  if d == ax.Delim.Paren as u64 { return ")"; }
+  if d == ax.Delim.Bracket as u64 { return "]"; }
+  return "}";
+};
+
+let emit_open = func(d: u64, g: Mut(Gap)) ?{ out: io.Sink } -> () {
+  let o: Slice(u8) = open_delim(d);
+  let first: u64 = o[0] as u64;
+  put_gap(g, first);
+  out.write(o);
+  g.written = g.written + o.len;
+  g.started = 1;
+  g.last = first;
+};
+
+let emit_close = func(d: u64, g: Mut(Gap)) ?{ out: io.Sink } -> () {
+  let c: Slice(u8) = close_delim(d);
+  out.write(c);
+  g.written = g.written + c.len;
+  g.started = 1;
+  g.last = c[0] as u64;
+};
+
+let emit_node = func(h: u64, g: Mut(Gap)) ?{ out: io.Sink } -> () {
+  if ax.is_group_node(h) == 0 {
+    let n: u64 = ax.lit_len(h);
+    if n == 0 {
+      return;
+    }
+    let s: Slice(u8) = make_slice(Slice(u8), ax.lit_addr(h), n);
+    emit_token(s, g);
+    return;
+  }
+  let d: u64 = ax.delim(h);
+  emit_open(d, g);
+  let n: u64 = ax.n_count(h);
+  let i: u64 = 0;
+  while i < n {
+    emit_node(ax.n_at(h, i), g);
+    i = i + 1;
+  };
+  emit_close(d, g);
+};
+
+let emit_u64 = func(v: u64) ?{ out: io.Sink } -> () {
+  let c: fm.Cursor = fm.write_u64(fm.fmt_begin(), v);
+  out.write(fm.fmt_done(c));
+};
+
+pub let dump_deps = func(k: Mut(st.State)) ?{ out: io.Sink } -> () {
+  out.write("flowchart LR\n");
+  let total: u64 = cmp.source_count();
+  let i: u64 = 0;
+  while i < total {
+    out.write("  m");
+    emit_u64(i);
+    out.write("[\"");
+    out.write(cmp.source_path(i));
+    out.write("\"]\n");
+    i = i + 1;
+  };
+  let graph: cmp.DepGraph = cmp.dep_edges(k);
+  let items: MutSlice(cmp.DepEdge) = graph.edges;
+  let j: u64 = 0;
+  while j < graph.count {
+    let e: Mut(cmp.DepEdge) = mut_of((items[j]));
+    out.write("  m");
+    emit_u64(e.from_src);
+    out.write(" --> m");
+    emit_u64(e.to_src);
+    out.write("\n");
+    j = j + 1;
+  };
+};
+
+let scalar_name = func(w: u64, sg: u64) -> Slice(u8) {
+  if w == 1 {
+    if sg == 0 { return "bool"; }
+    return "i1";
+  }
+  if w == 8 { if sg == 1 { return "i8"; } else { return "u8"; } }
+  if w == 16 { if sg == 1 { return "i16"; } else { return "u16"; } }
+  if w == 32 { if sg == 1 { return "i32"; } else { return "u32"; } }
+  if w == 64 { if sg == 1 { return "i64"; } else { return "u64"; } }
+  return "u64";
+};
+
+let emit_type_line = func(s: cmp.Symbol) ?{ out: io.Sink } -> () {
+  out.write("- `");
+  if s.kind == cmp.kind_sig() {
+    out.write("sig ");
+  } else if s.kind == cmp.kind_mod() {
+    out.write("module ");
+  } else {
+    let tk: u64 = cmp.type_kind(s);
+    if tk == cmp.type_cenum() {
+      out.write("enum(");
+      out.write(scalar_name(cmp.type_width(s), cmp.type_signed(s)));
+      out.write(") ");
+    } else if tk == cmp.type_enum() {
+      out.write("enum ");
+    } else {
+      out.write("struct ");
+    }
+  }
+  out.write(s.name);
+  out.write("`\n");
+};
+
+let find_body = func(root: u64, from: u64, n: u64) -> u64 {
+  let i: u64 = from;
+  while i < n {
+    if (ax.is_group(root, i) == 1) and (ax.delim_of(root, i) == ax.Delim.Brace as u64) {
+      return i;
+    }
+    i = i + 1;
+  };
+  return n;
+};
+
+let emit_fn_sig = func(s: cmp.Symbol, g: Mut(Gap)) ?{ out: io.Sink } -> () {
+  let root: u64 = cmp.source_root(s.src);
+  if root == 0 {
+    return;
+  }
+  let n: u64 = ax.n_count(root);
+  if s.decl >= n {
+    return;
+  }
+  let body: u64 = if s.kind == cmp.kind_generic() {
+    cmp.generic_body(s)
+  } else {
+    find_body(root, s.decl + 1, n)
+  };
+  let stop: u64 = if body > n { n } else { body };
+  let i: u64 = s.decl;
+  while i < stop {
+    emit_node(ax.n_at(root, i), g);
+    i = i + 1;
+  };
+};
+
+let emit_fn_line = func(s: cmp.Symbol) ?{ out: io.Sink } -> () {
+  out.write("- `");
+  out.write(s.name);
+  out.write("` — `");
+  let g0: Gap = gap_new();
+  let g: Mut(Gap) = mut_of(g0);
+  emit_fn_sig(s, g);
+  if g.written == 0 {
+    out.write("func(...)");
+  }
+  out.write("`\n");
+};
+
+let emit_docs_for = func(k: Mut(st.State), src: u64) ?{ out: io.Sink } -> () {
+  out.write("## `");
+  out.write(cmp.source_path(src));
+  out.write("`\n\n### Types\n\n");
+  let total: u64 = cmp.sym_count(k);
+  let i: u64 = 0;
+  while i < total {
+    let s: cmp.Symbol = cmp.sym_info(k, i);
+    if (s.modv == src) and (s.visible != 0) and (cmp.is_type(s)) {
+      emit_type_line(s);
+    }
+    i = i + 1;
+  };
+  out.write("\n### Functions\n\n");
+  let j: u64 = 0;
+  while j < total {
+    let s: cmp.Symbol = cmp.sym_info(k, j);
+    if (s.modv == src) and (s.visible != 0) and (cmp.is_function(s)) {
+      emit_fn_line(s);
+    }
+    j = j + 1;
+  };
+  out.write("\n");
+};
+
+pub let dump_docs = func(k: Mut(st.State)) ?{ out: io.Sink } -> () {
+  let total: u64 = cmp.source_count();
+  let i: u64 = 0;
+  while i < total {
+    emit_docs_for(k, i);
+    i = i + 1;
+  };
+};

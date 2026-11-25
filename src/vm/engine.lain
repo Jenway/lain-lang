@@ -1,6 +1,9 @@
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
 let st = import("src::vm::engine::state");
+let cs = import("src::vm::engine::caps");
+let ip = import("src::vm::engine::ipc");
+let tb = import("src::vm::engine::tcb");
 let run = import("src::vm::engine::run");
 
 pub let MAX_OPERANDS = st.MAX_OPERANDS;
@@ -38,13 +41,13 @@ pub let VmTrap = module {
   pub let StackOverflow: u64 = st.VmTrap.StackOverflow as u64;
 };
 
-pub let VmValue = st.VmValue;
+pub let Value = st.Value;
 
-pub let value_zero = func() -> VmValue {
+pub let value_zero = func() -> Value {
   return st.value_zero();
 };
 
-pub let value_bits = func(bits: u64, width: u64) -> VmValue {
+pub let value_bits = func(bits: u64, width: u64) -> Value {
   return st.value_bits(bits, width);
 };
 
@@ -68,200 +71,213 @@ pub let type_size = func(kind: u64, width: u64) -> u64 {
   return st.type_size(kind, width);
 };
 
-pub let VmCaps = sig {
+pub let Caps = sig {
   pub let Self: Type;
   pub let invoke: Fn((Mut(Self), u64, Slice(u64)) -> u64);
 };
 
-pub let CAP_FUNCTION = func() -> u64 { return st.CAP_FUNCTION(); };
-pub let CAP_AST_TX_BEGIN = func() -> u64 { return st.CAP_AST_TX_BEGIN(); };
-pub let CAP_AST_TX_COMMIT = func() -> u64 { return st.CAP_AST_TX_COMMIT(); };
-pub let CAP_AST_TX_ROLLBACK = func() -> u64 { return st.CAP_AST_TX_ROLLBACK(); };
-pub let CAP_AST_MK_TOKEN = func() -> u64 { return st.CAP_AST_MK_TOKEN(); };
-pub let CAP_AST_MK_GROUP = func() -> u64 { return st.CAP_AST_MK_GROUP(); };
-pub let CAP_TYPE_REC_BEGIN = func() -> u64 { return st.CAP_TYPE_REC_BEGIN(); };
-pub let CAP_TYPE_REC_ADD = func() -> u64 { return st.CAP_TYPE_REC_ADD(); };
-pub let CAP_TYPE_REC_END = func() -> u64 { return st.CAP_TYPE_REC_END(); };
+pub let CapKind = module {
+  pub let Function: u64 = cs.CapKind.Function as u64;
+  pub let AstTxBegin: u64 = cs.CapKind.AstTxBegin as u64;
+  pub let AstTxCommit: u64 = cs.CapKind.AstTxCommit as u64;
+  pub let AstTxRollback: u64 = cs.CapKind.AstTxRollback as u64;
+  pub let AstMkToken: u64 = cs.CapKind.AstMkToken as u64;
+  pub let AstMkGroup: u64 = cs.CapKind.AstMkGroup as u64;
+  pub let TypeRecBegin: u64 = cs.CapKind.TypeRecBegin as u64;
+  pub let TypeRecAdd: u64 = cs.CapKind.TypeRecAdd as u64;
+  pub let TypeRecEnd: u64 = cs.CapKind.TypeRecEnd as u64;
+};
 
 pub let cap_kind_callable = func(kind: u64) -> u64 {
-  return st.cap_kind_callable(kind);
+  return cs.kind_callable(kind as cs.CapKind);
 };
 
-pub let VmCapEntry = st.VmCapEntry;
+pub let CapEntry = cs.CapEntry;
 
-pub let VmCapTable = st.VmCapTable;
+pub let CapTable = cs.CapTable;
 
-pub let caps_new = func(entries: Mut(VmCapEntry), cap: u64) -> VmCapTable {
-  return st.caps_new(entries, cap);
+pub let caps_new = func(entries: Mut(CapEntry), cap: u64) -> CapTable {
+  return CapTable.new(entries, cap);
 };
 
-pub let caps_register = func(t: Mut(VmCapTable), link_name: u64, kind: u64, context: u64,
+pub let caps_register = func(t: Mut(CapTable), link_name: u64, kind: u64, context: u64,
                             invoke_fn: Fn((u64, Slice(u64)) -> u64)) -> u64 {
-  return st.caps_register(t, link_name, kind, context, invoke_fn);
+  return CapTable.register(t, link_name, kind as cs.CapKind, context, invoke_fn);
 };
 
-pub let caps_freeze = func(t: Mut(VmCapTable)) -> u64 {
-  return st.caps_freeze(t);
+pub let caps_freeze = func(t: Mut(CapTable)) -> u64 {
+  return CapTable.freeze(t);
 };
 
-pub let caps_is_frozen = func(t: Mut(VmCapTable)) -> u64 {
-  return st.caps_is_frozen(t);
+pub let caps_is_frozen = func(t: Mut(CapTable)) -> u64 {
+  return CapTable.is_frozen(t);
 };
 
-pub let caps_find = func(t: Mut(VmCapTable), link_name: u64, i: u64) -> u64 {
-  return st.caps_find(t, link_name, i);
+pub let caps_find = func(t: Mut(CapTable), link_name: u64, i: u64) -> u64 {
+  return CapTable.find(t, link_name, i);
 };
 
-pub let VmCapHost: VmCaps = module {
-  pub let Self = VmCapTable;
-  pub let invoke = func(self: Mut(VmCapTable), link_name: u64, args: Slice(u64)) -> u64 {
-    return st.caps_invoke(self, link_name, args);
+pub let VmCapHost: Caps = module {
+  pub let Self = CapTable.Self;
+  pub let invoke = func(self: Mut(CapTable), link_name: u64, args: Slice(u64)) -> u64 {
+    return CapTable.invoke(self, link_name, args);
   };
 };
 
-pub let EP_IDLE = func() -> u64 { return st.EP_IDLE(); };
-pub let EP_SENDER_PARKED = func() -> u64 { return st.EP_SENDER_PARKED(); };
-pub let EP_RECEIVER_PARKED = func() -> u64 { return st.EP_RECEIVER_PARKED(); };
-pub let EP_SENDER_DELIVERED = func() -> u64 { return st.EP_SENDER_DELIVERED(); };
+pub let EpState = module {
+  pub let Idle: u64 = ip.EpState.Idle as u64;
+  pub let SenderParked: u64 = ip.EpState.SenderParked as u64;
+  pub let ReceiverParked: u64 = ip.EpState.ReceiverParked as u64;
+  pub let SenderDelivered: u64 = ip.EpState.SenderDelivered as u64;
+};
 
-pub let EP_OK = func() -> u64 { return st.EP_OK(); };
-pub let EP_BLOCKED = func() -> u64 { return st.EP_BLOCKED(); };
-pub let EP_BUSY = func() -> u64 { return st.EP_BUSY(); };
+pub let EpStatus = module {
+  pub let Ok: u64 = ip.EpStatus.Ok as u64;
+  pub let Blocked: u64 = ip.EpStatus.Blocked as u64;
+  pub let Busy: u64 = ip.EpStatus.Busy as u64;
+};
 
-pub let Endpoint = st.Endpoint;
+pub let Endpoint = ip.Endpoint;
 
 pub let endpoint_new = func(id: u64) -> Endpoint {
-  return st.endpoint_new(id);
+  return Endpoint.new(id);
 };
 
 pub let endpoint_state = func(ep: Ref(Endpoint)) -> u64 {
-  return st.endpoint_state(ep);
+  return Endpoint.state(ep) as u64;
 };
 
 pub let endpoint_peer = func(ep: Ref(Endpoint)) -> u64 {
-  return st.endpoint_peer(ep);
+  return Endpoint.peer(ep);
 };
 
-pub let endpoint_send = func(ep: Mut(Endpoint), who: u64, value: VmValue,
+pub let endpoint_send = func(ep: Mut(Endpoint), who: u64, value: Value,
                              out_who: Mut(u64)) -> u64 {
-  return st.endpoint_send(ep, who, value, out_who);
+  return Endpoint.send(ep, who, value, out_who) as u64;
 };
 
-pub let endpoint_recv = func(ep: Mut(Endpoint), who: u64, out: Mut(VmValue),
+pub let endpoint_recv = func(ep: Mut(Endpoint), who: u64, out: Mut(Value),
                              out_who: Mut(u64)) -> u64 {
-  return st.endpoint_recv(ep, who, out, out_who);
+  return Endpoint.recv(ep, who, out, out_who) as u64;
 };
 
 pub let endpoint_cancel = func(ep: Mut(Endpoint), who: u64) -> u64 {
-  return st.endpoint_cancel(ep, who);
+  return Endpoint.cancel(ep, who);
 };
 
-pub let VmTraceEvent = st.VmTraceEvent;
+pub let TraceEvent = st.TraceEvent;
 
-pub let TRACE_ENTER = func() -> u64 { return st.TRACE_ENTER(); };
-pub let TRACE_EXIT = func() -> u64 { return st.TRACE_EXIT(); };
-pub let TRACE_TRAP = func() -> u64 { return st.TRACE_TRAP(); };
+pub let TraceKind = module {
+  pub let None: u64 = st.TraceKind.None as u64;
+  pub let Enter: u64 = st.TraceKind.Enter as u64;
+  pub let Exit: u64 = st.TraceKind.Exit as u64;
+  pub let Trap: u64 = st.TraceKind.Trap as u64;
+};
 
-pub let Frame = st.Frame;
+pub let trace_none = func() -> TraceEvent {
+  return st.trace_none();
+};
 
-pub let TCB = st.TCB;
+pub let Frame = tb.Frame;
+
+pub let TCB = tb.TCB;
 
 pub let Self = TCB;
 
-pub let VmResult = st.VmResult;
+pub let Result = st.Result;
 
-pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_state(tcb); };
-pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_steps(tcb); };
-pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_stack_peak(tcb); };
-pub let vm_tcb_has_result = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_has_result(tcb); };
-pub let vm_tcb_result = func(tcb: Ref(TCB)) -> VmValue {
-  return st.vm_tcb_result(tcb);
+pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return TCB.state(tcb); };
+pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return TCB.steps(tcb); };
+pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return TCB.stack_peak(tcb); };
+pub let vm_tcb_has_result = func(tcb: Ref(TCB)) -> u64 { return TCB.has_result(tcb); };
+pub let vm_tcb_result = func(tcb: Ref(TCB)) -> Value {
+  return TCB.result_value(tcb);
 };
-pub let vm_tcb_trap_kind = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_kind(tcb); };
-pub let vm_tcb_trap_status = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_status(tcb); };
-pub let vm_tcb_trap_region = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_region(tcb); };
-pub let vm_tcb_trap_position = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_trap_position(tcb); };
-pub let vm_tcb_current_region = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_current_region(tcb); };
-pub let vm_tcb_call_depth = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_call_depth(tcb); };
-pub let vm_tcb_frame_count = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_frame_count(tcb); };
+pub let vm_tcb_trap_kind = func(tcb: Ref(TCB)) -> u64 { return TCB.trap_kind(tcb); };
+pub let vm_tcb_trap_status = func(tcb: Ref(TCB)) -> u64 { return TCB.trap_status(tcb); };
+pub let vm_tcb_trap_region = func(tcb: Ref(TCB)) -> u64 { return TCB.trap_region(tcb); };
+pub let vm_tcb_trap_position = func(tcb: Ref(TCB)) -> u64 { return TCB.trap_position(tcb); };
+pub let vm_tcb_current_region = func(tcb: Ref(TCB)) -> u64 { return TCB.current_region(tcb); };
+pub let vm_tcb_call_depth = func(tcb: Ref(TCB)) -> u64 { return TCB.call_depth(tcb); };
+pub let vm_tcb_frame_count = func(tcb: Ref(TCB)) -> u64 { return TCB.frame_count(tcb); };
 
 pub let vm_tcb_frame_region = func(tcb: Ref(TCB), i: u64) -> u64 {
-  return st.vm_tcb_frame_region(tcb, i);
+  return TCB.frame_region(tcb, i);
 };
 
 pub let vm_tcb_frame_position = func(tcb: Ref(TCB), i: u64) -> u64 {
-  return st.vm_tcb_frame_position(tcb, i);
+  return TCB.frame_position(tcb, i);
 };
 
 pub let vm_tcb_frame_slot_base = func(tcb: Ref(TCB), i: u64) -> u64 {
-  return st.vm_tcb_frame_slot_base(tcb, i);
+  return TCB.frame_slot_base(tcb, i);
 };
 
 pub let vm_tcb_frame_slot_count = func(tcb: Ref(TCB), i: u64) -> u64 {
-  return st.vm_tcb_frame_slot_count(tcb, i);
+  return TCB.frame_slot_count(tcb, i);
 };
 
-pub let vm_tcb_slot = func(tcb: Ref(TCB), i: u64) -> VmValue {
-  return st.vm_tcb_slot(tcb, i);
+pub let vm_tcb_slot = func(tcb: Ref(TCB), i: u64) -> Value {
+  return TCB.slot(tcb, i);
 };
 
 pub let vm_tcb_block = func(tcb: Mut(TCB)) -> u64 {
-  return st.vm_tcb_block(tcb);
+  return TCB.block(tcb);
 };
 
 pub let vm_tcb_wake = func(tcb: Mut(TCB)) -> u64 {
-  return st.vm_tcb_wake(tcb);
+  return TCB.wake(tcb);
 };
 
 pub let vm_tcb_yield = func(tcb: Mut(TCB)) -> u64 {
-  return st.vm_tcb_yield(tcb);
+  return TCB.park(tcb);
 };
 
 pub let vm_tcb_resume = func(tcb: Mut(TCB)) -> u64 {
-  return st.vm_tcb_resume(tcb);
+  return TCB.resume(tcb);
 };
 
 pub let frame_cap_of = func(image: Ref(im.VmImage), quota: Quota) -> u64 {
-  return st.frame_cap_of(image, quota);
+  return TCB.capacity(image, quota);
 };
 
 pub let vm_tcb_bytes = func(image: Ref(im.VmImage), quota: Quota) -> u64 {
-  return st.vm_tcb_bytes(image, quota);
+  return TCB.bytes(image, quota);
 };
 
 pub let vm_tcb_blank = func() -> TCB {
-  return st.vm_tcb_blank();
+  return TCB.blank();
 };
 
 pub let vm_tcb_new = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
-                          caps: Mut(VmCapTable), quota: Quota,
+                          caps: Mut(CapTable), quota: Quota,
                           lease: vs.StackLease, owner: u64,
                           arena: MutSlice(u8), out: Mut(TCB)) -> u64 {
-  return st.vm_tcb_new(image, space, caps, quota, lease, owner, arena, out);
+  return TCB.init(image, space, caps, quota, lease, owner, arena, out);
 };
 
-pub let vm_tcb_set_trace = func(tcb: Mut(TCB), buf: MutSlice(VmTraceEvent),
+pub let vm_tcb_set_trace = func(tcb: Mut(TCB), buf: MutSlice(TraceEvent),
                                 count: Mut(u64)) -> u64 {
-  return st.vm_tcb_set_trace(tcb, buf, count);
+  return TCB.set_trace(tcb, buf, count);
 };
 
 pub let vm_tcb_trace_count = func(tcb: Ref(TCB)) -> u64 {
-  return st.vm_tcb_trace_count(tcb);
+  return TCB.trace_count(tcb);
 };
 
 pub let vm_tcb_trace_cap = func(tcb: Ref(TCB)) -> u64 {
-  return st.vm_tcb_trace_cap(tcb);
+  return TCB.trace_cap(tcb);
 };
 
 pub let vm_tcb_free = func(tcb: Mut(TCB)) -> u64 {
-  return st.vm_tcb_free(tcb);
+  return TCB.release(tcb);
 };
 
-pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
+pub let vm_result_trap = func(trap_kind: u64) -> Result {
   return st.vm_trap_result_bits(trap_kind, st.Subcode.AssemblyFailed as u64);
 };
 
-pub let vm_step = func(tcb: Mut(TCB)) -> VmResult {
+pub let vm_step = func(tcb: Mut(TCB)) -> Result {
   return run.vm_step(tcb);
 };
 
@@ -270,16 +286,16 @@ pub let vm_tcb_start = func(tcb: Mut(TCB), entry: u64, args: Slice(u64)) -> u64 
 };
 
 pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
-                        caps: Mut(VmCapTable), quota: Quota, owner: u64,
+                        caps: Mut(CapTable), quota: Quota, owner: u64,
                         entry: u64, args: Slice(u64),
-                        arena: MutSlice(u8)) -> VmResult {
+                        arena: MutSlice(u8)) -> Result {
   return run.vm_apply(image, space, caps, quota, owner, entry, args, arena);
 };
 
 pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
-                               caps: Mut(VmCapTable), quota: Quota, owner: u64,
+                               caps: Mut(CapTable), quota: Quota, owner: u64,
                                entry: u64, args: Slice(u64), arena: MutSlice(u8),
-                               trace: MutSlice(VmTraceEvent),
-                               count: Mut(u64)) -> VmResult {
+                               trace: MutSlice(TraceEvent),
+                               count: Mut(u64)) -> Result {
   return run.vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, trace, count);
 };

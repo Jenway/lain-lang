@@ -1,0 +1,134 @@
+let cli = import("std::cli");
+let os = import("std::os");
+let str = import("std::str");
+let io = import("std::io");
+let cmp = import("src::compiler");
+let st = import("src::driver::state");
+let insp = import("tools::inspect");
+
+let Options = struct {
+  deps: bool,
+  docs: bool,
+  help: bool,
+  bad: bool,
+  out_path: cli.OptSlice.Opt,
+  src_path: cli.OptSlice.Opt,
+};
+
+let arg_at = func(i: u64) -> Slice(u8) {
+  return cli.OptSlice.unwrap_or(cli.arg(i), "");
+};
+
+let usage = func() -> u64 {
+  return os.eprint("usage: lain_inspect <source.lain> [--deps|--docs] [--out <file>] [--help]\n");
+};
+
+let parse = func(o: Mut(Options), argc: u64) -> u64 {
+  let i: u64 = 1;
+  while i < argc {
+    let s: Slice(u8) = arg_at(i);
+    if str.eq(s, "--deps") {
+      o.deps = true;
+      i = i + 1;
+    } else if str.eq(s, "--docs") {
+      o.docs = true;
+      i = i + 1;
+    } else if str.eq(s, "--out") and (i + 1 < argc) {
+      o.out_path = cli.OptSlice.some(arg_at(i + 1));
+      i = i + 2;
+    } else if str.eq(s, "--help") or str.eq(s, "-h") {
+      o.help = true;
+      i = argc;
+    } else if str.starts_with(s, "-") {
+      o.bad = true;
+      i = argc;
+    } else if cli.OptSlice.is_none(o.src_path) {
+      o.src_path = cli.OptSlice.some(s);
+      i = i + 1;
+    } else {
+      o.bad = true;
+      i = argc;
+    }
+  };
+  return 0;
+};
+
+let report = func(k: Mut(st.State), path: Slice(u8), deps: bool) -> u64 {
+  if path.len == 0 {
+    if deps {
+      insp.dump_deps(k) ?{ out: io.StdoutSink };
+    } else {
+      insp.dump_docs(k) ?{ out: io.StdoutSink };
+    }
+    return 0;
+  }
+  if insp.file_open(path) == false {
+    os.eprint("[lain_inspect] cannot open output file: ");
+    os.eprint(path);
+    os.eprint("\n");
+    return 1;
+  }
+  if deps {
+    insp.dump_deps(k) ?{ out: insp.FileSink };
+  } else {
+    insp.dump_docs(k) ?{ out: insp.FileSink };
+  }
+  if insp.file_close() == false {
+    os.eprint("[lain_inspect] failed to write output file: ");
+    os.eprint(path);
+    os.eprint("\n");
+    return 1;
+  }
+  return 0;
+};
+
+@root
+let main = func() -> u64 {
+  let argc: u64 = cli.count();
+  if argc < 2 {
+    usage();
+    return 2;
+  }
+  let o0: Options = Options {
+    deps: false,
+    docs: false,
+    help: false,
+    bad: false,
+    out_path: cli.OptSlice.none(),
+    src_path: cli.OptSlice.none(),
+  };
+  let o: Mut(Options) = mut_of(o0);
+  parse(o, argc);
+  if o.help {
+    usage();
+    return 0;
+  }
+  if o.bad {
+    usage();
+    return 2;
+  }
+  if (o.deps == false) and (o.docs == false) {
+    usage();
+    return 2;
+  }
+  if o.deps and o.docs {
+    usage();
+    return 2;
+  }
+  let src: Slice(u8) = cli.OptSlice.unwrap_or(o.src_path, "");
+  if src.len == 0 {
+    usage();
+    return 2;
+  }
+  let a: cmp.Analysis = cmp.analyze_file(src);
+  let status: u64 = a.status;
+  if status != cmp.status_ok() {
+    cmp.print_diagnostics();
+    if status == cmp.status_no_source() {
+      return 2;
+    }
+    return 1;
+  }
+  let out_path: Slice(u8) = cli.OptSlice.unwrap_or(o.out_path, "");
+  return report(a.state, out_path, o.deps);
+};

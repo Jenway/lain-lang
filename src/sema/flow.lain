@@ -7,98 +7,62 @@ let s = import("src::driver::sym");
 let ax = import("src::sema::ast");
 let cx = import("src::sema::ctx");
 let agg = import("src::sema::agg");
+let ef = import("src::sema::effects");
 
 extern flow_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern flow_block(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 = lainc_stmt_block;
 
-let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
-let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
-let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
-let box_put = func(p: Mut(u64), v: u64) -> u64 { return ax.box_put(p, v); };
-let box_get = func(p: Mut(u64)) -> u64 { return ax.box_get(p); };
-let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
-let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
-let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
-let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
-let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
-let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
-let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
-let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
-let is_digit_token = func(g: u64, i: u64) -> u64 { return ax.is_digit_token(g, i); };
-let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
-let num_value = func(p: Ref(u8), n: u64) -> u64 { return ax.num_value(p, n); };
-let lit_addr = func(h: u64) -> Ref(u8) { return ax.lit_addr(h); };
-let lit_len = func(h: u64) -> u64 { return ax.lit_len(h); };
-let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
-let no_slot = func() -> u64 { return ax.no_slot(); };
-let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
-let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
-let e_frame = func() -> u64 { return ax.FailKind.Frame as u64; };
-let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
-let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
-let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.coerce(k, v, from, to, out); };
-let val_force = func(k: Mut(st.State), v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.val_force(k, v, tp); };
-let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 { return cx.slot_put(k, j, v, tp); };
-let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.slot_get(k, j, tp, out); };
-let slot_copy = func(k: Mut(st.State), dst: u64, src: u64) -> u64 { return cx.slot_copy(k, dst, src); };
-let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
-let alloc_res_slot = func(k: Mut(st.State)) -> u64 { return cx.alloc_res_slot(k); };
-let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
-let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
-let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
-let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); };
-
 pub let if_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
-  let ct: Mut(ty.Ty) = tbool(k);
-  let cv: Mut(ty.Val) = new_val(k);
-  let j: u64 = flow_expr(k, g, i + 1, 0, tnone(k), cv);
+  let ct: Mut(ty.Ty) = cx.tbool(k);
+  let cv: Mut(ty.Val) = ax.new_val(k);
+  let j: u64 = flow_expr(k, g, i + 1, 0, cx.tnone(k), cv);
   if st.st_ok(k) != 0 { return j; }
-  let cb: Mut(ty.Val) = new_val(k);
-  coerce(k, cv, ty.vty(cv), ct, cb);
-  let cn: u64 = val_force(k, cb, ct);
+  let cb: Mut(ty.Val) = ax.new_val(k);
+  cx.coerce(k, cv, ty.vty(cv), ct, cb);
+  let cn: u64 = cx.val_force(k, cb, ct);
   let has_res: u64 = ty.ty_known(want);
-  let resj: u64 = if has_res == 1 { alloc_res_slot(k) } else { no_slot() };
-  let t1: Mut(u64) = box(k);
+  let resj: u64 = if has_res == 1 { cx.alloc_res_slot(k) } else { ax.no_slot() };
+  let t1: Mut(u64) = ax.box(k);
   ir.region_begin(k);
   let j1: u64 = branch_block(k, g, j, want, resj, t1);
   let r1: u64 = ir.region_end(k);
-  let t2: Mut(u64) = box(k);
-  let ob: Mut(u64) = box(k);
+  let t2: Mut(u64) = ax.box(k);
+  let ob: Mut(u64) = ax.box(k);
   let j3: u64 = if_else_part(k, g, j1, want, resj, t2, ob);
-  ir.emit_if(k, 0, cn, r1, box_get(ob));
+  ir.emit_if(k, 0, cn, r1, ax.box_get(ob));
   if st.st_ok(k) != 0 { return j3; }
-  if box_get(t1) == 1 and box_get(t2) == 1 { box_put(term, 1); }
-  if has_res == 1 { slot_get(k, resj, want, out); } else { ty.val_none(out); }
+  if ax.box_get(t1) == 1 and ax.box_get(t2) == 1 { ax.box_put(term, 1); }
+  if has_res == 1 { cx.slot_get(k, resj, want, out); } else { ty.val_none(out); }
   return j3;
 };
 
 let if_else_part = func(k: Mut(st.State), g: u64, j1: u64, want: Mut(ty.Ty), resj: u64, t2: Mut(u64), ob: Mut(u64)) -> u64 {
-  if j1 < n_count(g) and n_sym(g, j1) == s.k_else() {
+  if j1 < ax.n_count(g) and ax.n_sym(g, j1) == s.k_else() {
     ir.region_begin(k);
     let jx: u64 = j1 + 1;
-    let j3: u64 = if jx < n_count(g) and n_sym(g, jx) == s.k_if() {
+    let j3: u64 = if jx < ax.n_count(g) and ax.n_sym(g, jx) == s.k_if() {
       if_nested(k, g, jx, want, resj, t2)
     } else {
       branch_block(k, g, jx, want, resj, t2)
     };
     let r2: u64 = ir.region_end(k);
-    box_put(ob, r2);
+    ax.box_put(ob, r2);
     return j3;
   }
-  box_put(ob, 0);
+  ax.box_put(ob, 0);
   return j1;
 };
 
 let if_nested = func(k: Mut(st.State), g: u64, jx: u64, want: Mut(ty.Ty), resj: u64, t2: Mut(u64)) -> u64 {
-  let inner: Mut(ty.Val) = new_val(k);
+  let inner: Mut(ty.Val) = ax.new_val(k);
   let j: u64 = if_compile(k, g, jx, want, inner, t2);
-  if resj != no_slot() and ty.val_known(inner) == 1 { slot_put(k, resj, inner, ty.vty(inner)); }
+  if resj != ax.no_slot() and ty.val_known(inner) == 1 { cx.slot_put(k, resj, inner, ty.vty(inner)); }
   return j;
 };
 
 let branch_block = func(k: Mut(st.State), g: u64, j: u64, tp: Mut(ty.Ty), slot: u64, term: Mut(u64)) -> u64 {
-  if j >= n_count(g) { st.st_fail(k, e_ast()); box_put(term, 1); return j; }
-  let bg: u64 = n_at(g, j);
+  if j >= ax.n_count(g) { st.st_fail(k, ax.FailKind.Ast as u64); ax.box_put(term, 1); return j; }
+  let bg: u64 = ax.n_at(g, j);
   let mark: u64 = env.env_mark(k);
   flow_block(k, bg, 0, term, slot, tp);
   env.env_release(k, mark);
@@ -106,51 +70,51 @@ let branch_block = func(k: Mut(st.State), g: u64, j: u64, tp: Mut(ty.Ty), slot: 
 };
 
 let loop_params = func(k: Mut(st.State), pg: u64, i: u64, f: Mut(st.LoopFrame), idx: u64, lt: Mut(ty.Ty)) -> u64 {
-  let n: u64 = n_count(pg);
+  let n: u64 = ax.n_count(pg);
   if i >= n { return i; }
-  if idx >= 4 { st.st_fail(k, e_frame()); return i; }
-  let name: u64 = n_sym(pg, i);
-  let a: u64 = expect_sym(k, pg, i + 1, s.p_colon());
-  let t: Mut(ty.Ty) = new_ty(k);
-  let b: u64 = parse_type(k, pg, a, t);
+  if idx >= 4 { st.st_fail(k, ax.FailKind.Frame as u64); return i; }
+  let name: u64 = ax.n_sym(pg, i);
+  let a: u64 = cx.expect_sym(k, pg, i + 1, s.p_colon());
+  let t: Mut(ty.Ty) = ax.new_ty(k);
+  let b: u64 = cx.parse_type(k, pg, a, t);
   ty.ty_at(lt, t);
-  let c: u64 = expect_sym(k, pg, b, s.p_eq());
-  let v: Mut(ty.Val) = new_val(k);
+  let c: u64 = cx.expect_sym(k, pg, b, s.p_eq());
+  let v: Mut(ty.Val) = ax.new_val(k);
   let d: u64 = flow_expr(k, pg, c, 0, t, v);
   let sl: u64 = st.st_next_slot(k);
-  slot_put(k, sl, v, t);
+  cx.slot_put(k, sl, v, t);
   env.env_push(k, name, sl, t);
   st.st_set_lf_slot(f, idx, sl);
   st.st_set_lf_np(f, idx + 1);
-  if is_comma(pg, d) == 1 { return loop_params(k, pg, d + 1, f, idx + 1, lt); }
+  if ax.is_comma(pg, d) == 1 { return loop_params(k, pg, d + 1, f, idx + 1, lt); }
   return d;
 };
 
 pub let loop_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
-  let n: u64 = n_count(g);
+  let n: u64 = ax.n_count(g);
   let ho: Mut(cx.LoopHeadOut) = ptr_cast(Mut(cx.LoopHeadOut), st.st_alloc(k, 16));
-  let j0: u64 = loop_head(k, g, i + 1, ho);
+  let j0: u64 = cx.loop_head(k, g, i + 1, ho);
   let label: u64 = if ho.has == 1 { ho.label } else { ir.fresh_l(k) };
   let d: u64 = st.st_loopdepth(k);
-  if d >= 8 { st.st_fail(k, e_frame()); return j0; }
+  if d >= 8 { st.st_fail(k, ax.FailKind.Frame as u64); return j0; }
   let f: Mut(st.LoopFrame) = st.st_lf(k, d);
   st.st_set_loopdepth(k, d + 1);
   st.st_set_lf_label(f, label);
-  st.st_set_lf_res(f, no_slot());
+  st.st_set_lf_res(f, ax.no_slot());
   st.st_set_lf_np(f, 0);
   let mark: u64 = env.env_mark(k);
   st.st_set_lf_mark(f, mark);
-  let lt: Mut(ty.Ty) = new_ty(k);
-  let j: u64 = if j0 < n and is_group(g, j0) == 1 and delim_of(g, j0) == dl_paren() {
-    loop_params(k, n_at(g, j0), 0, f, 0, lt);
+  let lt: Mut(ty.Ty) = ax.new_ty(k);
+  let j: u64 = if j0 < n and ax.is_group(g, j0) == 1 and ax.delim_of(g, j0) == ax.Delim.Paren as u64 {
+    loop_params(k, ax.n_at(g, j0), 0, f, 0, lt);
     j0 + 1
   } else { j0 };
   let np: u64 = st.st_lf_np(f);
-  let wt: Mut(ty.Ty) = new_ty(k);
+  let wt: Mut(ty.Ty) = ax.new_ty(k);
   if ty.ty_known(want) == 1 { ty.ty_at(wt, want); } else { if np > 0 { ty.ty_at(wt, lt); } }
-  let resj: u64 = if ty.ty_known(wt) == 1 { alloc_res_slot(k) } else { no_slot() };
+  let resj: u64 = if ty.ty_known(wt) == 1 { cx.alloc_res_slot(k) } else { ax.no_slot() };
   st.st_set_lf_res(f, resj);
-  if j < n and n_sym(g, j) == s.k_while() {
+  if j < n and ax.n_sym(g, j) == s.k_while() {
     return loop_while(k, g, j + 1, out, f, resj, np, wt, d, mark);
   }
   return loop_plain(k, g, j, out, f, resj, np, wt, d, mark);
@@ -158,45 +122,45 @@ pub let loop_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
 
 let loop_while = func(k: Mut(st.State), g: u64, wh: u64, out: Mut(ty.Val), f: Mut(st.LoopFrame), resj: u64,
                 np: u64, wt: Mut(ty.Ty), d: u64, mark: u64) -> u64 {
-  let ct: Mut(ty.Ty) = tbool(k);
-  let noty: Mut(ty.Ty) = tnone(k);
+  let ct: Mut(ty.Ty) = cx.tbool(k);
+  let noty: Mut(ty.Ty) = cx.tnone(k);
   ir.region_begin(k);
-  let cv: Mut(ty.Val) = new_val(k);
-  let cj: u64 = flow_expr(k, g, wh, 0, tnone(k), cv);
-  let cb: Mut(ty.Val) = new_val(k);
-  coerce(k, cv, ty.vty(cv), ct, cb);
-  let cn: u64 = val_force(k, cb, ct);
-  let bg: u64 = n_at(g, cj);
-  let bt: Mut(u64) = box(k);
+  let cv: Mut(ty.Val) = ax.new_val(k);
+  let cj: u64 = flow_expr(k, g, wh, 0, cx.tnone(k), cv);
+  let cb: Mut(ty.Val) = ax.new_val(k);
+  cx.coerce(k, cv, ty.vty(cv), ct, cb);
+  let cn: u64 = cx.val_force(k, cb, ct);
+  let bg: u64 = ax.n_at(g, cj);
+  let bt: Mut(u64) = ax.box(k);
   let h1: u64 = ir.region_begin(k);
-  flow_block(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
+  flow_block(k, bg, 0, bt, ax.no_slot(), noty);
+  if ax.box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
   let r1: u64 = ir.region_end(k);
   ir.emit_if(k, 0, cn, r1, 0);
-  if resj != no_slot() and np > 0 { slot_copy(k, resj, st.st_lf_slot(f, np - 1)); }
+  if resj != ax.no_slot() and np > 0 { cx.slot_copy(k, resj, st.st_lf_slot(f, np - 1)); }
   ir.args_reset(k);
   ir.emit_jump(k, codes.InstKind.Break as u64, st.st_lf_label(f));
   let r2: u64 = ir.region_end(k);
   ir.emit_loop(k, 0, st.st_lf_label(f), r2);
   st.st_set_loopdepth(k, d);
   env.env_release(k, mark);
-  if resj != no_slot() { slot_get(k, resj, wt, out); } else { ty.val_none(out); }
+  if resj != ax.no_slot() { cx.slot_get(k, resj, wt, out); } else { ty.val_none(out); }
   return cj + 1;
 };
 
 let loop_plain = func(k: Mut(st.State), g: u64, j: u64, out: Mut(ty.Val), f: Mut(st.LoopFrame), resj: u64,
                 np: u64, wt: Mut(ty.Ty), d: u64, mark: u64) -> u64 {
-  let noty: Mut(ty.Ty) = tnone(k);
+  let noty: Mut(ty.Ty) = cx.tnone(k);
   let r0: u64 = ir.region_begin(k);
-  let bg: u64 = n_at(g, j);
-  let bt: Mut(u64) = box(k);
-  flow_block(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
+  let bg: u64 = ax.n_at(g, j);
+  let bt: Mut(u64) = ax.box(k);
+  flow_block(k, bg, 0, bt, ax.no_slot(), noty);
+  if ax.box_get(bt) == 0 { ir.args_reset(k); ir.emit_jump(k, codes.InstKind.Continue as u64, st.st_lf_label(f)); }
   let r1: u64 = ir.region_end(k);
   ir.emit_loop(k, 0, st.st_lf_label(f), r1);
   st.st_set_loopdepth(k, d);
   env.env_release(k, mark);
-  if resj != no_slot() { slot_get(k, resj, wt, out); } else { ty.val_none(out); }
+  if resj != ax.no_slot() { cx.slot_get(k, resj, wt, out); } else { ty.val_none(out); }
   return j + 1;
 };
 
@@ -210,15 +174,9 @@ let Arm = struct {
   region: u64
 };
 
-let arm_rec = func() -> u64 { return 56; };
-
 let arm_at = func(base: Mut(Arm), i: u64) -> Mut(Arm) {
-  return ptr_cast(Mut(Arm), ptr_cast(Mut(u8), base) + i * arm_rec());
+  return ptr_cast(Mut(Arm), ptr_cast(Mut(u8), base) + i * 56);
 };
-
-let pat_int = func() -> u64 { return 0; };
-let pat_var = func() -> u64 { return 1; };
-let pat_wild = func() -> u64 { return 2; };
 
 let ArmOut = struct {
   region: u64,
@@ -245,25 +203,23 @@ let MatchCtx = struct {
   resname: u64
 };
 
-let wild_sym = func() -> u64 { return s.intern("_", 1); };
-
 let skip_seps = func(ag: u64, i: u64) -> u64 {
-  if i >= n_count(ag) { return i; }
-  if is_comma(ag, i) == 1 { return skip_seps(ag, i + 1); }
-  if is_semi(ag, i) == 1 { return skip_seps(ag, i + 1); }
+  if i >= ax.n_count(ag) { return i; }
+  if ax.is_comma(ag, i) == 1 { return skip_seps(ag, i + 1); }
+  if ax.is_semi(ag, i) == 1 { return skip_seps(ag, i + 1); }
   return i;
 };
 
 let skip_to_sep = func(ag: u64, i: u64) -> u64 {
-  if i >= n_count(ag) { return i; }
-  if is_comma(ag, i) == 1 { return i; }
-  if is_semi(ag, i) == 1 { return i; }
+  if i >= ax.n_count(ag) { return i; }
+  if ax.is_comma(ag, i) == 1 { return i; }
+  if ax.is_semi(ag, i) == 1 { return i; }
   return skip_to_sep(ag, i + 1);
 };
 
 let skip_body = func(ag: u64, b: u64) -> u64 {
-  if b >= n_count(ag) { return b; }
-  if is_group(ag, b) == 1 { return b + 1; }
+  if b >= ax.n_count(ag) { return b; }
+  if ax.is_group(ag, b) == 1 { return b + 1; }
   return skip_to_sep(ag, b);
 };
 
@@ -272,53 +228,53 @@ let pat_parse = func(k: Mut(st.State), ag: u64, i: u64, sh: u64, a: Mut(Arm)) ->
   a.mem = 0;
   a.body = 0;
   a.blk = 0;
-  if is_group(ag, i) == 1 { st.st_fail(k, e_ast()); return i + 1; }
-  if is_digit_token(ag, i) == 1 {
+  if ax.is_group(ag, i) == 1 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
+  if ax.is_digit_token(ag, i) == 1 {
     if sh != 0 {
       let m0: Ref(u8) = "integer pattern on enum";
-      let d0: u64 = ir.diag(k, n_at(ag, i), 1, m0, 23);
-      st.st_fail(k, e_type());
+      let d0: u64 = ir.diag(k, ax.n_at(ag, i), 1, m0, 23);
+      st.st_fail(k, ax.FailKind.Type as u64);
       return i + 1;
     }
-    let h: u64 = n_at(ag, i);
-    a.kind = pat_int();
-    a.value = num_value(lit_addr(h), lit_len(h));
+    let h: u64 = ax.n_at(ag, i);
+    a.kind = 0;
+    a.value = ax.num_value(ax.lit_addr(h), ax.lit_len(h));
     return i + 1;
   }
-  if is_name(ag, i) == 0 { st.st_fail(k, e_ast()); return i + 1; }
-  let nm: u64 = n_sym(ag, i);
-  if nm == wild_sym() {
-    a.kind = pat_wild();
+  if ax.is_name(ag, i) == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
+  let nm: u64 = ax.n_sym(ag, i);
+  if nm == s.intern("_", 1) {
+    a.kind = 2;
     a.value = 0;
     return i + 1;
   }
   if sh == 0 {
     let m1: Ref(u8) = "match scrutinee is not an enum";
-    let d1: u64 = ir.diag(k, n_at(ag, i), 1, m1, 30);
-    st.st_fail(k, e_type());
+    let d1: u64 = ir.diag(k, ax.n_at(ag, i), 1, m1, 30);
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
   let mv: Mut(agg.Member) = agg.mem_find(sh, nm);
   if is_null(mv) {
     let m2: Ref(u8) = "unknown enum variant";
-    let d2: u64 = ir.diag(k, n_at(ag, i), 1, m2, 20);
-    st.st_fail(k, e_type());
+    let d2: u64 = ir.diag(k, ax.n_at(ag, i), 1, m2, 20);
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
-  a.kind = pat_var();
+  a.kind = 1;
   a.value = agg.mem_tag(mv);
   a.mem = mv as u64;
   a.region = 0;
   let j: u64 = i + 1;
-  if (j < n_count(ag)) and (is_group(ag, j) == 1) and (delim_of(ag, j) == dl_paren()) {
-    let pg: u64 = n_at(ag, j);
-    if (n_count(pg) > 0) and (is_name(pg, 0) == 1) {
-      let bn: u64 = n_sym(pg, 0);
-      if bn != wild_sym() {
+  if (j < ax.n_count(ag)) and (ax.is_group(ag, j) == 1) and (ax.delim_of(ag, j) == ax.Delim.Paren as u64) {
+    let pg: u64 = ax.n_at(ag, j);
+    if (ax.n_count(pg) > 0) and (ax.is_name(pg, 0) == 1) {
+      let bn: u64 = ax.n_sym(pg, 0);
+      if bn != s.intern("_", 1) {
         if agg.mem_has(mv) == 0 {
           let m3: Ref(u8) = "variant has no payload";
-          let d3: u64 = ir.diag(k, n_at(pg, 0), 1, m3, 22);
-          st.st_fail(k, e_type());
+          let d3: u64 = ir.diag(k, ax.n_at(pg, 0), 1, m3, 22);
+          st.st_fail(k, ax.FailKind.Type as u64);
           return j + 1;
         }
         a.bind = bn;
@@ -335,43 +291,43 @@ let tok_byte = func(p: Ref(u8), k: u64) -> u64 {
 };
 
 let arrow_tok = func(ag: u64, i: u64) -> u64 {
-  if i >= n_count(ag) { return 0; }
-  if is_group(ag, i) == 1 { return 0; }
-  let h: u64 = n_at(ag, i);
+  if i >= ax.n_count(ag) { return 0; }
+  if ax.is_group(ag, i) == 1 { return 0; }
+  let h: u64 = ax.n_at(ag, i);
   if h == 0 { return 0; }
-  let len: u64 = lit_len(h);
-  let p: Ref(u8) = lit_addr(h);
+  let len: u64 = ax.lit_len(h);
+  let p: Ref(u8) = ax.lit_addr(h);
   if tok_byte(p, 0) != 61 { return 0; }
   if len == 2 {
     if tok_byte(p, 1) == 62 { return 1; }
     return 0;
   }
   if len != 1 { return 0; }
-  if i + 1 >= n_count(ag) { return 0; }
-  if is_group(ag, i + 1) == 1 { return 0; }
-  let h2: u64 = n_at(ag, i + 1);
+  if i + 1 >= ax.n_count(ag) { return 0; }
+  if ax.is_group(ag, i + 1) == 1 { return 0; }
+  let h2: u64 = ax.n_at(ag, i + 1);
   if h2 == 0 { return 0; }
-  if lit_len(h2) != 1 { return 0; }
-  if tok_byte(lit_addr(h2), 0) == 62 { return 2; }
+  if ax.lit_len(h2) != 1 { return 0; }
+  if tok_byte(ax.lit_addr(h2), 0) == 62 { return 2; }
   return 0;
 };
 
 let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
   let n: u64 = arrow_tok(ag, i);
-  if n == 0 { st.st_fail(k, e_ast()); return i + 1; }
+  if n == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
   return i + n;
 };
 
 let shadowed = func(arms: Mut(Arm), upto: u64, kind: u64, value: u64, j: u64) -> u64 {
   if j >= upto { return 0; }
   let p: Mut(Arm) = arm_at(arms, j);
-  if p.kind == pat_wild() { return 1; }
-  if (kind != pat_wild()) and (p.kind == kind) and (p.value == value) { return 1; }
+  if p.kind == 2 { return 1; }
+  if (kind != 2) and (p.kind == kind) and (p.value == value) { return 1; }
   return shadowed(arms, upto, kind, value, j + 1);
 };
 
 let find_arrow = func(ag: u64, i: u64) -> u64 {
-  if i >= n_count(ag) { return 0; }
+  if i >= ax.n_count(ag) { return 0; }
   let n: u64 = arrow_tok(ag, i);
   if n != 0 { return i + n; }
   return find_arrow(ag, i + 1);
@@ -379,10 +335,10 @@ let find_arrow = func(ag: u64, i: u64) -> u64 {
 
 let all_expr_arms = func(ag: u64, i: u64) -> u64 {
   let j: u64 = skip_seps(ag, i);
-  if j >= n_count(ag) { return 1; }
+  if j >= ax.n_count(ag) { return 1; }
   let b: u64 = find_arrow(ag, j);
   if b == 0 { return 0; }
-  if (b < n_count(ag)) and (is_group(ag, b) == 1) and (delim_of(ag, b) == dl_brace()) { return 0; }
+  if (b < ax.n_count(ag)) and (ax.is_group(ag, b) == 1) and (ax.delim_of(ag, b) == ax.Delim.Brace as u64) { return 0; }
   return all_expr_arms(ag, skip_body(ag, b));
 };
 
@@ -405,32 +361,35 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
   let r: u64 = ir.region_begin(k);
   let mark: u64 = env.env_mark(k);
   if c.yields == 1 { ir.region_result(k, c.want); }
-  let bt: Mut(u64) = box(k);
+  let bt: Mut(u64) = ax.box(k);
   let ej: u64 = a.body;
   if a.bind != 0 {
     let m: Mut(agg.Member) = ptr_cast(Mut(agg.Member), a.mem);
-    let mt: Mut(ty.Ty) = new_ty(k);
+    let mt: Mut(ty.Ty) = ax.new_ty(k);
     let rc: u64 = agg.mem_ty(k, m, mt);
-    let pv: Mut(ty.Val) = new_val(k);
+    let pv: Mut(ty.Val) = ax.new_val(k);
     let ld: u64 = agg.load_at(k, c.obj, agg.mem_off(m), mt, pv);
-    slot_put(k, c.pslot, pv, mt);
+    cx.slot_put(k, c.pslot, pv, mt);
     env.env_push(k, a.bind, c.pslot, mt);
   }
   if a.blk == 1 {
-    let bg: u64 = n_at(c.ag, a.body);
+    let bg: u64 = ax.n_at(c.ag, a.body);
     flow_block(k, bg, 0, bt, c.resj, c.want);
   } else {
-    let av: Mut(ty.Val) = new_val(k);
+    let av: Mut(ty.Val) = ax.new_val(k);
     ej = flow_expr(k, c.ag, a.body, 0, c.want, av);
-    if c.yields == 1 {
-      let yv: Mut(ty.Val) = new_val(k);
-      coerce(k, av, ty.vty(av), c.want, yv);
+    if (st.st_ok(k) == 0) and (cx.val_is_never(k, av) == 1) {
+      let dr: u64 = ef.emit_default_return(k);
+      ax.box_put(bt, 1);
+    } else if c.yields == 1 {
+      let yv: Mut(ty.Val) = ax.new_val(k);
+      cx.coerce(k, av, ty.vty(av), c.want, yv);
       ir.args_reset(k);
-      push_val(k, yv);
+      cx.push_val(k, yv);
       ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
     } else {
-      if (st.st_ok(k) == 0) and (c.resj != no_slot()) and (ty.val_known(av) == 1) {
-        slot_put(k, c.resj, av, ty.vty(av));
+      if (st.st_ok(k) == 0) and (c.resj != ax.no_slot()) and (ty.val_known(av) == 1) {
+        cx.slot_put(k, c.resj, av, ty.vty(av));
       }
     }
   }
@@ -438,7 +397,7 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
   if st.st_ok(k) != 0 { return 0; }
   let h: u64 = ir.region_end(k);
   o.region = h;
-  o.term = box_get(bt);
+  o.term = ax.box_get(bt);
   o.end = ej;
   return 0;
 };
@@ -446,7 +405,7 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
 let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   let ag: u64 = c.ag;
   let j: u64 = skip_seps(ag, i);
-  if j >= n_count(ag) { return j; }
+  if j >= ax.n_count(ag) { return j; }
   let a: Mut(Arm) = arm_at(c.arms, c.nrec);
   let pj: u64 = pat_parse(k, ag, j, c.sh, a);
   if st.st_ok(k) != 0 { return pj; }
@@ -455,14 +414,14 @@ let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   let shadow: u64 = shadowed(c.arms, c.nrec, a.kind, a.value, 0);
   if shadow == 1 {
     let m: Ref(u8) = "unreachable match arm";
-    let d: u64 = ir.diag(k, n_at(ag, j), 2, m, 21);
+    let d: u64 = ir.diag(k, ax.n_at(ag, j), 2, m, 21);
     return arm_loop(k, c, skip_body(ag, bj));
   }
   c.nrec = c.nrec + 1;
-  let isblk: u64 = if (is_group(ag, bj) == 1) and (delim_of(ag, bj) == dl_brace()) { 1 } else { 0 };
+  let isblk: u64 = if (ax.is_group(ag, bj) == 1) and (ax.delim_of(ag, bj) == ax.Delim.Brace as u64) { 1 } else { 0 };
   a.body = bj;
   a.blk = isblk;
-  if (a.bind != 0) and (c.pslot == no_slot()) { c.pslot = alloc_match_slot(k); }
+  if (a.bind != 0) and (c.pslot == ax.no_slot()) { c.pslot = alloc_match_slot(k); }
   let ao: Mut(ArmOut) = ptr_cast(Mut(ArmOut), st.st_alloc(k, 24));
   ao.region = 0;
   ao.term = 0;
@@ -471,7 +430,7 @@ let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   if st.st_ok(k) != 0 { return bj; }
   a.region = ao.region;
   let next: u64 = if isblk == 1 { bj + 1 } else { ao.end };
-  if a.kind == pat_wild() {
+  if a.kind == 2 {
     c.hasdef = 1;
     c.defr = ao.region;
     c.defterm = ao.term;
@@ -485,15 +444,15 @@ let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
 let add_cases = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   if i >= c.nrec { return i; }
   let a: Mut(Arm) = arm_at(c.arms, i);
-  if a.kind != pat_wild() { ir.case_add(k, a.value, a.region); }
+  if a.kind != 2 { ir.case_add(k, a.value, a.region); }
   return add_cases(k, c, i + 1);
 };
 
 let covered = func(arms: Mut(Arm), nrec: u64, tag: u64, j: u64) -> u64 {
   if j >= nrec { return 0; }
   let p: Mut(Arm) = arm_at(arms, j);
-  if p.kind == pat_wild() { return 1; }
-  if (p.kind == pat_var()) and (p.value == tag) { return 1; }
+  if p.kind == 2 { return 1; }
+  if (p.kind == 1) and (p.value == tag) { return 1; }
   return covered(arms, nrec, tag, j + 1);
 };
 
@@ -509,7 +468,7 @@ let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u6
     if c.hasdef == 1 { return 1; }
     let mi: Ref(u8) = "non-exhaustive match";
     let di: u64 = ir.diag(k, span, 1, mi, 20);
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return 0;
   }
   if c.hasdef == 1 { return 1; }
@@ -518,7 +477,7 @@ let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u6
   if miss == 0 { return 1; }
   let me: Ref(u8) = "non-exhaustive match";
   let de: u64 = ir.diag(k, span, 1, me, 20);
-  st.st_fail(k, e_type());
+  st.st_fail(k, ax.FailKind.Type as u64);
   return 0;
 };
 
@@ -529,58 +488,58 @@ let match_selector = func(k: Mut(st.State), cv: Mut(ty.Val), sh: u64, sel_ty: Mu
       let w: u64 = agg.shp_und_w(sh);
       let sg: u64 = agg.shp_und_sg(sh);
       ty.ty_bits(sel_ty, w, sg);
-      return val_force(k, cv, sel_ty);
+      return cx.val_force(k, cv, sel_ty);
     }
     let on: u64 = ty.vn(cv);
-    if on == 0 { st.st_fail(k, e_type()); return 0; }
+    if on == 0 { st.st_fail(k, ax.FailKind.Type as u64); return 0; }
     ty.ty_u8(sel_ty);
     let t8: Mut(ty.Ty) = ir.tbits(k, 8);
-    let tagv: Mut(ty.Val) = new_val(k);
+    let tagv: Mut(ty.Val) = ax.new_val(k);
     let ld: u64 = agg.load_at(k, on, 0, t8, tagv);
-    box_put(obj, on);
+    ax.box_put(obj, on);
     return ty.vn(tagv);
   }
-  if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return 0; }
+  if ty.ty_known(vt) == 0 { st.st_fail(k, ax.FailKind.Type as u64); return 0; }
   if ty.tk(vt) != (codes.TyKind.Bits as u64) {
     let m: Ref(u8) = "match scrutinee must be an integer";
     let d: u64 = ir.diag(k, 0, 1, m, 34);
-    st.st_fail(k, e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return 0;
   }
   ty.ty_at(sel_ty, vt);
-  return val_force(k, cv, sel_ty);
+  return cx.val_force(k, cv, sel_ty);
 };
 
 pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
-  let n: u64 = n_count(g);
+  let n: u64 = ax.n_count(g);
   let j0: u64 = i + 1;
-  if j0 >= n { st.st_fail(k, e_ast()); return j0; }
-  let cv: Mut(ty.Val) = new_val(k);
-  let sj: u64 = flow_expr(k, g, j0, 0, tnone(k), cv);
+  if j0 >= n { st.st_fail(k, ax.FailKind.Ast as u64); return j0; }
+  let cv: Mut(ty.Val) = ax.new_val(k);
+  let sj: u64 = flow_expr(k, g, j0, 0, cx.tnone(k), cv);
   if st.st_ok(k) != 0 { return sj; }
-  if sj >= n { st.st_fail(k, e_ast()); return sj; }
-  if is_group(g, sj) == 0 { st.st_fail(k, e_ast()); return sj + 1; }
-  if delim_of(g, sj) != dl_brace() { st.st_fail(k, e_ast()); return sj + 1; }
-  let ag: u64 = n_at(g, sj);
+  if sj >= n { st.st_fail(k, ax.FailKind.Ast as u64); return sj; }
+  if ax.is_group(g, sj) == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return sj + 1; }
+  if ax.delim_of(g, sj) != ax.Delim.Brace as u64 { st.st_fail(k, ax.FailKind.Ast as u64); return sj + 1; }
+  let ag: u64 = ax.n_at(g, sj);
   let sh0: u64 = ty.tsh(ty.vty(cv));
   let sh: u64 = if sh0 == 0 { 0 } else {
     let kd0: u64 = agg.shp_kind(sh0);
     if kd0 == agg.kind_enum() or kd0 == agg.kind_cenum() { sh0 } else { 0 }
   };
-  let sel_ty: Mut(ty.Ty) = new_ty(k);
-  let ob: Mut(u64) = box(k);
+  let sel_ty: Mut(ty.Ty) = ax.new_ty(k);
+  let ob: Mut(u64) = ax.box(k);
   let sel: u64 = match_selector(k, cv, sh, sel_ty, ob);
   if st.st_ok(k) != 0 { return sj + 1; }
   let has_res: u64 = ty.ty_known(want);
   let yields: u64 = if has_res == 1 { all_expr_arms(ag, 0) } else { 0 };
-  let resj: u64 = if (has_res == 1) and (yields == 0) { alloc_match_slot(k) } else { no_slot() };
+  let resj: u64 = if (has_res == 1) and (yields == 0) { alloc_match_slot(k) } else { ax.no_slot() };
   let resname: u64 = if yields == 1 { ir.fresh_t(k) } else { 0 };
-  let cnt: u64 = n_count(ag);
-  let arms: Mut(Arm) = ptr_cast(Mut(Arm), st.st_alloc(k, cnt * arm_rec() + arm_rec()));
+  let cnt: u64 = ax.n_count(ag);
+  let arms: Mut(Arm) = ptr_cast(Mut(Arm), st.st_alloc(k, cnt * 56 + 56));
   let c: Mut(MatchCtx) = ptr_cast(Mut(MatchCtx), st.st_alloc(k, 128));
   c.ag = ag;
   c.sh = sh;
-  c.obj = box_get(ob);
+  c.obj = ax.box_get(ob);
   c.sel_ty = sel_ty;
   c.want = want;
   c.resj = resj;
@@ -591,18 +550,18 @@ pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
   c.defr = 0;
   c.defterm = 1;
   c.allterm = 1;
-  c.pslot = no_slot();
+  c.pslot = ax.no_slot();
   c.yields = yields;
   c.resname = resname;
   let cj: u64 = arm_loop(k, c, 0);
   if st.st_ok(k) != 0 { return sj + 1; }
   if c.nrec == 0 {
     let me: Ref(u8) = "non-exhaustive match";
-    let de: u64 = ir.diag(k, n_at(g, i), 1, me, 20);
-    st.st_fail(k, e_type());
+    let de: u64 = ir.diag(k, ax.n_at(g, i), 1, me, 20);
+    st.st_fail(k, ax.FailKind.Type as u64);
     return sj + 1;
   }
-  let span: u64 = n_at(g, i);
+  let span: u64 = ax.n_at(g, i);
   check_exhaustive(k, c, span);
   if st.st_ok(k) != 0 { return sj + 1; }
   add_cases(k, c, 0);
@@ -614,13 +573,13 @@ pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
     ir.emit_jump(k, codes.InstKind.Unreachable as u64, 0);
     ir.region_end(k)
   };
-  if c.allterm == 1 { box_put(term, 1); }
+  if c.allterm == 1 { ax.box_put(term, 1); }
   ir.emit_switch(k, c.resname, sel, sel_ty, dref);
   if st.st_ok(k) != 0 { return sj + 1; }
   if yields == 1 {
     ty.val_ref(out, resname, want);
   } else {
-    if has_res == 1 { slot_get(k, resj, want, out); } else { ty.val_none(out); }
+    if has_res == 1 { cx.slot_get(k, resj, want, out); } else { ty.val_none(out); }
   }
   return sj + 1;
 };

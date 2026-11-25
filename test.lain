@@ -69,6 +69,29 @@ let LangCodeBox = struct {
   tag: u64
 };
 
+let LangKind = enum(u64) {
+  Alpha = 1,
+  Beta = 2
+};
+
+let LangPayload = enum {
+  Text(i64)
+  Empty
+};
+
+let LangKindAlias = LangKind;
+
+let LangExport = module {
+  pub let KindAlias = LangKind;
+  pub let PayloadAlias = LangPayload;
+
+  pub let code_of = func(k: KindAlias) -> u64 {
+    return k as u64;
+  };
+};
+
+let LangExportAlias = LangExport.KindAlias;
+
 let lang_code_value = func(c: LangCode) -> u64 {
   return c as u64;
 };
@@ -977,6 +1000,99 @@ let unit_inc = func(x: Mut(u64)) -> () { deref(x) = deref(x) + 1; };
 let make_vec2 = func(x: i64, y: i64) -> LangVec2 { return LangVec2 { x: x, y: y }; };
 let wrap_u64_opt = func(v: u64) -> opt.Option(u64) { return OptU64.some(v); };
 
+let lang_alias_code = func() -> u64 {
+  let direct: LangKindAlias = LangKindAlias.Beta;
+  let via_mod: LangExport.KindAlias = LangExport.KindAlias.Beta;
+  let over_mod: LangExportAlias = LangExportAlias.Beta;
+  let base: LangKind = LangExportAlias.Alpha;
+  let sum: u64 = (direct as u64) + (via_mod as u64) + (over_mod as u64) + (base as u64);
+  return sum + LangExport.code_of(LangExport.KindAlias.Alpha);
+};
+
+let lang_alias_payload = func() -> i64 {
+  let a: LangExport.PayloadAlias = LangExport.PayloadAlias.Text { 40 };
+  let b: LangExport.PayloadAlias = LangExport.PayloadAlias.Empty {};
+  let c: LangPayload = LangExport.PayloadAlias.Text { 2 };
+  let x: i64 = match a {
+    Text(v) => v,
+    Empty => 0,
+  };
+  let y: i64 = match b {
+    Text(v) => v,
+    Empty => 100,
+  };
+  let z: i64 = match c {
+    Text(v) => v,
+    Empty => 0,
+  };
+  return x + y + z;
+};
+
+let lang_never_tail = func(c: u64) -> u64 {
+  mem.trap_abort(c);
+};
+
+let lang_never_branch = func(c: u64) -> u64 {
+  if c == 0 {
+    mem.trap_abort(31);
+  }
+  return c + 1;
+};
+
+let lang_never_match = func(c: u64) -> u64 {
+  match c {
+    0 => mem.trap_abort(61),
+    _ => 5,
+  }
+  return 9;
+};
+
+let lang_never_let = func(c: u64) -> u64 {
+  let dead: u64 = mem.trap_abort(c);
+  return dead;
+};
+
+let lang_never_assign = func(c: u64) -> u64 {
+  let out: u64 = 0;
+  out = mem.trap_abort(c);
+  return out;
+};
+
+let lang_never_tail_probe = func(c: u64) -> u64 {
+  return handle lang_never_tail(c) with {
+    return(v) => v,
+    trap(code) => code * 2 + 1,
+  };
+};
+
+let lang_never_branch_probe = func(c: u64) -> u64 {
+  return handle lang_never_branch(c) with {
+    return(v) => v,
+    trap(code) => code + 100,
+  };
+};
+
+let lang_never_match_probe = func(c: u64) -> u64 {
+  return handle lang_never_match(c) with {
+    return(v) => v,
+    trap(code) => code + 300,
+  };
+};
+
+let lang_never_let_probe = func(c: u64) -> u64 {
+  return handle lang_never_let(c) with {
+    return(v) => v,
+    trap(code) => code + 200,
+  };
+};
+
+let lang_never_assign_probe = func(c: u64) -> u64 {
+  return handle lang_never_assign(c) with {
+    return(v) => v,
+    trap(code) => code + 400,
+  };
+};
+
 let run_lang_core_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::core");
 
@@ -1044,6 +1160,17 @@ let run_lang_core_suite = func() -> i64 {
   t.eq_i64(mut_of(st), "call().ufcs()", make_vec2(3, 4).get_x(), 3);
   let wrapped: opt.Option(u64) = wrap_u64_opt(77);
   t.eq_u64(mut_of(st), "type pos opt.Option(u64)", OptU64.unwrap_or(wrapped, 0), 77);
+
+  t.eq_u64(mut_of(st), "enum alias variant value", lang_alias_code(), 8);
+  t.eq_i64(mut_of(st), "enum alias payload construct", lang_alias_payload(), 142);
+
+  t.eq_u64(mut_of(st), "never tail resumes trap handler", lang_never_tail_probe(7), 15);
+  t.eq_u64(mut_of(st), "never branch resumes trap handler", lang_never_branch_probe(0), 131);
+  t.eq_u64(mut_of(st), "never branch normal path", lang_never_branch_probe(4), 5);
+  t.eq_u64(mut_of(st), "never match arm resumes trap handler", lang_never_match_probe(0), 361);
+  t.eq_u64(mut_of(st), "never match arm normal path", lang_never_match_probe(3), 9);
+  t.eq_u64(mut_of(st), "never let binding resumes trap handler", lang_never_let_probe(5), 205);
+  t.eq_u64(mut_of(st), "never assignment resumes trap handler", lang_never_assign_probe(4), 404);
   return t.finish(mut_of(st));
 };
 

@@ -1,0 +1,762 @@
+let io = import("std::io");
+let os = import("std::os");
+let option = import("std::option");
+let cli = import("std::cli");
+let str = import("std::str");
+let fs = import("std::fs");
+let rd = import("src::frontend::reader");
+
+let OptSlice = option.Option(MutSlice(u8));
+
+let TokKind = enum(u64) {
+  Ident = 0,
+  Number = 1,
+  String = 2,
+  Punct = 3,
+  Open = 4,
+  Close = 5
+};
+
+let Tok = struct {
+  off: u64,
+  len: u64,
+  line: u64,
+  col: u64,
+  kind: u64,
+  ch: u64
+};
+
+let Cmt = struct {
+  from: u64,
+  to: u64,
+  line: u64,
+  col: u64,
+  block: u64
+};
+
+let Pos = struct {
+  line: u64,
+  col: u64
+};
+
+let Head = struct {
+  ok: u64,
+  body_open: u64,
+  body_close: u64,
+  ret_start: u64,
+  ret_end: u64
+};
+
+let Buf = struct {
+  ptr: Mut(u8),
+  cap: u64,
+  len: u64
+};
+
+let Path = struct {
+  ptr: Ref(u8),
+  len: u64
+};
+
+let Ctx = struct {
+  src: Slice(u8),
+  toks: Mut(Tok),
+  n: u64,
+  path: Slice(u8),
+  diag: u64,
+  at: u64,
+  line: u64,
+  col: u64
+};
+
+let empty = func() -> Slice(u8) {
+  return make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+};
+
+let tok_at = func(base: Mut(Tok), i: u64) -> Mut(Tok) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Tok), raw + i * size_of(Tok));
+};
+
+let cmt_at = func(base: Mut(Cmt), i: u64) -> Mut(Cmt) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Cmt), raw + i * size_of(Cmt));
+};
+
+let path_at = func(base: Mut(Path), i: u64) -> Mut(Path) {
+  let raw: Mut(u8) = ptr_cast(Mut(u8), base);
+  return ptr_cast(Mut(Path), raw + i * size_of(Path));
+};
+
+let path_slice = func(p: Path) -> Slice(u8) {
+  return make_slice(Slice(u8), p.ptr, p.len);
+};
+
+let buf_new = func(cap0: u64) -> Buf {
+  let cap: u64 = if cap0 < 64 { 64 } else { cap0 };
+  let raw: u64 = os.alloc_bytes(cap);
+  return Buf { ptr: ptr_cast(Mut(u8), raw), cap: cap, len: 0 };
+};
+
+let buf_reserve = func(b: Mut(Buf), extra: u64) {
+  let need: u64 = b.len + extra;
+  if need <= b.cap {
+    return;
+  }
+  let next: u64 = loop grow(c: u64 = b.cap) while c < need {
+    c = c * 2;
+  };
+  let raw: u64 = os.alloc_bytes(next);
+  let fresh: Mut(u8) = ptr_cast(Mut(u8), raw);
+  loop cp(i: u64 = 0) while i < b.len {
+    deref(fresh + i) = deref(b.ptr + i);
+    i = i + 1;
+  };
+  let released: u64 = os.free_bytes(b.ptr as u64);
+  b.ptr = fresh;
+  b.cap = next;
+};
+
+let buf_byte = func(b: Mut(Buf), v: u8) {
+  buf_reserve(b, 1);
+  deref(b.ptr + b.len) = v;
+  b.len = b.len + 1;
+};
+
+let buf_put = func(b: Mut(Buf), s: Slice(u8)) {
+  buf_reserve(b, s.len);
+  loop cp(i: u64 = 0) while i < s.len {
+    deref(b.ptr + b.len) = s[i];
+    b.len = b.len + 1;
+    i = i + 1;
+  };
+};
+
+let buf_span = func(b: Mut(Buf), s: Slice(u8), from: u64, to: u64) {
+  if to <= from {
+    return;
+  }
+  buf_reserve(b, to - from);
+  loop cp(i: u64 = from) while i < to {
+    deref(b.ptr + b.len) = s[i];
+    b.len = b.len + 1;
+    i = i + 1;
+  };
+};
+
+let buf_u64 = func(b: Mut(Buf), v: u64) {
+  if v >= 10 {
+    buf_u64(b, v / 10);
+  }
+  buf_byte(b, (48 + (v % 10)) as u8);
+};
+
+let diag_text = func(path: Slice(u8), line: u64, col: u64, rule: Slice(u8)) -> Slice(u8) {
+  let b0: Buf = buf_new(96);
+  let b: Mut(Buf) = mut_of(b0);
+  buf_put(b, path);
+  buf_byte(b, 58);
+  buf_u64(b, line);
+  buf_byte(b, 58);
+  buf_u64(b, col);
+  buf_put(b, ": warning [");
+  buf_put(b, rule);
+  buf_put(b, "]\n");
+  return make_slice(Slice(u8), ptr_cast(Ref(u8), b.ptr), b.len);
+};
+
+let eprint_path = func(lead: Slice(u8), path: Slice(u8), tail: Slice(u8)) {
+  let b0: Buf = buf_new(96);
+  let b: Mut(Buf) = mut_of(b0);
+  buf_put(b, lead);
+  buf_put(b, path);
+  buf_put(b, tail);
+  let view: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), b.ptr), b.len);
+  let n: u64 = os.eprint(view);
+  let released: u64 = os.free_bytes(b.ptr as u64);
+};
+
+let eprint_reader = func(path: Slice(u8), line: u64, col: u64, kind: u64) {
+  let b0: Buf = buf_new(128);
+  let b: Mut(Buf) = mut_of(b0);
+  buf_put(b, "lain_tidy: ");
+  buf_put(b, path);
+  buf_byte(b, 58);
+  buf_u64(b, line);
+  buf_byte(b, 58);
+  buf_u64(b, col);
+  buf_put(b, ": reader error ");
+  buf_u64(b, kind);
+  buf_byte(b, 10);
+  let view: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), b.ptr), b.len);
+  let n: u64 = os.eprint(view);
+  let released: u64 = os.free_bytes(b.ptr as u64);
+};
+
+let is_hspace = func(c: u8) -> bool {
+  if c == 32 {
+    return true;
+  }
+  if c == 9 {
+    return true;
+  }
+  return false;
+};
+
+let close_of = func(open: u64) -> u64 {
+  if open == 40 {
+    return 41;
+  }
+  if open == 91 {
+    return 93;
+  }
+  return 125;
+};
+
+let pos_of = func(src: Slice(u8), off: u64) -> Pos {
+  let lim: u64 = if off > src.len { src.len } else { off };
+  let line: u64 = 1;
+  let col: u64 = 1;
+  let i: u64 = 0;
+  while i < lim {
+    let c: u64 = src[i] as u64;
+    if c == 10 {
+      line = line + 1;
+      col = 1;
+    } else {
+      col = col + 1;
+    }
+    i = i + 1;
+  };
+  return Pos { line: line, col: col };
+};
+
+let skip_string = func(src: Slice(u8), at: u64) -> u64 {
+  let n: u64 = src.len;
+  let i: u64 = at + 1;
+  let done: bool = false;
+  while (i < n) and (done == false) {
+    let c: u64 = src[i] as u64;
+    if c == 92 {
+      i = i + 2;
+    } else if c == 34 {
+      i = i + 1;
+      done = true;
+    } else {
+      i = i + 1;
+    }
+  };
+  let stop: u64 = if i > n { n } else { i };
+  return stop;
+};
+
+let scan_comments = func(src: Slice(u8), list: Mut(Cmt), fill: u64) -> u64 {
+  let n: u64 = src.len;
+  let count: u64 = 0;
+  let i: u64 = 0;
+  while i < n {
+    let c: u64 = src[i] as u64;
+    if c == 34 {
+      i = skip_string(src, i);
+    } else if (c == 47) and ((i + 1) < n) and ((src[i + 1] as u64) == 47) {
+      let start: u64 = i;
+      let j: u64 = i + 2;
+      while (j < n) and ((src[j] as u64) != 10) {
+        j = j + 1;
+      };
+      if fill == 1 {
+        let p: Pos = pos_of(src, start);
+        let slot: Mut(Cmt) = cmt_at(list, count);
+        slot.from = start;
+        slot.to = j;
+        slot.line = p.line;
+        slot.col = p.col;
+        slot.block = 0;
+      }
+      count = count + 1;
+      i = j;
+    } else if (c == 47) and ((i + 1) < n) and ((src[i + 1] as u64) == 42) {
+      let start: u64 = i;
+      let j: u64 = i + 2;
+      let done: bool = false;
+      while (j < n) and (done == false) {
+        let d: u64 = src[j] as u64;
+        if (d == 42) and ((j + 1) < n) and ((src[j + 1] as u64) == 47) {
+          j = j + 2;
+          done = true;
+        } else {
+          j = j + 1;
+        }
+      };
+      if fill == 1 {
+        let p: Pos = pos_of(src, start);
+        let slot: Mut(Cmt) = cmt_at(list, count);
+        slot.from = start;
+        slot.to = j;
+        slot.line = p.line;
+        slot.col = p.col;
+        slot.block = 1;
+      }
+      count = count + 1;
+      i = j;
+    } else {
+      i = i + 1;
+    }
+  };
+  return count;
+};
+
+let strip_comments = func(src: Slice(u8), list: Mut(Cmt), count: u64) -> Buf {
+  let out: Buf = buf_new(src.len);
+  let o: Mut(Buf) = mut_of(out);
+  let cursor: u64 = 0;
+  loop it(k: u64 = 0) while k < count {
+    let cm: Cmt = deref(cmt_at(list, k));
+    if cm.block == 0 {
+      let trim: u64 = loop tb(p: u64 = cm.from) while (p > cursor) and is_hspace(src[p - 1]) {
+        p = p - 1;
+      };
+      buf_span(o, src, cursor, trim);
+    } else {
+      buf_span(o, src, cursor, cm.from);
+      let j: u64 = cm.from;
+      while j < cm.to {
+        if (src[j] as u64) == 10 {
+          buf_byte(o, 10);
+        }
+        j = j + 1;
+      };
+    }
+    cursor = cm.to;
+    k = k + 1;
+  };
+  buf_span(o, src, cursor, src.len);
+  return out;
+};
+
+let map_leaf_kind = func(k: u64) -> u64 {
+  if k == rd.RawKind.TokenIdent as u64 {
+    return TokKind.Ident as u64;
+  }
+  if k == rd.RawKind.TokenNumber as u64 {
+    return TokKind.Number as u64;
+  }
+  if k == rd.RawKind.TokenString as u64 {
+    return TokKind.String as u64;
+  }
+  return TokKind.Punct as u64;
+};
+
+let push_tok = func(c: Mut(Ctx), off: u64, len: u64, kind: u64, ch: u64) {
+  let t: Mut(Tok) = tok_at(c.toks, c.n);
+  t.off = off;
+  t.len = len;
+  t.line = c.line;
+  t.col = c.col;
+  t.kind = kind;
+  t.ch = ch;
+  c.n = c.n + 1;
+};
+
+let advance_to = func(c: Mut(Ctx), off: u64) {
+  while c.at < off {
+    let ch: u64 = c.src[c.at] as u64;
+    if ch == 10 {
+      c.line = c.line + 1;
+      c.col = 1;
+    } else {
+      c.col = c.col + 1;
+    }
+    c.at = c.at + 1;
+  };
+};
+
+let emit_at = func(c: Mut(Ctx), off: u64, len: u64, kind: u64, ch: u64) {
+  advance_to(c, off);
+  push_tok(c, off, len, kind, ch);
+};
+
+let walk = func(c: Mut(Ctx), ast: rd.RawAst, id: u64) {
+  let node: rd.RawNode = rd.node_get(ast.nodes, id);
+  let kind: u64 = node.kind;
+  let sp: rd.Span = rd.span_at(ast.spans, node.span_id);
+  if kind == rd.RawKind.Root as u64 {
+    loop rt(k: u64 = 0) while k < node.child_count {
+      walk(c, ast, rd.child_id(ast, id, k));
+      k = k + 1;
+    };
+    return;
+  }
+  if (kind == rd.RawKind.GroupParen as u64) or (kind == rd.RawKind.GroupBracket as u64) or (kind == rd.RawKind.GroupBrace as u64) {
+    let open_ch: u64 = 40;
+    let stop_ch: u64 = 41;
+    if kind == rd.RawKind.GroupBracket as u64 {
+      open_ch = 91;
+      stop_ch = 93;
+    }
+    if kind == rd.RawKind.GroupBrace as u64 {
+      open_ch = 123;
+      stop_ch = 125;
+    }
+    emit_at(c, sp.offset, 1, TokKind.Open as u64, open_ch);
+    loop ch(k: u64 = 0) while k < node.child_count {
+      walk(c, ast, rd.child_id(ast, id, k));
+      k = k + 1;
+    };
+    let close_at: u64 = if sp.len > 0 { sp.offset + sp.len - 1 } else { sp.offset };
+    emit_at(c, close_at, 1, TokKind.Close as u64, stop_ch);
+    return;
+  }
+  emit_at(c, sp.offset, sp.len, map_leaf_kind(kind), 0);
+};
+
+let tok_kind_is = func(c: Mut(Ctx), i: u64, k: u64) -> bool {
+  if i >= c.n {
+    return false;
+  }
+  let t: Tok = deref(tok_at(c.toks, i));
+  return t.kind == k;
+};
+
+let tok_text = func(src: Slice(u8), t: Tok) -> Slice(u8) {
+  return make_slice(Slice(u8), src.ptr + t.off, t.len);
+};
+
+let tok_is = func(c: Mut(Ctx), i: u64, s: Slice(u8)) -> bool {
+  if i >= c.n {
+    return false;
+  }
+  let t: Tok = deref(tok_at(c.toks, i));
+  if (t.kind == TokKind.Open as u64) or (t.kind == TokKind.Close as u64) or (t.kind == TokKind.String as u64) {
+    return false;
+  }
+  let tx: Slice(u8) = tok_text(c.src, t);
+  return str.eq(tx, s);
+};
+
+let tok_open_is = func(c: Mut(Ctx), i: u64, ch: u64) -> bool {
+  if i >= c.n {
+    return false;
+  }
+  let t: Tok = deref(tok_at(c.toks, i));
+  return (t.kind == TokKind.Open as u64) and (t.ch == ch);
+};
+
+let tok_any_open = func(c: Mut(Ctx), i: u64) -> bool {
+  return tok_kind_is(c, i, TokKind.Open as u64);
+};
+
+let match_close = func(c: Mut(Ctx), open_at: u64) -> u64 {
+  let op: Tok = deref(tok_at(c.toks, open_at));
+  let stop: u64 = close_of(op.ch);
+  let depth: u64 = 0;
+  let j: u64 = open_at;
+  while j < c.n {
+    let t: Tok = deref(tok_at(c.toks, j));
+    if (t.kind == TokKind.Open as u64) and (t.ch == op.ch) {
+      depth = depth + 1;
+    } else if (t.kind == TokKind.Close as u64) and (t.ch == stop) {
+      depth = depth - 1;
+      if depth == 0 {
+        return j;
+      }
+    }
+    j = j + 1;
+  };
+  return c.n;
+};
+
+let emit = func(c: Mut(Ctx), line: u64, col: u64, rule: Slice(u8)) {
+  let msg: Slice(u8) = diag_text(c.path, line, col, rule);
+  io.StdoutSink.write(msg);
+  let released: u64 = os.free_bytes(msg.ptr as u64);
+  c.diag = c.diag + 1;
+};
+
+let head_of = func(c: Mut(Ctx), i: u64) -> Head {
+  let bad: Head = Head { ok: 0, body_open: 0, body_close: 0, ret_start: 0, ret_end: 0 };
+  if (i + 1) >= c.n {
+    return bad;
+  }
+  let t: Tok = deref(tok_at(c.toks, i + 1));
+  if t.kind != TokKind.Ident as u64 {
+    return bad;
+  }
+  let j: u64 = i + 2;
+  if tok_is(c, j, "=") == false {
+    return bad;
+  }
+  j = j + 1;
+  if tok_is(c, j, "func") == false {
+    return bad;
+  }
+  j = j + 1;
+  if tok_open_is(c, j, 40) == false {
+    return bad;
+  }
+  let pclose: u64 = match_close(c, j);
+  if pclose >= c.n {
+    return bad;
+  }
+  j = pclose + 1;
+  let ret_start: u64 = 0;
+  let ret_end: u64 = 0;
+  if tok_is(c, j, "->") {
+    if (j + 1) >= c.n {
+      return bad;
+    }
+    ret_start = j + 1;
+    if tok_any_open(c, ret_start) {
+      ret_end = match_close(c, ret_start) + 1;
+    } else {
+      ret_end = ret_start + 1;
+      if tok_open_is(c, ret_end, 40) or tok_open_is(c, ret_end, 91) {
+        ret_end = match_close(c, ret_end) + 1;
+      }
+    }
+    j = ret_end;
+  }
+  if tok_is(c, j, "!") {
+    j = j + 1;
+    if tok_open_is(c, j, 123) {
+      j = match_close(c, j) + 1;
+    }
+  }
+  if tok_open_is(c, j, 123) == false {
+    return bad;
+  }
+  let bclose: u64 = match_close(c, j);
+  if bclose >= c.n {
+    return bad;
+  }
+  return Head { ok: 1, body_open: j, body_close: bclose, ret_start: ret_start, ret_end: ret_end };
+};
+
+let is_discard_name = func(name: Slice(u8)) -> bool {
+  if str.eq(name, "dead") or str.eq(name, "ignored") {
+    return true;
+  }
+  if str.eq(name, "seen") or str.eq(name, "dummy") or str.eq(name, "unused") {
+    return true;
+  }
+  return false;
+};
+
+let check_upstream = func(c: Mut(Ctx), i: u64, name: Slice(u8), h: Head) {
+  let lt: Tok = deref(tok_at(c.toks, i));
+  let width: u64 = h.body_close - h.body_open;
+  let inner: u64 = if width > 1 { width - 1 } else { 0 };
+  let ret_one: u64 = if h.ret_end == h.ret_start + 1 { 1 } else { 0 };
+  let scalar_ret: u64 = 0;
+  if (ret_one == 1) and (tok_is(c, h.ret_start, "u64") or tok_is(c, h.ret_start, "i64")) {
+    scalar_ret = 1;
+  }
+  if (inner == 3) and (scalar_ret == 1) {
+    if tok_is(c, h.body_open + 1, "return") and tok_kind_is(c, h.body_open + 2, TokKind.Number as u64) and tok_is(c, h.body_open + 3, ";") {
+      emit(c, lt.line, lt.col, "no-fake-const-getter");
+    }
+  }
+  if inner >= 6 {
+    if tok_is(c, h.body_open + 1, "return") and tok_kind_is(c, h.body_open + 2, TokKind.Ident as u64) and tok_is(c, h.body_open + 3, ".") and tok_kind_is(c, h.body_open + 4, TokKind.Ident as u64) and tok_open_is(c, h.body_open + 5, 40) {
+      let close: u64 = match_close(c, h.body_open + 5);
+      if (close + 2) == h.body_close {
+        if tok_is(c, close + 1, ";") {
+          emit(c, lt.line, lt.col, "no-one-line-forwarder");
+        }
+      }
+    }
+  }
+  if (ret_one == 1) and tok_is(c, h.ret_start, "u64") {
+    if str.starts_with(name, "is_") or str.starts_with(name, "has_") {
+      emit(c, lt.line, lt.col, "no-u64-bool-pred");
+    }
+  }
+};
+
+let check_let = func(c: Mut(Ctx), i: u64) {
+  if (i + 1) >= c.n {
+    return;
+  }
+  let name_t: Tok = deref(tok_at(c.toks, i + 1));
+  if name_t.kind != TokKind.Ident as u64 {
+    return;
+  }
+  let name: Slice(u8) = tok_text(c.src, name_t);
+  let lt: Tok = deref(tok_at(c.toks, i));
+  if (i + 4) < c.n {
+    if tok_is(c, i + 2, ":") and tok_is(c, i + 3, "Array") and tok_open_is(c, i + 4, 40) {
+      let close: u64 = match_close(c, i + 4);
+      if (close > (i + 5)) and (close < c.n) {
+        if tok_is(c, close - 1, "1") and tok_is(c, close - 2, ",") {
+          emit(c, lt.line, lt.col, "no-array-singleton");
+        }
+      }
+    }
+    if tok_is(c, i + 2, ":") and tok_is(c, i + 3, "u64") and tok_is(c, i + 4, "=") {
+      if is_discard_name(name) {
+        emit(c, lt.line, lt.col, "no-dead-discard");
+      }
+    }
+  }
+  let h: Head = head_of(c, i);
+  if h.ok == 1 {
+    check_upstream(c, i, name, h);
+  }
+};
+
+let check_pass = func(path: Slice(u8), src: Slice(u8)) -> i64 {
+  let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
+  let scan: rd.RawAst = rd.parse(src, probe);
+  if (scan.kind != rd.ReadStatus.ErrCapacity as u64) and (scan.kind != rd.ReadStatus.Ok as u64) {
+    eprint_reader(path, scan.err_line, scan.err_col, scan.kind);
+    return -1;
+  }
+  let need: u64 = scan.needed + 64;
+  let arena_raw: u64 = os.alloc_bytes(need);
+  let arena: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), arena_raw), need);
+  let ast: rd.RawAst = rd.parse(src, arena);
+  if ast.kind != rd.ReadStatus.Ok as u64 {
+    eprint_reader(path, ast.err_line, ast.err_col, ast.kind);
+    let released: u64 = os.free_bytes(arena_raw);
+    return -1;
+  }
+  let tok_cap: u64 = ast.node_count * 2 + 8;
+  let tok_raw: u64 = os.alloc_bytes(tok_cap * size_of(Tok));
+  let c0: Ctx = Ctx {
+    src: src,
+    toks: ptr_cast(Mut(Tok), tok_raw),
+    n: 0,
+    path: path,
+    diag: 0,
+    at: 0,
+    line: 1,
+    col: 1
+  };
+  let c: Mut(Ctx) = mut_of(c0);
+  walk(c, ast, ast.root);
+  let i: u64 = 0;
+  while i < c.n {
+    let t: Tok = deref(tok_at(c.toks, i));
+    if (t.kind == TokKind.Ident as u64) and str.eq(tok_text(c.src, t), "let") {
+      check_let(c, i);
+    }
+    i = i + 1;
+  };
+  let cc: u64 = scan_comments(src, null_ref(Mut(Cmt)), 0);
+  if cc > 0 {
+    let craw: u64 = os.alloc_bytes(cc * size_of(Cmt));
+    let clist: Mut(Cmt) = ptr_cast(Mut(Cmt), craw);
+    let got: u64 = scan_comments(src, clist, 1);
+    loop it(k: u64 = 0) while k < got {
+      let cm: Cmt = deref(cmt_at(clist, k));
+      emit(c, cm.line, cm.col, "no-comments");
+      k = k + 1;
+    };
+    let released: u64 = os.free_bytes(craw);
+  }
+  let total: i64 = c.diag as i64;
+  let released_tok: u64 = os.free_bytes(tok_raw);
+  let released_arena: u64 = os.free_bytes(arena_raw);
+  return total;
+};
+
+let lint_file = func(path: Slice(u8), fix: u64) -> i64 {
+  let loaded: OptSlice.Opt = fs.read_bytes(path);
+  if OptSlice.is_none(loaded) {
+    eprint_path("lain_tidy: cannot read ", path, "\n");
+    return -1;
+  }
+  let raw: MutSlice(u8) = OptSlice.unwrap_or(loaded, make_slice(MutSlice(u8), null_ref(Mut(u8)), 0));
+  let src0: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), raw.ptr), raw.len);
+  let src: Slice(u8) = src0;
+  let fixed_raw: u64 = 0;
+  if fix == 1 {
+    let cc: u64 = scan_comments(src, null_ref(Mut(Cmt)), 0);
+    if cc > 0 {
+      let craw: u64 = os.alloc_bytes(cc * size_of(Cmt));
+      let clist: Mut(Cmt) = ptr_cast(Mut(Cmt), craw);
+      let got: u64 = scan_comments(src, clist, 1);
+      let out: Buf = strip_comments(src, clist, got);
+      let view: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), out.ptr), out.len);
+      let ok: bool = fs.write_bytes(path, view);
+      if ok == false {
+        eprint_path("lain_tidy: cannot write ", path, "\n");
+        let released_a: u64 = os.free_bytes(craw);
+        let released_b: u64 = os.free_bytes(out.ptr as u64);
+        let released_c: u64 = os.free_bytes(raw.ptr as u64);
+        return -1;
+      }
+      src = view;
+      fixed_raw = out.ptr as u64;
+      let released: u64 = os.free_bytes(craw);
+    }
+  }
+  let result: i64 = check_pass(path, src);
+  let released_src: u64 = os.free_bytes(raw.ptr as u64);
+  if fixed_raw != 0 {
+    let released_fix: u64 = os.free_bytes(fixed_raw);
+  }
+  return result;
+};
+
+let usage = func() -> u64 {
+  let msg: Slice(u8) = "usage: lain_tidy [--fix] <file1.lain> [<file2.lain> ...]\n";
+  return os.eprint(msg);
+};
+
+let main = func() -> i64 {
+  let argc: u64 = cli.count();
+  let cap: u64 = if argc > 1 { argc } else { 1 };
+  let raw: u64 = os.alloc_bytes(cap * size_of(Path));
+  let paths: Mut(Path) = ptr_cast(Mut(Path), raw);
+  let np: u64 = 0;
+  let fix: u64 = 0;
+  let bad: u64 = 0;
+  let help: u64 = 0;
+  let i: u64 = 1;
+  while i < argc {
+    let a: cli.OptSlice.Opt = cli.arg(i);
+    let s: Slice(u8) = cli.OptSlice.unwrap_or(a, empty());
+    if str.eq(s, "--fix") {
+      fix = 1;
+    } else if (str.eq(s, "--help")) or (str.eq(s, "-h")) {
+      help = 1;
+    } else if (s.len > 0) and ((s[0] as u64) == 45) {
+      bad = 1;
+    } else {
+      let p: Mut(Path) = path_at(paths, np);
+      p.ptr = s.ptr;
+      p.len = s.len;
+      np = np + 1;
+    }
+    i = i + 1;
+  };
+  if help == 1 {
+    let rc: u64 = usage();
+    return 0;
+  }
+  if (bad == 1) or (np == 0) {
+    let rc: u64 = usage();
+    return 2;
+  }
+  let diag: u64 = 0;
+  let failed: u64 = 0;
+  loop files(k: u64 = 0) while k < np {
+    let path: Slice(u8) = path_slice(deref(path_at(paths, k)));
+    let got: i64 = lint_file(path, fix);
+    if got < 0 {
+      failed = 1;
+    } else {
+      diag = diag + (got as u64);
+    }
+    k = k + 1;
+  };
+  let released: u64 = os.free_bytes(raw);
+  if failed == 1 {
+    return 2;
+  }
+  if diag > 0 {
+    return 1;
+  }
+  return 0;
+};
