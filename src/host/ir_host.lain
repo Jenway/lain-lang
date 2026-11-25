@@ -1,7 +1,8 @@
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
-let c99 = import("src::backend::c99");
+let cw = import("src::backend::c99::writer");
+let cm = import("src::backend::c99::module");
 let mem = import("std::mem");
 let tab = import("src::host::symtab");
 
@@ -1343,19 +1344,19 @@ pub let ir_mod_free = func(h: Mut(HostIr), modv: u64) -> u64 {
   return 0;
 };
 
-let emit_data = func(w: Mut(c99.C99Writer), m: Mut(ModState), i: u64) -> u64 {
+let emit_data = func(w: Mut(cw.C99Writer), m: Mut(ModState), i: u64) -> u64 {
   if i >= m.data_count { return 1; }
   let rec: Mut(DataRec) = data_slot(m.data, m.data_cap, i);
   let bytes: Slice(u8) = make_slice(Slice(u8), rec.bytes, rec.size);
-  let n: u64 = c99.emit_data_decl(w, rec.symbol, bytes, rec.is_writable);
+  let n: u64 = cm.emit_data_decl(w, rec.symbol, bytes, rec.is_writable);
   if n == 0 { return 0; }
   return emit_data(w, m, i + 1);
 };
 
-let emit_procs = func(w: Mut(c99.C99Writer), mv: Ref(vf.IrModule), count: u64,
+let emit_procs = func(w: Mut(cw.C99Writer), mv: Ref(vf.IrModule), count: u64,
                       i: u64) -> u64 {
   if i >= count { return 1; }
-  let n: u64 = c99.emit_proc_c99(w, mv, i);
+  let n: u64 = cm.emit_proc_c99(w, mv, i);
   let modv: vf.IrModule = deref(mv);
   let p: vf.IrProc = vf.proc_at_ref(modv.procs, i);
   if p.is_extern == 0 {
@@ -1374,9 +1375,9 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
   let code: u64 = checks.verify_module_large(mv);
   h.last_verify = code;
   if code != 0 { return fail(h, HOST_ERR_IR()); }
-  let w0: c99.C99Writer = c99.new_writer(buf);
-  let w: Mut(c99.C99Writer) = mut_of(w0);
-  let pn: u64 = c99.emit_preamble(w);
+  let w0: cw.C99Writer = cw.new_writer(buf);
+  let w: Mut(cw.C99Writer) = mut_of(w0);
+  let pn: u64 = cm.emit_preamble(w);
   let dn: u64 = emit_data(w, m, 0);
   if dn == 0 {
     return fail_msg(h, "ir_host: ir_mod_emit_c99 data", HOST_ERR_CAPACITY());
@@ -1386,11 +1387,11 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
     return fail_msg(h, "ir_host: ir_mod_emit_c99 procedures",
                     HOST_ERR_CAPACITY());
   }
-  if c99.writer_ok(w) == 0 {
+  if cw.writer_ok(w) == 0 {
     return fail_msg(h, "ir_host: ir_mod_emit_c99 buffer overflow",
                     HOST_ERR_CAPACITY());
   }
-  return c99.writer_len(w);
+  return cw.writer_len(w);
 };
 
 pub let diag_emit = func(h: Mut(HostIr), span: u64, level: u64, p: Ref(u8),

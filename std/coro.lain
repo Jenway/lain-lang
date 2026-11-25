@@ -84,7 +84,7 @@ comptime if is_windows() {
   extern perf_nanos() -> u64 = lain_perf_nanos;
 
   let os_spawn_thread = func(start: Fn((Mut(u8)) -> c_uint), arg: Mut(u8)) -> Mut(u8) {
-    let slot: Array(u64, 1) = [0];
+    let slot: u64 = 0;
     let out: Mut(u64) = mut_of(slot);
     let rc: c_int = c_pthread_create(out, null_bytes(), start, arg);
     if rc != 0 {
@@ -165,33 +165,35 @@ let null_task = func() -> Mut(CoroTask) {
   return ptr_cast(Mut(CoroTask), 0 as u64);
 };
 
-let sched_slot: Array(u64, 1) = [0];
-let current_slot: Array(u64, 1) = [0];
+let Cell = struct { v: u64 };
+
+let sched_slot: Cell = Cell { };
+let current_slot: Cell = Cell { };
 
 let sched_of = func() -> Mut(FiberSched) {
-  let p: Mut(u64) = mut_of(sched_slot);
-  return ptr_cast(Mut(FiberSched), deref(p));
+  let p: Mut(Cell) = mut_of(sched_slot);
+  return ptr_cast(Mut(FiberSched), deref(p).v);
 };
 
 let set_sched = func(s: Mut(FiberSched)) -> Mut(FiberSched) {
-  let p: Mut(u64) = mut_of(sched_slot);
-  let prev: Mut(FiberSched) = ptr_cast(Mut(FiberSched), deref(p));
-  deref(p) = s as u64;
+  let p: Mut(Cell) = mut_of(sched_slot);
+  let prev: Mut(FiberSched) = ptr_cast(Mut(FiberSched), deref(p).v);
+  deref(p).v = s as u64;
   return prev;
 };
 
 let current_task = func() -> Mut(CoroTask) {
-  let p: Mut(u64) = mut_of(current_slot);
-  return ptr_cast(Mut(CoroTask), deref(p));
+  let p: Mut(Cell) = mut_of(current_slot);
+  return ptr_cast(Mut(CoroTask), deref(p).v);
 };
 
 let set_current_task = func(t: Mut(CoroTask)) {
-  let p: Mut(u64) = mut_of(current_slot);
+  let p: Mut(Cell) = mut_of(current_slot);
   if is_null(t) {
-    deref(p) = 0;
+    deref(p).v = 0;
     return;
   }
-  deref(p) = t as u64;
+  deref(p).v = t as u64;
 };
 
 let task_ready_next = func(t: Mut(CoroTask)) -> Mut(CoroTask) {
@@ -477,7 +479,7 @@ pub let run_fiber_local = func(entry: Fn((Mut(u8)) -> u64), ctx: Mut(u8)) -> u64
 pub let Gen = func(T: Type) -> Module {
   return module {
     let opt = option.Option(T);
-    let active_slot: Array(u64, 1) = [0];
+    let active_slot: Cell = Cell { };
 
     pub let Opt = opt.Opt;
 
@@ -493,8 +495,8 @@ pub let Gen = func(T: Type) -> Module {
     };
 
     let active_gen = func() -> Mut(Self) {
-      let p: Mut(u64) = mut_of(active_slot);
-      return ptr_cast(Mut(Self), deref(p));
+      let p: Mut(Cell) = mut_of(active_slot);
+      return ptr_cast(Mut(Self), deref(p).v);
     };
 
     pub let yield_val = func(v: T) {
@@ -541,12 +543,12 @@ pub let Gen = func(T: Type) -> Module {
     pub let next = func(g: Mut(Self)) -> opt.Opt {
       if g.finished != 0 { return opt.none(); }
       if sync.atomic_u64_load(g.abort, sync.MemOrder.Acquire as u64) != 0 { return opt.none(); }
-      let p: Mut(u64) = mut_of(active_slot);
-      deref(p) = g as u64;
+      let p: Mut(Cell) = mut_of(active_slot);
+      deref(p).v = g as u64;
       g.produced = 0;
       sync.atomic_u64_store(g.turn, 1, sync.MemOrder.Release as u64);
       wait_release(g.turn);
-      deref(p) = 0;
+      deref(p).v = 0;
       if g.finished != 0 { return opt.none(); }
       if g.produced == 0 { return opt.none(); }
       let v: T = g.value;

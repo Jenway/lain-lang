@@ -6,9 +6,10 @@ let ao = import("src::meta::ast_out");
 let sh = import("src::host::source_host");
 let irh = import("src::host::ir_host");
 let vmh = import("src::host::vm_host");
-let eng = import("src::vm::engine");
+let vst = import("src::vm::engine::state");
 let emit_text = import("src::ir::emit_text");
-let c99 = import("src::backend::c99");
+let cw = import("src::backend::c99::writer");
+let cm = import("src::backend::c99::module");
 let vf = import("src::ir::verify::model");
 let opt = import("src::ir::opt");
 let mem = import("std::mem");
@@ -69,10 +70,12 @@ let HostRt = struct {
   release_fast: u64,
 };
 
-let g_rt: Array(u64, 1) = [0];
+let RtCell = struct { v: u64 };
 
-let rt_slot = func() -> MutSlice(u64) {
-  return make_slice(MutSlice(u64), mut_of(g_rt), 1);
+let g_rt: RtCell = RtCell { };
+
+let rt_slot = func() -> Mut(RtCell) {
+  return mut_of(g_rt);
 };
 
 let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
@@ -196,12 +199,12 @@ let host_new = func() -> u64 {
 };
 
 pub let rt_init = func() -> u64 {
-  let s: MutSlice(u64) = rt_slot();
-  if s[0] != 0 { return s[0]; }
+  let s: Mut(RtCell) = rt_slot();
+  if s.v != 0 { return s.v; }
   let raw_ptr: u64 = host_new();
-  s[0] = raw_ptr;
+  s.v = raw_ptr;
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
-  let rc: u64 = c99.set_syms(h.syms);
+  let rc: u64 = cw.set_syms(h.syms);
   if rc != 0 { die("[host_rt] c99 symbol table wiring failed\n", rc); }
   return raw_ptr;
 };
@@ -375,13 +378,15 @@ let read_keep = func(h: Mut(HostRt), p: Ref(u8), n: u64, out_len: Mut(u64)) -> M
 let report_missing = func(dst: Mut(u8), n: u64) -> u64 {
   os.eprint("[host_rt] cannot read source file: ");
   os.eprint(make_slice(Slice(u8), ptr_cast(Ref(u8), dst), n));
-  return os.eprint("\n");
+  os.eprint("\n");
+  return 1;
 };
 
 let report_missing_module = func(modv: Slice(u8)) -> u64 {
   os.eprint("[host_rt] cannot find imported module: ");
   os.eprint(modv);
-  return os.eprint("\n");
+  os.eprint("\n");
+  return 1;
 };
 
 let load_source = func(h: Mut(HostRt), p: Mut(u8), n: u64) -> u64 {
@@ -757,19 +762,19 @@ let module_of = func(m: Mut(irh.ModState)) -> vf.IrModule {
                        m.scratch);
 };
 
-let emit_data_all = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+let emit_data_all = func(w: Mut(cw.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
   if i >= m.data_count { return 1; }
   let at: Mut(irh.DataRec) = m.data + i * size_of(DataRecCell);
   let d: irh.DataRec = deref(at);
   let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
-  let rc: u64 = c99.emit_data_decl(w, d.symbol, bytes, d.is_writable);
+  let rc: u64 = cm.emit_data_decl(w, d.symbol, bytes, d.is_writable);
   return emit_data_all(w, m, i + 1);
 };
 
-let emit_procs_all = func(w: Mut(c99.C99Writer), mv: Ref(vf.IrModule), count: u64,
+let emit_procs_all = func(w: Mut(cw.C99Writer), mv: Ref(vf.IrModule), count: u64,
                           i: u64) -> u64 {
   if i >= count { return 1; }
-  let b: u64 = c99.emit_proc_body_c99(w, mv, i);
+  let b: u64 = cm.emit_proc_body_c99(w, mv, i);
   return emit_procs_all(w, mv, count, i + 1);
 };
 
@@ -835,25 +840,25 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
   }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
-  let w0: c99.C99Writer = c99.new_writer(ms);
-  let w: Mut(c99.C99Writer) = mut_of(w0);
-  let pn: u64 = c99.emit_preamble_lib(w);
+  let w0: cw.C99Writer = cw.new_writer(ms);
+  let w: Mut(cw.C99Writer) = mut_of(w0);
+  let pn: u64 = cm.emit_preamble_lib(w);
   let t_data: u64 = tr.span_begin();
   let dn: u64 = emit_data_all(w, m, 0);
   tr.span_end("c99_emit_data", "c99", t_data, dn);
   let t_decls: u64 = tr.span_begin();
-  let fd: u64 = c99.emit_all_proc_decls(w, mv, 0);
+  let fd: u64 = cm.emit_all_proc_decls(w, mv, 0);
   tr.span_end("c99_emit_proc_decls", "c99", t_decls, fd);
-  let nl: u64 = c99.put_byte(w, 10);
+  let nl: u64 = cw.put_byte(w, 10);
   let t_procs: u64 = tr.span_begin();
   let pr: u64 = emit_procs_all(w, mv, m.proc_count, 0);
   tr.span_end("c99_emit_procs", "c99", t_procs, pr);
   let es: u64 = sym_intern(entry.ptr, entry.len);
   let t_entry: u64 = tr.span_begin();
-  let en: u64 = c99.emit_entry_main(w, mv, es, print_result);
+  let en: u64 = cm.emit_entry_main(w, mv, es, print_result);
   tr.span_end("c99_emit_entry_main", "c99", t_entry, en);
-  let ok: u64 = c99.writer_ok(w);
-  let wrote: u64 = c99.writer_len(w);
+  let ok: u64 = cw.writer_ok(w);
+  let wrote: u64 = cw.writer_len(w);
   if ok == 0 {
     os.free_bytes(raw);
     return note_fail("[host_rt] emit_c99_file buffer overflow\n");
@@ -891,27 +896,27 @@ let split_part_path = func(dst: Mut(u8), prefix: Slice(u8), n: u64) -> Slice(u8)
   return make_slice(Slice(u8), ptr_cast(Ref(u8), dst), d);
 };
 
-let split_writer = func(buf: Mut(u8), cap: u64) -> c99.C99Writer {
+let split_writer = func(buf: Mut(u8), cap: u64) -> cw.C99Writer {
   let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
-  return c99.new_writer(ms);
+  return cw.new_writer(ms);
 };
 
-let split_flush = func(buf: Mut(u8), w: Mut(c99.C99Writer), path: Slice(u8),
+let split_flush = func(buf: Mut(u8), w: Mut(cw.C99Writer), path: Slice(u8),
                        msg: Slice(u8)) -> u64 {
-  let ok: u64 = c99.writer_ok(w);
+  let ok: u64 = cw.writer_ok(w);
   if ok == 0 { return note_fail(msg); }
-  let wrote: u64 = c99.writer_len(w);
+  let wrote: u64 = cw.writer_len(w);
   let out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), wrote);
   let rc: u64 = os.write_file(path, out);
   if rc != 0 { return note_fail(msg); }
   return 0;
 };
 
-let split_include = func(w: Mut(c99.C99Writer), base: Slice(u8), suffix: Slice(u8)) -> u64 {
-  let a: u64 = c99.put_str(w, "#include \"");
-  let b: u64 = c99.put_str(w, base);
-  let c: u64 = c99.put_str(w, suffix);
-  return c99.put_str(w, "\"\n");
+let split_include = func(w: Mut(cw.C99Writer), base: Slice(u8), suffix: Slice(u8)) -> u64 {
+  let a: u64 = cw.put_str(w, "#include \"");
+  let b: u64 = cw.put_str(w, base);
+  let c: u64 = cw.put_str(w, suffix);
+  return cw.put_str(w, "\"\n");
 };
 
 let split_data_rec = func(m: Mut(irh.ModState), i: u64) -> irh.DataRec {
@@ -919,19 +924,19 @@ let split_data_rec = func(m: Mut(irh.ModState), i: u64) -> irh.DataRec {
   return deref(at);
 };
 
-let split_data_externs = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+let split_data_externs = func(w: Mut(cw.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
   if i >= m.data_count { return 1; }
   let d: irh.DataRec = split_data_rec(m, i);
   let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
-  let rc: u64 = c99.emit_data_decl_extern(w, d.symbol, bytes, d.is_writable);
+  let rc: u64 = cm.emit_data_decl_extern(w, d.symbol, bytes, d.is_writable);
   return split_data_externs(w, m, i + 1);
 };
 
-let split_data_defs = func(w: Mut(c99.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
+let split_data_defs = func(w: Mut(cw.C99Writer), m: Mut(irh.ModState), i: u64) -> u64 {
   if i >= m.data_count { return 1; }
   let d: irh.DataRec = split_data_rec(m, i);
   let bytes: Slice(u8) = make_slice(Slice(u8), d.bytes, d.size);
-  let rc: u64 = c99.emit_data_decl_shared(w, d.symbol, bytes, d.is_writable);
+  let rc: u64 = cm.emit_data_decl_shared(w, d.symbol, bytes, d.is_writable);
   return split_data_defs(w, m, i + 1);
 };
 
@@ -960,7 +965,7 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
   let modval: vf.IrModule = module_of(m);
   let mv: Ref(vf.IrModule) = ref_of(modval);
   let es: u64 = sym_intern(entry.ptr, entry.len);
-  let pi: u64 = c99.find_proc(mv, es);
+  let pi: u64 = cw.find_proc(mv, es);
   if pi == vf.NO_REGION() {
     return note_fail("[host_rt] emit_c99_split: entry procedure not found\n");
   }
@@ -974,53 +979,53 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
   let base0: Slice(u8) = split_base(prefix);
   let inc_base: Slice(u8) = if base0.len == 0 { prefix } else { base0 };
   let step: u64 = if batch == 0 { 400 } else { batch };
-  let mark: MutSlice(u64) = c99.compute_reachable_procs(mv, pi);
-  let guard: u64 = c99.fnv1a_hash(prefix);
+  let mark: MutSlice(u64) = cw.compute_reachable_procs(mv, pi);
+  let guard: u64 = cm.fnv1a_hash(prefix);
 
-  let w10: c99.C99Writer = split_writer(buf, cap);
-  let w1: Mut(c99.C99Writer) = mut_of(w10);
-  let w1s: u64 = c99.writer_set_split(w1, 1);
-  let g0: u64 = c99.put_str(w1, "#ifndef LAIN_SPLIT_C_");
-  let g1: u64 = c99.put_u64_hex(w1, guard);
-  let g2: u64 = c99.put_str(w1, "\n#define LAIN_SPLIT_C_");
-  let g3: u64 = c99.put_u64_hex(w1, guard);
-  let g4: u64 = c99.put_str(w1, "\n");
-  let g5: u64 = c99.emit_split_preamble_shared(w1);
+  let w10: cw.C99Writer = split_writer(buf, cap);
+  let w1: Mut(cw.C99Writer) = mut_of(w10);
+  let w1s: u64 = cw.writer_set_split(w1, 1);
+  let g0: u64 = cw.put_str(w1, "#ifndef LAIN_SPLIT_C_");
+  let g1: u64 = cw.put_u64_hex(w1, guard);
+  let g2: u64 = cw.put_str(w1, "\n#define LAIN_SPLIT_C_");
+  let g3: u64 = cw.put_u64_hex(w1, guard);
+  let g4: u64 = cw.put_str(w1, "\n");
+  let g5: u64 = cm.emit_split_preamble_shared(w1);
   let g6: u64 = split_data_externs(w1, m, 0);
-  let g7: u64 = c99.emit_reachable_proc_decls(w1, mv, mark);
-  let g8: u64 = c99.put_str(w1, "\n#endif\n");
+  let g7: u64 = cm.emit_reachable_proc_decls(w1, mv, mark);
+  let g8: u64 = cw.put_str(w1, "\n#endif\n");
   let shared_path: Slice(u8) = split_path(p_buf, prefix, "_shared.h");
   let rc_s: u64 = split_flush(buf, w1, shared_path,
                               "[host_rt] emit_c99_split: failed to write shared header\n");
   if rc_s != 0 {
-    let rel_s: u64 = c99.release_reachable_procs(mark);
+    let rel_s: u64 = cw.release_reachable_procs(mark);
     os.free_bytes(raw);
     return rc_s;
   }
 
-  let w20: c99.C99Writer = split_writer(buf, cap);
-  let w2: Mut(c99.C99Writer) = mut_of(w20);
-  let w2s: u64 = c99.writer_set_split(w2, 1);
+  let w20: cw.C99Writer = split_writer(buf, cap);
+  let w2: Mut(cw.C99Writer) = mut_of(w20);
+  let w2s: u64 = cw.writer_set_split(w2, 1);
   let d_inc: u64 = split_include(w2, inc_base, "_shared.h");
-  let d_sep: u64 = c99.put_str(w2, "\n");
+  let d_sep: u64 = cw.put_str(w2, "\n");
   let d_def: u64 = split_data_defs(w2, m, 0);
   let data_path: Slice(u8) = split_path(p_buf, prefix, "_data.c");
   let rc_d: u64 = split_flush(buf, w2, data_path,
                               "[host_rt] emit_c99_split: failed to write data file\n");
   if rc_d != 0 {
-    let rel_d: u64 = c99.release_reachable_procs(mark);
+    let rel_d: u64 = cw.release_reachable_procs(mark);
     os.free_bytes(raw);
     return rc_d;
   }
 
   let parts_rc: u64 = loop c(lo: u64 = 0, part: u64 = 0) while 1 {
     if lo >= m.proc_count { break c(0); }
-    let wp0: c99.C99Writer = split_writer(buf, cap);
-    let wp: Mut(c99.C99Writer) = mut_of(wp0);
-    let wps: u64 = c99.writer_set_split(wp, 1);
+    let wp0: cw.C99Writer = split_writer(buf, cap);
+    let wp: Mut(cw.C99Writer) = mut_of(wp0);
+    let wps: u64 = cw.writer_set_split(wp, 1);
     let p_inc: u64 = split_include(wp, inc_base, "_shared.h");
-    let p_sep: u64 = c99.put_str(wp, "\n");
-    let p_body: u64 = c99.emit_reachable_proc_bodies_range(wp, mv, mark, lo, lo + step);
+    let p_sep: u64 = cw.put_str(wp, "\n");
+    let p_body: u64 = cm.emit_reachable_proc_bodies_range(wp, mv, mark, lo, lo + step);
     let part_path: Slice(u8) = split_part_path(p_buf, prefix, part);
     let rc_p: u64 = split_flush(buf, wp, part_path,
                                 "[host_rt] emit_c99_split: failed to write procedure part\n");
@@ -1029,24 +1034,24 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
     part = part + 1;
   };
   if parts_rc != 0 {
-    let rel_p: u64 = c99.release_reachable_procs(mark);
+    let rel_p: u64 = cw.release_reachable_procs(mark);
     os.free_bytes(raw);
     return parts_rc;
   }
 
-  let w30: c99.C99Writer = split_writer(buf, cap);
-  let w3: Mut(c99.C99Writer) = mut_of(w30);
-  let w3s: u64 = c99.writer_set_split(w3, 1);
+  let w30: cw.C99Writer = split_writer(buf, cap);
+  let w3: Mut(cw.C99Writer) = mut_of(w30);
+  let w3s: u64 = cw.writer_set_split(w3, 1);
   let m_inc: u64 = split_include(w3, inc_base, "_shared.h");
-  let m_sep: u64 = c99.put_str(w3, "\n");
-  let m_glob: u64 = c99.emit_split_main_globals(w3);
-  let m_sep2: u64 = c99.put_str(w3, "\n");
-  let m_main: u64 = c99.emit_entry_main(w3, mv, es, print_result);
+  let m_sep: u64 = cw.put_str(w3, "\n");
+  let m_glob: u64 = cm.emit_split_main_globals(w3);
+  let m_sep2: u64 = cw.put_str(w3, "\n");
+  let m_main: u64 = cm.emit_entry_main(w3, mv, es, print_result);
   let main_path: Slice(u8) = split_path(p_buf, prefix, "_main.c");
   let rc_m: u64 = split_flush(buf, w3, main_path,
                               "[host_rt] emit_c99_split: failed to write entry file\n");
   if rc_m != 0 {
-    let rel_m: u64 = c99.release_reachable_procs(mark);
+    let rel_m: u64 = cw.release_reachable_procs(mark);
     os.free_bytes(raw);
     return rc_m;
   }
@@ -1063,7 +1068,7 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
   let mf_path: Slice(u8) = split_path(p_buf, prefix, "_manifest.txt");
   let mf_out: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), mf), mf_c);
   let mf_rc: u64 = os.write_file(mf_path, mf_out);
-  let rel_all: u64 = c99.release_reachable_procs(mark);
+  let rel_all: u64 = cw.release_reachable_procs(mark);
   os.free_bytes(raw);
   if mf_rc != 0 {
     return note_fail("[host_rt] emit_c99_split: failed to write manifest\n");
@@ -1073,9 +1078,9 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
 };
 
 let trace_kind_cat = func(kind: u64) -> Slice(u8) {
-  if kind == eng.TraceKind.Enter { return "vm_enter"; }
-  if kind == eng.TraceKind.Exit { return "vm_exit"; }
-  if kind == eng.TraceKind.Trap { return "vm_trap"; }
+  if kind == (vst.TraceKind.Enter as u64) { return "vm_enter"; }
+  if kind == (vst.TraceKind.Exit as u64) { return "vm_exit"; }
+  if kind == (vst.TraceKind.Trap as u64) { return "vm_trap"; }
   return "vm_trace";
 };
 
@@ -1088,7 +1093,7 @@ let sub_name = func(h: Mut(HostRt), sym: u64) -> Slice(u8) {
 
 let emit_vm_trace = func(h: Mut(HostRt), i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
-  let ev: eng.TraceEvent = vmh.last_trace_at(h.vm, i);
+  let ev: vst.TraceEvent = vmh.last_trace_at(h.vm, i);
   let ts: u64 = tr.span_begin_tid();
   tr.span_end_tid(sub_name(h, ev.sub_sym), trace_kind_cat(ev.kind as u64), ts, ev.steps,
                   tr.Lane.Vm as u64);
@@ -1196,7 +1201,7 @@ pub let print_diags = func() -> u64 {
     let e: u64 = if span == 0 { d } else { put_text(buf, d, ")") };
     let f: u64 = put_text(buf, e, "\n");
     let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), f);
-    let wrote: u64 = os.eprint(line);
+    os.eprint(line);
     os.free_bytes(raw);
     i = i + 1;
   };
@@ -1212,9 +1217,9 @@ let report_at = func(path: Slice(u8), text: Slice(u8), span: u64,
   let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
   let n: u64 = err.format_loc_err(ms, path, text, span, msg);
   let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), n);
-  let rc: u64 = os.eprint(line);
+  os.eprint(line);
   os.free_bytes(raw);
-  return rc;
+  return 1;
 };
 
 pub let report_fail_at = func(src: u64, span: u64, msg: Slice(u8)) -> u64 {
@@ -1236,9 +1241,9 @@ pub let report_err = func(info: err.ErrInfo) -> u64 {
   let ms: MutSlice(u8) = make_slice(MutSlice(u8), buf, cap);
   let n: u64 = err.format_err(info, ms);
   let line: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), buf), n);
-  let rc: u64 = os.eprint(line);
+  os.eprint(line);
   os.free_bytes(raw);
-  return rc;
+  return 1;
 };
 
 pub let report_source_fail = func(path: Slice(u8)) -> u64 {

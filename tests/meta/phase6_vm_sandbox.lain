@@ -3,7 +3,9 @@ let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
-let eng = import("src::vm::engine");
+let st = import("src::vm::engine::state");
+let cs = import("src::vm::engine::caps");
+let run = import("src::vm::engine::run");
 
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
@@ -459,8 +461,8 @@ let build_divzero = func() -> vf.IrModule {
   return vf.builder_module(b, 92);
 };
 
-let run_image = func(m: vf.IrModule, quota: eng.Quota, caps: Mut(eng.CapTable),
-                     entry: u64, args: Slice(u64)) -> eng.Result {
+let run_image = func(m: vf.IrModule, quota: st.Quota.Self, caps: Mut(cs.CapTable.Self),
+                     entry: u64, args: Slice(u64)) -> st.Result {
   let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
   let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
   let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
@@ -488,9 +490,9 @@ let run_image = func(m: vf.IrModule, quota: eng.Quota, caps: Mut(eng.CapTable),
   };
   let img: Mut(im.VmImage) = ptr_cast(Mut(im.VmImage), layout_ptr() + 9856);
   let le: u64 = im.image_load(ref_of(m), space, lay0, img);
-  if le != 0 { return eng.vm_result_trap(eng.VmTrap.State); }
+  if le != 0 { return st.vm_trap_result_bits(st.VmTrap.State as u64, st.Subcode.AssemblyFailed as u64); }
   let tcb_arena: MutSlice(u8) = make_slice(MutSlice(u8), tcb_ptr(), 12288);
-  return eng.vm_apply(ref_of(deref(img)), space, caps, quota, 1, entry, args, tcb_arena);
+  return run.vm_apply(ref_of(deref(img)), space, caps, quota, 1, entry, args, tcb_arena);
 };
 
 let HostCapsSig = sig {
@@ -499,17 +501,17 @@ let HostCapsSig = sig {
 };
 
 let HostCaps: HostCapsSig = module {
-  pub let Self = eng.CapTable.Self;
+  pub let Self = cs.CapTable.Self;
   pub let invoke = func(self: Mut(Self), link_name: u64, args: Slice(u64)) -> u64 {
-    let hit: u64 = eng.caps_find(self, link_name, 0);
+    let hit: u64 = cs.CapTable.find(self, link_name, 0);
     if hit == 0 { return 0; }
-    let e: Mut(eng.CapEntry) = self.entries + (hit - 1) * 32;
+    let e: Mut(cs.CapEntry) = self.entries + (hit - 1) * 32;
     let fn: Fn((u64, Slice(u64)) -> u64) = e.invoke_fn;
     return fn(e.context, args);
   };
 };
 
-let invoke_cap = func(table: Mut(eng.CapTable), link_name: u64,
+let invoke_cap = func(table: Mut(cs.CapTable.Self), link_name: u64,
                       args: Slice(u64)) ?{ caps: HostCapsSig } -> u64 {
   return caps.invoke(table, link_name, args);
 };
@@ -518,11 +520,11 @@ let main = func() -> i64 {
   let host_add: Fn((u64, Slice(u64)) -> u64) = func(ctx: u64, args: Slice(u64)) -> u64 {
     return args[0] + 100;
   };
-  let entries: Mut(eng.CapEntry) = ptr_cast(Mut(eng.CapEntry), cap_ptr());
-  let caps0: eng.CapTable = eng.caps_new(entries, 8);
-  let caps: Mut(eng.CapTable) = mut_of(caps0);
-  let reg: u64 = eng.caps_register(caps, 707, eng.CapKind.Function, 0, host_add);
-  let fz: u64 = eng.caps_freeze(caps);
+  let entries: Mut(cs.CapEntry) = ptr_cast(Mut(cs.CapEntry), cap_ptr());
+  let caps0: cs.CapTable.Self = cs.CapTable.new(entries, 8);
+  let caps: Mut(cs.CapTable.Self) = mut_of(caps0);
+  let reg: u64 = cs.CapTable.register(caps, 707, cs.CapKind.Function, 0, host_add);
+  let fz: u64 = cs.CapTable.freeze(caps);
   if reg != 1 { return 10; }
   if fz != 1 { return 11; }
 
@@ -534,12 +536,12 @@ let main = func() -> i64 {
   let m: vf.IrModule = build_sandbox();
   let ve: u64 = checks.verify_module(ref_of(m));
   if ve != 0 { return 20 + ve as i64; }
-  let quota: eng.Quota = eng.Quota.new(4000, 8192, 8);
+  let quota: st.Quota.Self = st.Quota.new(4000, 8192, 8);
   let argv: Array(u64, 1) = [4];
   let args: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(argv)), 1);
-  let ok: eng.Result = run_image(m, quota, caps, 0, args);
-  if ok.status != eng.SliceStatus.Done { return 30; }
-  if ok.trap_kind != eng.VmTrap.None { return 31; }
+  let ok: st.Result = run_image(m, quota, caps, 0, args);
+  if ok.status != (st.SliceStatus.Done as u64) { return 30; }
+  if ok.trap_kind != (st.VmTrap.None as u64) { return 31; }
   if ok.result_val.bits != 63 { return 32; }
 
   let mf: vf.IrModule = build_fuel();
@@ -547,17 +549,17 @@ let main = func() -> i64 {
   if ef != 0 { return 40; }
   let no_args: Array(u64, 1) = [0];
   let empty: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(no_args)), 0);
-  let qf: eng.Quota = eng.Quota.new(64, 0, 4);
-  let rf: eng.Result = run_image(mf, qf, caps, 0, empty);
-  if rf.status != eng.SliceStatus.Trapped { return 41; }
-  if rf.trap_kind != eng.VmTrap.Fuel { return 42; }
+  let qf: st.Quota.Self = st.Quota.new(64, 0, 4);
+  let rf: st.Result = run_image(mf, qf, caps, 0, empty);
+  if rf.status != (st.SliceStatus.Trapped as u64) { return 41; }
+  if rf.trap_kind != (st.VmTrap.Fuel as u64) { return 42; }
 
   let mo: vf.IrModule = build_oob();
   let eo: u64 = checks.verify_module(ref_of(mo));
   if eo != 0 { return 50; }
-  let ro: eng.Result = run_image(mo, quota, caps, 0, empty);
-  if ro.status != eng.SliceStatus.Trapped { return 51; }
-  if ro.trap_kind != eng.VmTrap.MemoryOob { return 52; }
+  let ro: st.Result = run_image(mo, quota, caps, 0, empty);
+  if ro.status != (st.SliceStatus.Trapped as u64) { return 51; }
+  if ro.trap_kind != (st.VmTrap.MemoryOob as u64) { return 52; }
 
   let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
   let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
@@ -572,9 +574,9 @@ let main = func() -> i64 {
   let mz: vf.IrModule = build_divzero();
   let ez: u64 = checks.verify_module(ref_of(mz));
   if ez != 0 { return 70; }
-  let rz: eng.Result = run_image(mz, quota, caps, 0, empty);
-  if rz.status != eng.SliceStatus.Trapped { return 71; }
-  if rz.trap_kind != eng.VmTrap.ArithDomain { return 72; }
+  let rz: st.Result = run_image(mz, quota, caps, 0, empty);
+  if rz.status != (st.SliceStatus.Trapped as u64) { return 71; }
+  if rz.trap_kind != (st.VmTrap.ArithDomain as u64) { return 72; }
 
   let esc0: u64 = vs.check_no_addr_escape(space, 0, 8, vs.Access.Read as u64);
   if esc0 != (vs.Trap.MemBounds as u64) { return 80; }

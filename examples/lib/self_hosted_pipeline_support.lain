@@ -3,10 +3,13 @@ let ao = import("src::meta::ast_out");
 let meta = import("src::meta::ast");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
-let c99 = import("src::backend::c99");
+let cw = import("src::backend::c99::writer");
+let cm = import("src::backend::c99::module");
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
-let eng = import("src::vm::engine");
+let st = import("src::vm::engine::state");
+let cs = import("src::vm::engine::caps");
+let run = import("src::vm::engine::run");
 let codes = import("src::ir::ir_codes");
 
 let BlocksStore = struct {
@@ -211,17 +214,17 @@ pub let run_vm = func() -> VmFacts {
   let img: Mut(im.VmImage) = ptr_cast(Mut(im.VmImage), at(layout_off() + 3072));
   let le: u64 = im.image_load(ref_of(m), space, lay, img);
   if le != 0 {
-    return VmFacts { status: eng.SliceStatus.Trapped, trap: eng.VmTrap.State, result: le, steps: 0 };
+    return VmFacts { status: st.SliceStatus.Trapped as u64, trap: st.VmTrap.State as u64, result: le, steps: 0 };
   }
 
-  let entries: Mut(eng.CapEntry) = ptr_cast(Mut(eng.CapEntry), at(caps_off()));
-  let caps0: eng.CapTable = eng.caps_new(entries, 2);
-  let caps: Mut(eng.CapTable) = mut_of(caps0);
-  let q: eng.Quota = eng.Quota.new(4000, 0, 4);
+  let entries: Mut(cs.CapEntry) = ptr_cast(Mut(cs.CapEntry), at(caps_off()));
+  let caps0: cs.CapTable.Self = cs.CapTable.new(entries, 2);
+  let caps: Mut(cs.CapTable.Self) = mut_of(caps0);
+  let q: st.Quota.Self = st.Quota.new(4000, 0, 4);
   let no_args: Slice(u64) = make_slice(Slice(u64),
       ptr_cast(Ref(u64), at(lists_off())), 0);
   let arena: MutSlice(u8) = slice_at(tcb_off(), 1536);
-  let vr: eng.Result = eng.vm_apply(ref_of(deref(img)), space, caps, q, 1, 0,
+  let vr: st.Result = run.vm_apply(ref_of(deref(img)), space, caps, q, 1, 0,
       no_args, arena);
   return VmFacts {
     status: vr.status,
@@ -238,15 +241,15 @@ pub let C99Facts = struct {
 
 pub let run_c99 = func() -> C99Facts {
   let m: vf.IrModule = build_module();
-  let w0: c99.C99Writer = c99.new_writer(slice_at(c99_off(), 13760));
-  let w: Mut(c99.C99Writer) = mut_of(w0);
-  let n0: u64 = c99.emit_preamble(w);
-  let n1: u64 = c99.emit_proc_c99(w, ref_of(m), 0);
-  if c99.writer_ok(w) == 0 { return C99Facts { bytes: 0, hash: 0 }; }
-  let total: u64 = c99.writer_len(w);
+  let w0: cw.C99Writer = cw.new_writer(slice_at(c99_off(), 13760));
+  let w: Mut(cw.C99Writer) = mut_of(w0);
+  let n0: u64 = cm.emit_preamble(w);
+  let n1: u64 = cm.emit_proc_c99(w, ref_of(m), 0);
+  if cw.writer_ok(w) == 0 { return C99Facts { bytes: 0, hash: 0 }; }
+  let total: u64 = cw.writer_len(w);
   let text: Slice(u8) = make_slice(Slice(u8),
       ptr_cast(Ref(u8), at(c99_off())), total);
-  return C99Facts { bytes: total, hash: c99.fnv1a_hash(text) };
+  return C99Facts { bytes: total, hash: cm.fnv1a_hash(text) };
 };
 
 pub let reset = func() -> u64 {
