@@ -1391,16 +1391,31 @@ let lainc_compile_functor_mod = func(k: Mut(st.State), src: u64, bodyg: u64, par
   return vmod;
 };
 
+let push_snap_mods = func(k: Mut(st.State), snap_buf: Mut(u8), i: u64, cnt: u64) -> u64 {
+  if i >= cnt { return 1; }
+  let base: Mut(u8) = snap_buf + i * 32;
+  let kind: u64 = deref(ptr_cast(Mut(u64), base + 8));
+  if kind == 9 {
+    let a: u64 = deref(ptr_cast(Mut(u64), base + 16));
+    let b: u64 = deref(ptr_cast(Mut(u64), base + 24));
+    gv.push_mod_implicit(k, a, b);
+  }
+  return push_snap_mods(k, snap_buf, i + 1, cnt);
+};
+
 @root
 let lainc_compile_functor_mod_p2 = func(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 {
   let saved_src: u64 = st.st_src(k);
   let saved_vmod: u64 = st.st_vmod(k);
   let cm: u64 = ctf.mark(k);
+  let wm: u64 = gv.mark(k);
   let rs: u64 = ctf.snap_restore(k, snap_buf, snap_cnt);
+  push_snap_mods(k, snap_buf, 0, snap_cnt);
   st.st_set_src(k, src);
   st.st_set_vmod(k, vmod);
   let b: u64 = phase2(k, bodyg, 0, ax.n_count(bodyg));
   if st.st_ok(k) == 0 { let bd: u64 = drop.bind_self_drop(k, vmod); }
+  gv.release(k, wm);
   ctf.release(k, cm);
   st.st_set_vmod(k, saved_vmod);
   st.st_set_src(k, saved_src);

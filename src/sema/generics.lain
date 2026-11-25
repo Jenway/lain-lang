@@ -136,6 +136,7 @@ let push_bound = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u64, v
     let nm: u64 = cp_rec.name;
     let v: Mut(ctf.CtVal) = gu.val_at(vals, i);
     ctf.bind(k, nm, v.kind, v.a, v.b);
+    if v.kind == 9 { gv.push_mod_implicit(k, v.a, v.b); }
   }
   return push_bound(k, ctp_tbl, nct, vals, bound, i + 1);
 };
@@ -191,10 +192,12 @@ let eval_rt_args = func(k: Mut(st.State), pg: u64, pi: u64, argsg: u64, ai: u64,
   let te: u64 = gu.ct_skip_ty(pg, pi + 2);
   let v: Mut(ty.Val) = rtval_at(ab, idx);
   let cm: u64 = ctf.mark(k);
+  let wm: u64 = gv.mark(k);
   push_bound(k, ctp_tbl, nct, vals, bound, 0);
   if gu.ast_has_unbound(pg, pi + 2, te, ctp_tbl, nct, bound) == 0 {
     let wt: Mut(ty.Ty) = ax.new_ty(k);
     cx.parse_type(k, pg, pi + 2, wt);
+    gv.release(k, wm);
     ctf.release(k, cm);
     if st.st_ok(k) != 0 { return idx; }
     let aj: u64 = core_expr(k, argsg, ai, 0, wt, v);
@@ -206,6 +209,7 @@ let eval_rt_args = func(k: Mut(st.State), pg: u64, pi: u64, argsg: u64, ai: u64,
     let nj: u64 = if ax.is_comma(argsg, aj) == 1 { aj + 1 } else { aj };
     return eval_rt_args(k, pg, te, argsg, nj, idx + 1, ab, ctp_tbl, nct, vals, bound);
   }
+  gv.release(k, wm);
   ctf.release(k, cm);
   let aj2: u64 = core_expr(k, argsg, ai, 0, cx.tnone(k), v);
   if st.st_ok(k) != 0 { return idx; }
@@ -325,13 +329,16 @@ let resolve_sig_pass = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRe
   if i >= nct { return 1; }
   let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
   let cm: u64 = ctf.mark(k);
+  let wm: u64 = gv.mark(k);
   push_bound(k, ctp_tbl, nct, vals, bound, 0);
   let sig_e: Mut(modules.SymEntry) = gv.sig_at(k, qg, p.ty_start, p.ty_end);
   if is_null(sig_e) {
+    gv.release(k, wm);
     ctf.release(k, cm);
     return resolve_sig_pass(k, qg, ctp_tbl, nct, vals, bound, i + 1);
   }
   let ok: u64 = resolve_sig_param(k, qg, ctp_tbl, nct, vals, bound, i, sig_e);
+  gv.release(k, wm);
   ctf.release(k, cm);
   if ok == 0 { return 0; }
   if st.st_ok(k) != 0 { return 0; }
@@ -352,17 +359,21 @@ let resolve_givens_rest = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtPara
     }
     if p.def_start != 0 {
       let cm0: u64 = ctf.mark(k);
+      let wm0: u64 = gv.mark(k);
       push_bound(k, ctp_tbl, nct, vals, bound, 0);
       ctfn.ct_eval(k, qg, p.def_start, 0, gu.val_at(vals, i));
+      gv.release(k, wm0);
       ctf.release(k, cm0);
       if st.st_ok(k) != 0 { return 0; }
       deref(gu.word_at(bound, i)) = 1;
       return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
     }
     let cm: u64 = ctf.mark(k);
+    let wm: u64 = gv.mark(k);
     push_bound(k, ctp_tbl, nct, vals, bound, 0);
     let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
     ctfn.ct_eval(k, qg, p.ty_start, 0, tv);
+    gv.release(k, wm);
     ctf.release(k, cm);
     if st.st_ok(k) != 0 { return 0; }
     let target_tid: u64 = ctp.as_type(k, tv);
@@ -481,12 +492,14 @@ pub let call_generic = func(k: Mut(st.State), e: Mut(modules.SymEntry), g: u64, 
   if resolve_givens(k, qg, ctp_tbl, nct, vals, bound, 0) == 0 { st.st_set_vmod(k, prev_vmod); st.st_set_src(k, prev_src); return 0; }
   let hit: Mut(gu.MonoCacheRec) = gu.cache_find(k, e as u64, nct, vals);
   let cm: u64 = ctf.mark(k);
+  let wm: u64 = gv.mark(k);
   push_bound(k, ctp_tbl, nct, vals, bound, 0);
   let sg_raw: Mut(u8) = if is_null(hit) == 0 {
     hit.concrete_sg
   } else {
     build_sig(k, root, pg, ret_i)
   };
+  gv.release(k, wm);
   ctf.release(k, cm);
   st.st_set_vmod(k, prev_vmod);
   st.st_set_src(k, prev_src);

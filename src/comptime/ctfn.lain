@@ -13,6 +13,9 @@ let ctp = import("src::comptime::ctprim");
 
 extern ctfn_compile_vmod(k: Mut(st.State), src: u64, bodyg: u64, parent_modv: u64, vmod: u64) -> u64 = lainc_compile_functor_mod;
 extern resolve_q_bridge(k: Mut(st.State), callee_src: u64, callee_vmod: u64, qg: u64, qag: u64, npos: u64, pos_nms: Mut(u64), pos_vals: Mut(ctf.CtVal), out_nms: Mut(u64), out_vals: Mut(ctf.CtVal)) -> u64 = lainc_resolve_factory_q;
+extern w_mark(k: Mut(st.State)) -> u64 = lainc_witness_mark;
+extern w_release(k: Mut(st.State), m: u64) -> u64 = lainc_witness_release;
+extern w_push_mod(k: Mut(st.State), modv: u64, seal: u64) -> u64 = lainc_witness_push_mod;
 
 let ct_val_at = func(ab: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
   return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), ab) + idx * 24);
@@ -263,6 +266,7 @@ let bind_arr = func(k: Mut(st.State), nms: Mut(u64), ab: Mut(ctf.CtVal), i: u64,
   let v: Mut(ctf.CtVal) = ct_val_at(ab, i);
   let nm: u64 = deref(word_at(nms, i));
   ctf.bind(k, nm, ctf.v_kind(v), ctf.v_a(v), ctf.v_b(v));
+  if ctf.v_kind(v) == 9 { w_push_mod(k, ctf.v_a(v), ctf.v_b(v)); }
   if st.st_ok(k) != 0 { return 0; }
   return bind_arr(k, nms, ab, i + 1, n);
 };
@@ -309,11 +313,13 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, qag: u
   let prev_src: u64 = st.st_src(k);
   let prev_vmod: u64 = st.st_vmod(k);
   let mark: u64 = ctf.mark(k);
+  let wm: u64 = w_mark(k);
   st.st_set_ctdone(k, 0);
   st.st_set_src(k, modules.sym_src(e));
   st.st_set_vmod(k, modules.sym_home(e));
   bind_arr(k, nms, ab, 0, total_args);
   if st.st_ok(k) == 0 { run(k, ax.n_at(root, body)); }
+  w_release(k, wm);
   ctf.release(k, mark);
   st.st_set_vmod(k, prev_vmod);
   st.st_set_src(k, prev_src);
