@@ -1,18 +1,75 @@
 let io = import("std::io");
 
 extern bench_steps() -> u64 = lain_perf_steps;
-extern bench_nanos() -> u64 = lain_perf_nanos;
+
+comptime if is_windows() {
+  @extern(abi = "C", link = "QueryPerformanceCounter")
+  let c_query_performance_counter = func(out: Mut(u64)) -> c_int;
+
+  @extern(abi = "C", link = "QueryPerformanceFrequency")
+  let c_query_performance_frequency = func(out: Mut(u64)) -> c_int;
+
+  let os_counter = func() -> u64 {
+    let slot: u64 = 0;
+    let out: Mut(u64) = mut_of(slot);
+    let ok: c_int = c_query_performance_counter(out);
+    if ok == 0 {
+      return 0;
+    }
+    return deref(out);
+  };
+
+  let os_frequency = func() -> u64 {
+    let slot: u64 = 0;
+    let out: Mut(u64) = mut_of(slot);
+    let ok: c_int = c_query_performance_frequency(out);
+    if ok == 0 {
+      return 0;
+    }
+    return deref(out);
+  };
+
+  let os_nanos = func() -> u64 {
+    let freq: u64 = os_frequency();
+    if freq == 0 {
+      return 0;
+    }
+    let ticks: u64 = os_counter();
+    let sec: u64 = ticks / freq;
+    let rem: u64 = ticks % freq;
+    return sec * 1000000000 + (rem * 1000000000) / freq;
+  };
+} else {
+  let Timespec = struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+  };
+
+  @extern(abi = "C", link = "clock_gettime")
+  let c_clock_gettime = func(clk_id: c_int, ts: Mut(Timespec)) -> c_int;
+
+  let os_nanos = func() -> u64 {
+    let slot: Timespec = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let ts: Mut(Timespec) = mut_of(slot);
+    let ok: c_int = c_clock_gettime(1 as c_int, ts);
+    if ok != 0 {
+      return 0;
+    }
+    let span: Timespec = deref(ts);
+    return (span.tv_sec as u64) * 1000000000 + (span.tv_nsec as u64);
+  };
+}
 
 pub let steps = func() -> u64 {
   return bench_steps();
 };
 
 pub let nanos = func() -> u64 {
-  return bench_nanos();
+  return os_nanos();
 };
 
 pub let elapsed_nanos = func(start: u64) -> u64 {
-  return bench_nanos() - start;
+  return os_nanos() - start;
 };
 
 pub let delta_steps = func(start: u64) -> u64 {
@@ -26,14 +83,14 @@ pub let Sample = struct {
 };
 
 pub let begin = func(name: Slice(u8)) -> Sample {
-  return Sample { name: name, steps: bench_steps(), nanos: bench_nanos() };
+  return Sample { name: name, steps: bench_steps(), nanos: os_nanos() };
 };
 
 pub let finish = func(s: Sample) -> Sample {
   return Sample {
     name: s.name,
     steps: bench_steps() - s.steps,
-    nanos: bench_nanos() - s.nanos,
+    nanos: os_nanos() - s.nanos,
   };
 };
 

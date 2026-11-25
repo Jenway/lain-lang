@@ -1,40 +1,95 @@
 let os = import("std::os");
 
-extern io_write(ptr: Ref(u8), len: u64) -> u64 = lain_io_write;
-extern io_print_i64(v: i64) -> u64 = lain_io_print_i64;
-extern io_print_u64(v: u64) -> u64 = lain_io_print_u64;
-extern io_newline() -> u64 = lain_io_newline;
+comptime if is_windows() {
+  @extern(abi = "C", link = "GetStdHandle")
+  let c_get_std_handle = func(n: c_int) -> Mut(u8);
+
+  @extern(abi = "C", link = "WriteFile")
+  let c_write_file = func(h: Mut(u8), buf: Ref(u8), len: c_uint, written: Mut(c_uint),
+                          ovl: Mut(u8)) -> c_int;
+
+  let os_write_stdout = func(ptr: Ref(u8), len: u64) -> u64 {
+    if len == 0 {
+      return 0;
+    }
+    let h: Mut(u8) = c_get_std_handle(-11 as c_int);
+    if is_null(h) {
+      return 0;
+    }
+    let slot: c_uint = 0;
+    let written: Mut(c_uint) = mut_of(slot);
+    let ok: c_int = c_write_file(h, ptr, len as c_uint, written, null_ref(Mut(u8)));
+    if ok == 0 {
+      return 0;
+    }
+    return deref(written) as u64;
+  };
+} else {
+  @extern(abi = "C", link = "write")
+  let c_write = func(fd: c_int, buf: Ref(u8), len: c_size) -> c_long;
+
+  let os_write_stdout = func(ptr: Ref(u8), len: u64) -> u64 {
+    if len == 0 {
+      return 0;
+    }
+    let rc: c_long = c_write(1 as c_int, ptr, len as c_size);
+    if rc < 0 {
+      return 0;
+    }
+    return rc as u64;
+  };
+}
+
+let write_digits = func(v: u64) -> u64 {
+  let raw: Array(u8, 24) = [0; 24];
+  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), mut_of(raw)), 24);
+  let pos: u64 = 24;
+  let left: u64 = v;
+  while left >= 10 {
+    pos = pos - 1;
+    buf[pos] = (48 + (left % 10)) as u8;
+    left = left / 10;
+  };
+  pos = pos - 1;
+  buf[pos] = (48 + left) as u8;
+  return os_write_stdout(ptr_cast(Ref(u8), buf.ptr) + pos, 24 - pos);
+};
 
 pub let write_str = func(s: Slice(u8)) -> u64 {
-  return io_write(s.ptr, s.len);
+  return os_write_stdout(s.ptr, s.len);
 };
 
 pub let print = func(s: Slice(u8)) -> u64 {
   return write_str(s);
 };
 
+pub let newline = func() -> u64 {
+  return write_str("\n");
+};
+
 pub let println = func(s: Slice(u8)) -> u64 {
-  return write_str(s) + io_newline();
-};
-
-pub let print_i64 = func(v: i64) -> u64 {
-  return io_print_i64(v);
-};
-
-pub let println_i64 = func(v: i64) -> u64 {
-  return io_print_i64(v) + io_newline();
+  return write_str(s) + newline();
 };
 
 pub let print_u64 = func(v: u64) -> u64 {
-  return io_print_u64(v);
+  return write_digits(v);
 };
 
 pub let println_u64 = func(v: u64) -> u64 {
-  return io_print_u64(v) + io_newline();
+  return write_digits(v) + newline();
 };
 
-pub let newline = func() -> u64 {
-  return io_newline();
+pub let print_i64 = func(v: i64) -> u64 {
+  if v < 0 {
+    let head: u64 = write_str("-");
+    let mag: u64 = (0 as u64) - (v as u64);
+    return head + write_digits(mag);
+  }
+  return write_digits(v as u64);
+};
+
+pub let println_i64 = func(v: i64) -> u64 {
+  return print_i64(v) + newline();
 };
 
 pub let Sink = sig {
