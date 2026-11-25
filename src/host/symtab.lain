@@ -33,8 +33,7 @@ pub let trap_note = func(msg: Slice(u8), detail: u64) -> () {
 
 let trap_with = func(msg: Slice(u8), detail: u64) -> u64 {
   trap_note(msg, detail);
-  let dead: u64 = mem.trap_abort(detail);
-  return dead;
+  mem.trap_abort(detail);
 };
 
 pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> () {
@@ -263,15 +262,15 @@ let check_align = func(align: u64) -> u64 {
   return a;
 };
 
-let trap_mut = func(t: Mut(HostSymTab), msg: Slice(u8), cause: u64) -> Mut(u8) {
-  trap_with(msg, cause);
-  return t.region;
+let die = func(msg: Slice(u8), cause: u64) -> Never {
+  trap_note(msg, cause);
+  mem.trap_abort(cause);
 };
 
 pub let mem_alloc = func(t: Mut(HostSymTab), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = check_align(align);
   if bytes > free_bytes(t) {
-    return trap_mut(t, "HostSymTab::mem_alloc: request exceeds free bytes", bytes);
+    die("HostSymTab::mem_alloc: request exceeds free bytes", bytes);
   }
   let base: u64 = t.region as u64;
   let end: u64 = base + t.region_cap;
@@ -279,7 +278,7 @@ pub let mem_alloc = func(t: Mut(HostSymTab), bytes: u64, align: u64) -> Mut(u8) 
   let target: u64 = front - bytes;
   let aligned: u64 = target / a * a;
   if aligned < base + t.pool_used {
-    return trap_mut(t, "HostSymTab::mem_alloc: allocation crosses pool watermark", target);
+    die("HostSymTab::mem_alloc: allocation crosses pool watermark", target);
   }
   let used: u64 = end - aligned;
   t.arena_used = used;

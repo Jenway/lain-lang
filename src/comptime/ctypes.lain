@@ -23,7 +23,7 @@ let scan_kind_elem = func(k: Mut(st.State), kind: u64, elem: u64, i: u64, n: u64
 let scan_array = func(k: Mut(st.State), elem: u64, cnt: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let sh: u64 = shape_at(k, i);
-  let got: u64 = if agg.shp_kind(sh) == agg.kind_array() {
+  let got: u64 = if agg.shp_kind(sh) == agg.ShapeKind.Array as u64 {
     if agg.shp_elem(sh) == elem {
       if agg.shp_len(sh) == cnt { agg.shp_tid(sh) } else { 0 }
     } else {
@@ -47,7 +47,7 @@ let sig_same = func(p: u64, q: u64, np: u64, i: u64) -> u64 {
 let scan_fn = func(k: Mut(st.State), ret: u64, np: u64, sig: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let sh: u64 = shape_at(k, i);
-  let got: u64 = if agg.shp_kind(sh) == agg.kind_fn() {
+  let got: u64 = if agg.shp_kind(sh) == agg.ShapeKind.Fn as u64 {
     if agg.shp_ret(sh) == ret {
       if agg.shp_len(sh) == np {
         let p: u64 = agg.shp_sig(sh);
@@ -79,16 +79,16 @@ let ptr_like_t = func(k: Mut(st.State), kind: u64, elem: u64) -> u64 {
 };
 
 pub let ref_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
-  let kind: u64 = if mutv == 1 { agg.kind_mut() } else { agg.kind_ref() };
+  let kind: u64 = if mutv == 1 { agg.ShapeKind.Mut as u64 } else { agg.ShapeKind.Ref as u64 };
   return ptr_like_t(k, kind, elem);
 };
 
 pub let uninit_t = func(k: Mut(st.State), elem: u64) -> u64 {
-  return ptr_like_t(k, agg.kind_uninit(), elem);
+  return ptr_like_t(k, agg.ShapeKind.Uninit as u64, elem);
 };
 
 pub let slice_t = func(k: Mut(st.State), elem: u64, mutv: u64) -> u64 {
-  let kind: u64 = if mutv == 1 { agg.kind_mutslice() } else { agg.kind_slice() };
+  let kind: u64 = if mutv == 1 { agg.ShapeKind.MutSlice as u64 } else { agg.ShapeKind.Slice as u64 };
   let hit: u64 = scan_kind_elem(k, kind, elem, 0, shapes_used(k));
   if hit != 0 { return hit; }
   let sh: u64 = agg.shp_new(k, kind, 0, st.st_src(k));
@@ -109,7 +109,7 @@ pub let array_t = func(k: Mut(st.State), elem: u64, cnt: u64) -> u64 {
   if hit != 0 { return hit; }
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let r: u64 = ireg.project(k, elem, t);
-  let sh: u64 = agg.array_new(k, agg.kind_array(), cnt, ty.tk(t), ty.tw(t), ty.tsg(t),
+  let sh: u64 = agg.array_new(k, agg.ShapeKind.Array as u64, cnt, ty.tk(t), ty.tw(t), ty.tsg(t),
                               ty.tsh(t));
   let e1: u64 = agg.shp_set_elem(sh, elem);
   let id: u64 = ireg.ty_add(k, ireg.lk_array(), 0, 0, sh);
@@ -120,7 +120,7 @@ pub let array_t = func(k: Mut(st.State), elem: u64, cnt: u64) -> u64 {
 pub let fn_t = func(k: Mut(st.State), ret: u64, np: u64, sig: u64) -> u64 {
   let hit: u64 = scan_fn(k, ret, np, sig, 0, shapes_used(k));
   if hit != 0 { return hit; }
-  let sh: u64 = agg.shp_new(k, agg.kind_fn(), 0, st.st_src(k));
+  let sh: u64 = agg.shp_new(k, agg.ShapeKind.Fn as u64, 0, st.st_src(k));
   let p: Mut(agg.Shape) = agg.shp_ptr(sh);
   p.size = 8;
   p.align = 8;
@@ -198,36 +198,36 @@ pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> 
   let fe: u64 = agg.shp_elem(fsh);
   let te: u64 = agg.shp_elem(tsh);
 
-  if tk == agg.kind_uninit() or fk == agg.kind_uninit() { return 9; }
-  if tk == agg.kind_mut() {
-    if fk == agg.kind_ref() { return 9; }
-    if fk != agg.kind_mut() { return 9; }
+  if tk == agg.ShapeKind.Uninit as u64 or fk == agg.ShapeKind.Uninit as u64 { return 9; }
+  if tk == agg.ShapeKind.Mut as u64 {
+    if fk == agg.ShapeKind.Ref as u64 { return 9; }
+    if fk != agg.ShapeKind.Mut as u64 { return 9; }
     if fe == te { return 0; }
     return 3;
   }
-  if tk == agg.kind_ref() {
-    if fk == agg.kind_string() { return 3; }
-    if fk != agg.kind_ref() and fk != agg.kind_mut() { return 9; }
+  if tk == agg.ShapeKind.Ref as u64 {
+    if fk == agg.ShapeKind.String as u64 { return 3; }
+    if (fk != agg.ShapeKind.Ref as u64) and (fk != agg.ShapeKind.Mut as u64) { return 9; }
     if fe == te { return 1; }
     return 3;
   }
-  if tk == agg.kind_slice() or tk == agg.kind_mutslice() {
-    if fk == agg.kind_slice() or fk == agg.kind_mutslice() {
+  if tk == agg.ShapeKind.Slice as u64 or tk == agg.ShapeKind.MutSlice as u64 {
+    if fk == agg.ShapeKind.Slice as u64 or fk == agg.ShapeKind.MutSlice as u64 {
       if fe != te { return 9; }
       if fk == tk { return 0; }
-      if tk == agg.kind_slice() { return 1; }
+      if tk == agg.ShapeKind.Slice as u64 { return 1; }
       return 9;
     }
-    if fk == agg.kind_array() { return 2; }
-    if fk == agg.kind_string() {
-      if tk == agg.kind_mutslice() { return 9; }
+    if fk == agg.ShapeKind.Array as u64 { return 2; }
+    if fk == agg.ShapeKind.String as u64 {
+      if tk == agg.ShapeKind.MutSlice as u64 { return 9; }
       return 2;
     }
     return 9;
   }
 
-  if tk == agg.kind_fn() {
-    if fk != agg.kind_fn() { return 9; }
+  if tk == agg.ShapeKind.Fn as u64 {
+    if fk != agg.ShapeKind.Fn as u64 { return 9; }
     if agg.shp_ret(fsh) != agg.shp_ret(tsh) { return 9; }
     let np: u64 = agg.shp_len(fsh);
     if np != agg.shp_len(tsh) { return 9; }

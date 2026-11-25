@@ -24,7 +24,9 @@ let ctf = import("src::comptime::ctfor");
 let ctfn = import("src::comptime::ctfn");
 let gv = import("src::sema::witness");
 let gn = import("src::sema::generics");
-let ef = import("src::sema::effects");
+let efrow = import("src::sema::effects::row");
+let efinf = import("src::sema::effects::infer");
+let eflow = import("src::sema::effects::lower");
 
 let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = ax.n_count(g);
@@ -59,7 +61,7 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
       }
     }
     if ax.n_sym(g, i) == s.p_bang() {
-      let pr: u64 = ef.propagate(k);
+      let pr: u64 = eflow.propagate(k);
       return expr_tail(k, g, i + 1, minp, want, out);
     }
   }
@@ -118,8 +120,8 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
   let rest: Mut(ty.Ty) = ax.new_ty(k);
   ty.result_ty(op, opt, rest);
   ir.args_reset(k);
-  cx.push_val(k, lv);
-  cx.push_val(k, rvv);
+  ir.op_val(k, lv);
+  ir.op_val(k, rvv);
   let res: u64 = ir.fresh_t(k);
   ir.emit(k, kind, res, opt);
   ty.val_ref(out, res, rest);
@@ -197,7 +199,7 @@ let brace_struct_at = func(k: Mut(st.State), sym: u64) -> u64 {
   if kd == modules.sym_kind_type_alias() {
     let sh: u64 = ireg.ty_shape(k, modules.sym_qual(t));
     if sh != 0 {
-      if agg.shp_kind(sh) == agg.kind_struct() { return 1; }
+      if agg.shp_kind(sh) == agg.ShapeKind.Struct as u64 { return 1; }
     }
   }
   return 0;
@@ -251,9 +253,9 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     st.st_fail(k, ax.FailKind.Unsup as u64);
     return i + 1;
   }
-  if sym == s.k_perform() { return ef.perform_expr(k, g, i, want, out); }
-  if sym == s.k_handle() { return ef.handle_expr(k, g, i, want, out); }
-  if sym == s.k_resume() { return ef.resume_expr(k, g, i, want, out); }
+  if sym == s.k_perform() { return eflow.perform_expr(k, g, i, want, out); }
+  if sym == s.k_handle() { return eflow.handle_expr(k, g, i, want, out); }
+  if sym == s.k_resume() { return eflow.resume_expr(k, g, i, want, out); }
   if sym == s.k_effect() {
     let m: Ref(u8) = "effect is compile-time only";
     let d: u64 = ir.diag(k, 0, 1, m, 27);
@@ -309,7 +311,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
           return i + 3;
         }
       }
-      let bv: u64 = ef.bare_variant(k, g, i, want, out);
+      let bv: u64 = efrow.bare_variant(k, g, i, want, out);
       if bv != 0 { return bv; }
       return me.dotted(k, g, i, want, out);
     }
@@ -398,7 +400,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
         env.env_ty(k, fo, ft);
         let fsh: u64 = ty.tsh(ft);
         if fsh != 0 {
-          if agg.shp_kind(fsh) == agg.kind_fn() {
+          if agg.shp_kind(fsh) == agg.ShapeKind.Fn as u64 {
             let fv: Mut(ty.Val) = ax.new_val(k);
             let fj: u64 = cl.var_ref(k, g, i, cx.tnone(k), fv);
             let pf: u64 = rv.postfix_call(k, g, i + 1, 0, want, fv);
@@ -420,7 +422,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       }
       let cj: u64 = cl.call_expr(k, g, i, want, out);
       let se2: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
-      let cg: u64 = ef.call_guard(k, se2, g, i + 2);
+      let cg: u64 = efinf.call_guard(k, se2, g, i + 2);
       return cj;
     }
     if ax.delim_of(g, i + 1) == ax.Delim.Bracket as u64 and sym == s.b_icall() {
@@ -485,7 +487,7 @@ let eval_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mu
   }
   ir.proc_result(k, vt);
   ir.args_reset(k);
-  cx.push_val(k, tv);
+  ir.op_val(k, tv);
   ir.emit_jump(k, codes.InstKind.Return as u64, 0);
   ir.region_end(k);
   let vrc: u64 = cpt.verify(tmp);
@@ -544,7 +546,7 @@ let sub_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty
   let sh: u64 = ty.tsh(bt);
   if sh == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i + 1; }
   let kd: u64 = agg.shp_kind(sh);
-  let sliced: u64 = if kd == agg.kind_slice() or kd == agg.kind_mutslice() { 1 } else { 0 };
+  let sliced: u64 = if kd == agg.ShapeKind.Slice as u64 or kd == agg.ShapeKind.MutSlice as u64 { 1 } else { 0 };
   let base: Mut(ty.Val) = ax.new_val(k);
   if sliced == 1 {
     let lv_val: Mut(ty.Val) = ax.new_val(k);
@@ -658,7 +660,7 @@ let arr_rep = func(k: Mut(st.State), g: u64, i: u64, grp: u64, sep: u64, want: M
   }
   let wsh: u64 = ty.tsh(want);
   let shaped: u64 = if wsh == 0 { 0 } else {
-    if agg.shp_kind(wsh) == agg.kind_array() { 1 } else { 0 }
+    if agg.shp_kind(wsh) == agg.ShapeKind.Array as u64 { 1 } else { 0 }
   };
   let et: Mut(ty.Ty) = ax.new_ty(k);
   if shaped == 1 {
@@ -692,7 +694,7 @@ let arr_rep = func(k: Mut(st.State), g: u64, i: u64, grp: u64, sep: u64, want: M
   let c1: u64 = cx.coerce(k, v, ty.vty(v), et, c);
   if st.st_ok(k) != 0 { return i + 1; }
   let sh: u64 = if shaped == 1 { wsh } else {
-    agg.array_new(k, agg.kind_array(), cnt, ty.tk(et), ty.tw(et), ty.tsg(et), ty.tsh(et))
+    agg.array_new(k, agg.ShapeKind.Array as u64, cnt, ty.tk(et), ty.tw(et), ty.tsg(et), ty.tsh(et))
   };
   let size: u64 = agg.shp_size(sh);
   let objv: Mut(ty.Val) = ax.new_val(k);
@@ -718,7 +720,7 @@ let arr_lit = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(
   let cnt: u64 = bi.table_cnt(grp, 0, ax.n_count(grp), 0);
   let wsh: u64 = ty.tsh(want);
   let ok: u64 = if wsh == 0 { 0 } else {
-    if agg.shp_kind(wsh) == agg.kind_array() {
+    if agg.shp_kind(wsh) == agg.ShapeKind.Array as u64 {
       if agg.shp_len(wsh) == cnt { 1 } else { 0 }
     } else { 0 }
   };

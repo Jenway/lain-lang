@@ -18,7 +18,9 @@ let tb = import("src::sema::tbuild");
 let ctf = import("src::comptime::ctfor");
 let gn = import("src::sema::generics");
 let gv = import("src::sema::witness");
-let ef = import("src::sema::effects");
+let efrow = import("src::sema::effects::row");
+let efinf = import("src::sema::effects::infer");
+let eflow = import("src::sema::effects::lower");
 let drop = import("src::sema::drop");
 let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
@@ -100,7 +102,7 @@ let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   let rt: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_none(rt);
   if ret_i != 0 { cx.parse_type(k, root, ret_i, rt); }
-  let row: Mut(ef.EffRow) = ef.row_empty(k);
+  let row: Mut(efrow.EffRow) = efrow.row_empty(k);
   compile_body_with(k, pg, rt, bodyg, q, row);
   gv.release(k, gmark);
   ctf.release(k, cm);
@@ -189,7 +191,7 @@ let drain_queue = func(k: Mut(st.State)) -> u64 {
     let avm: u64 = if am >= 1000 { am } else { 0 };
     st.st_set_src(k, src);
     st.st_set_vmod(k, avm);
-    let row0: Mut(ef.EffRow) = ef.row_empty(k);
+    let row0: Mut(efrow.EffRow) = efrow.row_empty(k);
     let b: u64 = compile_body(k, g, node, q, row0);
     let h0: u64 = handled();
     if st.st_ok(k) != 0 {
@@ -201,8 +203,8 @@ let drain_queue = func(k: Mut(st.State)) -> u64 {
     st.st_set_src(k, saved_src);
     return drain_queue(k);
   }
-  if ef.handler_pending(k) == 1 {
-    let hh: u64 = ef.flush_one_handler(k);
+  if eflow.handler_pending(k) == 1 {
+    let hh: u64 = eflow.flush_one_handler(k);
     let h1: u64 = handled();
     return drain_queue(k);
   }
@@ -216,15 +218,15 @@ let drain_queue = func(k: Mut(st.State)) -> u64 {
   return flush_fq(k);
 };
 
-let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u64, q: u64, row: Mut(ef.EffRow)) -> u64 {
+let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u64, q: u64, row: Mut(efrow.EffRow)) -> u64 {
   let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
   let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = cx.parse_params(k, pg, 0, 0, paramp, syms);
   let sr: u64 = agg.sret_ty(rt);
   let ip0: u64 = st.st_in_proc(k);
   let bp: u64 = begin_proc(k, q, rt);
-  let ab0: u64 = ef.clear_aborts(k);
-  let fr: u64 = ef.push_frame(k, row);
+  let ab0: u64 = efrow.clear_aborts(k);
+  let fr: u64 = efrow.push_frame(k, row);
   let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
   let pnames: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let dummy: u64 = loop w(idx: u64 = 0) while idx < np {
@@ -260,13 +262,13 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   ir.region_end(k);
   ir.proc_end(k);
   let ipr: u64 = st.st_set_in_proc(k, ip0);
-  let pf: u64 = ef.pop_frame(k);
+  let pf: u64 = efrow.pop_frame(k);
   return flush_queue(k);
 };
 
-let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64, row: Mut(ef.EffRow)) -> u64 {
+let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64, row: Mut(efrow.EffRow)) -> u64 {
   let pg: u64 = ax.n_at(g, i);
-  let l: Mut(ef.FnLayout) = ef.fn_layout(k, g, i);
+  let l: Mut(efrow.FnLayout) = efrow.fn_layout(k, g, i);
   let rt: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_none(rt);
   if l.ret_i != 0 { cx.parse_type(k, g, l.ret_i, rt); }
@@ -291,7 +293,7 @@ pub let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   if is_null(se) == 0 {
     if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 2); }
   }
-  let row: Mut(ef.EffRow) = ef.callee_row(k, se);
+  let row: Mut(efrow.EffRow) = efinf.callee_row(k, se);
   return compile_body(k, g, i + 2, q, row);
 };
 
@@ -301,7 +303,7 @@ pub let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) ->
   if is_null(se) == 0 {
     if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 1); }
   }
-  let row: Mut(ef.EffRow) = ef.callee_row(k, se);
+  let row: Mut(efrow.EffRow) = efinf.callee_row(k, se);
   let b: u64 = compile_body(k, g, i + 1, q, row);
   return ax.skip_semi(g, b);
 };
@@ -333,7 +335,7 @@ pub let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   } else {
     let vs: u64 = ty.tsh(ty.vty(v));
     if vs != 0 {
-      if agg.shp_kind(vs) == agg.kind_string() {
+      if agg.shp_kind(vs) == agg.ShapeKind.String as u64 {
         let id: u64 = ireg.ty_add(k, ireg.lk_bits(), 8, 0, 0);
         let sid: u64 = ct.slice_t(k, id, 0);
         let projected: u64 = ireg.project(k, sid, vt);
@@ -356,7 +358,7 @@ pub let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let lv_val: Mut(ty.Val) = ax.new_val(k);
   cx.slot_get(k, sl, vt, lv_val);
   ir.args_reset(k);
-  cx.push_val(k, lv_val);
+  ir.op_val(k, lv_val);
   ir.emit_jump(k, codes.InstKind.Return as u64, 0);
   ir.region_end(k);
   ir.proc_end(k);

@@ -22,7 +22,9 @@ let ctfn = import("src::comptime::ctfn");
 let gv = import("src::sema::witness");
 let gn = import("src::sema::generics");
 let ex = import("src::syntax::expand");
-let ef = import("src::sema::effects");
+let efrow = import("src::sema::effects::row");
+let efinf = import("src::sema::effects::infer");
+let eflow = import("src::sema::effects::lower");
 let sm = import("src::sema::stmt");
 let drop = import("src::sema::drop");
 let tr = import("std::trace");
@@ -194,7 +196,7 @@ let fn_type_id = func(k: Mut(st.State), sg: Mut(u8)) -> u64 {
 };
 
 let parse_struct_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut(modules.SymEntry) {
-  let sh: u64 = agg.shp_new(k, agg.kind_struct(), name, modules.cur(k));
+  let sh: u64 = agg.shp_new(k, agg.ShapeKind.Struct as u64, name, modules.cur(k));
   let n: u64 = ax.n_count(fg);
   let j: u64 = loop c(j: u64 = 0) while j < n {
     if ax.is_semi(fg, j) == 1 or ax.is_comma(fg, j) == 1 {
@@ -213,7 +215,7 @@ let parse_struct_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> M
 };
 
 let parse_enum_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut(modules.SymEntry) {
-  let sh: u64 = agg.shp_new(k, agg.kind_enum(), name, modules.cur(k));
+  let sh: u64 = agg.shp_new(k, agg.ShapeKind.Enum as u64, name, modules.cur(k));
   let n: u64 = ax.n_count(fg);
   let j: u64 = loop c(j: u64 = 0) while j < n {
     if ax.is_name(fg, j) == 0 {
@@ -314,7 +316,7 @@ let find_brace = func(g: u64, i: u64, n: u64) -> u64 {
 
 let p1_generic = func(k: Mut(st.State), g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64, q: u64) -> u64 {
   let n: u64 = ax.n_count(g);
-  let l: Mut(ef.FnLayout) = ef.layout_from(k, g, qmark_i + 2);
+  let l: Mut(efrow.FnLayout) = efrow.layout_from(k, g, qmark_i + 2);
   let eff: u64 = if l.eff_i == 0 { 0 } else { ax.n_at(g, l.eff_i) };
   gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, l.ret_i, eff, l.body_i);
   return l.body_i;
@@ -493,7 +495,7 @@ let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) 
   if st.st_ok(k) != 0 { return i + 1; }
   let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_mod(), modules.cur(k), alias, src2, null_ref(Mut(u8)), 0);
   let sp: u64 = modules.sym_set_pub(se, is_pub);
-  let m: u64 = modules.mod_add(k, alias, src2, agg.kind_struct());
+  let m: u64 = modules.mod_add(k, alias, src2, agg.ShapeKind.Struct as u64);
   return i + 1;
 };
 
@@ -730,7 +732,7 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
   }
   let e: u64 = cx.expect_sym(k, g, j, s.p_eq());
   if e >= n { st.st_fail(k, ax.FailKind.Ast as u64); return e; }
-  let efj: u64 = ef.effect_rhs(k, g, e, name, is_pub);
+  let efj: u64 = eflow.effect_rhs(k, g, e, name, is_pub);
   if efj != 0 { return ax.skip_semi(g, efj); }
   if ax.n_sym(g, e) == s.k_import() { return p1_import(k, g, e, name, is_pub); }
   let is_root: u64 = if i >= 2 and ax.is_group(g, i - 2) == 0 and ax.n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
@@ -848,7 +850,7 @@ let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: 
   let a0: u64 = e + 2;
   if a0 + 1 < n and ax.is_group(g, a0) == 0 and ax.n_sym(g, a0) == s.p_qmark() and ax.is_group(g, a0 + 1) == 1 {
     if ax.delim_of(g, a0 + 1) == ax.Delim.Brace as u64 {
-      let fl: Mut(ef.FnLayout) = ef.layout_from(k, g, a0 + 2);
+      let fl: Mut(efrow.FnLayout) = efrow.layout_from(k, g, a0 + 2);
       let is_ct_ret: u64 = if fl.ret_i != 0 and ax.is_group(g, fl.ret_i) == 0 {
         let rs: u64 = ax.n_sym(g, fl.ret_i);
         if (rs == s.t_module()) or (rs == s.t_type()) or (rs == s.t_effect()) { 1 } else { 0 }
@@ -880,7 +882,7 @@ let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: 
   let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
   let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = cx.parse_params(k, pg, 0, 0, paramp, syms);
-  let l: Mut(ef.FnLayout) = ef.fn_layout(k, g, e + 1);
+  let l: Mut(efrow.FnLayout) = efrow.fn_layout(k, g, e + 1);
   let rt: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_none(rt);
   let a: u64 = if l.ret_i != 0 { cx.parse_type(k, g, l.ret_i, rt) } else { l.ret_i };
@@ -962,7 +964,7 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let kd: u64 = modules.sym_kind(se);
 
   if kd == modules.sym_kind_sig() or kd == modules.sym_kind_type_alias() { return skip_stmt(g, i + 1, n); }
-  if kd == ef.kind_effect() { return skip_stmt(g, i + 1, n); }
+  if kd == efrow.kind_effect() { return skip_stmt(g, i + 1, n); }
 
   if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() { return skip_stmt(g, i + 1, n); }
 
@@ -989,9 +991,9 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   }
   let marked: u64 = modules.sym_set_flag(se, 1);
   if kd == modules.sym_kind_func() {
-    let prev: u64 = ef.infer_begin(k, se);
+    let prev: u64 = efinf.infer_begin(k, se);
     let cf: u64 = dl.compile_func_expr(k, g, modules.sym_decl(se), name);
-    let fin: u64 = ef.infer_end(k, prev);
+    let fin: u64 = efinf.infer_end(k, prev);
     return cf;
   }
   if kd == modules.sym_kind_value() {
@@ -1175,13 +1177,13 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     let droot: u64 = hr.source_root(dsrc);
     st.st_set_root(k, droot);
     let cf: u64 = 0;
-    let pv: u64 = ef.infer_begin(k, fn);
+    let pv: u64 = efinf.infer_begin(k, fn);
     if ax.is_group(droot, dnode + 1) == 1 {
       cf = dl.compile_func_expr(k, droot, dnode, fname);
     } else {
       cf = dl.compile_func(k, droot, dnode);
     }
-    let cfin: u64 = ef.infer_end(k, pv);
+    let cfin: u64 = efinf.infer_end(k, pv);
     let fs: u64 = modules.sym_set_flag(fn, 1);
     st.st_set_src(k, saved_src);
     st.st_set_root(k, saved_root);

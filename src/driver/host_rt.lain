@@ -13,20 +13,9 @@ let vf = import("src::ir::verify::model");
 let opt = import("src::ir::opt");
 let mem = import("std::mem");
 
-let trap_mut = func(cause: u64) -> Mut(u8) {
-  let dead: u64 = mem.trap_abort(cause);
-  return null_ref(Mut(u8));
-};
-
-let die_u64 = func(msg: Slice(u8), cause: u64) -> u64 {
+let die = func(msg: Slice(u8), cause: u64) -> Never {
   os.eprint(msg);
-  let dead: u64 = mem.trap_abort(cause);
-  return dead;
-};
-
-let die_mut = func(msg: Slice(u8), cause: u64) -> Mut(u8) {
-  os.eprint(msg);
-  return trap_mut(cause);
+  mem.trap_abort(cause);
 };
 
 let note_fail = func(msg: Slice(u8)) -> u64 {
@@ -129,17 +118,17 @@ let put_dec = func(dst: Mut(u8), at: u64, v: u64) -> u64 {
 let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = if align == 0 { 16 } else { align };
   if (a & (a - 1)) != 0 {
-    return die_mut("[host_rt] bump allocation alignment is not a power of two\n", bytes);
+    die("[host_rt] bump allocation alignment is not a power of two\n", bytes);
   }
   if a > 4096 {
-    return die_mut("[host_rt] bump allocation alignment exceeds one page\n", align);
+    die("[host_rt] bump allocation alignment exceeds one page\n", align);
   }
   let base: u64 = h.bump_base as u64;
   let want: u64 = h.bump_used;
   let miss: u64 = want % a;
   let off: u64 = if miss == 0 { want } else { want + (a - miss) };
   if (off + bytes) > h.bump_cap {
-    return die_mut("[host_rt] bump arena exhausted\n", bytes);
+    die("[host_rt] bump arena exhausted\n", bytes);
   }
   h.bump_used = off + bytes;
   return ptr_cast(Mut(u8), base + off);
@@ -148,43 +137,43 @@ let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
 let host_new = func() -> u64 {
   let raw_ptr: u64 = os.alloc_bytes(size_of(HostRt));
   if raw_ptr == 0 {
-    return die_u64("[host_rt] host struct allocation failed\n", raw_ptr);
+    die("[host_rt] host struct allocation failed\n", raw_ptr);
   }
   let stab: Mut(symtab.HostSymTab) =
     ptr_cast(Mut(symtab.HostSymTab), os.alloc_bytes(size_of(SymTabCell)));
-  if is_null(stab) { return die_u64("[host_rt] symtab init failed\n", 0); }
+  if is_null(stab) { die("[host_rt] symtab init failed\n", 0); }
   let sbase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(sym_bytes()));
-  if is_null(sbase) { return die_u64("[host_rt] symtab arena allocation failed\n", 0); }
+  if is_null(sbase) { die("[host_rt] symtab arena allocation failed\n", 0); }
   let sbuf: MutSlice(u8) = make_slice(MutSlice(u8), sbase, sym_bytes());
   deref(stab) = symtab.symtab_new(sbuf);
 
   let arena_bytes: u64 = ao.ast_out_bytes(ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
                                           ast_mark_cap());
   let abase: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(arena_bytes));
-  if is_null(abase) { return die_u64("[host_rt] ast arena allocation failed\n", 0); }
+  if is_null(abase) { die("[host_rt] ast arena allocation failed\n", 0); }
   let ast_out: Mut(ao.AstOut) = ptr_cast(Mut(ao.AstOut), os.alloc_bytes(size_of(AstOutCell)));
-  if is_null(ast_out) { return die_u64("[host_rt] ast_out init failed\n", 0); }
+  if is_null(ast_out) { die("[host_rt] ast_out init failed\n", 0); }
   deref(ast_out) = ao.ast_out_init(abase, ast_node_cap(), ast_kid_cap(), ast_pool_cap(),
                                    ast_mark_cap());
 
   let sources: Mut(sh.HostSources) =
     ptr_cast(Mut(sh.HostSources), os.alloc_bytes(size_of(SourcesCell)));
-  if is_null(sources) { return die_u64("[host_rt] source manager init failed\n", 0); }
+  if is_null(sources) { die("[host_rt] source manager init failed\n", 0); }
   deref(sources) = sh.host_sources_new(stab, ast_out, source_cap(), source_kids_cap());
 
   let ir_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(ir_bytes()));
-  if is_null(ir_base) { return die_u64("[host_rt] ir arena allocation failed\n", 0); }
+  if is_null(ir_base) { die("[host_rt] ir arena allocation failed\n", 0); }
   let ir: Mut(irh.HostIr) = irh.host_new(ir_base, ir_bytes());
-  if is_null(ir) { return die_u64("[host_rt] ir host init failed\n", 0); }
+  if is_null(ir) { die("[host_rt] ir host init failed\n", 0); }
 
   let vm_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(vm_bytes()));
-  if is_null(vm_base) { return die_u64("[host_rt] vm arena allocation failed\n", 0); }
+  if is_null(vm_base) { die("[host_rt] vm arena allocation failed\n", 0); }
   let vm: Mut(vmh.VmHost) =
     vmh.host_new_with_config(vm_base, vm_bytes(), ir, vmh.default_large_config());
-  if is_null(vm) { return die_u64("[host_rt] vm host init failed\n", 0); }
+  if is_null(vm) { die("[host_rt] vm host init failed\n", 0); }
 
   let bump_base: Mut(u8) = ptr_cast(Mut(u8), os.alloc_bytes(bump_bytes()));
-  if is_null(bump_base) { return die_u64("[host_rt] bump arena allocation failed\n", 0); }
+  if is_null(bump_base) { die("[host_rt] bump arena allocation failed\n", 0); }
 
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   deref(h) = HostRt {
@@ -213,7 +202,7 @@ pub let rt_init = func() -> u64 {
   s[0] = raw_ptr;
   let h: Mut(HostRt) = ptr_cast(Mut(HostRt), raw_ptr);
   let rc: u64 = c99.set_syms(h.syms);
-  if rc != 0 { return die_u64("[host_rt] c99 symbol table wiring failed\n", rc); }
+  if rc != 0 { die("[host_rt] c99 symbol table wiring failed\n", rc); }
   return raw_ptr;
 };
 
@@ -506,7 +495,7 @@ let sym_id_of = func(v: u64) -> u64 {
 let sym_handle_of = func(v: u64) -> u64 {
   if v == 0 { return 0; }
   if (v >> CLASS_SHIFT()) == SYM_CLASS() { return v; }
-  if v > INDEX_MASK() { return die_u64("[host_rt] symbol handle out of range\n", v); }
+  if v > INDEX_MASK() { die("[host_rt] symbol handle out of range\n", v); }
   return (SYM_CLASS() << CLASS_SHIFT()) | v;
 };
 
@@ -553,7 +542,7 @@ pub let ast_tx_begin = func() -> u64 {
 let current_tx = func(h: Mut(HostRt)) -> u64 {
   let a: Mut(ao.AstOut) = h.ast_out;
   let d: u64 = ao.tx_depth(a);
-  if d == 0 { return die_u64("[host_rt] ast transaction stack is empty\n", d); }
+  if d == 0 { die("[host_rt] ast transaction stack is empty\n", d); }
   let at: Mut(ao.Mark) = a.marks + (d - 1) * size_of(MarkCell);
   let m: ao.Mark = deref(at);
   return m.tx;
@@ -747,21 +736,15 @@ pub let diag_emit = func(span: u64, level: u64, p: Ref(u8), n: u64) -> u64 {
   return irh.diag_emit(h.ir, span, level, p, n);
 };
 
-let die_mod = func(msg: Slice(u8), cause: u64) -> Mut(irh.ModState) {
-  os.eprint(msg);
-  let dead: u64 = mem.trap_abort(cause);
-  return null_ref(Mut(irh.ModState));
-};
-
 let mod_of = func(ir: Mut(irh.HostIr), modv: u64) -> Mut(irh.ModState) {
-  if modv == 0 { return die_mod("[host_rt] module handle is zero\n", modv); }
+  if modv == 0 { die("[host_rt] module handle is zero\n", modv); }
   if modv > ir.mod_cap {
-    return die_mod("[host_rt] module handle above capacity\n", modv);
+    die("[host_rt] module handle above capacity\n", modv);
   }
   let raw: Mut(u8) = ptr_cast(Mut(u8), ir.mods);
   let m: Mut(irh.ModState) = ptr_cast(Mut(irh.ModState),
                                      raw + (modv - 1) * size_of(ModStateCell));
-  if m.in_use == 0 { return die_mod("[host_rt] module handle is not in use\n", modv); }
+  if m.in_use == 0 { die("[host_rt] module handle is not in use\n", modv); }
   return m;
 };
 
@@ -810,7 +793,7 @@ pub let ir_mod_emit_output = func(modv: u64) -> u64 {
   let cap: u64 = out_bytes();
   let raw: u64 = os.alloc_bytes(cap);
   if raw == 0 {
-    return die_u64("[host_rt] ir_mod_emit_output: output buffer allocation failed\n", 0);
+    die("[host_rt] ir_mod_emit_output: output buffer allocation failed\n", 0);
   }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let wrote: u64 = render_l1(h, m, buf, cap);
@@ -1162,7 +1145,7 @@ pub let trace_set_path = func(path: Slice(u8)) -> u64 {
   }
   let raw: u64 = os.alloc_bytes(path.len + 1);
   if raw == 0 {
-    return die_u64("[host_rt] trace_set_path: trace path allocation failed\n", 0);
+    die("[host_rt] trace_set_path: trace path allocation failed\n", 0);
   }
   let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
   let copied: u64 = copy_bytes(buf, path.ptr, path.len);
@@ -1203,7 +1186,7 @@ pub let print_diags = func() -> u64 {
     let head: Slice(u8) = diag_head(level);
     let raw: u64 = os.alloc_bytes(head.len + msg.len + 32);
     if raw == 0 {
-      return die_u64("[host_rt] print_diags: diagnostic line allocation failed\n", 0);
+      die("[host_rt] print_diags: diagnostic line allocation failed\n", 0);
     }
     let buf: Mut(u8) = ptr_cast(Mut(u8), raw);
     let a: u64 = put_text(buf, 0, head);
