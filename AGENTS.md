@@ -8,7 +8,7 @@ READ THE FXXKING DOCS
 
 ## Rolling Bootstrap Discipline (`Step A -> Step B`)
 - Any change to `src/` syntax, keywords, or module visibility MUST split into two commits:
-  1. **Step A**: Add compiler support while keeping `src/` compilable by the current `bootstrap/lainc_boot.c`, verify fixed point (`.\build\build_runner.exe --bootstrap`), refresh `bootstrap/lainc_boot.c` via `.\build\lainc_stage2.exe src/driver/entry.lain --entry main --out bootstrap/lainc_boot.c`, and commit.
+  1. **Step A**: Add compiler support while keeping `src/` compilable by the current `bootstrap/lainc_boot.c`, verify fixed point (`.\build\build_runner.exe --bootstrap`), refresh `bootstrap/lainc_boot.c` via `.\build\lainc_stage2.exe src/driver/cli.lain --entry main --out bootstrap/lainc_boot.c`, and commit.
   2. **Step B**: Migrate `src/`, `std/`, `examples/`, and `test.lain`, remove legacy compatibility, verify fixed point, refresh `bootstrap/lainc_boot.c`, and commit.
 
 ## Modern Lain & Compiler Invariants

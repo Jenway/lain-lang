@@ -1,4 +1,6 @@
 let os = import("std::os");
+let cli = import("std::cli");
+let str = import("std::str");
 let st = import("src::driver::state");
 let ev = import("src::sema::eval");
 let ex = import("src::syntax::expand");
@@ -7,10 +9,6 @@ let tr = import("std::trace");
 let hr = import("src::driver::host_rt");
 let err = import("src::driver::err");
 let insp = import("src::driver::inspect");
-let option = import("std::option");
-
-let OptSlice = option.Option(Slice(u8));
-
 let CliOpts = struct {
   help: bool,
   c99: bool,
@@ -20,40 +18,18 @@ let CliOpts = struct {
   dump_expand: bool,
   dump_deps: bool,
   dump_docs: bool,
-  out_path: OptSlice.Opt,
-  split_c: OptSlice.Opt,
-  trace_path: OptSlice.Opt,
-  entry_name: OptSlice.Opt,
-  target: OptSlice.Opt,
-  src_path: OptSlice.Opt,
+  out_path: cli.OptSlice.Opt,
+  split_c: cli.OptSlice.Opt,
+  trace_path: cli.OptSlice.Opt,
+  entry_name: cli.OptSlice.Opt,
+  target: cli.OptSlice.Opt,
+  src_path: cli.OptSlice.Opt,
   bad_args: bool,
 };
 
-let same_range = func(a: Slice(u8), b: Slice(u8), i: u64) -> bool {
-  if i >= a.len { return true; }
-  if a[i] != b[i] { return false; }
-  return same_range(a, b, i + 1);
-};
-
-let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
-  if a.len != b.len { return false; }
-  return same_range(a, b, 0);
-};
-
-let ends_c = func(s: Slice(u8)) -> bool {
-  if s.len < 2 { return false; }
-  if s[s.len - 2] != 46 { return false; }
-  if s[s.len - 1] != 99 { return false; }
-  return true;
-};
-
-let arg = func(i: u64) -> Slice(u8) {
-  let n: u64 = os.argv_len(i);
-  let cap: u64 = n + 1;
-  let raw: u64 = os.alloc_bytes(cap);
-  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
-  let got: u64 = os.argv_copy(i, buf);
-  return make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got);
+let arg_at = func(i: u64) -> Slice(u8) {
+  let a: cli.OptSlice.Opt = cli.arg(i);
+  return cli.OptSlice.unwrap_or(a, "");
 };
 
 let usage = func() -> u64 {
@@ -63,66 +39,66 @@ let usage = func() -> u64 {
 
 let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
-  let s: Slice(u8) = arg(i);
-  if same(s, "--out") and (i + 1 < n) {
-    o.out_path = OptSlice.some(arg(i + 1));
+  let s: Slice(u8) = arg_at(i);
+  if str.eq(s, "--out") and (i + 1 < n) {
+    o.out_path = cli.OptSlice.some(arg_at(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--split-c") and (i + 1 < n) {
-    o.split_c = OptSlice.some(arg(i + 1));
+  if str.eq(s, "--split-c") and (i + 1 < n) {
+    o.split_c = cli.OptSlice.some(arg_at(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--entry") and (i + 1 < n) {
-    o.entry_name = OptSlice.some(arg(i + 1));
+  if str.eq(s, "--entry") and (i + 1 < n) {
+    o.entry_name = cli.OptSlice.some(arg_at(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--trace") and (i + 1 < n) {
-    o.trace_path = OptSlice.some(arg(i + 1));
+  if str.eq(s, "--trace") and (i + 1 < n) {
+    o.trace_path = cli.OptSlice.some(arg_at(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--target") and (i + 1 < n) {
-    o.target = OptSlice.some(arg(i + 1));
+  if str.eq(s, "--target") and (i + 1 < n) {
+    o.target = cli.OptSlice.some(arg_at(i + 1));
     return parse(o, i + 2, n);
   }
-  if same(s, "--help") or same(s, "-h") {
+  if str.eq(s, "--help") or str.eq(s, "-h") {
     o.help = true;
     return 0;
   }
-  if same(s, "--c99") {
+  if str.eq(s, "--c99") {
     o.c99 = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--opt") {
+  if str.eq(s, "--opt") {
     o.opt = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--release-fast") {
+  if str.eq(s, "--release-fast") {
     o.release_fast = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--print-result") {
+  if str.eq(s, "--print-result") {
     o.print_result = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--dump-expand") {
+  if str.eq(s, "--dump-expand") {
     o.dump_expand = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--dump-deps") {
+  if str.eq(s, "--dump-deps") {
     o.dump_deps = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--dump-docs") {
+  if str.eq(s, "--dump-docs") {
     o.dump_docs = true;
     return parse(o, i + 1, n);
   }
-  if same(s, "--out") or same(s, "--split-c") or same(s, "--entry") or same(s, "--trace") or same(s, "--target") {
+  if str.eq(s, "--out") or str.eq(s, "--split-c") or str.eq(s, "--entry") or str.eq(s, "--trace") or str.eq(s, "--target") {
     o.bad_args = true;
     return 1;
   }
-  let src: OptSlice.Opt = o.src_path;
-  if OptSlice.is_none(src) {
-    o.src_path = OptSlice.some(s);
+  let src: cli.OptSlice.Opt = o.src_path;
+  if cli.OptSlice.is_none(src) {
+    o.src_path = cli.OptSlice.some(s);
     return parse(o, i + 1, n);
   }
   o.bad_args = true;
@@ -130,7 +106,7 @@ let parse = func(o: Mut(CliOpts), i: u64, n: u64) -> u64 {
 };
 
 let entry_name = func(o: Mut(CliOpts)) -> Slice(u8) {
-  let en: OptSlice.Opt = o.entry_name;
+  let en: cli.OptSlice.Opt = o.entry_name;
   return match en {
     None => "s0__main",
     Some(name) => name,
@@ -138,19 +114,19 @@ let entry_name = func(o: Mut(CliOpts)) -> Slice(u8) {
 };
 
 let target_apply = func(o: Mut(CliOpts)) -> u64 {
-  let t: OptSlice.Opt = o.target;
+  let t: cli.OptSlice.Opt = o.target;
   return match t {
     None => 0,
     Some(name) => {
-      if same(name, "windows") {
+      if str.eq(name, "windows") {
         let s0: u64 = hr.set_target_os(hr.OS_WINDOWS());
         return 0;
       }
-      if same(name, "linux") {
+      if str.eq(name, "linux") {
         let s1: u64 = hr.set_target_os(hr.OS_LINUX());
         return 0;
       }
-      if same(name, "macos") {
+      if str.eq(name, "macos") {
         let s2: u64 = hr.set_target_os(hr.OS_MACOS());
         return 0;
       }
@@ -241,16 +217,16 @@ let run_cli = func() -> u64 {
     dump_expand: false,
     dump_deps: false,
     dump_docs: false,
-    out_path: OptSlice.none(),
-    split_c: OptSlice.none(),
-    trace_path: OptSlice.none(),
-    entry_name: OptSlice.none(),
-    target: OptSlice.none(),
-    src_path: OptSlice.none(),
+    out_path: cli.OptSlice.none(),
+    split_c: cli.OptSlice.none(),
+    trace_path: cli.OptSlice.none(),
+    entry_name: cli.OptSlice.none(),
+    target: cli.OptSlice.none(),
+    src_path: cli.OptSlice.none(),
     bad_args: false,
   };
   let o: Mut(CliOpts) = mut_of(o0);
-  let argc: u64 = os.argc();
+  let argc: u64 = cli.count();
   if argc < 2 {
     usage();
     return 2;
@@ -272,12 +248,12 @@ let run_cli = func() -> u64 {
   if o.release_fast {
     let rf: u64 = hr.set_release_fast(1);
   }
-  let src_opt: OptSlice.Opt = o.src_path;
+  let src_opt: cli.OptSlice.Opt = o.src_path;
   let src: Slice(u8) = match src_opt {
     None => "",
     Some(p) => p,
   };
-  let trace_opt: OptSlice.Opt = o.trace_path;
+  let trace_opt: cli.OptSlice.Opt = o.trace_path;
   match trace_opt {
     None => 0,
     Some(p) => {
@@ -337,8 +313,8 @@ let run_cli = func() -> u64 {
     return report_code(added, hr.source_err_offset(added),
                        "LAINIR verification failed");
   }
-  let out_opt: OptSlice.Opt = o.out_path;
-  let split_opt: OptSlice.Opt = o.split_c;
+  let out_opt: cli.OptSlice.Opt = o.out_path;
+  let split_opt: cli.OptSlice.Opt = o.split_c;
   match split_opt {
     None => 0,
     Some(prefix) => {
@@ -357,7 +333,7 @@ let run_cli = func() -> u64 {
   match out_opt {
     None => 0,
     Some(out_path) => {
-      if o.c99 or ends_c(out_path) {
+      if o.c99 or str.ends_with(out_path, ".c") {
         let en: Slice(u8) = entry_name(o);
         let pr: u64 = if o.print_result { 1 } else { 0 };
         let t_c99: u64 = tr.span_begin();
