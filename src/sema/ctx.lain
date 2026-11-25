@@ -102,12 +102,32 @@ let conv_fail = func(k: Mut(st.State)) -> u64 {
   return st.st_fail(k, e_type());
 };
 
+// 整数枚举：值就是底层整数的字面量，不参与聚合的地址语义。
+// 形状号先做范围校验：编译器内部少数路径会把签名记录当 Ty 传，
+// 那里的形状字段是无关字节，不能拿去索引形状表。
+pub let is_cenum = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
+  let sh: u64 = ty.tsh(t);
+  if sh == 0 { return 0; }
+  let base: u64 = st.st_shpbase(k) as u64;
+  if sh < base or sh >= base + st.st_shpcap(k) { return 0; }
+  if agg.shp_kind(sh) == agg.kind_cenum() { return 1; }
+  return 0;
+};
+
+// 整数枚举与整数之间不允许隐式转换：两边的字面量也一律拒绝。
+let cenum_mismatch = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> u64 {
+  if ty.ty_same(from, to) == 1 { return 0; }
+  if is_cenum(k, from) == 1 or is_cenum(k, to) == 1 { return 1; }
+  return 0;
+};
+
 // 把 v（类型 from）转成 to，结果写 out。复合类型先走 ctypes 的转换判定：
 // 只改类型、现造切片头、或明确拒绝（Ref 不能升级成 Mut）。
 pub let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   ty.val_at(out, v);
   if ty.ty_known(from) == 0 { return 0; }
   if ty.ty_known(to) == 0 { return 0; }
+  if cenum_mismatch(k, from, to) == 1 { return conv_fail(k); }
   if ty.vlit(v) == 1 {
     return ty.val_lit(out, ty.vbits(v), to);
   }
@@ -126,11 +146,48 @@ pub let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mu
   return ty.val_ref(out, res, to);
 };
 
+let is_int_scalar = func(t: Mut(ty.Ty)) -> u64 {
+  if ty.tk(t) != codes.TY_BITS() { return 0; }
+  if ty.tw(t) == 0 { return 0; }
+  if ty.tw(t) == 1 { return 0; }
+  return 1;
+};
+
+// 显式 as 转换：整数枚举与整数之间靠这里连通（隐式 coerce 一律拒绝），
+// 其余类型对走常规的 coerce。
+pub let cast_value = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let fc: u64 = is_cenum(k, from);
+  let tc: u64 = is_cenum(k, to);
+  if fc == 0 and tc == 0 { return coerce(k, v, from, to, out); }
+  let fint: u64 = if fc == 1 { 1 } else { is_int_scalar(from) };
+  let tint: u64 = if tc == 1 { 1 } else { is_int_scalar(to) };
+  if fint == 0 or tint == 0 { return conv_fail(k); }
+  if ty.ty_same(from, to) == 1 { return ty.val_at(out, v); }
+  if ty.vlit(v) == 1 { return ty.val_lit(out, ty.vbits(v), to); }
+  let fw: u64 = ty.tw(from);
+  let tw: u64 = ty.tw(to);
+  if fw == tw { return ty.val_ref(out, ty.vn(v), to); }
+  let nb: Mut(ty.Ty) = new_ty(k);
+  ty.ty_bits(nb, tw, 0);
+  let kind: u64 = ty.cast_inst(codes.TY_BITS(), fw, ty.tsg(from), codes.TY_BITS(), tw);
+  if kind == 0 { return ty.val_ref(out, ty.vn(v), to); }
+  ir.args_reset(k);
+  ir.arg_ref(k, ty.vn(v));
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, kind, res, nb);
+  return ty.val_ref(out, res, to);
+};
+
 // --- 栈槽 ---------------------------------------------------------------
 pub let slot_put = func(k: Mut(st.State), j: u64, v: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 {
   let w: Mut(ty.Ty) = t64(k);
   let c: Mut(ty.Val) = new_val(k);
-  coerce(k, v, tp, w, c);
+  // 栈槽是一个裸 64 位字：整数枚举按显式转换落槽，不走隐式 coerce。
+  if is_cenum(k, tp) == 1 {
+    cast_value(k, v, tp, w, c);
+  } else {
+    coerce(k, v, tp, w, c);
+  }
   ir.args_reset(k);
   push_val(k, c);
   ir.arg_ref(k, ir.slot_name(k, j));
@@ -145,6 +202,7 @@ pub let slot_get = func(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Va
   ir.emit_mem(k, codes.INST_LOAD(), res, w, 0);
   let v: Mut(ty.Val) = new_val(k);
   ty.val_ref(v, res, w);
+  if is_cenum(k, tp) == 1 { return cast_value(k, v, w, tp, out); }
   return coerce(k, v, w, tp, out);
 };
 
@@ -230,6 +288,10 @@ let entry_type = func(k: Mut(st.State), e: Mut(modules.SymEntry), out: Mut(ty.Ty
   }
   if kd != modules.sym_kind_struct() and kd != modules.sym_kind_enum() { return 0; }
   let sh: u64 = modules.sym_shape(e);
+  if sh != 0 and agg.shp_kind(sh) == agg.kind_cenum() {
+    let ct: u64 = agg.cenum_ty(sh, out);
+    return 1;
+  }
   let a: u64 = ty.ty_addr(out);
   let b: u64 = ty.ty_set_sh(out, sh);
   return 1;

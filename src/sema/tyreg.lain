@@ -53,6 +53,8 @@ pub let lk_type = func() -> u64 { return 13; };
 pub let lk_of_shape = func(sk: u64) -> u64 {
   if sk == agg.kind_struct() { return lk_struct(); }
   if sk == agg.kind_enum() { return lk_enum(); }
+  // 整数枚举物理上就是底层整数标量。
+  if sk == agg.kind_cenum() { return lk_bits(); }
   if sk == agg.kind_array() { return lk_array(); }
   if sk == agg.kind_string() { return lk_array(); }
   if sk == agg.kind_ref() { return lk_ref(); }
@@ -241,18 +243,26 @@ pub let ty_shape = func(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEn
 
 pub let void_tid = func(k: Mut(st.State)) -> u64 { return ty_add(k, lk_void(), 0, 0, 0); };
 
+// 把一个形状归到一个 TypeId：形状还没编号就现登记。
+// 整数枚举用底层位宽与符号性登记，形状号保证它与同宽整数、与另一个枚举都不同。
+pub let tid_of_shape = func(k: Mut(st.State), sh: u64) -> u64 {
+  let got: u64 = agg.shp_tid(sh);
+  if got != 0 { return got; }
+  let sk: u64 = agg.shp_kind(sh);
+  let id: u64 = if sk == agg.kind_cenum() {
+    ty_add(k, lk_bits(), agg.shp_und_w(sh), agg.shp_und_sg(sh), sh)
+  } else {
+    ty_add(k, lk_of_shape(sk), 0, 0, sh)
+  };
+  let s1: u64 = agg.shp_set_tid(sh, id);
+  return id;
+};
+
 // 把一个 Ty 归到一个 TypeId：带形状的按形状找，形状还没编号就现登记。
 pub let tid_of = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
   if ty.ty_known(t) == 0 { return void_tid(k); }
   let sh: u64 = ty.tsh(t);
-  if sh != 0 {
-    let got: u64 = agg.shp_tid(sh);
-    if got != 0 { return got; }
-    let sk: u64 = agg.shp_kind(sh);
-    let id: u64 = ty_add(k, lk_of_shape(sk), 0, 0, sh);
-    let st1: u64 = agg.shp_set_tid(sh, id);
-    return id;
-  }
+  if sh != 0 { return tid_of_shape(k, sh); }
   return ty_add(k, ty.tk(t), ty.tw(t), ty.tsg(t), 0);
 };
 
@@ -264,12 +274,18 @@ pub let project = func(k: Mut(st.State), id: u64, out: Mut(ty.Ty)) -> u64 {
   let lk: u64 = ty_kind(k, id);
   let w: u64 = ty_width(k, id);
   let sg: u64 = ty_signed(k, id);
-  if lk <= 3 { return ty.ty_save(out, lk, w, sg); }
+  let sh: u64 = ty_shape(k, id);
+  // 整数枚举登记为标量种类但带形状号，投影必须保留它，否则物理投影会
+  // 退化成裸整数、与底层整数混淆。其余标量形状号（类型句柄）沿用裸投影。
+  if lk <= 3 {
+    let a: u64 = ty.ty_save(out, lk, w, sg);
+    if lk == lk_bits() and sh != 0 { return ty.ty_set_sh(out, sh); }
+    return a;
+  }
   if lk == lk_void() { return ty.ty_none(out); }
   if lk == lk_type() { return ty.ty_none(out); }
-  let sh: u64 = ty_shape(k, id);
-  let a: u64 = ty.ty_addr(out);
-  if sh == 0 { return a; }
+  let a0: u64 = ty.ty_addr(out);
+  if sh == 0 { return a0; }
   return ty.ty_set_sh(out, sh);
 };
 

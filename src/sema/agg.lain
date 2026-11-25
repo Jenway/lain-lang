@@ -1,7 +1,7 @@
 // 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
 // 形状记录 128 字节头，成员记录在独立数组里（每项 64 字节）。
 // 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、
-// 10 Uninit、11 Fn、12 Type。
+// 10 Uninit、11 Fn、12 Type、13 C 风格整数枚举。
 // 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
 // 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("src::driver::state");
@@ -51,6 +51,8 @@ pub let kind_mutslice = func() -> u64 { return 9; };
 pub let kind_uninit = func() -> u64 { return 10; };
 pub let kind_fn = func() -> u64 { return 11; };
 pub let kind_type = func() -> u64 { return 12; };
+// C 风格整数枚举：值是底层整数的字面量，不是带标签的聚合。
+pub let kind_cenum = func() -> u64 { return 13; };
 
 pub let shp_ptr = func(sh: u64) -> Mut(Shape) { return ptr_cast(Mut(Shape), sh); };
 
@@ -116,6 +118,16 @@ pub let shp_ret = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return
 pub let shp_set_ret = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.ret_tid = v; return v; };
 pub let shp_sig = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.sig; };
 pub let shp_set_sig = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.sig = v; return v; };
+// 整数枚举的底层整数：位宽与符号性。枚举形状不用 elem / ret_tid，
+// 这两个槽在 kind_cenum 下专存底层位宽与符号性。
+pub let shp_und_w = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.elem; };
+pub let shp_und_sg = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.ret_tid; };
+pub let shp_set_under = func(sh: u64, w: u64, sg: u64) -> u64 {
+  let p: Mut(Shape) = shp_ptr(sh);
+  p.elem = w;
+  p.ret_tid = sg;
+  return w;
+};
 pub let shp_drop_q = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.drop_q; };
 pub let shp_set_drop_q = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.drop_q = v; return v; };
 pub let shp_has_drop = func(sh: u64) -> u64 {
@@ -238,6 +250,52 @@ pub let variant_add = func(s: Mut(st.State), sh: u64, name: u64, has: u64, k: u6
   let end: u64 = if has == 1 { off + sz } else { 1 };
   if end > p.size { p.size = end; }
   return add_member(s, sh, name, off, tag, has, k, w, sg, sub);
+};
+
+// 整数枚举：底层整数决定字宽与符号性，变体名只携带自己的判别值。
+pub let cenum_new = func(s: Mut(st.State), name: u64, w: u64, sg: u64) -> u64 {
+  let sh: u64 = shp_new(s, kind_cenum(), name, st.st_src(s));
+  let p: Mut(Shape) = shp_ptr(sh);
+  let sz: u64 = w / 8;
+  p.size = sz;
+  p.align = sz;
+  let u: u64 = shp_set_under(sh, w, sg);
+  return sh;
+};
+
+// 变体记录：tag 存判别值（构造顺序不再有意义），没有载荷。
+pub let cenum_variant_add = func(s: Mut(st.State), sh: u64, name: u64, value: u64) -> Mut(Member) {
+  let p: Mut(Shape) = shp_ptr(sh);
+  let i: u64 = p.count;
+  let rs: u64 = mem_reserve(s, sh, i + 1);
+  if st.st_ok(s) != 0 { return null_ref(Mut(Member)); }
+  let m: Mut(Member) = mem_at(sh, i);
+  m.name = name;
+  m.off = 0;
+  m.tag = value;
+  m.has = 0;
+  m.k = 0;
+  m.w = 0;
+  m.sg = 0;
+  m.sh = 0;
+  p.count = i + 1;
+  return m;
+};
+
+// 整数枚举的类型描述：底层位宽与符号性加形状号，形状号保证与同名底层整数
+// （以及另一个不同枚举）在 ty_same 上严格区分。
+pub let cenum_ty = func(sh: u64, out: Mut(ty.Ty)) -> u64 {
+  let w: u64 = shp_und_w(sh);
+  let sg: u64 = shp_und_sg(sh);
+  ty.ty_save(out, codes.TY_BITS(), w, sg);
+  return ty.ty_set_sh(out, sh);
+};
+
+// 一个变体值就是该枚举类型的整数常量。
+pub let cenum_lit = func(k: Mut(st.State), sh: u64, value: u64, out: Mut(ty.Val)) -> u64 {
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
+  let a: u64 = cenum_ty(sh, t);
+  return ty.val_lit(out, value, t);
 };
 
 // 数组与字符串：一个成员，描述元素类型。

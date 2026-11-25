@@ -517,10 +517,11 @@ let covered = func(arms: Mut(Arm), nrec: u64, tag: u64, j: u64) -> u64 {
   return covered(arms, nrec, tag, j + 1);
 };
 
-let find_missing = func(arms: Mut(Arm), nrec: u64, cnt: u64, i: u64) -> u64 {
+let find_missing = func(arms: Mut(Arm), nrec: u64, sh: u64, cnt: u64, i: u64) -> u64 {
   if i >= cnt { return 0; }
-  if covered(arms, nrec, i, 0) == 0 { return i + 1; }
-  return find_missing(arms, nrec, cnt, i + 1);
+  let tag: u64 = agg.mem_tag(agg.mem_at(sh, i));
+  if covered(arms, nrec, tag, 0) == 0 { return tag + 1; }
+  return find_missing(arms, nrec, sh, cnt, i + 1);
 };
 
 let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u64 {
@@ -533,7 +534,7 @@ let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u6
   }
   if c.hasdef == 1 { return 1; }
   let cnt: u64 = agg.shp_count(c.sh);
-  let miss: u64 = find_missing(c.arms, c.nrec, cnt, 0);
+  let miss: u64 = find_missing(c.arms, c.nrec, c.sh, cnt, 0);
   if miss == 0 { return 1; }
   let me: Ref(u8) = "non-exhaustive match";
   let de: u64 = ir.diag(k, span, 1, me, 20);
@@ -541,10 +542,16 @@ let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u6
   return 0;
 };
 
-// 枚举 scrutinee 取首字节标签当选择子；整数 scrutinee 直接用自身。
+// 枚举 scrutinee 取首字节标签当选择子；整数枚举与整数 scrutinee 用值本身。
 let match_selector = func(k: Mut(st.State), cv: Mut(ty.Val), sh: u64, sel_ty: Mut(ty.Ty), obj: Mut(u64)) -> u64 {
   let vt: Mut(ty.Ty) = ty.vty(cv);
   if sh != 0 {
+    if agg.shp_kind(sh) == agg.kind_cenum() {
+      let w: u64 = agg.shp_und_w(sh);
+      let sg: u64 = agg.shp_und_sg(sh);
+      ty.ty_bits(sel_ty, w, sg);
+      return val_force(k, cv, sel_ty);
+    }
     let on: u64 = ty.vn(cv);
     if on == 0 { st.st_fail(k, e_type()); return 0; }
     ty.ty_u8(sel_ty);
@@ -577,7 +584,10 @@ pub let match_compile = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty),
   if delim_of(g, sj) != dl_brace() { st.st_fail(k, e_ast()); return sj + 1; }
   let ag: u64 = n_at(g, sj);
   let sh0: u64 = ty.tsh(ty.vty(cv));
-  let sh: u64 = if sh0 == 0 { 0 } else { if agg.shp_kind(sh0) == agg.kind_enum() { sh0 } else { 0 } };
+  let sh: u64 = if sh0 == 0 { 0 } else {
+    let kd0: u64 = agg.shp_kind(sh0);
+    if kd0 == agg.kind_enum() or kd0 == agg.kind_cenum() { sh0 } else { 0 }
+  };
   let sel_ty: Mut(ty.Ty) = new_ty(k);
   let ob: Mut(u64) = box(k);
   let sel: u64 = match_selector(k, cv, sh, sel_ty, ob);

@@ -279,6 +279,82 @@ let parse_enum_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut
   return modules.sym_add(k, modules.sym_kind_enum(), modules.cur(k), name, q, null_ref(Mut(u8)), sh);
 };
 
+// --- C 风格整数枚举 ------------------------------------------------------
+let cenum_fail = func(k: Mut(st.State), m: Ref(u8), len: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, len);
+  return st.st_fail(k, e_type());
+};
+
+// 判别值：负号字面量或编译期整数表达式。
+let cenum_value_at = func(k: Mut(st.State), fg: u64, i: u64, out: Mut(u64)) -> u64 {
+  let n: u64 = n_count(fg);
+  if i >= n { st.st_fail(k, e_ast()); return i; }
+  let cv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
+  if is_name(fg, i) == 0 and n_sym(fg, i) == s.o_minus() {
+    let j: u64 = ctfn.ct_eval(k, fg, i + 1, 0, cv);
+    if st.st_ok(k) != 0 { return j; }
+    if ctf.v_kind(cv) != 0 { return j; }
+    deref(out) = 0 - ctf.v_a(cv);
+    return j;
+  }
+  let j2: u64 = ctfn.ct_eval(k, fg, i, 0, cv);
+  if st.st_ok(k) != 0 { return j2; }
+  if ctf.v_kind(cv) != 0 { return j2; }
+  deref(out) = ctf.v_a(cv);
+  return j2;
+};
+
+// 判别值必须落在底层整数的表示范围内。
+let cenum_fits = func(w: u64, sg: u64, v: u64) -> u64 {
+  if w >= 64 { return 1; }
+  let lim: u64 = 1 << w;
+  let r: u64 = v % lim;
+  if sg == 0 { return if r == v { 1 } else { 0 }; }
+  let half: u64 = 1 << (w - 1);
+  if r <= half - 1 { return 1; }
+  if r >= lim - half { return 1; }
+  return 0;
+};
+
+let cenum_dup = func(sh: u64, value: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let m: Mut(agg.Member) = agg.mem_at(sh, i);
+  if agg.mem_tag(m) == value { return 1; }
+  return cenum_dup(sh, value, i + 1, n);
+};
+
+// let Name = enum(u64) { A, B = 40, C }：每个变体带一个整数判别值，
+// 没写 = 时从 0 或上一个值加一。
+let parse_cenum_shape = func(k: Mut(st.State), name: u64, q: u64, w: u64, sg: u64, fg: u64) -> Mut(modules.SymEntry) {
+  let sh: u64 = agg.cenum_new(k, name, w, sg);
+  let n: u64 = n_count(fg);
+  let nxt: Mut(u64) = box(k);
+  deref(nxt) = 0;
+  let done: u64 = loop v(j: u64 = 0) while j < n {
+    if is_comma(fg, j) == 1 or is_semi(fg, j) == 1 {
+      j = j + 1;
+    } else {
+      if is_name(fg, j) == 0 { st.st_fail(k, e_ast()); break v(j + 1); }
+      let vname: u64 = n_sym(fg, j);
+      let j2: u64 = j + 1;
+      let bv: Mut(u64) = box(k);
+      deref(bv) = deref(nxt);
+      let j3: u64 = if j2 < n and n_sym(fg, j2) == s.p_eq() { cenum_value_at(k, fg, j2 + 1, bv) } else { j2 };
+      if st.st_ok(k) != 0 { break v(j3); }
+      let val: u64 = box_get(bv);
+      let fit: u64 = cenum_fits(w, sg, val);
+      if fit == 0 { let f0: u64 = cenum_fail(k, "enum value out of range", 23); break v(j3); }
+      let dup: u64 = cenum_dup(sh, val, 0, agg.shp_count(sh));
+      if dup == 1 { let f1: u64 = cenum_fail(k, "duplicate enum value", 20); break v(j3); }
+      let m: Mut(agg.Member) = agg.cenum_variant_add(k, sh, vname, val);
+      deref(nxt) = val + 1;
+      j = j3;
+    }
+  };
+  let fin: u64 = agg.finish(k, sh);
+  return modules.sym_add(k, modules.sym_kind_enum(), modules.cur(k), name, q, null_ref(Mut(u8)), sh);
+};
+
 // 函数签名：phase1 登记，phase2 才编译体（调用点要先看见签名）。
 let find_brace = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
@@ -750,6 +826,23 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e + 2);
   }
+  // let 名 = enum(u64) { 变体 = 值, ... }：整数枚举，值是底层整数常量。
+  if n_sym(g, e) == s.k_enum() and e + 2 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.dl_paren() and is_group(g, e + 2) == 1 and delim_of(g, e + 2) == dl_brace() {
+    let pg: u64 = n_at(g, e + 1);
+    let bt: Mut(ty.Ty) = new_ty(k);
+    let bj: u64 = parse_type(k, pg, 0, bt);
+    if st.st_ok(k) != 0 { return skip_semi(g, e + 3); }
+    let bw: u64 = ty.tw(bt);
+    let ok: u64 = if ty.tk(bt) == codes.TY_BITS() and bw >= 8 and bw <= 64 and bw / 8 * 8 == bw { 1 } else { 0 };
+    if ok == 0 or bj != n_count(pg) {
+      let bf: u64 = cenum_fail(k, "enum base type must be an integer", 33);
+      return skip_semi(g, e + 3);
+    }
+    let se: Mut(modules.SymEntry) = parse_cenum_shape(k, name, q, bw, ty.tsg(bt), n_at(g, e + 2));
+    let sf: u64 = modules.sym_set_flag(se, 1);
+    let sp: u64 = modules.sym_set_pub(se, is_pub);
+    return skip_semi(g, e + 3);
+  }
   // let 名 = enum { 变体 }：形状在这里登记，体留给 phase2 跳过。
   if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
     let se: Mut(modules.SymEntry) = parse_enum_shape(k, name, q, n_at(g, e + 1));
@@ -940,6 +1033,9 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if n_sym(g, e) == s.k_import() { return skip_semi(g, e); }
   // let 名 = struct/enum { ... }：形状在 phase1 已登记，这里只跳过花括号组。
   if n_sym(g, e) == s.k_struct() or n_sym(g, e) == s.k_enum() {
+    if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.dl_paren() {
+      return skip_semi(g, e + 3);
+    }
     return skip_semi(g, e + 2);
   }
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
