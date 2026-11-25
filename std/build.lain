@@ -38,8 +38,31 @@ let GraphArena = struct {
 
 let arena_backing: GraphArena = GraphArena { };
 
+let ArenaCapacity: u64 = 16384;
+
+let arena_state: mem.BumpArena.Arena = mem.BumpArena.Arena { base: 0, cap: 0, used: 0 };
+
+let arena_mut = func() -> Mut(mem.BumpArena.Arena) {
+  return mut_of(arena_state);
+};
+
+let arena_ready = func() -> Mut(mem.BumpArena.Arena) {
+  let a: Mut(mem.BumpArena.Arena) = arena_mut();
+  if deref(a).cap == 0 {
+    deref(a).base = ptr_of(arena_backing);
+    deref(a).cap = ArenaCapacity;
+    deref(a).used = 0;
+  }
+  return a;
+};
+
 let arena_take = func(bytes: u64) -> u64 {
-  return mem.carve(ptr_of(arena_backing), 16384, bytes);
+  let raw: u64 = mem.BumpArena.alloc(arena_ready(), bytes);
+  if raw == 0 {
+    let dead: u64 = mem.trap_abort(bytes);
+    return dead;
+  }
+  return raw;
 };
 
 pub let fnv1a_bytes = func(data: Slice(u8)) -> u64 {

@@ -2,6 +2,8 @@ let io = import("std::io");
 let os = import("std::os");
 let fs = import("std::fs");
 let option = import("std::option");
+let cli = import("std::cli");
+let str = import("std::str");
 let rd = import("src::frontend::reader");
 
 let OptSlice = option.Option(MutSlice(u8));
@@ -116,15 +118,6 @@ let text_ptr_back = func(t: Mut(Text), p: Ref(u8), n: u64) {
   };
 };
 
-let slice_eq = func(a: Slice(u8), b: Slice(u8)) -> bool {
-  if a.len != b.len { return false; }
-  loop cp(i: u64 = 0) while i < a.len {
-    if a[i] != b[i] { return false; }
-    i = i + 1;
-  };
-  return true;
-};
-
 let is_hspace = func(c: u8) -> bool {
   if c == 32 { return true; }
   if c == 9 { return true; }
@@ -185,7 +178,7 @@ let is_ident = func(ast: rd.RawAst, id: u64) -> bool {
 let ident_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, s: Slice(u8)) -> bool {
   if is_ident(ast, id) == false { return false; }
   let t: Slice(u8) = rd.node_text(src, ast, id);
-  return slice_eq(t, s);
+  return str.eq(t, s);
 };
 
 let punct_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, c: u8) -> bool {
@@ -657,7 +650,7 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
   let type_sp: Range = trim_range(src, node_stop(ast, colon_id), eq_off);
   let rt: Slice(u8) = make_slice(Slice(u8), src.ptr + type_sp.from, type_sp.to - type_sp.from);
   let lt: Slice(u8) = make_slice(Slice(u8), src.ptr + last.type_off, last.type_len);
-  if slice_eq(rt, lt) == false {
+  if str.eq(rt, lt) == false {
     st.kept_position = st.kept_position + 1;
     report(st, line, label_of(st, label), "kept (result type differs from last state type)");
     return;
@@ -776,13 +769,9 @@ let usage = func() -> u64 {
   return os.eprint(msg);
 };
 
-let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
-  return slice_eq(a, b);
-};
-
 let take = func(c: Mut(Cli), a: Slice(u8)) {
   if c.pending_pass == 1 {
-    if same(a, "loop-to-while") {
+    if str.eq(a, "loop-to-while") {
       c.pass_loop = 1;
     } else {
       c.bad = 1;
@@ -790,19 +779,19 @@ let take = func(c: Mut(Cli), a: Slice(u8)) {
     c.pending_pass = 0;
     return;
   }
-  if same(a, "--pass") {
+  if str.eq(a, "--pass") {
     c.pending_pass = 1;
     return;
   }
-  if same(a, "--write") {
+  if str.eq(a, "--write") {
     c.mode = 1;
     return;
   }
-  if same(a, "--dry-run") {
+  if str.eq(a, "--dry-run") {
     c.mode = 2;
     return;
   }
-  if (same(a, "--help")) or (same(a, "-h")) {
+  if (str.eq(a, "--help")) or (str.eq(a, "-h")) {
     c.help = 1;
     return;
   }
@@ -818,13 +807,9 @@ let take = func(c: Mut(Cli), a: Slice(u8)) {
   c.have = 1;
 };
 
-let arg = func(i: u64) -> Slice(u8) {
-  let n: u64 = os.argv_len(i);
-  let cap: u64 = n + 1;
-  let raw: u64 = os.alloc_bytes(cap);
-  let buf: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), raw), cap);
-  let got: u64 = os.argv_copy(i, buf);
-  return make_slice(Slice(u8), ptr_cast(Ref(u8), raw), got);
+let arg_at = func(i: u64) -> Slice(u8) {
+  let a: cli.OptSlice.Opt = cli.arg(i);
+  return cli.OptSlice.unwrap_or(a, "");
 };
 
 let fail_usage = func() -> i64 {
@@ -833,7 +818,7 @@ let fail_usage = func() -> i64 {
 };
 
 let main = func() -> i64 {
-  let argc: u64 = os.argc();
+  let argc: u64 = cli.count();
   let c0: Cli = Cli {
     pass_loop: 0,
     pending_pass: 0,
@@ -845,7 +830,7 @@ let main = func() -> i64 {
   };
   let c: Mut(Cli) = mut_of(c0);
   loop args(i: u64 = 1) while i < argc {
-    take(c, arg(i));
+    take(c, arg_at(i));
     i = i + 1;
   };
   if c.help == 1 {

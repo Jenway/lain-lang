@@ -126,11 +126,10 @@ let region_index = func(r: vf.IrRegion, i: u64) -> u64 {
   return deref(at);
 };
 
-let region_set = func(r: Mut(vf.IrRegion), i: u64, value: u64) -> u64 {
+let region_set = func(r: Mut(vf.IrRegion), i: u64, value: u64) -> () {
   let base: Mut(u8) = ptr_cast(Mut(u8), r.insts);
   let at: Mut(u64) = ptr_cast(Mut(u64), base + i * size_of(u64));
   deref(at) = value;
-  return 0;
 };
 
 let facts_find = func(f: Mut(Facts), name: u64) -> u64 {
@@ -150,14 +149,13 @@ let facts_lookup = func(f: Mut(Facts), name: u64) -> Fold {
   return alias_of(f.values[idx]);
 };
 
-let facts_push = func(f: Mut(Facts), name: u64, kind: u64, value: u64) -> u64 {
+let facts_push = func(f: Mut(Facts), name: u64, kind: u64, value: u64) -> () {
   let n: u64 = f.count;
-  if n >= FACT_CAP() { return 0; }
+  if n >= FACT_CAP() { return; }
   f.names[n] = name;
   f.kinds[n] = kind;
   f.values[n] = value;
   f.count = n + 1;
-  return 0;
 };
 
 let facts_resolve = func(f: Mut(Facts), name: u64, depth: u64) -> u64 {
@@ -238,12 +236,11 @@ let mem_key = func(it: vf.IrInst) -> u64 {
   return it.ty_kind * 256 + it.ty_width;
 };
 
-let mem_clear = func(mf: Mut(MemFacts)) -> u64 {
+let mem_clear = func(mf: Mut(MemFacts)) -> () {
   mf.count = 0;
-  return 0;
 };
 
-let mem_drop = func(mf: Mut(MemFacts), addr: u64) -> u64 {
+let mem_drop = func(mf: Mut(MemFacts), addr: u64) -> () {
   let n: u64 = mf.count;
   let kept: u64 = loop lp(i: u64 = 0, w: u64 = 0) while i < n {
     if mf.addrs[i] != addr {
@@ -256,7 +253,6 @@ let mem_drop = func(mf: Mut(MemFacts), addr: u64) -> u64 {
     i = i + 1;
   };
   mf.count = kept;
-  return 0;
 };
 
 let mem_find = func(mf: Mut(MemFacts), addr: u64, key: u64) -> u64 {
@@ -267,126 +263,124 @@ let mem_find = func(mf: Mut(MemFacts), addr: u64, key: u64) -> u64 {
   };
 };
 
-let mem_set = func(mf: Mut(MemFacts), addr: u64, key: u64, vkind: u64, val: u64) -> u64 {
-  let drop: u64 = mem_drop(mf, addr);
+let mem_set = func(mf: Mut(MemFacts), addr: u64, key: u64, vkind: u64, val: u64) -> () {
+  mem_drop(mf, addr);
   let n: u64 = mf.count;
-  if n >= MEM_CAP() { return 0; }
+  if n >= MEM_CAP() { return; }
   mf.addrs[n] = addr;
   mf.keys[n] = key;
   mf.vkinds[n] = vkind;
   mf.vals[n] = val;
   mf.count = n + 1;
-  return 0;
 };
 
-let slots_reset = func(s: Mut(Slots)) -> u64 {
+let slots_reset = func(s: Mut(Slots)) -> () {
   s.count = 0;
-  return 0;
 };
 
-let slots_add = func(s: Mut(Slots), name: u64) -> u64 {
-  if name == 0 { return 0; }
+let slots_add = func(s: Mut(Slots), name: u64) -> () {
+  if name == 0 { return; }
   let n: u64 = s.count;
-  if n >= SLOT_CAP() { return 0; }
+  if n >= SLOT_CAP() { return; }
   s.names[n] = name;
   s.count = n + 1;
-  return 0;
 };
 
-let slots_has = func(c: Mut(Ctx), name: u64) -> u64 {
+let slots_has = func(c: Mut(Ctx), name: u64) -> bool {
   let s: Mut(Slots) = c.slots;
   let n: u64 = s.count;
-  return loop lp(i: u64 = 0, hit: u64 = 0) while (i < n) and (hit == 0) {
-    if s.names[i] == name { hit = 1; }
+  return loop lp(i: u64 = 0, hit: bool = false) while (i < n) and (hit == false) {
+    if s.names[i] == name { hit = true; }
     i = i + 1;
   };
 };
 
-let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
-  if depth > vf.MAX_DEPTH() { return 0; }
-  if ri >= c.region_count { return 0; }
+let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> () {
+  if depth > vf.MAX_DEPTH() { return; }
+  if ri >= c.region_count { return; }
   let r: vf.IrRegion = region_read(c, ri);
   let n: u64 = r.inst_count;
-  let walk: u64 = loop lp(i: u64 = 0) while i < n {
+  loop lp(i: u64 = 0) while i < n {
     let ii: u64 = region_index(r, i);
     if ii < c.inst_count {
       let it: vf.IrInst = inst_read(c, ii);
       if it.kind == codes.InstKind.Alloca as u64 {
-        let put: u64 = slots_add(c.slots, it.r0);
+        slots_add(c.slots, it.r0);
       }
       if it.body != vf.NO_REGION() {
-        let b: u64 = slots_scan(c, it.body, depth + 1);
+        slots_scan(c, it.body, depth + 1);
       }
       if it.else_body != vf.NO_REGION() {
-        let e: u64 = slots_scan(c, it.else_body, depth + 1);
+        slots_scan(c, it.else_body, depth + 1);
       }
       if it.default_body != vf.NO_REGION() {
-        let d: u64 = slots_scan(c, it.default_body, depth + 1);
+        slots_scan(c, it.default_body, depth + 1);
       }
-      let cs: u64 = loop lq(j: u64 = 0) while j < it.case_count {
+      loop lq(j: u64 = 0) while j < it.case_count {
         let cc: vf.IrCase = case_read(c, it.cases_at + j);
-        let sb: u64 = slots_scan(c, cc.body, depth + 1);
+        slots_scan(c, cc.body, depth + 1);
         j = j + 1;
       };
     }
     i = i + 1;
   };
-  return 0;
 };
 
-let mem_escape = func(k: u64) -> u64 {
-  if k == codes.InstKind.Call as u64 { return 1; }
-  if (k >= codes.InstKind.Xchg as u64) and (k <= codes.InstKind.RmwXor as u64) { return 1; }
-  if (k >= codes.InstKind.AtomicLoad as u64) and (k <= codes.InstKind.AtomicFence as u64) { return 1; }
-  return 0;
+let mem_escape = func(k: u64) -> bool {
+  if k == codes.InstKind.Call as u64 { return true; }
+  if (k >= codes.InstKind.Xchg as u64) and (k <= codes.InstKind.RmwXor as u64) { return true; }
+  if (k >= codes.InstKind.AtomicLoad as u64) and (k <= codes.InstKind.AtomicFence as u64) { return true; }
+  return false;
 };
 
-let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> () {
   let it: vf.IrInst = inst_read(c, ii);
   let mf: Mut(MemFacts) = c.mem;
-  if mem_escape(it.kind) == 1 { return mem_clear(mf); }
+  if mem_escape(it.kind) { mem_clear(mf); return; }
   if it.kind == codes.InstKind.Store as u64 {
-    if it.operand_count < 2 { return mem_clear(mf); }
+    if it.operand_count < 2 { mem_clear(mf); return; }
     let value: vf.IrOperand = vf.inst_op(it, 0);
     let dest: vf.IrOperand = vf.inst_op(it, 1);
-    if dest.kind != codes.OperandKind.Value as u64 { return mem_clear(mf); }
-    if dest.name == 0 { return mem_clear(mf); }
-    if slots_has(c, dest.name) == 0 { return mem_clear(mf); }
+    if dest.kind != codes.OperandKind.Value as u64 { mem_clear(mf); return; }
+    if dest.name == 0 { mem_clear(mf); return; }
+    if slots_has(c, dest.name) == false { mem_clear(mf); return; }
     let key: u64 = mem_key(it);
     if value.kind == codes.OperandKind.Int as u64 {
       if it.ty_kind == codes.TyKind.Bits as u64 {
         let bits: u64 = mask_width(value.bits, it.ty_width);
-        return mem_set(mf, dest.name, key, 1, bits);
+        mem_set(mf, dest.name, key, 1, bits);
+        return;
       }
-      let drop_int: u64 = mem_drop(mf, dest.name);
-      return 0;
+      mem_drop(mf, dest.name);
+      return;
     }
     if value.kind == codes.OperandKind.Value as u64 {
-      if value.name != 0 { return mem_set(mf, dest.name, key, 2, value.name); }
+      if value.name != 0 {
+        mem_set(mf, dest.name, key, 2, value.name);
+        return;
+      }
     }
-    let drop_other: u64 = mem_drop(mf, dest.name);
-    return 0;
+    mem_drop(mf, dest.name);
+    return;
   }
   if it.kind == codes.InstKind.Load as u64 {
-    if it.operand_count != 1 { return 0; }
-    if it.result_count != 1 { return 0; }
-    if it.r0 == 0 { return 0; }
+    if it.operand_count != 1 { return; }
+    if it.result_count != 1 { return; }
+    if it.r0 == 0 { return; }
     let src: vf.IrOperand = vf.inst_op(it, 0);
-    if src.kind != codes.OperandKind.Value as u64 { return 0; }
-    if src.name == 0 { return 0; }
+    if src.kind != codes.OperandKind.Value as u64 { return; }
+    if src.name == 0 { return; }
     let key: u64 = mem_key(it);
     let at: u64 = mem_find(mf, src.name, key);
     if at == 0 {
-
-      let rec: u64 = mem_set(mf, src.name, key, 2, it.r0);
-      return 0;
+      mem_set(mf, src.name, key, 2, it.r0);
+      return;
     }
-    if f.count >= FACT_CAP() { return 0; }
+    if f.count >= FACT_CAP() { return; }
     let idx: u64 = at - 1;
-    let pushed: u64 = facts_push(f, it.r0, mf.vkinds[idx], mf.vals[idx]);
+    facts_push(f, it.r0, mf.vkinds[idx], mf.vals[idx]);
     st.folded = st.folded + 1;
   }
-  return 0;
 };
 
 let fold_inst = func(it: vf.IrInst) -> Fold {
@@ -559,71 +553,69 @@ let fold_identity = func(it: vf.IrInst) -> Fold {
   return no_fold();
 };
 
-let subst_ok = func(k: u64) -> u64 {
-  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.AShr as u64) { return 1; }
-  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return 1; }
-  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return 1; }
-  return 0;
+let subst_ok = func(k: u64) -> bool {
+  if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.AShr as u64) { return true; }
+  if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return true; }
+  if (k >= codes.InstKind.ZExt as u64) and (k <= codes.InstKind.Trunc as u64) { return true; }
+  return false;
 };
 
-let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
+let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> () {
   let kind: u64 = codes.OperandKind.Int as u64;
-  if i == 0 { it.op0_kind = kind; it.op0_name = 0; it.op0_bits = value; return 0; }
-  if i == 1 { it.op1_kind = kind; it.op1_name = 0; it.op1_bits = value; return 0; }
-  if i == 2 { it.op2_kind = kind; it.op2_name = 0; it.op2_bits = value; return 0; }
-  if i == 3 { it.op3_kind = kind; it.op3_name = 0; it.op3_bits = value; return 0; }
-  if i == 4 { it.op4_kind = kind; it.op4_name = 0; it.op4_bits = value; return 0; }
-  if i == 5 { it.op5_kind = kind; it.op5_name = 0; it.op5_bits = value; return 0; }
-  if i == 6 { it.op6_kind = kind; it.op6_name = 0; it.op6_bits = value; return 0; }
-  if i == 7 { it.op7_kind = kind; it.op7_name = 0; it.op7_bits = value; return 0; }
-  if i == 8 { it.op8_kind = kind; it.op8_name = 0; it.op8_bits = value; return 0; }
-  if i == 9 { it.op9_kind = kind; it.op9_name = 0; it.op9_bits = value; return 0; }
-  if i == 10 { it.op10_kind = kind; it.op10_name = 0; it.op10_bits = value; return 0; }
-  if i == 11 { it.op11_kind = kind; it.op11_name = 0; it.op11_bits = value; return 0; }
-  if i == 12 { it.op12_kind = kind; it.op12_name = 0; it.op12_bits = value; return 0; }
-  if i == 13 { it.op13_kind = kind; it.op13_name = 0; it.op13_bits = value; return 0; }
-  if i == 14 { it.op14_kind = kind; it.op14_name = 0; it.op14_bits = value; return 0; }
-  if i == 15 { it.op15_kind = kind; it.op15_name = 0; it.op15_bits = value; return 0; }
-  return 0;
+  if i == 0 { it.op0_kind = kind; it.op0_name = 0; it.op0_bits = value; return; }
+  if i == 1 { it.op1_kind = kind; it.op1_name = 0; it.op1_bits = value; return; }
+  if i == 2 { it.op2_kind = kind; it.op2_name = 0; it.op2_bits = value; return; }
+  if i == 3 { it.op3_kind = kind; it.op3_name = 0; it.op3_bits = value; return; }
+  if i == 4 { it.op4_kind = kind; it.op4_name = 0; it.op4_bits = value; return; }
+  if i == 5 { it.op5_kind = kind; it.op5_name = 0; it.op5_bits = value; return; }
+  if i == 6 { it.op6_kind = kind; it.op6_name = 0; it.op6_bits = value; return; }
+  if i == 7 { it.op7_kind = kind; it.op7_name = 0; it.op7_bits = value; return; }
+  if i == 8 { it.op8_kind = kind; it.op8_name = 0; it.op8_bits = value; return; }
+  if i == 9 { it.op9_kind = kind; it.op9_name = 0; it.op9_bits = value; return; }
+  if i == 10 { it.op10_kind = kind; it.op10_name = 0; it.op10_bits = value; return; }
+  if i == 11 { it.op11_kind = kind; it.op11_name = 0; it.op11_bits = value; return; }
+  if i == 12 { it.op12_kind = kind; it.op12_name = 0; it.op12_bits = value; return; }
+  if i == 13 { it.op13_kind = kind; it.op13_name = 0; it.op13_bits = value; return; }
+  if i == 14 { it.op14_kind = kind; it.op14_name = 0; it.op14_bits = value; return; }
+  if i == 15 { it.op15_kind = kind; it.op15_name = 0; it.op15_bits = value; return; }
 };
 
-let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
-  if i == 0 { it.op0_name = name; return 0; }
-  if i == 1 { it.op1_name = name; return 0; }
-  if i == 2 { it.op2_name = name; return 0; }
-  if i == 3 { it.op3_name = name; return 0; }
-  if i == 4 { it.op4_name = name; return 0; }
-  if i == 5 { it.op5_name = name; return 0; }
-  if i == 6 { it.op6_name = name; return 0; }
-  if i == 7 { it.op7_name = name; return 0; }
-  if i == 8 { it.op8_name = name; return 0; }
-  if i == 9 { it.op9_name = name; return 0; }
-  if i == 10 { it.op10_name = name; return 0; }
-  if i == 11 { it.op11_name = name; return 0; }
-  if i == 12 { it.op12_name = name; return 0; }
-  if i == 13 { it.op13_name = name; return 0; }
-  if i == 14 { it.op14_name = name; return 0; }
-  if i == 15 { it.op15_name = name; return 0; }
-  return 0;
+let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> () {
+  if i == 0 { it.op0_name = name; return; }
+  if i == 1 { it.op1_name = name; return; }
+  if i == 2 { it.op2_name = name; return; }
+  if i == 3 { it.op3_name = name; return; }
+  if i == 4 { it.op4_name = name; return; }
+  if i == 5 { it.op5_name = name; return; }
+  if i == 6 { it.op6_name = name; return; }
+  if i == 7 { it.op7_name = name; return; }
+  if i == 8 { it.op8_name = name; return; }
+  if i == 9 { it.op9_name = name; return; }
+  if i == 10 { it.op10_name = name; return; }
+  if i == 11 { it.op11_name = name; return; }
+  if i == 12 { it.op12_name = name; return; }
+  if i == 13 { it.op13_name = name; return; }
+  if i == 14 { it.op14_name = name; return; }
+  if i == 15 { it.op15_name = name; return; }
 };
 
-let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> () {
   let copy: vf.IrInst = inst_read(c, ii);
   let n: u64 = copy.operand_count;
-  let lit: u64 = subst_ok(copy.kind);
+  let lit: bool = subst_ok(copy.kind);
   let changed: u64 = loop lp(i: u64 = 0, acc: u64 = 0) while i < n {
     let op: vf.IrOperand = vf.inst_op(copy, i);
     if (op.kind == codes.OperandKind.Value as u64) and (op.name != 0) {
       let resolved: u64 = facts_resolve(f, op.name, 0);
       let cf: Fold = facts_const(f, op.name, 0);
-      if (cf.ok == 1) and (lit == 1) {
+      if (cf.ok == 1) and lit {
         let slot: Mut(vf.IrInst) = inst_slot(c, ii);
-        let put: u64 = set_op_int(slot, i, cf.value);
+        set_op_int(slot, i, cf.value);
         acc = acc + 1;
       } else {
         if resolved != op.name {
           let slot2: Mut(vf.IrInst) = inst_slot(c, ii);
-          let put2: u64 = set_op_name(slot2, i, resolved);
+          set_op_name(slot2, i, resolved);
           acc = acc + 1;
         }
       }
@@ -631,22 +623,20 @@ let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -
     i = i + 1;
   };
   st.folded = st.folded + changed;
-  return changed;
 };
 
-let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
+let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> () {
   let it: vf.IrInst = inst_read(c, ii);
   let direct: Fold = fold_inst(it);
   let res: Fold = fold_pick(fold_pick(direct, fold_conv(it)), fold_identity(it));
   if res.ok == 1 {
     st.folded = st.folded + 1;
-    if it.r0 != 0 { let put: u64 = facts_push(f, it.r0, res.kind, res.value); }
+    if it.r0 != 0 { facts_push(f, it.r0, res.kind, res.value); }
   }
-  return 0;
 };
 
-let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
-  if it.body == vf.NO_REGION() { return 0; }
+let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> () {
+  if it.body == vf.NO_REGION() { return; }
   let cond: vf.IrOperand = vf.inst_op(it, 0);
   let has: u64 = 0;
   let truth: u64 = 0;
@@ -676,104 +666,103 @@ let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats),
     }
     if live != vf.NO_REGION() {
       let saved: u64 = f.count;
-      if named != 0 { let put: u64 = facts_push(f, named, 1, truth); }
-      let walk: u64 = fold_region(c, live, f, st, depth + 1);
+      if named != 0 { facts_push(f, named, 1, truth); }
+      fold_region(c, live, f, st, depth + 1);
       f.count = saved;
     }
-    return 0;
+    return;
   }
   if it.body != vf.NO_REGION() {
     let saved: u64 = f.count;
-    if named != 0 { let put: u64 = facts_push(f, named, 1, 1); }
-    let walk: u64 = fold_region(c, it.body, f, st, depth + 1);
+    if named != 0 { facts_push(f, named, 1, 1); }
+    fold_region(c, it.body, f, st, depth + 1);
     f.count = saved;
   }
   if it.else_body != vf.NO_REGION() {
     let saved2: u64 = f.count;
-    if named != 0 { let put: u64 = facts_push(f, named, 1, 0); }
-    let walk2: u64 = fold_region(c, it.else_body, f, st, depth + 1);
+    if named != 0 { facts_push(f, named, 1, 0); }
+    fold_region(c, it.else_body, f, st, depth + 1);
     f.count = saved2;
   }
-  return 0;
 };
 
-let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
-  if it.kind == codes.InstKind.If as u64 { return fold_if(c, it, f, st, depth); }
+let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> () {
+  if it.kind == codes.InstKind.If as u64 {
+    fold_if(c, it, f, st, depth);
+    return;
+  }
   let saved: u64 = f.count;
   if it.body != vf.NO_REGION() {
-    let a: u64 = fold_region(c, it.body, f, st, depth + 1);
+    fold_region(c, it.body, f, st, depth + 1);
   }
   if it.else_body != vf.NO_REGION() {
-    let b: u64 = fold_region(c, it.else_body, f, st, depth + 1);
+    fold_region(c, it.else_body, f, st, depth + 1);
   }
   if it.default_body != vf.NO_REGION() {
-    let d: u64 = fold_region(c, it.default_body, f, st, depth + 1);
+    fold_region(c, it.default_body, f, st, depth + 1);
   }
-  let cases: u64 = loop lp(i: u64 = 0) while i < it.case_count {
+  loop lp(i: u64 = 0) while i < it.case_count {
     let cs: vf.IrCase = case_read(c, it.cases_at + i);
-    let e: u64 = fold_region(c, cs.body, f, st, depth + 1);
+    fold_region(c, cs.body, f, st, depth + 1);
     i = i + 1;
   };
   f.count = saved;
-  return 0;
 };
 
-let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
-  let applied: u64 = apply_facts(c, ii, f, st);
-  let folded: u64 = fold_own(c, ii, f, st);
-  let mem: u64 = mem_step(c, ii, f, st);
+let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> () {
+  apply_facts(c, ii, f, st);
+  fold_own(c, ii, f, st);
+  mem_step(c, ii, f, st);
   let it: vf.IrInst = inst_read(c, ii);
-  return fold_children(c, it, f, st, depth);
+  fold_children(c, it, f, st, depth);
 };
 
-let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
-  if depth > vf.MAX_DEPTH() { return 0; }
-  if ri >= c.region_count { return 0; }
+let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> () {
+  if depth > vf.MAX_DEPTH() { return; }
+  if ri >= c.region_count { return; }
   if depth > 0 {
-    let enter: u64 = mem_clear(c.mem);
+    mem_clear(c.mem);
   }
   let r: Mut(vf.IrRegion) = region_slot(c, ri);
   let n: u64 = r.inst_count;
-  let walk: u64 = loop lp(i: u64 = 0) while i < n {
+  loop lp(i: u64 = 0) while i < n {
     let ii: u64 = region_index(deref(r), i);
     if ii < c.inst_count {
-      let step: u64 = fold_at(c, ii, f, st, depth);
+      fold_at(c, ii, f, st, depth);
     }
     i = i + 1;
   };
   if depth > 0 {
-    let leave: u64 = mem_clear(c.mem);
+    mem_clear(c.mem);
   }
-  return 0;
 };
 
-let is_pure = func(k: u64) -> u64 {
-  if k <= codes.InstKind.VCmpGt as u64 { return 1; }
-  if k == codes.InstKind.Lea as u64 { return 1; }
-  return 0;
+let is_pure = func(k: u64) -> bool {
+  if k <= codes.InstKind.VCmpGt as u64 { return true; }
+  if k == codes.InstKind.Lea as u64 { return true; }
+  return false;
 };
 
-let inst_uses = func(it: vf.IrInst, name: u64) -> u64 {
+let inst_uses = func(it: vf.IrInst, name: u64) -> bool {
   let n: u64 = it.operand_count;
-  let hit: u64 = loop lp(i: u64 = 0, found: u64 = 0) while (i < n) and (found == 0) {
+  return loop lp(i: u64 = 0, found: bool = false) while (i < n) and (found == false) {
     let op: vf.IrOperand = vf.inst_op(it, i);
-    if (op.kind == codes.OperandKind.Value as u64) and (op.name == name) { found = 1; }
+    if (op.kind == codes.OperandKind.Value as u64) and (op.name == name) { found = true; }
     i = i + 1;
   };
-  return hit;
 };
 
-let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> u64 {
+let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> bool {
   if it.body != vf.NO_REGION() {
-    if region_uses(c, it.body, name) == 1 { return 1; }
+    if region_uses(c, it.body, name) { return true; }
   }
   if it.else_body != vf.NO_REGION() {
-    if region_uses(c, it.else_body, name) == 1 { return 1; }
+    if region_uses(c, it.else_body, name) { return true; }
   }
   if it.default_body != vf.NO_REGION() {
-    if region_uses(c, it.default_body, name) == 1 { return 1; }
+    if region_uses(c, it.default_body, name) { return true; }
   }
-  let hit: u64 = loop lp(i: u64 = 0, found: u64 = 0) while (i < it.case_count) and (found == 0) {
+  let hit: bool = loop lp(i: u64 = 0, found: bool = false) while (i < it.case_count) and (found == false) {
     let cs: vf.IrCase = case_read(c, it.cases_at + i);
     found = region_uses(c, cs.body, name);
     i = i + 1;
@@ -781,30 +770,29 @@ let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> u64 {
   return hit;
 };
 
-let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
-  if ri >= c.region_count { return 0; }
+let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> bool {
+  if ri >= c.region_count { return false; }
   let r: vf.IrRegion = region_read(c, ri);
   let n: u64 = r.inst_count;
-  let hit: u64 = loop lp(k: u64 = 0, found: u64 = 0) while (k < n) and (found == 0) {
+  return loop lp(k: u64 = 0, found: bool = false) while (k < n) and (found == false) {
     let ii: u64 = region_index(r, k);
     if ii < c.inst_count {
       let it: vf.IrInst = inst_read(c, ii);
-      if inst_uses(it, name) == 1 {
-        found = 1;
+      if inst_uses(it, name) {
+        found = true;
       } else {
         found = sub_regions_use(c, it, name);
       }
     }
     k = k + 1;
   };
-  return hit;
 };
 
-let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> u64 {
-  if it.kind != codes.InstKind.Load as u64 { return 0; }
-  if it.operand_count != 1 { return 0; }
+let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> bool {
+  if it.kind != codes.InstKind.Load as u64 { return false; }
+  if it.operand_count != 1 { return false; }
   let src: vf.IrOperand = vf.inst_op(it, 0);
-  if src.kind != codes.OperandKind.Value as u64 { return 0; }
+  if src.kind != codes.OperandKind.Value as u64 { return false; }
   return slots_has(c, src.name);
 };
 
@@ -814,17 +802,17 @@ let compact_region = func(c: Mut(Ctx), ri: u64, proc_body: u64) -> u64 {
   let n: u64 = r.inst_count;
   let kept: u64 = loop lp(i: u64 = 0, w: u64 = 0) while i < n {
     let ii: u64 = region_index(deref(r), i);
-    let keep: u64 = 1;
+    let keep: bool = true;
     if ii < c.inst_count {
       let it: vf.IrInst = inst_read(c, ii);
-      let removable: u64 = is_pure(it.kind);
-      if removable == 0 { removable = dead_load_ok(c, it); }
-      if (removable == 1) and (it.result_count == 1) and (it.r0 != 0) {
-        if region_uses(c, proc_body, it.r0) == 0 { keep = 0; }
+      let removable: bool = is_pure(it.kind);
+      if removable == false { removable = dead_load_ok(c, it); }
+      if removable and (it.result_count == 1) and (it.r0 != 0) {
+        if region_uses(c, proc_body, it.r0) == false { keep = false; }
       }
     }
-    if keep == 1 {
-      let put: u64 = region_set(r, w, ii);
+    if keep {
+      region_set(r, w, ii);
       w = w + 1;
     }
     i = i + 1;
@@ -876,9 +864,9 @@ let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
     let mems: MemFacts = mem_new();
     let mf: Mut(MemFacts) = mut_of(mems);
     c.mem = mf;
-    let reset: u64 = slots_reset(c.slots);
-    let scanned: u64 = slots_scan(c, body, 0);
-    let folded: u64 = fold_region(c, body, f, st, 0);
+    slots_reset(c.slots);
+    slots_scan(c, body, 0);
+    fold_region(c, body, f, st, 0);
     let sweeps: u64 = loop lq(round: u64 = 0, done: u64 = 0) while done == 0 {
       let gone: u64 = dce_walk(c, body, body, st);
       if gone == 0 { done = 1; }

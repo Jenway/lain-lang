@@ -5,8 +5,9 @@ let tab = import("src::host::symtab");
 let mem = import("std::mem");
 
 let trap_u64 = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
-  let seen: u64 = tab.trap_report(syms, msg, detail);
-  return mem.halt_now(detail);
+  tab.trap_report(syms, msg, detail);
+  let dead: u64 = mem.trap_abort(detail);
+  return dead;
 };
 
 let trap_text = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> Slice(u8) {
@@ -232,17 +233,20 @@ pub let emitter_new = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
   };
 };
 
-let bind_one = func(em: Mut(TextEmitter), name: u64, kind: u64, width: u64) -> u64 {
-  if name == 0 { return trap_u64(em.syms, "emit_text: binding name is zero", name); }
+let bind_one = func(em: Mut(TextEmitter), name: u64, kind: u64, width: u64) -> () {
+  if name == 0 {
+    trap_u64(em.syms, "emit_text: binding name is zero", name);
+    return;
+  }
   if em.count >= vf.LARGE_BINDINGS() {
-    return trap_u64(em.syms, "emit_text: binding table exhausted", em.count);
+    trap_u64(em.syms, "emit_text: binding table exhausted", em.count);
+    return;
   }
   let at: u64 = em.count;
   deref(word_slot(em.names, at)) = name;
   deref(word_slot(em.kinds, at)) = kind;
   deref(word_slot(em.widths, at)) = width;
   em.count = at + 1;
-  return 1;
 };
 
 let scan_binding = func(em: Mut(TextEmitter), name: u64, i: u64) -> u64 {
@@ -256,11 +260,11 @@ let find_binding = func(em: Mut(TextEmitter), name: u64) -> u64 {
   return scan_binding(em, name, 0);
 };
 
-let bind_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> u64 {
-  if i >= count { return 1; }
+let bind_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> () {
+  if i >= count { return; }
   let p: vf.IrParam = vf.param_at_ref(base, i);
-  let rc: u64 = bind_one(em, p.name, p.ty_kind, p.ty_width);
-  return bind_params(em, base, count, i + 1);
+  bind_one(em, p.name, p.ty_kind, p.ty_width);
+  bind_params(em, base, count, i + 1);
 };
 
 let region_of = func(em: Mut(TextEmitter), ri: u64) -> vf.IrRegion {
@@ -339,102 +343,109 @@ let result_type = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> vf.IrType
   return vf.inst_ty(it);
 };
 
-let define_results = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
-  if i >= it.result_count { return 1; }
+let define_results = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> () {
+  if i >= it.result_count { return; }
   let name: u64 = vf.inst_result_name(it, i);
   let t: vf.IrType = result_type(em, it, i);
-  let rc: u64 = bind_one(em, name, t.kind, t.width);
-  return define_results(em, it, i + 1);
+  bind_one(em, name, t.kind, t.width);
+  define_results(em, it, i + 1);
 };
 
-let emit_indent = func(em: Mut(TextEmitter), n: u64) -> u64 {
-  let i: u64 = loop c(i: u64 = 0) while i < n {
-    let rc: u64 = put_str(em.w, "  ");
+let emit_indent = func(em: Mut(TextEmitter), n: u64) -> () {
+  loop c(i: u64 = 0) while i < n {
+    put_str(em.w, "  ");
     i = i + 1;
   };
-  return 1;
 };
 
-let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
+let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> () {
   if op.kind == codes.OperandKind.Value as u64 {
     put_byte(em.w, CH_PERCENT());
-    return put_symbol(em.w, em.syms, op.name);
+    put_symbol(em.w, em.syms, op.name);
+    return;
   }
-  return put_u64_dec(em.w, op.bits);
+  put_u64_dec(em.w, op.bits);
 };
 
-let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
-  if op.kind != codes.OperandKind.Value as u64 { return put_str(em.w, "#bits<64>"); }
+let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> () {
+  if op.kind != codes.OperandKind.Value as u64 {
+    put_str(em.w, "#bits<64>");
+    return;
+  }
   let p: u64 = find_binding(em, op.name);
-  if p == 0 { return trap_u64(em.syms, "emit_text: operand binding is not defined", op.name); }
+  if p == 0 {
+    trap_u64(em.syms, "emit_text: operand binding is not defined", op.name);
+    return;
+  }
   let t: vf.IrType = vf.IrType {
     kind: deref(word_slot(em.kinds, p - 1)),
     width: deref(word_slot(em.widths, p - 1)),
   };
-  return emit_type(em.w, em.syms, t);
+  emit_type(em.w, em.syms, t);
 };
 
-let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
-  if i >= it.operand_count { return 1; }
+let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> () {
+  if i >= it.operand_count { return; }
   if i > 0 { put_str(em.w, ", "); }
   let op: vf.IrOperand = vf.inst_op(it, i);
   emit_operand(em, op);
-  return emit_operands(em, it, i + 1);
+  emit_operands(em, it, i + 1);
 };
 
-let accepts_align = func(k: u64) -> u64 {
-  if k == codes.InstKind.Load as u64 { return 1; }
-  if k == codes.InstKind.Store as u64 { return 1; }
-  return 0;
+let accepts_align = func(k: u64) -> bool {
+  if k == codes.InstKind.Load as u64 { return true; }
+  if k == codes.InstKind.Store as u64 { return true; }
+  return false;
 };
 
-let emit_operand_list = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_operand_list = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   put_byte(em.w, CH_LPAREN());
   emit_operands(em, it, 0);
-  if (it.align != 0) and (accepts_align(it.kind) == 1) {
+  if (it.align != 0) and accepts_align(it.kind) {
     if it.operand_count > 0 { put_str(em.w, ", "); }
     put_str(em.w, "align=");
     put_u64_dec(em.w, it.align);
   }
-  return put_byte(em.w, CH_RPAREN());
+  put_byte(em.w, CH_RPAREN());
 };
 
-let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  if it.has_ty == 0 { return 1; }
+let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
+  if it.has_ty == 0 { return; }
   put_str(em.w, "[");
   let t: vf.IrType = vf.inst_ty(it);
   emit_type(em.w, em.syms, t);
-  return put_byte(em.w, CH_RBRACK());
+  put_byte(em.w, CH_RBRACK());
 };
 
-let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  if it.result_count == 0 { return 1; }
+let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
+  if it.result_count == 0 { return; }
   let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
     if i > 0 { put_str(em.w, ", "); }
     put_byte(em.w, CH_PERCENT());
     put_symbol(em.w, em.syms, vf.inst_result_name(it, i));
     i = i + 1;
   };
-  return put_str(em.w, " = ");
+  put_str(em.w, " = ");
 };
 
-let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
-  if r.result_count == 0 { return 1; }
+let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> () {
+  if r.result_count == 0 { return; }
   put_str(em.w, " -> (");
   let i: u64 = loop c(i: u64 = 0) while i < r.result_count {
     if i > 0 { put_str(em.w, ", "); }
     emit_type(em.w, em.syms, vf.type_at_ref(r.results, i));
     i = i + 1;
   };
-  return put_byte(em.w, CH_RPAREN());
+  put_byte(em.w, CH_RPAREN());
 };
 
-let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
-  if p.result_count == 0 { return 1; }
+let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> () {
+  if p.result_count == 0 { return; }
   put_str(em.w, " -> ");
   if p.result_count == 1 {
     let t: vf.IrType = vf.type_at_ref(p.results, 0);
-    return emit_type(em.w, em.syms, t);
+    emit_type(em.w, em.syms, t);
+    return;
   }
   put_byte(em.w, CH_LPAREN());
   let i: u64 = loop c(i: u64 = 0) while i < p.result_count {
@@ -442,22 +453,22 @@ let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
     emit_type(em.w, em.syms, vf.type_at_ref(p.results, i));
     i = i + 1;
   };
-  return put_byte(em.w, CH_RPAREN());
+  put_byte(em.w, CH_RPAREN());
 };
 
-let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> u64 {
-  if i >= count { return 1; }
+let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, i: u64) -> () {
+  if i >= count { return; }
   if i > 0 { put_str(em.w, ", "); }
   let p: vf.IrParam = vf.param_at_ref(base, i);
   put_byte(em.w, CH_PERCENT());
   put_symbol(em.w, em.syms, p.name);
   put_str(em.w, ": ");
   emit_type(em.w, em.syms, vf.param_ty(p));
-  return emit_params(em, base, count, i + 1);
+  emit_params(em, base, count, i + 1);
 };
 
-let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
-  if i >= r.param_count { return 1; }
+let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> () {
+  if i >= r.param_count { return; }
   if i > 0 { put_str(em.w, ", "); }
   let p: vf.IrParam = vf.param_at_ref(r.params, i);
   put_byte(em.w, CH_PERCENT());
@@ -465,39 +476,37 @@ let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64
   put_str(em.w, ": ");
   emit_type(em.w, em.syms, vf.param_ty(p));
   put_str(em.w, " = 0");
-  return emit_loop_params(em, r, i + 1);
+  emit_loop_params(em, r, i + 1);
 };
 
-let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> u64 {
+let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> () {
   put_byte(em.w, CH_HASH());
-  return put_str(em.w, opcode_name(em.syms, k));
+  put_str(em.w, opcode_name(em.syms, k));
 };
 
-let emit_insts = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
-  if i >= r.inst_count { return 1; }
+let emit_insts = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> () {
+  if i >= r.inst_count { return; }
   let ii: u64 = region_inst(r, i);
-  let rc: u64 = emit_inst(em, ii);
-  return emit_insts(em, r, i + 1);
+  emit_inst(em, ii);
+  emit_insts(em, r, i + 1);
 };
 
-let emit_body = func(em: Mut(TextEmitter), ri: u64) -> u64 {
+let emit_body = func(em: Mut(TextEmitter), ri: u64) -> () {
   let saved: u64 = em.count;
   let r: vf.IrRegion = region_of(em, ri);
-  let e: u64 = emit_insts(em, r, 0);
+  emit_insts(em, r, 0);
   em.count = saved;
-  return e;
 };
 
-let emit_block = func(em: Mut(TextEmitter), ri: u64) -> u64 {
+let emit_block = func(em: Mut(TextEmitter), ri: u64) -> () {
   let saved: u64 = em.count;
   let r: vf.IrRegion = region_of(em, ri);
-  let b: u64 = bind_params(em, r.params, r.param_count, 0);
-  let e: u64 = emit_insts(em, r, 0);
+  bind_params(em, r.params, r.param_count, 0);
+  emit_insts(em, r, 0);
   em.count = saved;
-  return e;
 };
 
-let emit_if = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_if = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   put_str(em.w, "#if ");
   let op: vf.IrOperand = vf.inst_op(it, 0);
   emit_operand(em, op);
@@ -511,17 +520,18 @@ let emit_if = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   em.depth = em.depth - 1;
   emit_indent(em, em.depth);
   if it.else_body == vf.NO_REGION() {
-    return put_str(em.w, "}\n");
+    put_str(em.w, "}\n");
+    return;
   }
   put_str(em.w, "} else {\n");
   em.depth = em.depth + 1;
   emit_body(em, it.else_body);
   em.depth = em.depth - 1;
   emit_indent(em, em.depth);
-  return put_str(em.w, "}\n");
+  put_str(em.w, "}\n");
 };
 
-let emit_loop = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_loop = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   put_str(em.w, "#loop ");
   put_symbol(em.w, em.syms, it.label);
   put_byte(em.w, CH_LPAREN());
@@ -534,11 +544,11 @@ let emit_loop = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   emit_block(em, it.body);
   em.depth = em.depth - 1;
   emit_indent(em, em.depth);
-  return put_str(em.w, "}\n");
+  put_str(em.w, "}\n");
 };
 
-let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
-  if i >= it.case_count { return 1; }
+let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> () {
+  if i >= it.case_count { return; }
   let cs: vf.IrCase = case_of(em, it.cases_at + i);
   em.depth = em.depth + 1;
   emit_indent(em, em.depth);
@@ -551,11 +561,11 @@ let emit_cases = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
   emit_indent(em, em.depth);
   put_str(em.w, "}\n");
   em.depth = em.depth - 1;
-  return emit_cases(em, it, i + 1);
+  emit_cases(em, it, i + 1);
 };
 
-let emit_default_case = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
-  if it.default_body == vf.NO_REGION() { return 1; }
+let emit_default_case = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
+  if it.default_body == vf.NO_REGION() { return; }
   em.depth = em.depth + 1;
   emit_indent(em, em.depth);
   put_str(em.w, "default {\n");
@@ -565,10 +575,9 @@ let emit_default_case = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   emit_indent(em, em.depth);
   put_str(em.w, "}\n");
   em.depth = em.depth - 1;
-  return 1;
 };
 
-let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   put_str(em.w, "#switch");
   emit_type_arg(em, it);
   put_byte(em.w, CH_SPACE());
@@ -582,10 +591,10 @@ let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   emit_cases(em, it, 0);
   emit_default_case(em, it);
   emit_indent(em, em.depth);
-  return put_str(em.w, "}\n");
+  put_str(em.w, "}\n");
 };
 
-let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   emit_opcode(em, it.kind);
   put_byte(em.w, CH_SPACE());
   put_symbol(em.w, em.syms, it.label);
@@ -594,10 +603,10 @@ let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
     emit_operands(em, it, 0);
     put_byte(em.w, CH_RPAREN());
   }
-  return put_byte(em.w, CH_NEWLINE());
+  put_byte(em.w, CH_NEWLINE());
 };
 
-let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   emit_opcode(em, it.kind);
   let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
     if i == 0 {
@@ -609,10 +618,10 @@ let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
     emit_operand(em, op);
     i = i + 1;
   };
-  return put_byte(em.w, CH_NEWLINE());
+  put_byte(em.w, CH_NEWLINE());
 };
 
-let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   put_str(em.w, " [(");
   let i: u64 = loop c(i: u64 = 1) while i < it.operand_count {
     if i > 1 { put_str(em.w, ", "); }
@@ -625,10 +634,10 @@ let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
     let t: vf.IrType = vf.inst_ty(it);
     emit_type(em.w, em.syms, t);
   }
-  return put_byte(em.w, CH_RBRACK());
+  put_byte(em.w, CH_RBRACK());
 };
 
-let emit_call_rest = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_call_rest = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   if it.symbol != 0 {
     put_str(em.w, " @");
     put_symbol(em.w, em.syms, it.symbol);
@@ -636,21 +645,22 @@ let emit_call_rest = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
     emit_call_signature(em, it);
   }
   emit_operand_list(em, it);
-  return put_byte(em.w, CH_NEWLINE());
+  put_byte(em.w, CH_NEWLINE());
 };
 
-let emit_generic = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
+let emit_generic = func(em: Mut(TextEmitter), it: vf.IrInst) -> () {
   emit_opcode(em, it.kind);
   if it.kind == codes.InstKind.Call as u64 {
-    return emit_call_rest(em, it);
+    emit_call_rest(em, it);
+    return;
   }
   emit_type_arg(em, it);
   emit_operand_list(em, it);
-  return put_byte(em.w, CH_NEWLINE());
+  put_byte(em.w, CH_NEWLINE());
 };
 
-let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> u64 {
-  if em.w.ok == 0 { return 0; }
+let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> () {
+  if em.w.ok == 0 { return; }
   let it: vf.IrInst = inst_of(em, ii);
   let k: u64 = it.kind;
   emit_indent(em, em.depth);
@@ -670,7 +680,7 @@ let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> u64 {
   } else {
     emit_generic(em, it);
   }
-  return define_results(em, it, 0);
+  define_results(em, it, 0);
 };
 
 let data_slot = func(base: Ref(IrDataView), i: u64) -> Ref(IrDataView) {
@@ -678,7 +688,7 @@ let data_slot = func(base: Ref(IrDataView), i: u64) -> Ref(IrDataView) {
   return ptr_cast(Ref(IrDataView), raw + i * size_of(IrDataView));
 };
 
-let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> u64 {
+let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> () {
   put_str(em.w, "data ");
   put_symbol(em.w, em.syms, d.symbol);
   if d.is_writable == 1 {
@@ -694,17 +704,17 @@ let emit_data = func(em: Mut(TextEmitter), d: IrDataView) -> u64 {
     put_u64_dec(em.w, byte);
     i = i + 1;
   };
-  return put_str(em.w, " }\n");
+  put_str(em.w, " }\n");
 };
 
-let emit_data_all = func(em: Mut(TextEmitter), base: Ref(IrDataView), count: u64, i: u64) -> u64 {
-  if i >= count { return 1; }
+let emit_data_all = func(em: Mut(TextEmitter), base: Ref(IrDataView), count: u64, i: u64) -> () {
+  if i >= count { return; }
   let d: IrDataView = deref(data_slot(base, i));
   emit_data(em, d);
-  return emit_data_all(em, base, count, i + 1);
+  emit_data_all(em, base, count, i + 1);
 };
 
-let emit_extern_attrs = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
+let emit_extern_attrs = func(em: Mut(TextEmitter), p: vf.IrProc) -> () {
   let first: u64 = 1;
   put_str(em.w, " #extern(");
   if p.abi != 0 {
@@ -725,10 +735,10 @@ let emit_extern_attrs = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
     put_str(em.w, "variadic");
     first = 0;
   }
-  return put_str(em.w, ")");
+  put_str(em.w, ")");
 };
 
-let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
+let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> () {
   put_str(em.w, "#proc ");
   put_symbol(em.w, em.syms, p.name);
   put_byte(em.w, CH_LPAREN());
@@ -747,7 +757,8 @@ let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
     } else {
       put_symbol(em.w, em.syms, p.name);
     }
-    return put_str(em.w, "\"\n");
+    put_str(em.w, "\"\n");
+    return;
   }
   put_str(em.w, " {\n");
   em.depth = 1;
@@ -755,15 +766,15 @@ let emit_proc = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
   bind_params(em, p.params, p.param_count, 0);
   emit_body(em, p.body);
   em.depth = 0;
-  return put_str(em.w, "}\n");
+  put_str(em.w, "}\n");
 };
 
-let emit_procs = func(em: Mut(TextEmitter), i: u64) -> u64 {
-  if i >= em.m.proc_count { return 1; }
+let emit_procs = func(em: Mut(TextEmitter), i: u64) -> () {
+  if i >= em.m.proc_count { return; }
   if i > 0 { put_byte(em.w, CH_NEWLINE()); }
   let p: vf.IrProc = vf.proc_at_ref(em.m.procs, i);
   emit_proc(em, p);
-  return emit_procs(em, i + 1);
+  emit_procs(em, i + 1);
 };
 
 pub let emit_module_text = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),

@@ -197,17 +197,24 @@ Lain-VM 面向多核编译器设计，原生支持 M:N 调度架构：
 
 Lain-VM 彻底废除未定义行为（UB）。一切越权、越界或未定义计算均强制收敛为 `Trap`，向宿主交付结构化错误报告：
 
-| Trap 分类 | 触发条件 |
+| Trap 分类（`VmTrap`） | 触发条件 |
 | :--- | :--- |
-| **`TRAP_MEMORY_OOB`** | 访存地址超出当前 `VSpace` 的 `accessible` 窗口边界。 |
-| **`TRAP_ALIGNMENT`** | 访存未满足指令显式声明的 `align` 对齐要求。 |
-| **`TRAP_PERM_VIOLATION`**| 向声明为 `ro` 的只读区段执行写入。 |
-| **`TRAP_ARITH_DOMAIN`** | 触发除数为零、有符号除法溢出或移位量大于等于位宽。 |
-| **`TRAP_CAP_DENIED`** | 尝试调用 `CSpace` 中未登记或权限受限的外部符号。 |
-| **`TRAP_CAPACITY_EXCEEDED`**| 物理底座分配超限或栈租约空间耗尽。 |
-| **`TRAP_UNREACHABLE`** | 控制流进入带有 `#unreachable` 断言的代码块。 |
+| **`MemoryOob`** | 访存地址超出当前 `VSpace` 的 `accessible` 窗口边界。 |
+| **`Alignment`** | 访存未满足指令显式声明的 `align` 对齐要求。 |
+| **`PermViolation`**| 向声明为 `ro` 的只读区段执行写入。 |
+| **`ArithDomain`** | 触发除数为零、有符号除法溢出或移位量大于等于位宽。 |
+| **`CapDenied`** | 尝试调用 `CSpace` 中未登记或权限受限的外部符号。 |
+| **`CapacityExceeded`**| 物理底座分配超限或栈租约空间耗尽。 |
+| **`Unreachable`** | 控制流进入带有 `#unreachable` 断言的代码块。 |
+| **`State`** | 帧、槽位、切换目标或指令编码处于非法状态。 |
+| **`Fuel`** | 单次执行切片的步数配额耗尽。 |
+| **`CallDepth`** | 调用深度触碰 `Quota.max_call_depth` 上限。 |
+| **`Unimplemented`** | 命中浮点、向量或原子扩展等尚未实现的指令族。 |
+| **`StackOverflow`** | 栈租约空间不足以容纳 `#alloca` 申请。 |
 
-发生 Trap 时，`Engine` 立即终止当前执行循环，记录当前触发指令在 `Image` 中的绝对偏移与所属过程符号，并将 `TCB` 置为 `HALTED_TRAPPED` 终态，直接转交编译器宿主生成诊断，绝不波及宿主进程。
+`VmTrap` 只给出粗粒度分类，具体成因由 `Subcode` 枚举逐条区分（例如 `Subcode.DivideByZero` 对应 `VmTrap.ArithDomain`，`Subcode.CallArity` 对应 `VmTrap.State`）。
+
+发生 Trap 时，`Engine` 立即终止当前执行循环，记录当前触发指令在 `Image` 中的绝对偏移与所属过程符号，并将 `TCB` 置为 `VmStatus.Dead` 与 `SliceStatus.Trapped` 终态，直接转交编译器宿主生成诊断，绝不波及宿主进程。
 
 ---
 

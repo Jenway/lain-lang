@@ -303,7 +303,7 @@ let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
 
   let caps: Mut(eng.VmCapTable) = ptr_cast(Mut(eng.VmCapTable), os.alloc_bytes(4096));
   deref(caps) = eng.caps_new(null_ref(Mut(eng.VmCapEntry)), 0);
-  let quota: eng.VmQuota = eng.quota_new(0, 0, 8);
+  let quota: eng.Quota = eng.Quota.new(0, 0, 8);
   let need: u64 = eng.vm_tcb_bytes(image, quota);
   let arena_a: MutSlice(u8) = make_slice(MutSlice(u8),
       ptr_cast(Mut(u8), os.alloc_bytes(need)), need);
@@ -325,9 +325,9 @@ let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
   let entry_a: u64 = im.vm_sub_index_by_body(image, intern(syms, "fiber_a"));
   let entry_b: u64 = im.vm_sub_index_by_body(image, intern(syms, "fiber_b"));
   let started_a: u64 = eng.vm_tcb_start(tcb_a, entry_a, empty_args);
-  t.eq_u64(st, "fiber start a", started_a, eng.SLICE_RUNNABLE());
+  t.eq_u64(st, "fiber start a", started_a, eng.SliceStatus.Runnable);
   let started_b: u64 = eng.vm_tcb_start(tcb_b, entry_b, empty_args);
-  t.eq_u64(st, "fiber start b", started_b, eng.SLICE_RUNNABLE());
+  t.eq_u64(st, "fiber start b", started_b, eng.SliceStatus.Runnable);
 
   let done_a: u64 = 0;
   let done_b: u64 = 0;
@@ -335,12 +335,12 @@ let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
   let rounds: u64 = loop spin(r: u64 = 0) while ((done_a == 0) or (done_b == 0)) and (r < 64) {
     if done_a == 0 {
       let sa: eng.VmResult = eng.vm_step(tcb_a);
-      if sa.status == eng.SLICE_RUNNABLE() {
+      if sa.status == eng.SliceStatus.Runnable {
         if eng.vm_tcb_yield(tcb_a) != 0 { bad = bad + 1; }
         let parked_a: eng.VmResult = eng.vm_step(tcb_a);
-        if parked_a.status != eng.SLICE_BLOCKED() { bad = bad + 1; }
+        if parked_a.status != eng.SliceStatus.Blocked { bad = bad + 1; }
         if eng.vm_tcb_resume(tcb_a) != 0 { bad = bad + 1; }
-      } else if sa.status == eng.SLICE_DONE() {
+      } else if sa.status == eng.SliceStatus.Done {
         done_a = 1;
       } else {
         bad = bad + 1;
@@ -349,12 +349,12 @@ let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
     }
     if done_b == 0 {
       let sb: eng.VmResult = eng.vm_step(tcb_b);
-      if sb.status == eng.SLICE_RUNNABLE() {
+      if sb.status == eng.SliceStatus.Runnable {
         if eng.vm_tcb_yield(tcb_b) != 0 { bad = bad + 1; }
         let parked_b: eng.VmResult = eng.vm_step(tcb_b);
-        if parked_b.status != eng.SLICE_BLOCKED() { bad = bad + 1; }
+        if parked_b.status != eng.SliceStatus.Blocked { bad = bad + 1; }
         if eng.vm_tcb_resume(tcb_b) != 0 { bad = bad + 1; }
-      } else if sb.status == eng.SLICE_DONE() {
+      } else if sb.status == eng.SliceStatus.Done {
         done_b = 1;
       } else {
         bad = bad + 1;
@@ -371,8 +371,8 @@ let run_fiber_test = func(st: Mut(t.Suite), h: Mut(irh.HostIr), md: u64,
   let value_b: eng.VmValue = eng.vm_tcb_result(ptr_cast(Ref(eng.TCB), tcb_b));
   t.eq_u64(st, "fiber a result", value_a.bits, 10);
   t.eq_u64(st, "fiber b result", value_b.bits, 100);
-  t.eq_u64(st, "fiber a state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_a)), eng.VM_DEAD());
-  t.eq_u64(st, "fiber b state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_b)), eng.VM_DEAD());
+  t.eq_u64(st, "fiber a state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_a)), eng.VmStatus.Dead);
+  t.eq_u64(st, "fiber b state", eng.vm_tcb_state(ptr_cast(Ref(eng.TCB), tcb_b)), eng.VmStatus.Dead);
   return 0;
 };
 
@@ -427,12 +427,12 @@ pub let run_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "bad_target rc", rc3, vmh.VMH_OK());
   t.check(mut_of(st), "bad_target traps", out_arr[0] != 0);
   t.eq_u64(mut_of(st), "bad_target trap kind", vmh.host_last_trap(vm),
-           eng.TRAP_MEMORY_OOB());
+           eng.VmTrap.MemoryOob);
 
   let rc4: u64 = vmh.apply_module(vm, md, intern(syms, "bad_arity"), empty_args, out_ptr, 16);
   t.eq_u64(mut_of(st), "bad_arity rc", rc4, vmh.VMH_OK());
   t.check(mut_of(st), "bad_arity traps", out_arr[0] != 0);
-  t.eq_u64(mut_of(st), "bad_arity trap kind", vmh.host_last_trap(vm), eng.TRAP_STATE());
+  t.eq_u64(mut_of(st), "bad_arity trap kind", vmh.host_last_trap(vm), eng.VmTrap.State);
 
   os.free_bytes(vm_raw);
   os.free_bytes(ir_raw);

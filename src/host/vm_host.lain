@@ -348,8 +348,8 @@ pub let last_trace_at = func(v: Mut(VmHost), i: u64) -> eng.VmTraceEvent {
 
 let clear_mark = func(v: Mut(VmHost)) -> u64 {
   v.last_error = VMH_OK();
-  v.last_trap = eng.TRAP_NONE();
-  v.last_status = eng.SLICE_DONE();
+  v.last_trap = eng.VmTrap.None;
+  v.last_status = eng.SliceStatus.Done;
   v.last_steps = 0;
   v.last_bytes = 0;
   deref(v.trace_count) = 0;
@@ -584,7 +584,7 @@ let bytes_result_ok = func(sub: im.SubInfo) -> u64 {
 
 let run_scalar = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
                       out: Mut(u8), cap: u64) -> u64 {
-  let quota: eng.VmQuota = eng.quota_new(v.quota_steps, v.quota_stack, v.quota_depth);
+  let quota: eng.Quota = eng.Quota.new(v.quota_steps, v.quota_stack, v.quota_depth);
   let arena: MutSlice(u8) = make_slice(MutSlice(u8), v.tcb_arena, v.tcb_len);
   let trace: MutSlice(eng.VmTraceEvent) =
       make_slice(MutSlice(eng.VmTraceEvent), v.trace, v.trace_len);
@@ -594,8 +594,8 @@ let run_scalar = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
   v.last_steps = result.steps_used;
   v.last_trap = result.trap_kind;
   v.last_status = result.status;
-  let status: u64 = if result.status == eng.SLICE_DONE() { 0 } else { result.trap_status };
-  let bits: u64 = if result.status == eng.SLICE_DONE() { result.result_bits } else { 0 };
+  let status: u64 = if result.status == eng.SliceStatus.Done { 0 } else { result.trap_status };
+  let bits: u64 = if result.status == eng.SliceStatus.Done { result.result_bits } else { 0 };
 
   let rec: Mut(u64) = ptr_cast(Mut(u64), out);
   deref(rec) = status;
@@ -629,7 +629,7 @@ let engine_has_result = func(tcb: Mut(eng.TCB)) -> u64 {
 
 let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
                      out: Mut(u8), cap: u64) -> u64 {
-  let quota: eng.VmQuota = eng.quota_new(v.quota_steps, v.quota_stack, v.quota_depth);
+  let quota: eng.Quota = eng.Quota.new(v.quota_steps, v.quota_stack, v.quota_depth);
   let lease0: vs.StackLease = vs.vm_no_lease();
   let lease: vs.StackLease = if quota.max_stack_bytes > 0 {
     vs.vm_alloc_stack(v.space, quota.max_stack_bytes, v.owner)
@@ -656,7 +656,7 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
   let started: u64 = eng.vm_tcb_start(tcb, entry, args);
   let first: eng.VmResult = eng.vm_step(tcb);
   let st: u64 = loop spin(st: u64 = first.status)
-      while (started == eng.SLICE_RUNNABLE()) and (st == eng.SLICE_RUNNABLE()) {
+      while (started == eng.SliceStatus.Runnable) and (st == eng.SliceStatus.Runnable) {
     let step: eng.VmResult = eng.vm_step(tcb);
     st = step.status;
   };
@@ -664,7 +664,7 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
   v.last_trap = eng.vm_tcb_trap_kind(ref_of(deref(tcb)));
   v.last_status = st;
   let code: u64 = VMH_OK();
-  if (engine_has_result(tcb) == 1) and (v.last_trap == eng.TRAP_NONE()) {
+  if (engine_has_result(tcb) == 1) and (v.last_trap == eng.VmTrap.None) {
 
     if vs.vm_lease_none(lease) == 0 {
       let peak: u64 = eng.vm_tcb_stack_peak(ref_of(deref(tcb)));
@@ -685,7 +685,7 @@ let run_bytes = func(v: Mut(VmHost), entry: u64, args: Slice(u64),
 };
 
 let tcb_reserve = func(v: Mut(VmHost), image: Ref(im.VmImage)) -> u64 {
-  let quota: eng.VmQuota = eng.quota_new(v.quota_steps, v.quota_stack, v.quota_depth);
+  let quota: eng.Quota = eng.Quota.new(v.quota_steps, v.quota_stack, v.quota_depth);
   let need: u64 = eng.vm_tcb_bytes(image, quota);
   if need <= v.tcb_len { return VMH_OK(); }
   let raw: Mut(u8) = take(v, need, 16);
