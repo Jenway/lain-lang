@@ -3,7 +3,7 @@ let option = import("std::option");
 
 use mem.{ OomErr };
 
-pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) } -> Module {
+pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
   return module {
     let opt = option.Option(T);
 
@@ -50,24 +50,25 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
         return true;
       }
       let wanted: u64 = if cur == 0 { 8 } else { cur * 2 };
+      let esz: u64 = size_of(T) as u64;
       let h: Mut(al.Self) = mut_of(deref(v).alloc);
-      let block: MutSlice(T) = al.alloc(h, wanted);
-      if (block.ptr as u64) == 0 {
+      let raw: u64 = al.alloc(h, wanted * esz);
+      if raw == 0 {
         return false;
       }
+      let block: MutSlice(T) = make_slice(MutSlice(T), ptr_cast(Mut(T), raw), wanted);
       let n: u64 = deref(v).len;
-      let esz: u64 = size_of(T) as u64;
       let old: MutSlice(T) = deref(v).buf;
       if (old.ptr as u64) != 0 {
         let src: Mut(u8) = ptr_cast(Mut(u8), old.ptr as u64);
-        let dst: Mut(u8) = ptr_cast(Mut(u8), block.ptr as u64);
+        let dst: Mut(u8) = ptr_cast(Mut(u8), raw);
         let i: u64 = 0;
         while i < n * esz {
           deref(dst + i) = deref(src + i);
           i = i + 1;
         };
         let hf: Mut(al.Self) = mut_of(deref(v).alloc);
-        let freed: u64 = al.free(hf, old);
+        let freed: u64 = al.free(hf, old.ptr as u64);
       }
       deref(v).buf = block;
       return true;
@@ -94,7 +95,11 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
         return Self { buf: empty_buf(), len: 0, alloc: a };
       }
       let h: Mut(al.Self) = mut_of(a);
-      let block: MutSlice(T) = al.alloc(h, wanted);
+      let raw: u64 = al.alloc(h, wanted * (size_of(T) as u64));
+      if raw == 0 {
+        return Self { buf: empty_buf(), len: 0, alloc: a };
+      }
+      let block: MutSlice(T) = make_slice(MutSlice(T), ptr_cast(Mut(T), raw), wanted);
       return Self { buf: block, len: 0, alloc: a };
     };
 
@@ -110,7 +115,7 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       };
       if base != 0 {
         let h: Mut(al.Self) = mut_of(deref(v).alloc);
-        let freed: u64 = al.free(h, block);
+        let freed: u64 = al.free(h, base);
       }
       deref(v).buf = empty_buf();
       deref(v).len = 0;
@@ -168,16 +173,23 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return ok;
     };
 
-    pub let clear = func(v: Mut(Self)) {
+    pub let truncate = func(v: Mut(Self), new_len: u64) {
       let n: u64 = deref(v).len;
+      if new_len >= n {
+        return;
+      }
       let base: u64 = deref(v).buf.ptr as u64;
-      let i: u64 = 0;
+      let i: u64 = new_len;
       while i < n {
         let slot: Mut(T) = elem_at(base, i);
         let gone: Uninit(T) = drop_at(slot);
         i = i + 1;
       };
-      deref(v).len = 0;
+      deref(v).len = new_len;
+    };
+
+    pub let clear = func(v: Mut(Self)) {
+      truncate(v, 0);
     };
 
     pub let as_slice = func(v: Ref(Self)) -> Slice(T) {

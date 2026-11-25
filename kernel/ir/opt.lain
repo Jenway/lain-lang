@@ -71,14 +71,20 @@ let FactSet = module {
       while i > 0 {
         i = i - 1;
         match fs.items.get(i) {
+          ConstVal(cf) => {
+            if cf.val_id == val_id {
+              if cf.imm == 0 {
+                return Option(bool)::some(false);
+              }
+              if cf.imm == 1 {
+                return Option(bool)::some(true);
+              }
+              return Option(bool)::none();
+            }
+          },
           KnownBool(bf) => {
             if bf.val_id == val_id {
               return Option(bool)::some(bf.truth);
-            }
-          },
-          ConstVal(cf) => {
-            if cf.val_id == val_id {
-              return Option(bool)::some(cf.imm != 0);
             }
           },
         };
@@ -130,6 +136,79 @@ let eval_const_binop = func(op: Op, t: Ty, lv: u64, rv: u64) -> u64 {
   return if hit { 1 } else { 0 };
 };
 
+let Rewrite = enum {
+  NoChange
+  AsConst(u64)
+  AsCopy(u64)
+};
+
+let const_is = func(o: Option(u64), want: u64) -> bool {
+  return match o {
+    Some(v) => v == want,
+    None => false,
+  };
+};
+
+let plan_binop = func(facts: Ref(FactSet), op: Op, ty: Ty, a: u64, b: u64) -> Rewrite {
+  let la: Option(u64) = facts.get_const(a);
+  let lb: Option(u64) = facts.get_const(b);
+  match la {
+    Some(l) => {
+      match lb {
+        Some(r) => {
+          return Rewrite::AsConst { eval_const_binop(op, ty, l, r) };
+        },
+        None => {},
+      };
+    },
+    None => {},
+  };
+  let az: bool = const_is(la, 0);
+  let ao: bool = const_is(la, 1);
+  let bz: bool = const_is(lb, 0);
+  let bo: bool = const_is(lb, 1);
+  if ((op == Op::Mul) or (op == Op::And)) and (az or bz) {
+    return Rewrite::AsConst { 0 };
+  }
+  if (op == Op::Add) and bz {
+    return Rewrite::AsCopy { a };
+  }
+  if (op == Op::Add) and az {
+    return Rewrite::AsCopy { b };
+  }
+  if (op == Op::Sub) and bz {
+    return Rewrite::AsCopy { a };
+  }
+  if ((op == Op::Mul) or (op == Op::Or) or (op == Op::Xor)) and bo {
+    return Rewrite::AsCopy { a };
+  }
+  if (op == Op::Mul) and ao {
+    return Rewrite::AsCopy { b };
+  }
+  if ((op == Op::Or) or (op == Op::Xor)) and az {
+    return Rewrite::AsCopy { b };
+  }
+  if (op == Op::Xor) and (a == b) {
+    return Rewrite::AsConst { 0 };
+  }
+  if (op == Op::Eq) or (op == Op::Ne) {
+    match facts.get_bool(a) {
+      Some(x) => {
+        match facts.get_bool(b) {
+          Some(y) => {
+            let same: bool = x == y;
+            let hit: bool = if (op == Op::Eq) { same } else { same == false };
+            return Rewrite::AsConst { if hit { 1 } else { 0 } };
+          },
+          None => {},
+        };
+      },
+      None => {},
+    };
+  }
+  return Rewrite::NoChange;
+};
+
 let is_pure_inst = func(op: Op) -> bool {
   let k: u64 = op as u64;
   if (op == Op::Const) or (op == Op::SymAddr) or (op == Op::Lea) {
@@ -153,47 +232,64 @@ let propagate_proc = func(p: Mut(Proc)) !{ OomErr } -> u64 {
     if op == Op::Const {
       facts.push_const(ins.dst, ins.imm);
     } else if op == Op::Assume {
-      facts.push_bool(ins.a, true);
+      facts.push_const(ins.a, 1);
     } else if op == Op::If {
       marks.push(facts.mark());
-      facts.push_bool(ins.a, true);
+      match facts.get_bool(ins.a) {
+        Some(t) => {
+          facts.push_bool(ins.a, t);
+        },
+        None => {
+          facts.push_bool(ins.a, true);
+        },
+      };
     } else if op == Op::Else {
       if marks.len() > 0 {
         let m: u64 = marks.get(marks.len() - 1);
         facts.rollback(m);
       }
-      let if_cond: u64 = p.insts.get_ref(ins.a).a;
-      facts.push_bool(if_cond, false);
+      if ins.a < n {
+        let if_ins: Ref(Inst) = p.insts.get_ref(ins.a);
+        if (if_ins.op == Op::If) {
+          facts.push_bool(if_ins.a, false);
+        }
+      }
     } else if op == Op::EndIf {
       match marks.pop() {
         Some(m) => facts.rollback(m),
         None => {},
       };
     } else if is_foldable_binop(op) {
-      if (op == Op::Xor) and (ins.a == ins.b) {
-        ins.op = Op::Const;
-        ins.imm = 0;
-        ins.a = 0;
-        ins.b = 0;
-        facts.push_const(ins.dst, 0);
-        changed = changed + 1;
-      } else {
-        match facts.get_const(ins.a) {
-          Some(lv) => match facts.get_const(ins.b) {
-            Some(rv) => {
-              let folded: u64 = eval_const_binop(op, ins.ty, lv, rv);
-              ins.op = Op::Const;
-              ins.imm = folded;
-              ins.a = 0;
-              ins.b = 0;
-              facts.push_const(ins.dst, folded);
-              changed = changed + 1;
+      let plan: Rewrite = plan_binop(ref_of(facts), op, ins.ty, ins.a, ins.b);
+      match plan {
+        AsConst(v) => {
+          ins.op = Op::Const;
+          ins.imm = v;
+          ins.a = 0;
+          ins.b = 0;
+          facts.push_const(ins.dst, v);
+          changed = changed + 1;
+        },
+        AsCopy(s) => {
+          ins.op = Op::Bitcast;
+          ins.a = s;
+          ins.b = 0;
+          match facts.get_const(s) {
+            Some(v) => {
+              facts.push_const(ins.dst, v);
             },
             None => {},
-          },
-          None => {},
-        };
-      }
+          };
+          match facts.get_bool(s) {
+            Some(t) => {
+              facts.push_bool(ins.dst, t);
+            },
+            None => {},
+          };
+          changed = changed + 1;
+        },
+        NoChange => {},
+      };
     }
     pc = pc + 1;
   };

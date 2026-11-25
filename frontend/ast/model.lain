@@ -1,0 +1,330 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ Allocator, SystemAlloc };
+use import("std::option")::{ Option };
+use import("frontend::syntax::span")::{ SourceId, Span };
+
+pub {
+  let DeclId = struct { idx: u32 };
+  let StmtId = struct { idx: u32 };
+  let ExprId = struct { idx: u32 };
+  let PatId = struct { idx: u32 };
+
+  let IdRange = struct {
+    start: u32,
+    len: u32
+  };
+
+  let UnOp = enum {
+    Neg
+    Not
+    BitNot
+  };
+
+  let BinOp = enum {
+    Add
+    Sub
+    Mul
+    Div
+    Rem
+    BitAnd
+    BitOr
+    BitXor
+    Shl
+    Shr
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+    And
+    Or
+  };
+
+  let LitKind = enum {
+    Int
+    Float
+    Str
+    Char
+    Bool(bool)
+  };
+
+  let UnaryExpr = struct {
+    op: UnOp,
+    operand: ExprId
+  };
+
+  let BinaryExpr = struct {
+    op: BinOp,
+    lhs: ExprId,
+    rhs: ExprId
+  };
+
+  let FieldExpr = struct {
+    base: ExprId,
+    field: Span
+  };
+
+  let IndexExpr = struct {
+    base: ExprId,
+    index: ExprId
+  };
+
+  let CallExpr = struct {
+    callee: ExprId,
+    args: IdRange
+  };
+
+  let CastExpr = struct {
+    expr: ExprId,
+    ty: ExprId
+  };
+
+  let IfExpr = struct {
+    cond: ExprId,
+    then_block: ExprId,
+    else_expr: Option(ExprId)
+  };
+
+  let MatchArm = struct {
+    pat: PatId,
+    body: ExprId,
+    span: Span
+  };
+
+  let MatchExpr = struct {
+    scrutinee: ExprId,
+    arms: IdRange
+  };
+
+  let BlockExpr = struct {
+    stmts: IdRange,
+    tail: Option(ExprId)
+  };
+
+  let Param = struct {
+    name: Span,
+    ty: ExprId,
+    span: Span
+  };
+
+  let WitnessParam = struct {
+    name: Span,
+    sig_expr: ExprId,
+    default_expr: Option(ExprId),
+    span: Span
+  };
+
+  let FuncExpr = struct {
+    params: IdRange,
+    witnesses: IdRange,
+    ret_ty: Option(ExprId),
+    effects: IdRange,
+    body: ExprId
+  };
+
+  let FieldDef = struct {
+    name: Span,
+    ty: ExprId,
+    span: Span
+  };
+
+  let VariantDef = struct {
+    name: Span,
+    payload: Option(ExprId),
+    discrim: Option(ExprId),
+    span: Span
+  };
+
+  let StructExpr = struct {
+    fields: IdRange
+  };
+
+  let EnumExpr = struct {
+    tag_ty: Option(ExprId),
+    variants: IdRange
+  };
+
+  let FieldInit = struct {
+    name: Span,
+    val: ExprId,
+    span: Span
+  };
+
+  let StructLitExpr = struct {
+    ty: ExprId,
+    inits: IdRange
+  };
+
+  let PerformExpr = struct {
+    eff: ExprId,
+    op_name: Span,
+    args: IdRange
+  };
+
+  let HandleArm = struct {
+    eff: Option(ExprId),
+    op_name: Span,
+    bind_name: Option(Span),
+    body: ExprId,
+    span: Span
+  };
+
+  let HandleExpr = struct {
+    body: ExprId,
+    arms: IdRange
+  };
+
+  let Expr = enum {
+    Lit(LitKind)
+    Ident(Span)
+    Path(IdRange)
+    Unary(UnaryExpr)
+    Binary(BinaryExpr)
+    Field(FieldExpr)
+    Index(IndexExpr)
+    Call(CallExpr)
+    Cast(CastExpr)
+    Try(ExprId)
+    Reloc(ExprId)
+    If(IfExpr)
+    ComptimeIf(IfExpr)
+    Match(MatchExpr)
+    Block(BlockExpr)
+    Func(FuncExpr)
+    Struct(StructExpr)
+    Enum(EnumExpr)
+    StructLit(StructLitExpr)
+    ModuleLit(IdRange)
+    Perform(PerformExpr)
+    Handle(HandleExpr)
+  };
+
+  let VariantPat = struct {
+    path: IdRange,
+    arg: Option(PatId)
+  };
+
+  let Pattern = enum {
+    Wildcard
+    Ident(Span)
+    Lit(LitKind)
+    Variant(VariantPat)
+  };
+
+  let LetStmt = struct {
+    name: Span,
+    ty: Option(ExprId),
+    init: ExprId
+  };
+
+  let AssignStmt = struct {
+    target: ExprId,
+    val: ExprId
+  };
+
+  let WhileStmt = struct {
+    cond: ExprId,
+    body: ExprId
+  };
+
+  let Stmt = enum {
+    Let(LetStmt)
+    Assign(AssignStmt)
+    Expr(ExprId)
+    Return(Option(ExprId))
+    While(WhileStmt)
+    Break
+    Continue
+  };
+
+  let UseDecl = struct {
+    target: ExprId,
+    names: IdRange
+  };
+
+  let LetDecl = struct {
+    is_pub: bool,
+    name: Span,
+    ty: Option(ExprId),
+    init: ExprId
+  };
+
+  let Decl = enum {
+    Let(LetDecl)
+    PubBlock(IdRange)
+    Use(UseDecl)
+  };
+};
+
+pub let AstModule = func() ?{ al: Allocator = SystemAlloc } -> Module {
+  return module {
+    let DeclVec = Vec(Decl) ?{ al: al };
+    let SpanVec = Vec(Span) ?{ al: al };
+    let StmtVec = Vec(Stmt) ?{ al: al };
+    let ExprVec = Vec(Expr) ?{ al: al };
+    let PatVec = Vec(Pattern) ?{ al: al };
+    let ExprIdVec = Vec(ExprId) ?{ al: al };
+    let StmtIdVec = Vec(StmtId) ?{ al: al };
+    let DeclIdVec = Vec(DeclId) ?{ al: al };
+    let ParamVec = Vec(Param) ?{ al: al };
+    let WitnessVec = Vec(WitnessParam) ?{ al: al };
+    let FieldVec = Vec(FieldDef) ?{ al: al };
+    let VariantVec = Vec(VariantDef) ?{ al: al };
+    let InitVec = Vec(FieldInit) ?{ al: al };
+    let MatchArmVec = Vec(MatchArm) ?{ al: al };
+    let HandleArmVec = Vec(HandleArm) ?{ al: al };
+
+    pub {
+      let Self = struct {
+        src: SourceId,
+        decls: DeclVec,
+        decl_spans: SpanVec,
+        stmts: StmtVec,
+        stmt_spans: SpanVec,
+        exprs: ExprVec,
+        expr_spans: SpanVec,
+        pats: PatVec,
+        pat_spans: SpanVec,
+        path_segs: SpanVec,
+        expr_lists: ExprIdVec,
+        stmt_lists: StmtIdVec,
+        decl_lists: DeclIdVec,
+        params: ParamVec,
+        witnesses: WitnessVec,
+        fields: FieldVec,
+        variants: VariantVec,
+        inits: InitVec,
+        match_arms: MatchArmVec,
+        handle_arms: HandleArmVec,
+        top_decls: IdRange
+      };
+
+      let with_alloc = func(src: SourceId, a: al::Self) -> Self {
+        return Self {
+          src: src,
+          decls: DeclVec::with_alloc(a),
+          decl_spans: SpanVec::with_alloc(a),
+          stmts: StmtVec::with_alloc(a),
+          stmt_spans: SpanVec::with_alloc(a),
+          exprs: ExprVec::with_alloc(a),
+          expr_spans: SpanVec::with_alloc(a),
+          pats: PatVec::with_alloc(a),
+          pat_spans: SpanVec::with_alloc(a),
+          path_segs: SpanVec::with_alloc(a),
+          expr_lists: ExprIdVec::with_alloc(a),
+          stmt_lists: StmtIdVec::with_alloc(a),
+          decl_lists: DeclIdVec::with_alloc(a),
+          params: ParamVec::with_alloc(a),
+          witnesses: WitnessVec::with_alloc(a),
+          fields: FieldVec::with_alloc(a),
+          variants: VariantVec::with_alloc(a),
+          inits: InitVec::with_alloc(a),
+          match_arms: MatchArmVec::with_alloc(a),
+          handle_arms: HandleArmVec::with_alloc(a),
+          top_decls: IdRange { start: 0, len: 0 }
+        };
+      };
+    };
+  };
+};

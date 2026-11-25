@@ -44,8 +44,11 @@ let emit_preamble = func() ?{ out: io::Sink } {
   out::write("#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
   out::write("static inline uint64_t lain_udiv(uint64_t a, uint64_t b) { if (!b) abort(); return a / b; }\n");
   out::write("static inline uint64_t lain_urem(uint64_t a, uint64_t b) { if (!b) abort(); return a % b; }\n");
+  out::write("static inline uint64_t lain_sdiv(uint64_t a, uint64_t b) { if (!b) abort(); if (((int64_t)a == INT64_MIN) && ((int64_t)b == -1)) abort(); return (uint64_t)((int64_t)a / (int64_t)b); }\n");
+  out::write("static inline uint64_t lain_srem(uint64_t a, uint64_t b) { if (!b) abort(); if (((int64_t)a == INT64_MIN) && ((int64_t)b == -1)) abort(); return (uint64_t)((int64_t)a % (int64_t)b); }\n");
   out::write("static inline uint64_t lain_shl(uint64_t a, uint64_t b, uint64_t w) { if (b >= w) abort(); return a << b; }\n");
   out::write("static inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint64_t w) { if (b >= w) abort(); return a >> b; }\n");
+  out::write("static inline uint64_t lain_ashr(uint64_t a, uint64_t b, uint64_t w) { if (b >= w) abort(); return (uint64_t)((int64_t)a >> b); }\n");
   out::write("static inline uint64_t lain_load(uint64_t addr, size_t n) { uint64_t v = 0; memcpy(&v, (const void*)(uintptr_t)addr, n); return v; }\n");
   out::write("static inline void lain_store(uint64_t addr, uint64_t v, size_t n) { memcpy((void*)(uintptr_t)addr, &v, n); }\n\n");
 };
@@ -123,6 +126,46 @@ let emit_bin_sym = func(op: Op) ?{ out: io::Sink } {
   else { out::write(" >= "); }
 };
 
+let emit_signed_cmp_sym = func(op: Op) ?{ out: io::Sink } {
+  if op == Op::Slt { out::write(" < "); }
+  else if op == Op::Sle { out::write(" <= "); }
+  else if op == Op::Sgt { out::write(" > "); }
+  else { out::write(" >= "); }
+};
+
+let find_value_block = func(p: Ref(Proc), pc: u64) -> Option(u64) {
+  let i: u64 = pc;
+  let depth: u64 = 0;
+  while i > 0 {
+    i = i - 1;
+    let ins: Ref(Inst) = p.insts.get_ref(i);
+    if (ins.op == Op::EndIf) or (ins.op == Op::EndLoop) or (ins.op == Op::EndSwitch) {
+      depth = depth + 1;
+    } else if (ins.op == Op::If) or (ins.op == Op::Loop) or (ins.op == Op::Switch) {
+      if depth > 0 {
+        depth = depth - 1;
+      } else if (ins.op == Op::If) or (ins.op == Op::Switch) {
+        return Option(u64)::some(i);
+      } else {
+        return Option(u64)::none();
+      };
+    };
+  };
+  return Option(u64)::none();
+};
+
+let find_loop_pc = func(p: Ref(Proc), pc: u64, label: u64) -> Option(u64) {
+  let i: u64 = pc;
+  while i > 0 {
+    i = i - 1;
+    let ins: Ref(Inst) = p.insts.get_ref(i);
+    if (ins.op == Op::Loop) and (ins.a == label) {
+      return Option(u64)::some(i);
+    };
+  };
+  return Option(u64)::none();
+};
+
 let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink } {
   let ins: Ref(Inst) = p.insts.get_ref(pc);
   let op: Op = ins.op;
@@ -135,6 +178,8 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
       emit_u64(ins.imm) ?{ out: out };
       out::write("ULL;\n");
     }
+  } else if op == Op::Param {
+    out::write("abort();\n");
   } else if op == Op::SymAddr {
     emit_val(ins.dst) ?{ out: out };
     out::write(" = (uint64_t)(uintptr_t)");
@@ -153,9 +198,18 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
     out::write(", ");
     emit_val(ins.b) ?{ out: out };
     out::write(");\n");
-  } else if (op == Op::Shl) or (op == Op::Lshr) {
+  } else if (op == Op::Sdiv) or (op == Op::Srem) {
     emit_val(ins.dst) ?{ out: out };
-    if op == Op::Shl { out::write(" = lain_shl("); } else { out::write(" = lain_lshr("); }
+    if op == Op::Sdiv { out::write(" = lain_sdiv("); } else { out::write(" = lain_srem("); }
+    emit_val(ins.a) ?{ out: out };
+    out::write(", ");
+    emit_val(ins.b) ?{ out: out };
+    out::write(");\n");
+  } else if (op == Op::Shl) or (op == Op::Lshr) or (op == Op::Ashr) {
+    emit_val(ins.dst) ?{ out: out };
+    if op == Op::Shl { out::write(" = lain_shl("); }
+    else if op == Op::Lshr { out::write(" = lain_lshr("); }
+    else { out::write(" = lain_ashr("); }
     emit_val(ins.a) ?{ out: out };
     out::write(", ");
     emit_val(ins.b) ?{ out: out };
@@ -165,6 +219,14 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
     out::write(" = (uint64_t)(");
     emit_val(ins.a) ?{ out: out };
     emit_bin_sym(op) ?{ out: out };
+    emit_val(ins.b) ?{ out: out };
+    out::write(");\n");
+  } else if (k >= (Op::Slt as u64)) and (k <= (Op::Sge as u64)) {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = (uint64_t)((int64_t)");
+    emit_val(ins.a) ?{ out: out };
+    emit_signed_cmp_sym(op) ?{ out: out };
+    out::write("(int64_t)");
     emit_val(ins.b) ?{ out: out };
     out::write(");\n");
   } else if (op == Op::Bitcast) or (op == Op::Zext) or (op == Op::Sext) or (op == Op::Trunc) {
@@ -229,6 +291,34 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
       ai = ai + 1;
     };
     out::write(");\n");
+  } else if op == Op::CallIndirect {
+    if ins.dst != 0 {
+      emit_val(ins.dst) ?{ out: out };
+      out::write(" = ");
+    }
+    out::write("((");
+    emit_c_ty(ins.ty) ?{ out: out };
+    out::write("(*)(");
+    if ins.c == 0 {
+      out::write("void");
+    } else {
+      let ti: u64 = 0;
+      while ti < ins.c {
+        if ti > 0 { out::write(", "); }
+        out::write("uint64_t");
+        ti = ti + 1;
+      };
+    }
+    out::write("))(uintptr_t)");
+    emit_val(ins.a) ?{ out: out };
+    out::write(")(");
+    let ii: u64 = 0;
+    while ii < ins.c {
+      if ii > 0 { out::write(", "); }
+      emit_val(p.call_args.get(ins.b + ii)) ?{ out: out };
+      ii = ii + 1;
+    };
+    out::write(");\n");
   } else if op == Op::If {
     out::write("if (");
     emit_val(ins.a) ?{ out: out };
@@ -238,9 +328,69 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
   } else if op == Op::EndIf {
     out::write("}\n");
   } else if op == Op::Loop {
-    out::write("while (1) {\n");
+    out::write("L_loop_");
+    emit_u64(ins.a) ?{ out: out };
+    out::write(": while (1) {\n");
   } else if op == Op::EndLoop {
-    out::write("break; }\n");
+    let lp: Ref(Inst) = p.insts.get_ref(ins.a);
+    out::write("break; } L_end_");
+    emit_u64(lp.a) ?{ out: out };
+    out::write(":;\n");
+  } else if op == Op::Break {
+    match find_loop_pc(p, pc, ins.a) {
+      Some(loop_pc) => {
+        let lp: Ref(Inst) = p.insts.get_ref(loop_pc);
+        if (lp.dst != 0) and (ins.b != 0) {
+          emit_val(lp.dst) ?{ out: out };
+          out::write(" = ");
+          emit_val(ins.b) ?{ out: out };
+          out::write(";\n  ");
+        };
+        out::write("goto L_end_");
+        emit_u64(ins.a) ?{ out: out };
+        out::write(";\n");
+      },
+      None => { out::write("abort();\n"); },
+    }
+  } else if op == Op::Continue {
+    match find_loop_pc(p, pc, ins.a) {
+      Some(_) => {
+        out::write("goto L_loop_");
+        emit_u64(ins.a) ?{ out: out };
+        out::write(";\n");
+      },
+      None => { out::write("abort();\n"); },
+    }
+  } else if op == Op::Switch {
+    out::write("switch (");
+    emit_val(ins.a) ?{ out: out };
+    if (ins.b > 0) and (ins.b < 64) {
+      out::write(" & ");
+      emit_u64(((1 as u64) << ins.b) - 1) ?{ out: out };
+      out::write("ULL");
+    };
+    out::write(") { if (0) {\n");
+  } else if op == Op::Case {
+    out::write("} break; case ");
+    emit_u64(ins.imm) ?{ out: out };
+    out::write("ULL: {\n");
+  } else if op == Op::Default {
+    out::write("} break; default: {\n");
+  } else if op == Op::EndSwitch {
+    out::write("} break; }\n");
+  } else if op == Op::Yield {
+    match find_value_block(p, pc) {
+      Some(h) => {
+        let hi: Ref(Inst) = p.insts.get_ref(h);
+        if (hi.dst != 0) and (ins.a != 0) {
+          emit_val(hi.dst) ?{ out: out };
+          out::write(" = ");
+          emit_val(ins.a) ?{ out: out };
+          out::write(";\n");
+        };
+      },
+      None => { out::write("abort();\n"); },
+    }
   } else if op == Op::Return {
     if ins.a != 0 {
       out::write("return ");

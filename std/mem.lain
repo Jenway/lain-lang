@@ -275,3 +275,84 @@ pub let align_up = func(v: u64, align: u64) -> u64 {
 pub let is_pow2 = func(v: u64) -> bool {
   return (v > 0) and ((v & (v - 1)) == 0);
 };
+
+pub let ChunkArena = module {
+  pub {
+    let Self = struct {
+      head: u64,
+      cur: u64,
+      used: u64,
+      cap: u64,
+      chunk_size: u64
+    };
+
+    let with_chunk_size = func(chunk_size: u64) -> Self {
+      let sz: u64 = if chunk_size < 4096 { 4096 } else { align_up(chunk_size, 8) };
+      return Self {
+        head: 0,
+        cur: 0,
+        used: 0,
+        cap: 0,
+        chunk_size: sz
+      };
+    };
+
+    let new = func() -> Self {
+      return with_chunk_size(65536);
+    };
+
+    let alloc = func(a: Mut(Self), bytes: u64) -> u64 {
+      let need: u64 = if bytes == 0 { 8 } else { align_up(bytes, 8) };
+      let start: u64 = align_up(deref(a).used, 8);
+      if (deref(a).cur != 0) and (start + need <= deref(a).cap) {
+        deref(a).used = start + need;
+        return deref(a).cur + 16 + start;
+      }
+      let body_cap: u64 = if need > deref(a).chunk_size { need } else { deref(a).chunk_size };
+      let block: u64 = os.alloc_bytes(16 + body_cap);
+      if block == 0 {
+        return 0;
+      }
+      let next_slot: Mut(u64) = ptr_cast(Mut(u64), block);
+      deref(next_slot) = deref(a).head;
+      let cap_slot: Mut(u64) = ptr_cast(Mut(u64), block + 8);
+      deref(cap_slot) = body_cap;
+      deref(a).head = block;
+      deref(a).cur = block;
+      deref(a).cap = body_cap;
+      deref(a).used = need;
+      return block + 16;
+    };
+
+    let drop = func(a: Mut(Self)) {
+      let node: u64 = deref(a).head;
+      while node != 0 {
+        let next_slot: Ref(u64) = ptr_cast(Ref(u64), node);
+        let next: u64 = deref(next_slot);
+        os.free_bytes(node);
+        node = next;
+      };
+      deref(a).head = 0;
+      deref(a).cur = 0;
+      deref(a).used = 0;
+      deref(a).cap = 0;
+    };
+  };
+};
+
+pub let ArenaAlloc = module {
+  pub {
+    let Self = Mut(ChunkArena);
+
+    let alloc = func(h: Mut(Self), bytes: u64) -> u64 {
+      return ChunkArena::alloc(deref(h), bytes);
+    };
+
+    let free = func(h: Mut(Self), ptr: u64) -> u64 {
+      if ptr == 0 {
+        return 0;
+      }
+      return 0;
+    };
+  };
+};

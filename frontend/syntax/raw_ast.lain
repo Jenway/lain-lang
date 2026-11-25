@@ -1,0 +1,78 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ Allocator, SystemAlloc };
+use import("std::str")::{ sub, eq };
+use import("frontend::syntax::span")::{ SourceId, Span };
+
+pub {
+  let NodeId = struct {
+    idx: u32
+  };
+
+  let Delim = enum {
+    Root
+    Paren
+    Bracket
+    Brace
+  };
+
+  let GroupRange = struct {
+    delim: Delim,
+    start: u32,
+    len: u32
+  };
+
+  let RawNode = enum {
+    Ident
+    IntLit
+    FloatLit
+    StrLit
+    CharLit
+    Punct(u8)
+    Group(GroupRange)
+  };
+};
+
+pub let RawAst = func() ?{ al: Allocator = SystemAlloc } -> Module {
+  return module {
+    let NodeVec = Vec(RawNode) ?{ al: al };
+    let SpanVec = Vec(Span) ?{ al: al };
+    let ChildVec = Vec(NodeId) ?{ al: al };
+
+    pub {
+      let Self = struct {
+        src: SourceId,
+        nodes: NodeVec,
+        spans: SpanVec,
+        children: ChildVec,
+        root: NodeId
+      };
+
+      let node_count = func(ast: Ref(Self)) -> u64 {
+        return deref(ast).nodes.len();
+      };
+
+      let node = func(ast: Ref(Self), id: NodeId) -> RawNode {
+        return deref(ast).nodes.get(id.idx as u64);
+      };
+
+      let span = func(ast: Ref(Self), id: NodeId) -> Span {
+        return deref(ast).spans.get(id.idx as u64);
+      };
+
+      let child_at = func(ast: Ref(Self), grp: GroupRange, offset: u32) -> NodeId {
+        let idx: u64 = (grp.start as u64) + (offset as u64);
+        return deref(ast).children.get(idx);
+      };
+
+      let text_of = func(ast: Ref(Self), text: Slice(u8), id: NodeId) -> Slice(u8) {
+        let sp: Span = deref(ast).spans.get(id.idx as u64);
+        return sub(text, sp.start as u64, sp.end as u64);
+      };
+
+      let text_eq = func(ast: Ref(Self), text: Slice(u8), id: NodeId, lit: Slice(u8)) -> bool {
+        let slice: Slice(u8) = text_of(ast, text, id);
+        return eq(slice, lit);
+      };
+    };
+  };
+};

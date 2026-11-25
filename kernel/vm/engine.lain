@@ -227,13 +227,189 @@ let step_loop = func(
           pi = pi + 1;
         };
       }
+    } else if op == Op::CallIndirect {
+      let fp: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
+      if (fp == 0) or ((fp - 1) >= img.ir.procs.len()) {
+        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { fp }, proc_id: pid, pc: pc });
+      }
+      let callee_id: u64 = fp - 1;
+      let callee: Ref(Proc) = img.ir.procs.get_ref(callee_id);
+      let call_vals: Vec(u64) = Vec(u64)::new();
+      let ai: u64 = 0;
+      while ai < ins.c {
+        let arg_vid: u64 = p.call_args.get(ins.b + ai);
+        call_vals.push(slot_get(ref_of(deref(tcb)), base, arg_vid));
+        ai = ai + 1;
+      };
+      if callee.is_extern {
+        let idx: u64 = match cs.lookup(callee.link_name) {
+          Some(ci) => ci,
+          None => perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc }),
+        };
+        let entry: Ref(CapEntry) = cs.entries.get_ref(idx);
+        if entry.param_count != call_vals.len() {
+          perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc });
+        }
+        let h: Fn((u64, Mut(VSpace), Slice(u64)) -> u64) = entry.handler;
+        let res: u64 = h(entry.ctx, vs, call_vals.as_slice());
+        if entry.has_ret and (ins.dst != 0) {
+          slot_set(tcb, base, ins.dst, res);
+        }
+        fr.pc = pc + 1;
+      } else {
+        fr.pc = pc + 1;
+        let seg: Ref(Segment) = vs.segs.get_ref(tcb.stack_seg.id);
+        tcb.push_frame(callee_id, 0, callee.val_count + 1, seg.accessible, ins.dst, ins.dst != 0);
+        let new_fr: Mut(Frame) = tcb.top_frame();
+        let pi: u64 = 0;
+        while pi < call_vals.len() {
+          slot_set(tcb, new_fr.slot_base, pi + 1, call_vals.get(pi));
+          pi = pi + 1;
+        };
+      }
     } else if op == Op::If {
       let cond: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       fr.pc = if cond == 0 { ins.b } else { pc + 1 };
     } else if op == Op::Else {
       fr.pc = ins.c + 1;
-    } else if (op == Op::EndIf) or (op == Op::Loop) or (op == Op::EndLoop) {
+    } else if (op == Op::EndIf) or (op == Op::Loop) or (op == Op::EndLoop) or (op == Op::EndSwitch) {
       fr.pc = pc + 1;
+    } else if op == Op::Switch {
+      let sel: u64 = mask_bits(slot_get(ref_of(deref(tcb)), base, ins.a), ins.b);
+      let limit: u64 = ins.c;
+      let depth: u64 = 0;
+      let case_target: u64 = 0;
+      let def_target: u64 = 0;
+      let sc: u64 = pc + 1;
+      while sc < limit {
+        let s_ins: Ref(Inst) = p.insts.get_ref(sc);
+        let s_op: Op = s_ins.op;
+        if s_op == Op::Switch {
+          depth = depth + 1;
+        } else if s_op == Op::EndSwitch {
+          if depth == 0 {
+            sc = limit;
+          } else {
+            depth = depth - 1;
+          }
+        } else if depth == 0 {
+          if s_op == Op::Case {
+            if (s_ins.imm == sel) and (case_target == 0) {
+              case_target = sc + 1;
+            }
+          } else if s_op == Op::Default {
+            if def_target == 0 {
+              def_target = sc + 1;
+            }
+          }
+        }
+        sc = sc + 1;
+      };
+      fr.pc = if case_target != 0 { case_target } else if def_target != 0 { def_target } else { limit + 1 };
+    } else if (op == Op::Case) or (op == Op::Default) {
+      let depth: u64 = 0;
+      let end_target: u64 = 0;
+      let sc: u64 = pc + 1;
+      let n: u64 = p.insts.len();
+      while sc < n {
+        let s_ins: Ref(Inst) = p.insts.get_ref(sc);
+        let s_op: Op = s_ins.op;
+        if s_op == Op::Switch {
+          depth = depth + 1;
+        } else if s_op == Op::EndSwitch {
+          if depth == 0 {
+            end_target = sc + 1;
+            sc = n;
+          } else {
+            depth = depth - 1;
+          }
+        }
+        sc = sc + 1;
+      };
+      if end_target == 0 {
+        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+      }
+      fr.pc = end_target;
+    } else if op == Op::Yield {
+      let val: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
+      let depth: u64 = 0;
+      let hdr_pc: u64 = 0;
+      let found: bool = false;
+      let i: u64 = pc;
+      while (i > 0) and (found == false) {
+        i = i - 1;
+        let b_ins: Ref(Inst) = p.insts.get_ref(i);
+        let b_op: Op = b_ins.op;
+        if (b_op == Op::EndIf) or (b_op == Op::EndLoop) or (b_op == Op::EndSwitch) {
+          depth = depth + 1;
+        } else if (b_op == Op::If) or (b_op == Op::Loop) or (b_op == Op::Switch) {
+          if depth == 0 {
+            if b_op == Op::Loop {
+              perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+            }
+            hdr_pc = i;
+            found = true;
+          } else {
+            depth = depth - 1;
+          }
+        }
+      };
+      if found {
+        let hdr: Ref(Inst) = p.insts.get_ref(hdr_pc);
+        if hdr.dst != 0 {
+          slot_set(tcb, base, hdr.dst, val);
+        }
+        fr.pc = hdr.c + 1;
+      } else {
+        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+      }
+    } else if op == Op::Break {
+      let val: u64 = slot_get(ref_of(deref(tcb)), base, ins.b);
+      let lbl: u64 = ins.a;
+      let loop_pc: u64 = 0;
+      let found: bool = false;
+      let i: u64 = pc;
+      while (i > 0) and (found == false) {
+        i = i - 1;
+        let b_ins: Ref(Inst) = p.insts.get_ref(i);
+        let b_op: Op = b_ins.op;
+        if b_op == Op::Loop {
+          if b_ins.a == lbl {
+            loop_pc = i;
+            found = true;
+          }
+        }
+      };
+      if found {
+        let lp: Ref(Inst) = p.insts.get_ref(loop_pc);
+        if lp.dst != 0 {
+          slot_set(tcb, base, lp.dst, val);
+        }
+        fr.pc = lp.b + 1;
+      } else {
+        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { lbl }, proc_id: pid, pc: pc });
+      }
+    } else if op == Op::Continue {
+      let lbl: u64 = ins.a;
+      let loop_pc: u64 = 0;
+      let found: bool = false;
+      let i: u64 = pc;
+      while (i > 0) and (found == false) {
+        i = i - 1;
+        let b_ins: Ref(Inst) = p.insts.get_ref(i);
+        let b_op: Op = b_ins.op;
+        if b_op == Op::Loop {
+          if b_ins.a == lbl {
+            loop_pc = i;
+            found = true;
+          }
+        }
+      };
+      if found {
+        fr.pc = loop_pc + 1;
+      } else {
+        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { lbl }, proc_id: pid, pc: pc });
+      }
     } else if op == Op::Return {
       let rv: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       let popped: Option(Frame) = tcb.pop_frame();

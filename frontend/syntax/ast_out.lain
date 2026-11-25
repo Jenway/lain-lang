@@ -1,0 +1,181 @@
+use import("std::collections")::{ Vec };
+use import("std::err")::{ Fail };
+use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
+use import("frontend::syntax::span")::{ SourceId, Span };
+use import("frontend::syntax::raw_ast")::{ NodeId, Delim, GroupRange, RawNode, RawAst };
+
+pub {
+  let Mark = struct {
+    nodes_len: u64,
+    children_len: u64,
+    pending_len: u64,
+    frames_len: u64
+  };
+
+  let GroupFrame = struct {
+    delim: Delim,
+    start: u32,
+    pending_start: u32
+  };
+
+  let AstOutErr = enum {
+    UnmatchedClose(Span)
+    UnclosedGroup(Span)
+    EmptyFinish
+  };
+
+  let AstOutFail = Fail(AstOutErr);
+};
+
+pub let AstOut = func() ?{ al: Allocator = SystemAlloc } -> Module {
+  return module {
+    let NodeVec = Vec(RawNode) ?{ al: al };
+    let SpanVec = Vec(Span) ?{ al: al };
+    let ChildVec = Vec(NodeId) ?{ al: al };
+    let FrameVec = Vec(GroupFrame) ?{ al: al };
+    let OutAst = RawAst() ?{ al: al };
+
+    pub {
+      let Self = struct {
+        src: SourceId,
+        alloc: al::Self,
+        nodes: NodeVec,
+        spans: SpanVec,
+        children: ChildVec,
+        pending: ChildVec,
+        frames: FrameVec
+      };
+
+      let with_alloc = func(src: SourceId, a: al::Self) !{ OomErr } -> Self {
+        let mut_frames: FrameVec = FrameVec::with_alloc(a);
+        let root_frame: GroupFrame = GroupFrame {
+          delim: Delim::Root,
+          start: 0,
+          pending_start: 0
+        };
+        mut_frames.push(root_frame);
+        return Self {
+          src: src,
+          alloc: a,
+          nodes: NodeVec::with_alloc(a),
+          spans: SpanVec::with_alloc(a),
+          children: ChildVec::with_alloc(a),
+          pending: ChildVec::with_alloc(a),
+          frames: reloc(mut_frames)
+        };
+      };
+
+      let depth = func(out: Ref(Self)) -> u64 {
+        return deref(out).frames.len();
+      };
+
+      let mark = func(out: Ref(Self)) -> Mark {
+        return Mark {
+          nodes_len: deref(out).nodes.len(),
+          children_len: deref(out).children.len(),
+          pending_len: deref(out).pending.len(),
+          frames_len: deref(out).frames.len()
+        };
+      };
+
+      let rollback = func(out: Mut(Self), m: Mark) {
+        deref(out).nodes.truncate(m.nodes_len);
+        deref(out).spans.truncate(m.nodes_len);
+        deref(out).children.truncate(m.children_len);
+        deref(out).pending.truncate(m.pending_len);
+        deref(out).frames.truncate(m.frames_len);
+      };
+
+      let emit = func(out: Mut(Self), node: RawNode, sp: Span) !{ OomErr } -> NodeId {
+        let id: NodeId = NodeId { idx: deref(out).nodes.len() as u32 };
+        deref(out).nodes.push(node);
+        deref(out).spans.push(sp);
+        deref(out).pending.push(id);
+        return id;
+      };
+
+      let begin_group = func(out: Mut(Self), delim: Delim, start: u32) !{ OomErr } {
+        let frame: GroupFrame = GroupFrame {
+          delim: delim,
+          start: start,
+          pending_start: deref(out).pending.len() as u32
+        };
+        deref(out).frames.push(frame);
+      };
+
+      let end_group = func(out: Mut(Self), delim: Delim, end_pos: u32) !{ OomErr, AstOutFail } -> NodeId {
+        let flen: u64 = deref(out).frames.len();
+        if flen <= 1 {
+          perform AstOutFail::fail(AstOutErr::UnmatchedClose(Span::empty(deref(out).src, end_pos)));
+        }
+        let top: GroupFrame = deref(out).frames.get(flen - 1);
+        if (top.delim == delim) == false {
+          perform AstOutFail::fail(AstOutErr::UnmatchedClose(Span::make(deref(out).src, top.start, end_pos)));
+        }
+        deref(out).frames.truncate(flen - 1);
+        let child_start: u32 = deref(out).children.len() as u32;
+        let plen: u64 = deref(out).pending.len();
+        let pstart: u64 = top.pending_start as u64;
+        let i: u64 = pstart;
+        while i < plen {
+          let cid: NodeId = deref(out).pending.get(i);
+          deref(out).children.push(cid);
+          i = i + 1;
+        };
+        deref(out).pending.truncate(pstart);
+        let count: u32 = (plen - pstart) as u32;
+        let grp: GroupRange = GroupRange {
+          delim: delim,
+          start: child_start,
+          len: count
+        };
+        let sp: Span = Span::make(deref(out).src, top.start, end_pos);
+        return emit(out, RawNode::Group(grp), sp);
+      };
+
+      let finish = func(out: Mut(Self), total_len: u32) !{ OomErr, AstOutFail } -> OutAst {
+        let flen: u64 = deref(out).frames.len();
+        if flen == 0 {
+          perform AstOutFail::fail(AstOutErr::EmptyFinish);
+        }
+        if flen > 1 {
+          let top: GroupFrame = deref(out).frames.get(flen - 1);
+          perform AstOutFail::fail(AstOutErr::UnclosedGroup(Span::empty(deref(out).src, top.start)));
+        }
+        let child_start: u32 = deref(out).children.len() as u32;
+        let plen: u64 = deref(out).pending.len();
+        let i: u64 = 0;
+        while i < plen {
+          let cid: NodeId = deref(out).pending.get(i);
+          deref(out).children.push(cid);
+          i = i + 1;
+        };
+        deref(out).pending.truncate(0);
+        deref(out).frames.truncate(0);
+        let root_id: NodeId = NodeId { idx: deref(out).nodes.len() as u32 };
+        let grp: GroupRange = GroupRange {
+          delim: Delim::Root,
+          start: child_start,
+          len: plen as u32
+        };
+        let sp: Span = Span::make(deref(out).src, 0, total_len);
+        deref(out).nodes.push(RawNode::Group(grp));
+        deref(out).spans.push(sp);
+        let a: al::Self = deref(out).alloc;
+        let nodes: NodeVec = deref(out).nodes;
+        deref(out).nodes = NodeVec::with_alloc(a);
+        let spans: SpanVec = deref(out).spans;
+        deref(out).spans = SpanVec::with_alloc(a);
+        let children: ChildVec = deref(out).children;
+        deref(out).children = ChildVec::with_alloc(a);
+        return OutAst {
+          src: deref(out).src,
+          nodes: reloc(nodes),
+          spans: reloc(spans),
+          children: reloc(children),
+          root: root_id
+        };
+      };
+    };
+  };
+};

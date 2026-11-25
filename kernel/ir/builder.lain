@@ -19,6 +19,13 @@ pub {
     res: ValId
   };
 
+  let SwitchToken = struct {
+    switch_pc: u64,
+    prev_arm_pc: u64,
+    default_pc: u64,
+    res: ValId
+  };
+
   let ProcBuilder = module {
     pub {
       let Self = struct {
@@ -118,6 +125,20 @@ pub {
         return dst;
       };
 
+      let call_indirect = func(b: Mut(Self), fn_ptr: ValId, args: Slice(ValId), ret_ty: Ty, is_tail: bool) !{ OomErr } -> ValId {
+        let start: u64 = b.proc.call_args.len();
+        let i: u64 = 0;
+        while i < args.len {
+          let av: ValId = args[i];
+          b.proc.call_args.push(av.id);
+          i = i + 1;
+        };
+        let dst: ValId = if (ret_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
+        let tail_flag: u64 = if is_tail { 1 } else { 0 };
+        b.proc.insts.push(Inst { op: Op::CallIndirect, ty: ret_ty, dst: dst.id, a: fn_ptr.id, b: start, c: args.len, imm: 0, aux: tail_flag });
+        return dst;
+      };
+
       let begin_if = func(b: Mut(Self), cond: ValId, res_ty: Ty) !{ OomErr } -> IfToken {
         let dst: ValId = if (res_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
         let pc: u64 = b.proc.insts.len();
@@ -161,6 +182,46 @@ pub {
         b.proc.insts.push(Inst { op: Op::EndLoop, ty: Ty::Void, dst: 0, a: tok.loop_pc, b: 0, c: 0, imm: 0, aux: 0 });
         let lp_ins: Mut(Inst) = b.proc.insts.get_mut(tok.loop_pc);
         lp_ins.b = end_pc;
+        return tok.res;
+      };
+
+      let begin_switch = func(b: Mut(Self), sel: ValId, sel_ty: Ty, res_ty: Ty) !{ OomErr } -> SwitchToken {
+        let dst: ValId = if (res_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
+        let pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::Switch, ty: res_ty, dst: dst.id, a: sel.id, b: sel_ty.bytes() * 8, c: 0, imm: 0, aux: 0 });
+        return SwitchToken { switch_pc: pc, prev_arm_pc: 0, default_pc: 0, res: dst };
+      };
+
+      let emit_case = func(b: Mut(Self), tok: Mut(SwitchToken), val: u64) !{ OomErr } {
+        let case_pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::Case, ty: Ty::Void, dst: 0, a: 0, b: 0, c: 0, imm: val, aux: 0 });
+        if tok.prev_arm_pc != 0 {
+          let prev_ins: Mut(Inst) = b.proc.insts.get_mut(tok.prev_arm_pc);
+          prev_ins.c = case_pc;
+        }
+        tok.prev_arm_pc = case_pc;
+      };
+
+      let emit_default = func(b: Mut(Self), tok: Mut(SwitchToken)) !{ OomErr } {
+        let def_pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::Default, ty: Ty::Void, dst: 0, a: 0, b: 0, c: 0, imm: 0, aux: 0 });
+        if tok.prev_arm_pc != 0 {
+          let prev_ins: Mut(Inst) = b.proc.insts.get_mut(tok.prev_arm_pc);
+          prev_ins.c = def_pc;
+        }
+        tok.prev_arm_pc = def_pc;
+        tok.default_pc = def_pc;
+      };
+
+      let end_switch = func(b: Mut(Self), tok: SwitchToken) !{ OomErr } -> ValId {
+        let end_pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::EndSwitch, ty: Ty::Void, dst: 0, a: 0, b: 0, c: 0, imm: 0, aux: 0 });
+        let sw_ins: Mut(Inst) = b.proc.insts.get_mut(tok.switch_pc);
+        sw_ins.c = end_pc;
+        if tok.prev_arm_pc != 0 {
+          let prev_ins: Mut(Inst) = b.proc.insts.get_mut(tok.prev_arm_pc);
+          prev_ins.c = end_pc;
+        }
         return tok.res;
       };
 
