@@ -1,5 +1,3 @@
-// generics.lain —— Phase 2B ?{} 泛型模板登记、4 步单态化调度与待编队列。
-// 单向依赖 state/types/ast/sym/agg/ir/modules/tyreg/tbuild/ctfor/ctfn/ctx/calls/given/genunify。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ax = import("src::sema::ast");
@@ -64,7 +62,6 @@ let paramty_at = func(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), ps) + i * 32);
 };
 
-// --- 模板头（64B）：[decl_i@0, src@8, pg_i@16, qg_i@24, ret_i@32, body_i@40, modv@48, eff_i@56] ---
 pub let gen_hdr_modv = func(hdr: Mut(GenHdr)) -> u64 { return hdr.modv; };
 
 pub let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_i: u64, qg_i: u64, ret_i: u64, eff_i: u64, body_i: u64) -> Mut(modules.SymEntry) {
@@ -83,8 +80,6 @@ pub let reg_generic = func(k: Mut(st.State), name: u64, q: u64, decl_i: u64, pg_
   return se;
 };
 
-// --- 待编队列（住在 st_genq_blk，每条 48B） ------------------------------
-// [mangled_q@0, tpl_e@8, nct@16, names_arr@24, vals_arr@32, depth@40]
 pub let gen_depth = func(k: Mut(st.State)) -> u64 { let gb: Mut(GenQBlk) = qblk(k); return gb.depth; };
 pub let set_gen_depth = func(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GenQBlk) = qblk(k); gb.depth = v; return v; };
 
@@ -101,7 +96,7 @@ let genq_push = func(k: Mut(st.State), q: u64, tpl_e: Mut(modules.SymEntry), nct
   let gb: Mut(GenQBlk) = qblk(k);
   let base: Mut(GenQRec) = genq_base(k);
   let n: u64 = gb.qn;
-  if n >= 128 { ctf.fail_msg(k, "generic queue full", 18, ax.e_ast()); return 0; }
+  if n >= 128 { ctf.fail_msg(k, "generic queue full", 18, ax.FailKind.Ast as u64); return 0; }
   let nms: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, nct * 8 + 8));
   let vcp: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_ralloc(k, nct * 24 + 8));
   let i: u64 = loop cp(i: u64 = 0) while i < nct {
@@ -134,7 +129,6 @@ pub let genq_pending = func(k: Mut(st.State)) -> Mut(GenQRec) {
   return qrec_at(gb.qbase, h);
 };
 
-// --- 辅助：压入已绑定的编译期实参 ----------------------------------------
 let push_bound = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
   if i >= nct { return 1; }
   if deref(gu.word_at(bound, i)) == 1 {
@@ -146,22 +140,21 @@ let push_bound = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u64, v
   return push_bound(k, ctp_tbl, nct, vals, bound, i + 1);
 };
 
-// 解析调用点显式 ?{ key: val, ... }
 let parse_explicit_q = func(k: Mut(st.State), qag: u64, i: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
   let n: u64 = ax.n_count(qag);
   if i >= n { return 1; }
   if ax.is_comma(qag, i) == 1 { return parse_explicit_q(k, qag, i + 1, ctp_tbl, nct, vals, bound); }
   if ax.is_name(qag, i) == 0 {
-    ctf.fail_msg(k, "bad ?{} arg", 11, ax.e_ast());
+    ctf.fail_msg(k, "bad ?{} arg", 11, ax.FailKind.Ast as u64);
     return 0;
   }
   if ctf.has_tok(qag, i + 1, s.p_colon()) == 0 {
-    ctf.fail_msg(k, "bad ?{} arg", 11, ax.e_ast());
+    ctf.fail_msg(k, "bad ?{} arg", 11, ax.FailKind.Ast as u64);
     return 0;
   }
   let idx: u64 = gu.ct_find(ctp_tbl, nct, ax.n_sym(qag, i), 0);
-  if idx == 999 { ctf.fail_msg(k, "unknown comptime arg", 20, ax.e_type()); return 0; }
-  // 实参是模块（名字、点号路径或函子调用）时记模块见证值。
+  if idx == 999 { ctf.fail_msg(k, "unknown comptime arg", 20, ax.FailKind.Type as u64); return 0; }
+
   let mv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
   let mj: u64 = gv.eval_mod_arg(k, qag, i + 2, mv);
   if st.st_ok(k) != 0 { return 0; }
@@ -184,18 +177,17 @@ let parse_explicit_q = func(k: Mut(st.State), qag: u64, i: u64, ctp_tbl: Mut(gu.
   return parse_explicit_q(k, qag, nj, ctp_tbl, nct, vals, bound);
 };
 
-// 逐个处理运行时实参：已知类型按 want 求值，含未绑定类型变量则 tnone 求值后合一。
 let eval_rt_args = func(k: Mut(st.State), pg: u64, pi: u64, argsg: u64, ai: u64, idx: u64, ab: Mut(ty.Val),
                   ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
   let pn: u64 = ax.n_count(pg);
   let an: u64 = ax.n_count(argsg);
   if pi >= pn {
-    if ai < an { ctf.fail_msg(k, "too many args", 13, ax.e_type()); }
+    if ai < an { ctf.fail_msg(k, "too many args", 13, ax.FailKind.Type as u64); }
     return idx;
   }
   if ax.is_comma(pg, pi) == 1 { return eval_rt_args(k, pg, pi + 1, argsg, ai, idx, ab, ctp_tbl, nct, vals, bound); }
-  if ai >= an { ctf.fail_msg(k, "missing args", 12, ax.e_type()); return idx; }
-  if ctf.has_tok(pg, pi + 1, s.p_colon()) == 0 { ctf.fail_msg(k, "expected :", 10, ax.e_ast()); return idx; }
+  if ai >= an { ctf.fail_msg(k, "missing args", 12, ax.FailKind.Type as u64); return idx; }
+  if ctf.has_tok(pg, pi + 1, s.p_colon()) == 0 { ctf.fail_msg(k, "expected :", 10, ax.FailKind.Ast as u64); return idx; }
   let te: u64 = gu.ct_skip_ty(pg, pi + 2);
   let v: Mut(ty.Val) = rtval_at(ab, idx);
   let cm: u64 = ctf.mark(k);
@@ -224,7 +216,6 @@ let eval_rt_args = func(k: Mut(st.State), pg: u64, pi: u64, argsg: u64, ai: u64,
   return eval_rt_args(k, pg, te, argsg, nj2, idx + 1, ab, ctp_tbl, nct, vals, bound);
 };
 
-// 编译期参数里第一个 T: Type 的下标；没有则 999。
 let type_param_at = func(qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, i: u64) -> u64 {
   if i >= nct { return 999; }
   let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
@@ -236,14 +227,13 @@ let type_param_at = func(qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, i: u64)
   return type_param_at(qg, ctp_tbl, nct, i + 1);
 };
 
-// 把 T 绑定成模块的 Self 类型；T 已绑定时比对一致性。
 let bind_self_param = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), t_idx: u64, i: u64, st_tid: u64) -> u64 {
   if t_idx == 999 or t_idx == i { return 1; }
-  if st_tid == 0 { ctf.fail_msg(k, "module has no Self type", 23, ax.e_type()); return 0; }
+  if st_tid == 0 { ctf.fail_msg(k, "module has no Self type", 23, ax.FailKind.Type as u64); return 0; }
   let tslot: Mut(ctf.CtVal) = gu.val_at(vals, t_idx);
   if deref(gu.word_at(bound, t_idx)) == 1 {
     if tslot.a != st_tid {
-      ctf.fail_msg(k, "module Self type conflict", 25, ax.e_type());
+      ctf.fail_msg(k, "module Self type conflict", 25, ax.FailKind.Type as u64);
       return 0;
     }
     return 1;
@@ -255,7 +245,6 @@ let bind_self_param = func(k: Mut(st.State), ctp_tbl: Mut(gu.CtParamRec), nct: u
   return 1;
 };
 
-// 约束是签名时的编译期参数求解：显式模块直接校验，隐式模块从模块见证记录区里搜。
 let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64, sig_e: Mut(modules.SymEntry)) -> u64 {
   let has_self: u64 = gv.sig_has_self(sig_e);
   let t_idx: u64 = type_param_at(qg, ctp_tbl, nct, 0);
@@ -263,7 +252,7 @@ let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamR
   let tv: Mut(ctf.CtVal) = gu.val_at(vals, i);
   if deref(gu.word_at(bound, i)) == 1 {
     if tv.kind != 9 {
-      ctf.fail_msg(k, "explicit ?{} arg needs a module", 31, ax.e_type());
+      ctf.fail_msg(k, "explicit ?{} arg needs a module", 31, ax.FailKind.Type as u64);
       return 0;
     }
     if gv.check_mod_matches_sig(k, tv.a, sig_e, 1) == 0 { return 0; }
@@ -307,7 +296,7 @@ let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamR
       if st.st_ok(k) != 0 { return 0; }
     }
     if tv.kind != 9 {
-      ctf.fail_msg(k, "default ?{} witness needs a module", 34, ax.e_type());
+      ctf.fail_msg(k, "default ?{} witness needs a module", 34, ax.FailKind.Type as u64);
       return 0;
     }
     if gv.check_mod_matches_sig(k, tv.a, sig_e, 1) == 0 { return 0; }
@@ -332,8 +321,6 @@ let resolve_sig_param = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamR
   return 1;
 };
 
-// 用已解出的编译期参数，解析出隐式模块见证；签名约束按签名查找模块见证。
-// 签名约束先解：T 未绑时可从胜出的模块取 Self，其余约束再解。
 let resolve_sig_pass = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64), i: u64) -> u64 {
   if i >= nct { return 1; }
   let p: Mut(gu.CtParamRec) = gu.ctparam_at(ctp_tbl, i);
@@ -381,10 +368,10 @@ let resolve_givens_rest = func(k: Mut(st.State), qg: u64, ctp_tbl: Mut(gu.CtPara
     let target_tid: u64 = ctp.as_type(k, tv);
     if st.st_ok(k) != 0 { return 0; }
     if target_tid == tb.type_tid(k) {
-      ctf.fail_msg(k, "cannot infer comptime param", 25, ax.e_type());
+      ctf.fail_msg(k, "cannot infer comptime param", 25, ax.FailKind.Type as u64);
       return 0;
     }
-    ctf.fail_msg(k, "missing comptime/module witness", 31, ax.e_type());
+    ctf.fail_msg(k, "missing comptime/module witness", 31, ax.FailKind.Type as u64);
     return 0;
   }
   return resolve_givens_rest(k, qg, ctp_tbl, nct, vals, bound, i + 1);
@@ -418,7 +405,7 @@ let build_sig = func(k: Mut(st.State), root: u64, pg: u64, ret_i: u64) -> Mut(u8
 
 let alloc_mangled = func(k: Mut(st.State), e: Mut(modules.SymEntry), src: u64, nct: u64, ctp_tbl: Mut(gu.CtParamRec), vals: Mut(ctf.CtVal), sg: Mut(u8)) -> u64 {
   let dp: u64 = gen_depth(k);
-  if dp + 1 >= 64 { ctf.fail_msg(k, "generic recursion limit", 23, ax.e_type()); return 0; }
+  if dp + 1 >= 64 { ctf.fail_msg(k, "generic recursion limit", 23, ax.FailKind.Type as u64); return 0; }
   let gb: Mut(GenQBlk) = qblk(k);
   let seq: u64 = gb.seq;
   gb.seq = seq + 1;
@@ -430,9 +417,9 @@ let alloc_mangled = func(k: Mut(st.State), e: Mut(modules.SymEntry), src: u64, n
 
 let ret_end = func(g: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return i; }
-  if ctf.has_delim(g, i, ax.dl_brace()) == 1 { return i; }
+  if ctf.has_delim(g, i, ax.Delim.Brace as u64) == 1 { return i; }
   if ax.is_group(g, i) == 0 and ax.n_sym(g, i) == s.p_bang() {
-    if ctf.has_delim(g, i + 1, ax.dl_brace()) == 1 { return i; }
+    if ctf.has_delim(g, i + 1, ax.Delim.Brace as u64) == 1 { return i; }
   }
   return ret_end(g, i + 1);
 };
@@ -449,7 +436,6 @@ let effect_row_param = func(k: Mut(st.State), qg: u64, p: Mut(gu.CtParamRec)) ->
   return 0;
 };
 
-// --- 对外调用入口 ---------------------------------------------------------
 pub let call_generic = func(k: Mut(st.State), e: Mut(modules.SymEntry), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), next_box: Mut(u64)) -> u64 {
   let hdr: Mut(GenHdr) = ptr_cast(Mut(GenHdr), modules.sym_sig(e));
   let src: u64 = hdr.src;
@@ -464,7 +450,7 @@ pub let call_generic = func(k: Mut(st.State), e: Mut(modules.SymEntry), g: u64, 
   let bound: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
   let bslice: MutSlice(u64) = make_slice(MutSlice(u64), bound, 8);
   let zi: u64 = loop zb(z: u64 = 0) while z < 8 { bslice[z] = 0; z = z + 1; };
-  let is_q: u64 = if ctf.has_tok(g, i + 2, s.p_qmark()) == 1 { ctf.has_delim(g, i + 3, ax.dl_brace()) } else { 0 };
+  let is_q: u64 = if ctf.has_tok(g, i + 2, s.p_qmark()) == 1 { ctf.has_delim(g, i + 3, ax.Delim.Brace as u64) } else { 0 };
   ax.box_put(next_box, if is_q == 1 { i + 4 } else { i + 2 });
   if is_q == 1 {
     if parse_explicit_q(k, ax.n_at(g, i + 3), 0, ctp_tbl, nct, vals, bound) == 0 { return 0; }

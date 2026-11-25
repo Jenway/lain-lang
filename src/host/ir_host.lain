@@ -1,13 +1,3 @@
-// 纯 Lain 的 IR 宿主：在内存里累积 LAINIR 模块，替代 lain2_ir_* 宿主原语。
-//
-// 句柄与邮箱语义对齐 src/ir.lain：
-//   模块句柄从 1 起，0 表示无效；
-//   区域句柄把模块序号与区域序号打包成一个整数；
-//   操作数邮箱跟着模块走，下一条 #inst* 取走并清空。
-// 这里只负责表示与追加，类型检查交给 src::ir::verify::checks，C99 文本交给
-// src::backend::c99。容量、句柄、状态上的任何违例都在发生位置就地终止，
-// 终止之前把说明文本与细节值写进 HostIr，事后可用 last_err_msg /
-// last_err_detail 读出崩溃点上下文。诊断是普通输出，不写进失败状态。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
@@ -15,7 +5,6 @@ let c99 = import("src::backend::c99");
 let mem = import("std::mem");
 let tab = import("src::host::symtab");
 
-// --- 容量与句柄 -----------------------------------------------------------
 pub let MODULE_CAP = func() -> u64 { return 16; };
 pub let FRAME_CAP = func() -> u64 { return 64; };
 pub let DIAG_CAP = func() -> u64 { return 256; };
@@ -24,7 +13,6 @@ pub let INIT_CAP = func() -> u64 { return 4; };
 pub let INIT_INST_CAP = func() -> u64 { return 16; };
 pub let HANDLE_STRIDE = func() -> u64 { return 4294967296; };
 
-// 宿主错误码：只作为就地终止的原因值，不从 ir_* 的返回值里推断。
 pub let HOST_OK = func() -> u64 { return 0; };
 pub let HOST_ERR_STATE = func() -> u64 { return 1; };
 pub let HOST_ERR_ARG = func() -> u64 { return 2; };
@@ -34,7 +22,6 @@ pub let HOST_ERR_RANGE = func() -> u64 { return 5; };
 pub let HOST_ERR_TYPE = func() -> u64 { return 6; };
 pub let HOST_ERR_IR = func() -> u64 { return 7; };
 
-// --- 记录 -----------------------------------------------------------------
 pub let DataRec = struct {
   symbol: u64,
   bytes: Ref(u8),
@@ -49,7 +36,6 @@ pub let Diag = struct {
   length: u64,
 };
 
-// 一个打开的区域：形参、结果与已追加的指令序号。
 pub let Frame = struct {
   params: Mut(vf.IrParam),
   param_cap: u64,
@@ -62,7 +48,6 @@ pub let Frame = struct {
   inst_count: u64,
 };
 
-// 一段打开的过程：形参、结果、已闭合区域深度与 switch 暂存分支。
 pub let ProcState = struct {
   open: u64,
   is_extern: u64,
@@ -114,8 +99,6 @@ pub let HostIr = struct {
   cap: u64,
   used: u64,
   err: u64,
-  err_msg: Slice(u8),
-  err_detail: u64,
   last_verify: u64,
   mods: Mut(ModState),
   mod_cap: u64,
@@ -124,11 +107,8 @@ pub let HostIr = struct {
   diag_count: u64,
 };
 
-// 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
 pub let Self = HostIr;
 
-// 记录步长：导入的结构类型不能直接出现在 size_of 的实参里，用本地单元
-// 结构包一层，字段仍在偏移 0。
 let IrProcCell = struct { v: vf.IrProc };
 let IrRegionCell = struct { v: vf.IrRegion };
 let IrInstCell = struct { v: vf.IrInst };
@@ -137,7 +117,6 @@ let IrTypeCell = struct { v: vf.IrType };
 let IrCaseCell = struct { v: vf.IrCase };
 let IrOperandCell = struct { v: vf.IrOperand };
 
-// --- 字节搬运 -------------------------------------------------------------
 let zero_bytes = func(p: Mut(u8), n: u64) -> u64 {
   let i: u64 = loop c(i: u64 = 0) while i < n {
     let q: Mut(u8) = p + i;
@@ -157,15 +136,13 @@ let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return 0;
 };
 
-// 违例出口：记下失败状态、打一行说明，再就地终止。
 let fail_msg = func(h: Mut(HostIr), msg: Slice(u8), code: u64) -> u64 {
   if h.err == 0 {
     h.err = code;
-    h.err_msg = msg;
-    h.err_detail = code;
   }
-  let seen: u64 = tab.trap_note(msg, code);
-  return mem.halt_now(code);
+  tab.trap_note(msg, code);
+  let dead: u64 = mem.trap_abort(code);
+  return dead;
 };
 
 let msg_state = func() -> Slice(u8) { return "ir_host: state mismatch"; };
@@ -186,29 +163,16 @@ let msg_for = func(code: u64) -> Slice(u8) {
   return msg_ir();
 };
 
-// 说明文本只在第一次失败时落笔：最深的发生位置最有上下文价值。
 let fail = func(h: Mut(HostIr), code: u64) -> u64 {
   return fail_msg(h, msg_for(code), code);
 };
 
-pub let last_err_msg = func(h: Mut(HostIr)) -> Slice(u8) {
-  if is_null(h) { return make_slice(Slice(u8), null_ref(Ref(u8)), 0); }
-  return h.err_msg;
-};
-
-pub let last_err_detail = func(h: Mut(HostIr)) -> u64 {
-  if is_null(h) { return HOST_ERR_HANDLE(); }
-  return h.err_detail;
-};
-
 let trap_host = func(cause: u64) -> Mut(HostIr) {
-  let dead: u64 = mem.halt_now(cause);
+  tab.trap_note("ir_host: host_new arena too small", cause);
+  mem.trap_abort(cause);
   return null_ref(Mut(HostIr));
 };
 
-// --- 槽位 -----------------------------------------------------------------
-// 每块宿主区都是定长元素表：先按元素类型造一个视图，按下标取元素地址。
-// 下标外面再包一层括号，mut_of 的实参才是一个完整的下标表达式。
 let mod_slot = func(base: Mut(ModState), cap: u64, i: u64) -> Mut(ModState) {
   let s: MutSlice(ModState) = make_slice(MutSlice(ModState), base, cap);
   return mut_of((s[i]));
@@ -264,7 +228,6 @@ let operand_slot = func(base: Mut(vf.IrOperand), cap: u64, i: u64) -> Mut(vf.IrO
   return mut_of((s[i]));
 };
 
-// --- 区域分配 -------------------------------------------------------------
 let arena_take = func(h: Mut(HostIr), bytes: u64, align: u64) -> Mut(u8) {
   if bytes == 0 { return null_ref(Mut(u8)); }
   let a: u64 = if align == 0 { 1 } else { align };
@@ -300,7 +263,6 @@ let grow_bytes = func(h: Mut(HostIr), old: Mut(u8), old_cap: u64, new_cap: u64,
   return p;
 };
 
-// --- 宿主 -----------------------------------------------------------------
 pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
   if is_null(arena) { return trap_host(HOST_ERR_ARG()); }
   let need: u64 = size_of(HostIr);
@@ -315,8 +277,6 @@ pub let host_new = func(arena: Mut(u8), bytes: u64) -> Mut(HostIr) {
     cap: bytes,
     used: used,
     err: 0,
-    err_msg: make_slice(Slice(u8), null_ref(Ref(u8)), 0),
-    err_detail: 0,
     last_verify: 0,
     mods: null_ref(Mut(ModState)),
     mod_cap: 0,
@@ -377,7 +337,6 @@ pub let host_diag_message = func(h: Mut(HostIr), i: u64) -> Slice(u8) {
   return make_slice(Slice(u8), d.message, d.length);
 };
 
-// --- 模块查找 -------------------------------------------------------------
 let mod_at = func(h: Mut(HostIr), i: u64) -> Mut(ModState) {
   if i >= h.mod_cap { return null_ref(Mut(ModState)); }
   return mod_slot(h.mods, h.mod_cap, i);
@@ -409,8 +368,6 @@ let free_slot = func(h: Mut(HostIr)) -> u64 {
   return free_slot_at(h, 0);
 };
 
-// --- 类型编码 -------------------------------------------------------------
-// 上游传 L1TypeKind + 1：0 表示无类型，1..4 表示 BITS/FLOATS/VEC/ADDR。
 let type_code_ok = func(k: u64) -> u64 {
   if k <= 4 { return 1; }
   return 0;
@@ -430,7 +387,6 @@ let set_inst_type = func(it: Mut(vf.IrInst), k: u64, w: u64) -> u64 {
   return vf.inst_set_type(it, t.kind, t.width);
 };
 
-// --- 容量扩展 -------------------------------------------------------------
 let mod_ensure_proc = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
   if m.proc_count < m.proc_cap { return 0; }
   let nc: u64 = if m.proc_cap == 0 { INIT_CAP() } else { m.proc_cap * 2 };
@@ -554,7 +510,6 @@ let proc_ensure_case = func(h: Mut(HostIr), p: Mut(ProcState)) -> u64 {
   return 0;
 };
 
-// --- 稳定副本 -------------------------------------------------------------
 let publish_params = func(h: Mut(HostIr), src: Ref(vf.IrParam), count: u64) -> Ref(vf.IrParam) {
   if count == 0 { return null_ref(Ref(vf.IrParam)); }
   let bytes: u64 = count * size_of(IrParamCell);
@@ -582,7 +537,6 @@ let publish_insts = func(h: Mut(HostIr), src: Ref(u64), count: u64) -> Ref(u64) 
   return ptr_cast(Ref(u64), p);
 };
 
-// --- 过程收尾 -------------------------------------------------------------
 let finalize_proc = func(h: Mut(HostIr), m: Mut(ModState), body: u64) -> u64 {
   let p: Mut(ProcState) = m.proc;
   let rc: u64 = mod_ensure_proc(h, m);
@@ -634,7 +588,6 @@ let finalize_extern = func(h: Mut(HostIr), m: Mut(ModState)) -> u64 {
   return 0;
 };
 
-// --- 指令构造 -------------------------------------------------------------
 let make_inst = func(h: Mut(HostIr), m: Mut(ModState), kind: u64) -> Mut(vf.IrInst) {
   let src: u64 = mod_ensure_inst(h, m);
   if src != 0 {
@@ -680,7 +633,6 @@ let data_find_at = func(m: Mut(ModState), name: u64, i: u64) -> u64 {
   return data_find_at(m, name, i + 1);
 };
 
-// --- 区域句柄 -------------------------------------------------------------
 let region_handle = func(mi: u64, ri: u64) -> u64 {
   return (mi + 1) * HANDLE_STRIDE() + ri + 1;
 };
@@ -703,7 +655,6 @@ let resolve_region = func(h: Mut(HostIr), m: Mut(ModState), raw: u64) -> u64 {
   return ri;
 };
 
-// --- 模块构造 -------------------------------------------------------------
 let init_module = func(h: Mut(HostIr), slot: u64, name: u64) -> Mut(ModState) {
   let m: Mut(ModState) = mod_slot(h.mods, h.mod_cap, slot);
   let rc: u64 = zero_bytes(ptr_cast(Mut(u8), m), size_of(ModState));
@@ -747,7 +698,6 @@ let module_of = func(h: Mut(HostIr), m: Mut(ModState)) -> vf.IrModule {
                        m.scratch);
 };
 
-// --- 公共原语：模块与数据 -------------------------------------------------
 pub let ir_mod_new = func(h: Mut(HostIr), name: u64) -> u64 {
   if is_null(h) { return 0; }
   if h.err != 0 { return 0; }
@@ -789,7 +739,6 @@ pub let ir_data_find = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
   return data_find_at(m, name, 0);
 };
 
-// --- 公共原语：过程 -------------------------------------------------------
 pub let ir_proc_begin = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
   if is_null(h) { return 0; }
   if h.err != 0 { return 0; }
@@ -812,8 +761,6 @@ pub let ir_proc_begin = func(h: Mut(HostIr), modv: u64, name: u64) -> u64 {
   return 0;
 };
 
-// 外部过程的 ABI 标记：abi 是调用约定编号，lib 是所属运行库，is_variadic 为真
-// 表示末尾参数可变。三个值先挂在打开的过程上，收尾时随过程槽一起交给校验器。
 pub let ir_proc_extern_abi = func(h: Mut(HostIr), modv: u64, name: u64, link: u64,
                                    abi: u64, lib: u64, is_variadic: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -893,7 +840,6 @@ pub let ir_proc_end = func(h: Mut(HostIr), modv: u64) -> u64 {
   return m.proc_count;
 };
 
-// --- 公共原语：区域 -------------------------------------------------------
 pub let ir_region_begin = func(h: Mut(HostIr), modv: u64) -> u64 {
   if is_null(h) { return 0; }
   if h.err != 0 { return 0; }
@@ -911,7 +857,6 @@ pub let ir_region_begin = func(h: Mut(HostIr), modv: u64) -> u64 {
   return m.depth;
 };
 
-// 区域形参的初值只在宿主侧使用；LAINIR 表示只记录名字与类型。
 pub let ir_region_param = func(h: Mut(HostIr), modv: u64, name: u64, k: u64,
                                w: u64, ik: u64, ib: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -964,8 +909,7 @@ pub let ir_region_end = func(h: Mut(HostIr), modv: u64) -> u64 {
   let f: Mut(Frame) = frame_slot(m.frames, FRAME_CAP(), depth - 1);
   let params: Ref(vf.IrParam) = publish_params(h, ptr_cast(Ref(vf.IrParam), f.params),
                                               f.param_count);
-  // 过程体区域的结果必须与过程签名一致，而过程结果可以在开区之后才声明，
-  // 所以这里按收区那一刻的过程结果表发布，不读开区时拍的快照。
+
   let rsrc: Ref(vf.IrType) = if depth == 1 {
     ptr_cast(Ref(vf.IrType), p.results)
   } else {
@@ -990,7 +934,6 @@ pub let ir_region_end = func(h: Mut(HostIr), modv: u64) -> u64 {
   return region_handle(mi, ri);
 };
 
-// --- 公共原语：操作数邮箱 -------------------------------------------------
 pub let ir_args_reset = func(h: Mut(HostIr), modv: u64) -> u64 {
   if is_null(h) { return 0; }
   if h.err != 0 { return 0; }
@@ -1035,7 +978,6 @@ pub let ir_arg_float = func(h: Mut(HostIr), modv: u64, bits: u64) -> u64 {
   return m.arg_count;
 };
 
-// --- 公共原语：指令 -------------------------------------------------------
 pub let ir_inst = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u64,
                        w: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -1193,7 +1135,6 @@ pub let ir_inst_jump = func(h: Mut(HostIr), modv: u64, kind: u64, label: u64) ->
   return 1;
 };
 
-// 尾调用标志不进入 LAINIR 表示，C99 后端对直接调用一视同仁。
 pub let ir_inst_call = func(h: Mut(HostIr), modv: u64, res: u64, callee: u64,
                             tail: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -1213,9 +1154,6 @@ pub let ir_inst_call = func(h: Mut(HostIr), modv: u64, res: u64, callee: u64,
   return 1;
 };
 
-// 间接调用：被调值由调用方压进邮箱第 0 项。返回类型码 0 表示无返回值，
-// 此时结果名必须为空。形参类型码在 LAINIR 表示里没有对应字段，C99 后端
-// 也按 uint64_t 逐个传参，这里只校验结果类型。
 pub let ir_inst_call_indirect = func(h: Mut(HostIr), modv: u64, res: u64, k: u64,
                                      w: u64, plo: u64, phi: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -1238,7 +1176,6 @@ pub let ir_inst_call_indirect = func(h: Mut(HostIr), modv: u64, res: u64, k: u64
   return 1;
 };
 
-// 内存序与 volatile 不进入 LAINIR 表示，只保留对齐；C99 后端同样只用对齐。
 pub let ir_inst_mem = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64, k: u64,
                            w: u64, order: u64, vol: u64, align: u64) -> u64 {
   if is_null(h) { return 0; }
@@ -1284,7 +1221,6 @@ pub let ir_inst_symbol = func(h: Mut(HostIr), modv: u64, kind: u64, res: u64,
   return 1;
 };
 
-// --- 校验与克隆 -----------------------------------------------------------
 pub let ir_mod_verify = func(h: Mut(HostIr), modv: u64) -> u64 {
   if is_null(h) { return HOST_ERR_HANDLE(); }
   if h.err != 0 { return h.err; }
@@ -1411,7 +1347,6 @@ pub let ir_mod_free = func(h: Mut(HostIr), modv: u64) -> u64 {
   return 0;
 };
 
-// --- C99 发射 -------------------------------------------------------------
 let emit_data = func(w: Mut(c99.C99Writer), m: Mut(ModState), i: u64) -> u64 {
   if i >= m.data_count { return 1; }
   let rec: Mut(DataRec) = data_slot(m.data, m.data_cap, i);
@@ -1462,7 +1397,6 @@ pub let ir_mod_emit_c99 = func(h: Mut(HostIr), modv: u64, buf: MutSlice(u8)) -> 
   return c99.writer_len(w);
 };
 
-// --- 诊断 -----------------------------------------------------------------
 pub let diag_emit = func(h: Mut(HostIr), span: u64, level: u64, p: Ref(u8),
                          n: u64) -> u64 {
   if is_null(h) { return 0; }

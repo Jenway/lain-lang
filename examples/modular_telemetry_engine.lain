@@ -1,10 +1,5 @@
-// Phase 4 展示：嵌套模块 + 签名封装 + 编译期函子 + SoA 摄取 + 策略 Witness + eval 阈值。
 let io = import("std::io");
 let bench = import("std::bench");
-
-// ---------------------------------------------------------------------------
-// 数据契约
-// ---------------------------------------------------------------------------
 
 let Packet = struct {
   src: i64,
@@ -23,10 +18,6 @@ let CodecSig = sig {
   pub let encode: Fn((Packet) -> i64);
   pub let decode: Fn((i64) -> Packet);
 };
-
-// ---------------------------------------------------------------------------
-// 策略 Witness：i64 的加法与峰值，Packet 的加权累计
-// ---------------------------------------------------------------------------
 
 let SumAgg: Aggregator = module {
   pub let Self = i64;
@@ -57,10 +48,6 @@ let WeightedAgg: Aggregator = module {
 };
 
 use SumAgg;
-
-// ---------------------------------------------------------------------------
-// 编译期函子：固定容量环形缓冲
-// ---------------------------------------------------------------------------
 
 let RingBuf = func(T: Type, Cap: u64) -> Module {
   return module {
@@ -103,13 +90,8 @@ let RingBuf = func(T: Type, Cap: u64) -> Module {
   };
 };
 
-// 同一份函子按不同 T / Cap 实例化，产出彼此独立的类型与命名空间
 let I64Ring = RingBuf(i64, 4);
 let PktRing = RingBuf(Packet, 4);
-
-// ---------------------------------------------------------------------------
-// 编译期类型工厂：AoS -> SoA 布局
-// ---------------------------------------------------------------------------
 
 let make_soa = func(T: Type, N: u64) -> Type {
   let b = record_begin();
@@ -120,10 +102,6 @@ let make_soa = func(T: Type, N: u64) -> Type {
 };
 
 let PacketSoA = make_soa(Packet, 4);
-
-// ---------------------------------------------------------------------------
-// 编译期阈值与惩罚权重：三项都在 eval 沙箱内折叠为立即数
-// ---------------------------------------------------------------------------
 
 let policy_spread = func(n: i64) -> i64 {
   let s: i64 = loop acc(i: i64 = 1, acc: i64 = 0) while i <= n {
@@ -145,8 +123,6 @@ let policy_penalty = func(base: i64, k: i64) -> i64 {
   return base + step;
 };
 
-// 一次 eval 把阈值、严重度种子、惩罚权重打包进单个字，运行时按位取出。
-
 let policy_word = func(n: i64) -> i64 {
   let thr: i64 = policy_spread(n);
   let seed: i64 = policy_seed(4);
@@ -155,10 +131,6 @@ let policy_word = func(n: i64) -> i64 {
 };
 
 let PolicyWord: i64 = eval(policy_word(6));
-
-// ---------------------------------------------------------------------------
-// 多跳嵌套模块：Telemetry.Codec / Policy / Engine
-// ---------------------------------------------------------------------------
 
 let Telemetry = module {
   pub let Codec = module {
@@ -187,11 +159,10 @@ let Telemetry = module {
     };
   };
 
-  // 签名视图：MAGIC / MASK16 / scramble 被封装在 Codec 内部
   pub let CodecSealed: CodecSig = Codec;
 
   pub let Policy = module {
-    // 从编译期折叠出的策略字里取出三个字段
+
     pub let Threshold: i64 = PolicyWord >> 32;
     pub let SeveritySeed: i64 = (PolicyWord >> 16) & 0xFFFF;
     pub let Penalty: i64 = PolicyWord & 0xFFFF;
@@ -242,7 +213,6 @@ let Telemetry = module {
       return total;
     };
 
-    // 从 SoA 列重建一行 AoS，保持零裸 addr
     pub let row = func(st: Ref(State), idx: u64) -> Packet {
       let cols: PacketSoA = deref(st).soa;
       return Packet {
@@ -259,10 +229,6 @@ let Telemetry = module {
   };
 };
 
-// ---------------------------------------------------------------------------
-// 泛型聚合：Witness 由 use 或 ?{ m: ... } 提供
-// ---------------------------------------------------------------------------
-
 let fold_all = func(items: Slice(T)) ?{ T: Type, m: Aggregator } -> T {
   let total: T = loop walk(i: u64 = 0, acc: T = m.zero()) while i < items.len {
     acc = m.combine(acc, items[i]);
@@ -271,14 +237,9 @@ let fold_all = func(items: Slice(T)) ?{ T: Type, m: Aggregator } -> T {
   return total;
 };
 
-// ---------------------------------------------------------------------------
-// 演示入口
-// ---------------------------------------------------------------------------
-
 let main = func() -> i64 {
   let started: u64 = bench.nanos();
 
-  // 1. i64 环形窗口：写入 6 个样本，容量 4 只保留最近 4 个
   let seeds: Array(i64, 4) = [0, 0, 0, 0];
   let signal: I64Ring.Self = I64Ring.make(seeds, 0);
   let samples: Array(i64, 6) = [12, 7, 30, 5, 18, 9];
@@ -298,8 +259,6 @@ let main = func() -> i64 {
   }
   let peak_override: i64 = fold_all(slice_of(window)) ?{ m: PeakAgg };
 
-  // 2. Packet 流水线：编码、环形缓存、SoA 摄取
-  // 结构体数组逐槽写入，避免依赖聚合字面量的隐式拷贝
   let zero: Packet = Packet { src: 0, weight: 0, payload: 0 };
   let ring_seed: Array(Packet, 4) = [zero, zero, zero, zero];
   ring_seed[0] = zero;
@@ -344,7 +303,6 @@ let main = func() -> i64 {
   let echo: Packet = Telemetry.CodecSealed.decode(wire_probe);
   let roundtrip: i64 = if (echo.src == frames[2].src) and (echo.payload == frames[2].payload) { 1 } else { 0 };
 
-  // 计时结果只用于确认单调时钟未回退，输出保持确定性
   let elapsed: u64 = bench.nanos() - started;
   let bench_ok: i64 = if elapsed >= 0 { 1 } else { 0 };
   let snapshot: i64 = Telemetry.Engine.snapshot(ref_of(engine));
@@ -360,7 +318,6 @@ let main = func() -> i64 {
     + Telemetry.Policy.SeveritySeed
     + Telemetry.Policy.Penalty;
 
-  // 3. 终端仪表盘
   io.println("== lain telemetry engine ==");
   io.print("window sum  : ");
   io.println_i64(sum_window);

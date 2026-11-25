@@ -1,22 +1,10 @@
-// Phase 6.1：纯 Lain 的 LAINIR 校验器与 C99 后端。
-//
-// 用 vf.IrBuilder 在内存里搭模块：合法模块 A 覆盖算术与 #alloca/#store/#load，
-// 合法模块 B 覆盖 #if/#loop/#switch，两个都必须被 verify_module 判为 0。
-// 四类畸形模块分别制造缺终结子、未定义 SSA 值、类型不匹配与重复 SSA 定义，
-// 错误码逐个对得上。随后 c99.emit_preamble 与 c99.emit_proc_c99 把前导文本和
-// 两个过程写进同一个缓冲区，检查 switch / lain_load_bits / return 都出现、
-// 且写出长度非零，最后返回 61。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
 let c99 = import("src::backend::c99");
 
-// 零块只写一次，再用嵌套数组把它们铺成连续的 8 字节对齐区。
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-// 构造器工作区：8 条指令 × 512 = 4096，8 个区域 384，2 个过程 128，
-// 8 个形参 192，4 个类型 64，4 个分支 64，304 个字的验证器绑定栈 2432，
-// 共 7360 字节；86 块留足余量。
 let arena_blocks: Array(Array(u64, 16), 86) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
@@ -30,7 +18,6 @@ let arena_blocks: Array(Array(u64, 16), 86) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
 
-// C99 文本缓冲区：前导文本 6176 字节，再加两个小过程，16384 字节足够。
 let c99_blocks: Array(Array(u64, 16), 128) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
@@ -49,20 +36,17 @@ let c99_blocks: Array(Array(u64, 16), 128) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
 
-// 区域指令序列：合法模块 A 的 5 条、模块 B 的 4 条与循环体 1 条，
-// 空区域共享一个计数为 0 的占位数组。
 let a_body: Array(u64, 5) = [0, 1, 2, 3, 4];
 let b_body: Array(u64, 4) = [0, 1, 3, 4];
 let loop_body: Array(u64, 1) = [2];
 let empty_insts: Array(u64, 1) = [0];
 
-// 畸形模块 A1：去掉 RETURN，过程体缺终结子。
 let missing_body: Array(u64, 4) = [0, 1, 2, 3];
-// 畸形模块 A2：算术指令引用未定义的 SSA 名。
+
 let undef_body: Array(u64, 2) = [0, 1];
-// 畸形模块 A3：64 位算术读了 32 位值。
+
 let mismatch_body: Array(u64, 2) = [0, 1];
-// 畸形模块 A4：两条指令定义同一个 SSA 名。
+
 let dup_body: Array(u64, 3) = [0, 1, 2];
 
 let arena_ptr = func() -> Mut(u8) {

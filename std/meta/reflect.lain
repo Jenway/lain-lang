@@ -1,13 +1,7 @@
-// std::meta::reflect —— 纯数据的反射描述表。
-//
-// 描述表只由普通结构体、切片与整数组成：打包与查询都不读编译器内部状态，
-// 同一段代码在 lainir-run 虚拟机与 C99 后端上得到完全相同的结果。字段类别
-// 直接存整数码值，FieldDesc.kind 就是该码值本身，打包时不需要任何转换。
 let mem = import("std::mem");
 let option = import("std::option");
 let str = import("std::str");
 
-// --- 字段类别码值 -----------------------------------------------------------
 pub let KIND_OTHER: u64 = 0;
 pub let KIND_INT: u64 = 1;
 pub let KIND_BOOL: u64 = 2;
@@ -18,8 +12,6 @@ pub let KIND_SLICE: u64 = 6;
 pub let KIND_PTR: u64 = 7;
 pub let KIND_ARRAY: u64 = 8;
 
-// --- 描述记录 ---------------------------------------------------------------
-// size 是字段自身的载荷宽度；字段之间的对齐填充不记在这里。
 pub let FieldDesc = struct {
   name: Slice(u8),
   offset: u64,
@@ -27,7 +19,6 @@ pub let FieldDesc = struct {
   kind: u64,
 };
 
-// size / align 是整个类型的物理布局，fields 按声明顺序排列。
 pub let TypeDesc = struct {
   name: Slice(u8),
   size: u64,
@@ -35,11 +26,8 @@ pub let TypeDesc = struct {
   fields: Slice(FieldDesc),
 };
 
-// 字段下标查询的结果：找到时返回声明顺序里的下标。
 pub let FieldIndex = option.Option(u64);
 
-// --- 纯数据查询 -------------------------------------------------------------
-// 全部字段载荷宽度之和。结构体总宽度要看 TypeDesc.size，两头的对齐填充不算在内。
 pub let total_field_bytes = func(fields: Slice(FieldDesc)) -> u64 {
   return loop c(i: u64 = 0, acc: u64 = 0) while i < fields.len {
     acc = acc + fields[i].size;
@@ -47,7 +35,6 @@ pub let total_field_bytes = func(fields: Slice(FieldDesc)) -> u64 {
   };
 };
 
-// 按字段名查下标；同名重复时取声明顺序里的第一个。
 pub let find_field = func(fields: Slice(FieldDesc), name: Slice(u8)) -> FieldIndex.Opt {
   let hit: u64 = 0;
   let found: bool = false;
@@ -66,8 +53,6 @@ pub let find_field = func(fields: Slice(FieldDesc), name: Slice(u8)) -> FieldInd
   return FieldIndex.Opt.None { };
 };
 
-// --- 字段名写出 -------------------------------------------------------------
-// 缓冲写满是调用方的不变量被破坏，交给 mem 的确定性陷阱，绝不静默截断。
 let put_byte = func(buf: MutSlice(u8), pos: u64, b: u8) -> u64 {
   if pos >= buf.len {
     let dead: u64 = mem.halt_now(buf.len);
@@ -84,7 +69,6 @@ let put_name = func(buf: MutSlice(u8), pos: u64, name: Slice(u8)) -> u64 {
   };
 };
 
-// 字段名按声明顺序写进 buf，以逗号分隔，返回写入的字节数。
 pub let emit_field_names_csv = func(fields: Slice(FieldDesc), buf: MutSlice(u8)) -> u64 {
   return loop c(i: u64 = 0, pos: u64 = 0) while i < fields.len {
     let start: u64 = if i == 0 { pos } else { put_byte(buf, pos, 44) };

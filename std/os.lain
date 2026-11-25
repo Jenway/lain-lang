@@ -1,13 +1,7 @@
-// std::os —— 宿主操作系统原语：命令行参数、堆内存、文件读写与标准错误输出。
-// 命令行参数与标准错误由 C99 前导代码用 lain_os_* 符号兑现；
-// 其余原语直接绑定 C99 <stdlib.h> / <stdio.h> / <string.h>。
-// 文件读写同时提供三类入口：原始状态码（read_file / write_file）、
-// 可选值（read_file_slice）与中止性效应（read_file_or_err）。
 let option = import("std::option");
 
 let OptSlice = option.Option(MutSlice(u8));
 
-// 文件操作失败是中止性的：调用方要么自己处理，要么沿效应行继续上抛。
 pub let IoErr = effect {
   op fail(code: u64) -> Never;
 };
@@ -53,7 +47,6 @@ let c_remove = func(path: Ref(u8)) -> c_int;
 @extern(abi = "C", link = "system")
 let c_system = func(cmd: Ref(u8)) -> c_int;
 
-// 把切片复制到一块 calloc 出来的、以 0 结尾的缓冲。
 let alloc_cstr = func(s: Slice(u8)) -> Mut(u8) {
   let n: c_size = s.len + 1;
   let p: Mut(u8) = c_calloc(1, n);
@@ -78,8 +71,6 @@ pub let argv_copy = func(idx: u64, dst: MutSlice(u8)) -> u64 {
   return os_argv_copy(idx, dst.ptr, dst.len);
 };
 
-// 打开文件：path 与 mode 各换成一块以 0 结尾的缓冲，fopen 之后立刻归还，
-// 调用方只负责关闭返回的 FILE*。分配失败回空指针。
 pub let open_file = func(path: Slice(u8), mode: Slice(u8)) -> Mut(u8) {
   let cpath: Mut(u8) = alloc_cstr(path);
   if is_null(cpath) {
@@ -109,8 +100,6 @@ pub let free_bytes = func(ptr: u64) -> u64 {
   return 0;
 };
 
-// 带类型的分配入口：调用方拿到可写视图，无需自己做指针转换。
-// 字节数为 0 时回空视图，其余情况切一块空视图指向新缓冲。
 pub let alloc_slice = func(bytes: u64) -> MutSlice(u8) {
   if bytes == 0 {
     return make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
@@ -119,13 +108,10 @@ pub let alloc_slice = func(bytes: u64) -> MutSlice(u8) {
   return make_slice(MutSlice(u8), p, bytes);
 };
 
-// 带类型的归还入口：接受视图，取缓冲地址后交给 free_bytes。
 pub let free_slice = func(s: MutSlice(u8)) -> u64 {
   return free_bytes(s.ptr as u64);
 };
 
-// 整文件读取：成功回 Some(可写视图)，缓冲尾部补一个 0 字节；任何一步失败回 None。
-// 视图的所有权交给调用方，用完用 free_bytes(view.ptr) 归还。
 pub let read_file_slice = func(path: Slice(u8)) -> OptSlice.Opt {
   let f: Mut(u8) = open_file(path, "rb");
   if is_null(f) {
@@ -161,7 +147,6 @@ pub let read_file_slice = func(path: Slice(u8)) -> OptSlice.Opt {
   return OptSlice.Opt.Some { make_slice(MutSlice(u8), buf, got) };
 };
 
-// 原始状态码入口：0 表示成功，出参拿到缓冲地址与字节数。
 pub let read_file = func(path: Slice(u8), out_ptr: Mut(u64), out_len: Mut(u64)) -> u64 {
   deref(out_ptr) = 0;
   deref(out_len) = 0;
@@ -175,7 +160,6 @@ pub let read_file = func(path: Slice(u8), out_ptr: Mut(u64), out_len: Mut(u64)) 
   };
 };
 
-// 效应入口：读取失败就地发起 IoErr.fail(1)，不回到调用点。
 pub let read_file_or_err = func(path: Slice(u8)) -> MutSlice(u8) !{ IoErr } {
   let r: OptSlice.Opt = read_file_slice(path);
   if OptSlice.is_none(r) {
@@ -199,7 +183,6 @@ pub let write_file = func(path: Slice(u8), data: Slice(u8)) -> u64 {
   return 0;
 };
 
-// 写入成功回 true，失败回 false。
 pub let write_file_bool = func(path: Slice(u8), data: Slice(u8)) -> bool {
   return write_file(path, data) == 0;
 };
@@ -219,8 +202,7 @@ pub let exec = func(cmd: Slice(u8)) -> u64 {
     return 127;
   }
   let raw: u64 = rc as u64;
-  // POSIX 的 system 返回 waitpid 状态：退出码在 256 以上，需要右移八位取回。
-  // Windows 的 system 直接返回退出码，通常小于 256，原样返回。
+
   if raw >= 256 {
     if (rc & 0x7f) == 0 {
       return ((rc >> 8) & 0xff) as u64;
@@ -230,7 +212,6 @@ pub let exec = func(cmd: Slice(u8)) -> u64 {
   return raw;
 };
 
-// 效应入口：命令退出码非 0 就地发起 IoErr.fail(退出码)，不回到调用点。
 pub let exec_or_err = func(cmd: Slice(u8)) !{ IoErr } {
   let rc: u64 = exec(cmd);
   if rc != 0 {

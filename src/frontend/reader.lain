@@ -1,32 +1,3 @@
-// reader.lain —— 零关键字 Reader：把源码字节切片切成零语义的形式树。
-//
-// 文法只有 Form，没有保留字：
-//   Form  ::= Token | Group
-//   Group ::= '(' Form* ')' | '[' Form* ']' | '{' Form* '}'
-//   Token ::= Ident | Number | String | Punct
-// let / func / if / struct 这一层全是 Ident，语义解释权归 Meta。
-//
-// 输出是一块平坦 Arena，依次是：
-//   RawNode 记录（每个 5 个字，步长 size_of(RawNode)）、
-//   组的孩子 NodeId 列表（u32）、
-//   每个节点的 Span（line / col / offset / len）。
-// 组与孩子之间只靠下标引用，没有一处裸地址；span_id 就是节点下标。
-//
-// 两遍扫描：第一遍数节点、孩子引用与暂存深度并检查词法，第二遍按准确尺寸填。
-// 两遍走同一份 parse_group / token 代码，模式由 Builder.fill 选择，计数与填空
-// 不可能分家。第二遍把每个未闭合组的孩子先攒在 Arena 尾部的暂存区，组收尾时
-// 整段搬到孩子区的当前位置，于是每个组的孩子在最终布局里严格连续。
-//
-// 词法约定：空白与 `//` 行尾注释跳过；标识符以字母、下划线或非 ASCII 字节开头，
-// 后续可以带数字；数字支持十六进制 `0x`、小数与指数；字符串里的反斜杠连同它
-// 后面那个字节整对跳过，`"` `\\` `\n` `\t` 因此不会提前收尾。字面量一律保留原文，
-// 反转义与数值解析都是 Meta 的事。双字节标点是 `->` `=>` `==` `!=` `<=` `>=`
-// `<<` `>>` `..` `::`，其余标点逐个字节成词。
-//
-// 诊断位置：未闭合组报开括号，括号不配对报撞上的闭括号，字符串未终止报开引号，
-// 嵌套过深报当前扫描位置。行列按字节计，行与列都从 1 起。
-
-// --- 节点类别 -------------------------------------------------------------
 pub let RawKind = enum(u64) {
   TokenIdent = 0,
   TokenNumber = 1,
@@ -38,19 +9,8 @@ pub let RawKind = enum(u64) {
   Root = 7
 };
 
-pub let RAW_TOKEN_IDENT = func() -> u64 { return RawKind.TokenIdent as u64; };
-pub let RAW_TOKEN_NUMBER = func() -> u64 { return RawKind.TokenNumber as u64; };
-pub let RAW_TOKEN_STRING = func() -> u64 { return RawKind.TokenString as u64; };
-pub let RAW_TOKEN_PUNCT = func() -> u64 { return RawKind.TokenPunct as u64; };
-pub let RAW_GROUP_PAREN = func() -> u64 { return RawKind.GroupParen as u64; };
-pub let RAW_GROUP_BRACKET = func() -> u64 { return RawKind.GroupBracket as u64; };
-pub let RAW_GROUP_BRACE = func() -> u64 { return RawKind.GroupBrace as u64; };
-pub let RAW_ROOT = func() -> u64 { return RawKind.Root as u64; };
-
-// flags 目前只标记根节点；其余位保留且恒为 0。
 pub let FLAG_ROOT = func() -> u64 { return 1; };
 
-// --- 结果类别 -------------------------------------------------------------
 pub let ReadStatus = enum(u64) {
   Ok = 0,
   ErrUnclosed = 1,
@@ -61,20 +21,8 @@ pub let ReadStatus = enum(u64) {
   ErrDepth = 6
 };
 
-pub let RD_OK = func() -> u64 { return ReadStatus.Ok as u64; };
-pub let RD_ERR_UNCLOSED = func() -> u64 { return ReadStatus.ErrUnclosed as u64; };
-pub let RD_ERR_MISMATCH = func() -> u64 { return ReadStatus.ErrMismatch as u64; };
-pub let RD_ERR_STRING = func() -> u64 { return ReadStatus.ErrString as u64; };
-pub let RD_ERR_CAPACITY = func() -> u64 { return ReadStatus.ErrCapacity as u64; };
-pub let RD_ERR_INTERNAL = func() -> u64 { return ReadStatus.ErrInternal as u64; };
-pub let RD_ERR_DEPTH = func() -> u64 { return ReadStatus.ErrDepth as u64; };
-
 pub let MAX_DEPTH = func() -> u64 { return 256; };
 
-// --- 布局 -----------------------------------------------------------------
-// payload：Token 是文本在源码里的字节偏移（字符串指向开引号，引号在文本之内）；
-// Group 是它那段连续孩子在孩子区里的起始下标，第 k 个孩子的 NodeId 是
-// children[payload + k]。span_id 就是节点下标，所以 Span 的条数等于 node_count。
 pub let RawNode = struct {
   kind: u64,
   flags: u64,
@@ -105,7 +53,6 @@ pub let RawAst = struct {
   bytes: u64,
 };
 
-// --- 节点访问 -------------------------------------------------------------
 pub let node_at = func(base: Ref(RawNode), i: u64) -> Ref(RawNode) {
   let raw: Mut(u8) = ptr_cast(Mut(u8), base);
   return ptr_cast(Ref(RawNode), raw + i * size_of(RawNode));
@@ -140,8 +87,6 @@ pub let node_text = func(source: Slice(u8), ast: RawAst, id: u64) -> Slice(u8) {
   return make_slice(Slice(u8), base + sp.offset, sp.len);
 };
 
-// --- 扫描状态 -------------------------------------------------------------
-// fill = 0 只数，fill = 1 填。两遍共用同一个结构体与同一份递归代码。
 let Builder = struct {
   source: Slice(u8),
   nodes: Mut(RawNode),
@@ -177,7 +122,7 @@ let builder_count = func(source: Slice(u8)) -> Builder {
     child_count: 0,
     scratch_used: 0,
     scratch_max: 0,
-    kind: RD_OK(),
+    kind: ReadStatus.Ok as u64,
     err_line: 0,
     err_col: 0,
     err_offset: 0,
@@ -203,7 +148,7 @@ let builder_fill = func(source: Slice(u8), base: Mut(u8), nodes_bytes: u64,
     child_count: 0,
     scratch_used: 0,
     scratch_max: 0,
-    kind: RD_OK(),
+    kind: ReadStatus.Ok as u64,
     err_line: 0,
     err_col: 0,
     err_offset: 0,
@@ -211,7 +156,7 @@ let builder_fill = func(source: Slice(u8), base: Mut(u8), nodes_bytes: u64,
 };
 
 let failed = func(b: Mut(Builder)) -> bool {
-  return b.kind != RD_OK();
+  return b.kind != ReadStatus.Ok as u64;
 };
 
 let fail_at = func(b: Mut(Builder), kind: u64, line: u64, col: u64,
@@ -227,7 +172,6 @@ let fail_here = func(b: Mut(Builder), kind: u64) {
   fail_at(b, kind, b.line, b.col, b.at);
 };
 
-// --- 字节与字符类 ---------------------------------------------------------
 let peek = func(b: Mut(Builder), ahead: u64) -> u64 {
   let i: u64 = b.at + ahead;
   if i >= b.source.len { return 0; }
@@ -252,8 +196,6 @@ let advance_to = func(b: Mut(Builder), end: u64) {
   };
 };
 
-// 读一个字节，越界给 0。所有字符类扫描都只经由它读源，`and` / `or` 在
-// LAINIR 里是两个操作数都求值的位运算，不能靠短路来保护下标。
 let at_byte = func(b: Mut(Builder), i: u64) -> u64 {
   if i >= b.source.len { return 0; }
   return b.source[i] as u64;
@@ -301,13 +243,12 @@ let closing_of = func(open: u64) -> u64 {
 };
 
 let group_kind_of = func(open: u64) -> u64 {
-  if open == 40 { return RAW_GROUP_PAREN(); }
-  if open == 91 { return RAW_GROUP_BRACKET(); }
-  if open == 123 { return RAW_GROUP_BRACE(); }
-  return RAW_ROOT();
+  if open == 40 { return RawKind.GroupParen as u64; }
+  if open == 91 { return RawKind.GroupBracket as u64; }
+  if open == 123 { return RawKind.GroupBrace as u64; }
+  return RawKind.Root as u64;
 };
 
-// 双字节算子：-> => == != <= >= << >> .. ::
 let is_pair = func(c: u64, n: u64) -> u64 {
   if (c == 45) and (n == 62) { return 1; }
   if (c == 61) and (n == 62) { return 1; }
@@ -322,7 +263,6 @@ let is_pair = func(c: u64, n: u64) -> u64 {
   return 0;
 };
 
-// --- 空白与注释 -----------------------------------------------------------
 let skip_trivia = func(b: Mut(Builder)) {
   loop sk(go: u64 = 1) while go == 1 {
     if b.at >= b.source.len {
@@ -353,7 +293,6 @@ let skip_trivia = func(b: Mut(Builder)) {
   };
 };
 
-// --- 词 -------------------------------------------------------------------
 let scan_ident_end = func(b: Mut(Builder)) -> u64 {
   let s: u64 = b.at;
   let i: u64 = loop w(i: u64 = s) while is_word(at_byte(b, i)) == 1 {
@@ -402,8 +341,6 @@ let scan_number_end = func(b: Mut(Builder)) -> u64 {
   return j;
 };
 
-// 字符串：开引号之后一路吃字节，反斜杠连同它后面的那一个字节整对跳过。
-// 未终止返回 0。
 let scan_string_end = func(b: Mut(Builder)) -> u64 {
   let q: u64 = b.at;
   let end: u64 = 0;
@@ -432,10 +369,10 @@ let scan_punct_end = func(b: Mut(Builder)) -> u64 {
 };
 
 let token_kind = func(c: u64) -> u64 {
-  if c == 34 { return RAW_TOKEN_STRING(); }
-  if is_digit(c) == 1 { return RAW_TOKEN_NUMBER(); }
-  if is_word_start(c) == 1 { return RAW_TOKEN_IDENT(); }
-  return RAW_TOKEN_PUNCT();
+  if c == 34 { return RawKind.TokenString as u64; }
+  if is_digit(c) == 1 { return RawKind.TokenNumber as u64; }
+  if is_word_start(c) == 1 { return RawKind.TokenIdent as u64; }
+  return RawKind.TokenPunct as u64;
 };
 
 let token_end = func(b: Mut(Builder), c: u64) -> u64 {
@@ -445,7 +382,6 @@ let token_end = func(b: Mut(Builder), c: u64) -> u64 {
   return scan_punct_end(b);
 };
 
-// --- Arena 写入 -----------------------------------------------------------
 let emit_node = func(b: Mut(Builder), kind: u64, flags: u64, payload: u64,
                      count: u64, offset: u64, length: u64, line: u64,
                      col: u64) -> u64 {
@@ -487,11 +423,9 @@ let copy_children = func(b: Mut(Builder), src_base: u64, dst_base: u64,
   };
 };
 
-// --- 组 -------------------------------------------------------------------
-// 返回组的 NodeId（后序：孩子先发布，组自己最后发布）。失败时 b.kind != RD_OK。
 let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
   if depth > MAX_DEPTH() {
-    fail_here(b, RD_ERR_DEPTH());
+    fail_here(b, ReadStatus.ErrDepth as u64);
     return 0;
   }
   let start_off: u64 = b.at;
@@ -506,14 +440,14 @@ let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
       if open == 0 {
         go = 0;
       } else {
-        fail_at(b, RD_ERR_UNCLOSED(), start_line, start_col, start_off);
+        fail_at(b, ReadStatus.ErrUnclosed as u64, start_line, start_col, start_off);
         go = 0;
       }
     } else {
       let c: u64 = b.source[b.at] as u64;
       if (c == 41) or (c == 93) or (c == 125) {
         if (open == 0) or (c != closing_of(open)) {
-          fail_here(b, RD_ERR_MISMATCH());
+          fail_here(b, ReadStatus.ErrMismatch as u64);
           go = 0;
         } else {
           bump(b);
@@ -534,7 +468,7 @@ let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
         let kind: u64 = token_kind(c);
         let end: u64 = token_end(b, c);
         if end == 0 {
-          fail_at(b, RD_ERR_STRING(), line, col, start);
+          fail_at(b, ReadStatus.ErrString as u64, line, col, start);
           go = 0;
         } else {
           advance_to(b, end);
@@ -550,7 +484,7 @@ let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
   copy_children(b, scratch_start, payload, count);
   b.child_count = payload + count;
   b.scratch_used = scratch_start;
-  let gkind: u64 = if open == 0 { RAW_ROOT() } else { group_kind_of(open) };
+  let gkind: u64 = if open == 0 { RawKind.Root as u64 } else { group_kind_of(open) };
   let gflags: u64 = if open == 0 { FLAG_ROOT() } else { 0 };
   let span_off: u64 = if open == 0 { 0 } else { start_off };
   let span_line: u64 = if open == 0 { 1 } else { start_line };
@@ -559,7 +493,6 @@ let parse_group = func(b: Mut(Builder), open: u64, depth: u64) -> u64 {
   return emit_node(b, gkind, gflags, payload, count, span_off, span_len, span_line, span_col);
 };
 
-// --- 入口 -----------------------------------------------------------------
 let raw_ast_fail = func(kind: u64, line: u64, col: u64, offset: u64,
                         needed: u64) -> RawAst {
   return RawAst {
@@ -578,8 +511,6 @@ let raw_ast_fail = func(kind: u64, line: u64, col: u64, offset: u64,
   };
 };
 
-// 解析整份源码。Arena 由调用方提供：尾部要留出暂存区，所需字节数在容量不足时
-// 从 RawAst.needed 交回，调用方按它重新给一块就能成功。
 pub let parse = func(source: Slice(u8), arena: MutSlice(u8)) -> RawAst {
   let scan0: Builder = builder_count(source);
   let sb: Mut(Builder) = mut_of(scan0);
@@ -593,7 +524,7 @@ pub let parse = func(source: Slice(u8), arena: MutSlice(u8)) -> RawAst {
   let scratch_bytes: u64 = sb.scratch_max * 4;
   let need: u64 = (((nodes_bytes + children_bytes) + spans_bytes) + scratch_bytes);
   if need > arena.len {
-    return raw_ast_fail(RD_ERR_CAPACITY(), 0, 0, 0, need);
+    return raw_ast_fail(ReadStatus.ErrCapacity as u64, 0, 0, 0, need);
   }
   let base: Mut(u8) = arena.ptr;
   let fill0: Builder = builder_fill(source, base, nodes_bytes, children_bytes, spans_bytes);
@@ -607,7 +538,7 @@ pub let parse = func(source: Slice(u8), arena: MutSlice(u8)) -> RawAst {
   if fb.child_count != sb.child_count { drift = 1; }
   if counted != root { drift = 1; }
   if drift == 1 {
-    return raw_ast_fail(RD_ERR_INTERNAL(), 0, 0, 0, need);
+    return raw_ast_fail(ReadStatus.ErrInternal as u64, 0, 0, 0, need);
   }
   let published: u64 = (nodes_bytes + children_bytes) + spans_bytes;
   return RawAst {
@@ -617,7 +548,7 @@ pub let parse = func(source: Slice(u8), arena: MutSlice(u8)) -> RawAst {
     child_count: fb.child_count,
     spans: ptr_cast(Ref(Span), base + nodes_bytes + children_bytes),
     root: root,
-    kind: RD_OK(),
+    kind: ReadStatus.Ok as u64,
     err_line: 0,
     err_col: 0,
     err_offset: 0,

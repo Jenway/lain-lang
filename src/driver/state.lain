@@ -1,11 +1,5 @@
-// 状态：编译期的可变寄存器块，住在 guest 内存里。
-// 所有字段布局集中在本文件，别的模块只经访问器读写。
-// 不写标量顶层 let：顶层标量 let 在 IR 里是符号指针，不能直接当整数算。
-
 let hr = import("src::driver::host_rt");
 
-// 已登记源标记的槽数：与宿主源码管理器的 source_cap 一致（256），源编号再大
-// 也会被宿主先拒掉，所以按源编号写入这张字节表不会越界。
 let DONE_CAP = func() -> u64 { return 256; };
 
 pub let LoopFrame = struct {
@@ -95,7 +89,6 @@ pub let State = struct {
   release_fast: u64
 };
 
-// 按 8 字节字清零：raw 必须来自 8 字节对齐的分配。
 let zero_words = func(raw: Mut(u8), words: u64) -> u64 {
   let ws: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), words);
   let i: u64 = loop zeros(i: u64 = 0) while i < words {
@@ -105,8 +98,6 @@ let zero_words = func(raw: Mut(u8), words: u64) -> u64 {
   return 0;
 };
 
-// cap：绑定栈字节数。arena 与持久分配都跨源存活：一次编译
-// 里所有源的形状、类型、符号必须同时有效。
 pub let st_new = func(cap: u64) -> Mut(State) {
   let witness_bytes: u64 = 24;
   let mono_bytes: u64 = 16;
@@ -238,33 +229,27 @@ pub let st_set_loopdepth = func(p: Mut(State), v: u64) -> u64 { p.loopdepth = v;
 pub let st_retsg = func(p: Mut(State)) -> u64 { return p.retsg; };
 pub let st_set_retsg = func(p: Mut(State), v: u64) -> u64 { p.retsg = v; return v; };
 
-// 当前源文件的根 AST 组句柄。
 pub let st_root = func(p: Mut(State)) -> u64 { return p.root; };
 pub let st_set_root = func(p: Mut(State), v: u64) -> u64 { p.root = v; return v; };
 
-// 当前源文件的模块前缀（符号句柄，形如 s0__）。
 let st_prefix = func(p: Mut(State)) -> u64 { return p.prefix; };
 let st_set_prefix = func(p: Mut(State), v: u64) -> u64 { p.prefix = v; return v; };
 
-// 本源里定义或导入的顶层名字（声明表）。
 let st_regbase = func(p: Mut(State)) -> Mut(u8) { return p.regbase; };
 let st_regcap = func(p: Mut(State)) -> u64 { return p.regcap; };
 let st_regused = func(p: Mut(State)) -> u64 { return p.regused; };
 let st_set_regused = func(p: Mut(State), v: u64) -> u64 { p.regused = v; return v; };
 
-// 持久分配：不随源重置，存放类型块与描述符。
 let st_rallbase = func(p: Mut(State)) -> Mut(u8) { return p.rallbase; };
 let st_rallcap = func(p: Mut(State)) -> u64 { return p.rallcap; };
 let st_rallused = func(p: Mut(State)) -> u64 { return p.rallused; };
 let st_set_rallused = func(p: Mut(State), v: u64) -> u64 { p.rallused = v; return v; };
 
-// 静态数据暂存：拼好字节再交给 hr.ir_data_add。
 pub let st_databuf = func(p: Mut(State)) -> Mut(u8) { return p.databuf; };
 pub let st_datacap = func(p: Mut(State)) -> u64 { return p.datacap; };
 pub let st_dataused = func(p: Mut(State)) -> u64 { return p.dataused; };
 pub let st_set_dataused = func(p: Mut(State), v: u64) -> u64 { p.dataused = v; return v; };
 
-// 已登记源标记：每份源一字节。
 let st_donebase = func(p: Mut(State)) -> Mut(u8) { return p.donebase; };
 
 pub let st_done = func(p: Mut(State), src: u64) -> u64 {
@@ -281,54 +266,44 @@ pub let st_mark_done = func(p: Mut(State), src: u64) -> u64 {
   return 1;
 };
 
-// 形状表：聚合、数组、字符串描述的连续数组，条目 112 字节。
 pub let st_shpbase = func(p: Mut(State)) -> Mut(u8) { return p.shpbase; };
 pub let st_shpused = func(p: Mut(State)) -> u64 { return p.shpused; };
 let st_set_shpused = func(p: Mut(State), v: u64) -> u64 { p.shpused = v; return v; };
 pub let st_shpcap = func(p: Mut(State)) -> u64 { return p.shpcap; };
 
-// 模块表：模块序号与别名。条目 32 字节。
 pub let st_modbase = func(p: Mut(State)) -> Mut(u8) { return p.modbase; };
 pub let st_modused = func(p: Mut(State)) -> u64 { return p.modused; };
 let st_set_modused = func(p: Mut(State), v: u64) -> u64 { p.modused = v; return v; };
 let st_modcap = func(p: Mut(State)) -> u64 { return p.modcap; };
 
-// 模块符号表：每个模块的顶层声明。条目 88 字节。
 pub let st_symbase = func(p: Mut(State)) -> Mut(u8) { return p.symbase; };
 pub let st_symused = func(p: Mut(State)) -> u64 { return p.symused; };
 let st_set_symused = func(p: Mut(State), v: u64) -> u64 { p.symused = v; return v; };
 let st_symcap = func(p: Mut(State)) -> u64 { return p.symcap; };
 
-// 匿名过程队列：条目 48 字节 [限定名, 源号, 根节点, 形参组, 签名, 预留模块号]。
 let st_pndbase = func(p: Mut(State)) -> Mut(u8) { return p.pndbase; };
 let st_pndused = func(p: Mut(State)) -> u64 { return p.pndused; };
 let st_set_pndused = func(p: Mut(State), v: u64) -> u64 { p.pndused = v; return v; };
 let st_pndcap = func(p: Mut(State)) -> u64 { return p.pndcap; };
 
-// 匿名过程队列的写入与读出。
 pub let st_q_add = func(p: Mut(State)) -> Mut(u8) { return st_pnd_new(p, 48); };
 pub let st_q_count = func(p: Mut(State)) -> u64 { return st_pndused(p) / 48; };
 pub let st_q_at = func(p: Mut(State), i: u64) -> Mut(u8) { return st_pndbase(p) + i * 48; };
 pub let st_qhead = func(p: Mut(State)) -> u64 { return p.qhead; };
 pub let st_set_qhead = func(p: Mut(State), v: u64) -> u64 { p.qhead = v; return v; };
 
-// 值聚合返回的隐藏出参：当前过程的 %_ret 名字（0 表示不走 sret）。
 pub let st_retptr = func(p: Mut(State)) -> u64 { return p.retptr; };
 pub let st_set_retptr = func(p: Mut(State), v: u64) -> u64 { p.retptr = v; return v; };
 
-// 返回类型的形状号：sret 的整块拷贝按它算字节数。
 pub let st_retsh = func(p: Mut(State)) -> u64 { return p.retsh; };
 pub let st_set_retsh = func(p: Mut(State), v: u64) -> u64 { p.retsh = v; return v; };
 
-// 匿名过程的合成序号。
 pub let st_anon = func(p: Mut(State)) -> u64 { return p.anon; };
 pub let st_set_anon = func(p: Mut(State), v: u64) -> u64 { p.anon = v; return v; };
 
-// 字符串字面量序号。
 let st_strseq = func(p: Mut(State)) -> u64 { return p.strseq; };
 let st_set_strseq = func(p: Mut(State), v: u64) -> u64 { p.strseq = v; return v; };
 
-// 类型注册表：编译期类型句柄（TypeId）的登记处。条目 40 字节。
 pub let st_tybase = func(p: Mut(State)) -> Mut(u8) { return p.tybase; };
 pub let st_set_tybase = func(p: Mut(State), v: Mut(u8)) -> u64 { p.tybase = v; return 1; };
 pub let st_tycap = func(p: Mut(State)) -> u64 { return p.tycap; };
@@ -336,11 +311,9 @@ pub let st_set_tycap = func(p: Mut(State), v: u64) -> u64 { p.tycap = v; return 
 pub let st_tyused = func(p: Mut(State)) -> u64 { return p.tyused; };
 pub let st_set_tyused = func(p: Mut(State), v: u64) -> u64 { p.tyused = v; return v; };
 
-// 反射表是否已经铺进当前模块。
 pub let st_rftab = func(p: Mut(State)) -> u64 { return p.rftab; };
 pub let st_set_rftab = func(p: Mut(State), v: u64) -> u64 { p.rftab = v; return v; };
 
-// 取旧值并把格子加一。
 pub let st_next_tmp = func(p: Mut(State)) -> u64 {
   let n: u64 = p.tmp;
   p.tmp = n + 1;
@@ -365,7 +338,6 @@ pub let st_next_str = func(p: Mut(State)) -> u64 {
   return n;
 };
 
-// 字节判真：u8 参与比较前先零扩展到 u64。
 let b2u = func(b: u8) -> u64 {
   return b as u64;
 };
@@ -389,7 +361,6 @@ let mem_copy = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   return i;
 };
 
-// 顺序分配器共用的游标推进：容量不足时置错误码，ok=0 由调用方转成空指针。
 let Bump = struct {
   ok: u64,
   at: u64
@@ -403,7 +374,6 @@ let bump = func(p: Mut(State), used: u64, cap: u64, n: u64) -> Bump {
   return Bump { ok: 1, at: used + n };
 };
 
-// arena：编译器给自己用的顺序切分内存，回收发生在整个源文件编译结束时。
 pub let st_alloc = func(p: Mut(State), n: u64) -> Mut(u8) {
   let b: Bump = bump(p, p.arenaused, p.arenasz, n);
   if b.ok == 0 { return null_ref(Mut(u8)); }
@@ -411,7 +381,6 @@ pub let st_alloc = func(p: Mut(State), n: u64) -> Mut(u8) {
   return p.arena + (b.at - n);
 };
 
-// 持久分配：跨源存活，装类型块与聚合描述符。
 pub let st_ralloc = func(p: Mut(State), n: u64) -> Mut(u8) {
   let b: Bump = bump(p, p.rallused, p.rallcap, n);
   if b.ok == 0 { return null_ref(Mut(u8)); }
@@ -419,7 +388,6 @@ pub let st_ralloc = func(p: Mut(State), n: u64) -> Mut(u8) {
   return p.rallbase + (b.at - n);
 };
 
-// 登记表顺序追加，溢出返回空指针并置错误码。
 pub let st_shp_new = func(p: Mut(State), n: u64) -> Mut(u8) {
   let b: Bump = bump(p, p.shpused, p.shpcap, n);
   if b.ok == 0 { return null_ref(Mut(u8)); }
@@ -448,36 +416,28 @@ let st_pnd_new = func(p: Mut(State), n: u64) -> Mut(u8) {
   return p.pndbase + (b.at - n);
 };
 
-// --- 编译期绑定栈与求值结果 ---------------------------------------------
-// 编译期绑定栈：每条 32 字节 [名字符号, 种类, 值一, 值二]。
 pub let st_ctbase = func(p: Mut(State)) -> Mut(u8) { return p.ctbase; };
 pub let st_ctcap = func(p: Mut(State)) -> u64 { return p.ctcap; };
 pub let st_ctused = func(p: Mut(State)) -> u64 { return p.ctused; };
 pub let st_set_ctused = func(p: Mut(State), v: u64) -> u64 { p.ctused = v; return v; };
 
-// 编译期函数 return 的结果单元（24 字节 [种类, 值一, 值二]）与返回标志。
 pub let st_ctret = func(p: Mut(State)) -> Mut(u8) { return p.ctret; };
 pub let st_ctdone = func(p: Mut(State)) -> u64 { return p.ctdone; };
 pub let st_set_ctdone = func(p: Mut(State), v: u64) -> u64 { p.ctdone = v; return v; };
 
-// 内建 Type 类型的逻辑形状号，第一次用到时创建。
 pub let st_typesh = func(p: Mut(State)) -> u64 { return p.typesh; };
 pub let st_set_typesh = func(p: Mut(State), v: u64) -> u64 { p.typesh = v; return v; };
 
-// 编译期类型工厂记忆化缓存区基址与已用条数。
 pub let st_ctcache = func(p: Mut(State)) -> Mut(u8) { return p.ctcache; };
 pub let st_set_ctcache = func(p: Mut(State), v: Mut(u8)) -> Mut(u8) { p.ctcache = v; return v; };
 pub let st_ctcache_n = func(p: Mut(State)) -> u64 { return p.ctcache_n; };
 pub let st_set_ctcache_n = func(p: Mut(State), v: u64) -> u64 { p.ctcache_n = v; return v; };
 
-// 编译期语义侧运行块，各自独立分配、各自清零：
-// 见证记录栈（24B）、单态化缓存（16B）、泛型待编队列（40B）、效应上下文槽（8B）。
 pub let st_witness_blk = func(p: Mut(State)) -> Mut(u8) { return p.witness_blk; };
 pub let st_mono_blk = func(p: Mut(State)) -> Mut(u8) { return p.mono_blk; };
 pub let st_genq_blk = func(p: Mut(State)) -> Mut(u8) { return p.genq_blk; };
 pub let st_eff_slot = func(p: Mut(State)) -> Mut(u64) { return p.eff_slot; };
 
-// 虚拟模块序号：内联 module 与函子实例化共用一条单调递增的编号流。
 let st_vmod_seq = func(p: Mut(State)) -> u64 { return p.vmod_seq; };
 
 pub let st_next_vmod = func(p: Mut(State)) -> u64 {
@@ -487,22 +447,18 @@ pub let st_next_vmod = func(p: Mut(State)) -> u64 {
   return n;
 };
 
-// 当前正在求值的过程编号（0 表示不在过程体内）。
 pub let st_in_proc = func(p: Mut(State)) -> u64 { return p.in_proc; };
 pub let st_set_in_proc = func(p: Mut(State), v: u64) -> u64 { p.in_proc = v; return v; };
 
-// 限定名拼装区：跨模块路径（A$B$name）在此拼接，32768 字节。
 pub let st_fqbase = func(p: Mut(State)) -> Mut(u8) { return p.fq_base; };
 pub let st_fqused = func(p: Mut(State)) -> u64 { return p.fq_used; };
 pub let st_set_fqused = func(p: Mut(State), v: u64) -> u64 { p.fq_used = v; return v; };
 pub let st_fqcap = func(p: Mut(State)) -> u64 { return p.fq_cap; };
 
-// 词法作用域编号覆盖：0 表示沿用源编号 p.src。
 pub let st_vmod = func(p: Mut(State)) -> u64 { return p.vmod; };
 pub let st_set_vmod = func(p: Mut(State), v: u64) -> u64 { p.vmod = v; return v; };
 pub let st_scope = func(p: Mut(State)) -> u64 { if p.vmod != 0 { return p.vmod; } return p.src; };
 
-// 快速发布模式：未捕获的 Trap 中止在编译期就被抵销，不再产生运行期陷阱。
 pub let st_release_fast = func(p: Mut(State)) -> u64 { return p.release_fast; };
 pub let st_set_release_fast = func(p: Mut(State), v: u64) -> u64 { p.release_fast = v; return v; };
 
@@ -513,14 +469,11 @@ pub let st_fail = func(p: Mut(State), code: u64) -> u64 {
 
 pub let st_ok = func(p: Mut(State)) -> u64 { return p.err; };
 
-// Ty/Val 缓冲都是单文件内的临时量，编译新文件前清空，避免跨文件累计耗尽。
 let st_reset_arena = func(p: Mut(State)) -> u64 {
   p.arenaused = 0;
   return 0;
 };
 
-// --- 循环帧 -------------------------------------------------------------
-// 第 i 帧 64 字节：标签、结果槽、环境标记、参数个数、4 个参数槽。
 pub let st_lf = func(p: Mut(State), i: u64) -> Mut(LoopFrame) {
   return ptr_cast(Mut(LoopFrame), p.frame + i * size_of(LoopFrame));
 };

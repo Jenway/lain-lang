@@ -1,5 +1,3 @@
-// 模块：模块表（别名 → 源号）、模块符号表（每份源导出的顶层名字）、限定名拼装。
-// 每个模块的过程与数据统一带前缀 "s<源号>__"，跨源同名不会撞。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ir = import("src::sema::ir_emit");
@@ -30,7 +28,6 @@ pub let SymEntry = struct {
   pub_flag: u64
 };
 
-// --- 符号字节 -----------------------------------------------------------
 pub let sym_addr = func(h: u64) -> Ref(u8) {
   if h == 0 { return null_ref(Ref(u8)); }
   return hr.sym_addr(h);
@@ -41,18 +38,15 @@ pub let sym_len = func(h: u64) -> u64 {
   return hr.sym_len(h);
 };
 
-// 符号句柄 → 只读字节视图；0 号句柄视为空串。
 let sym_slice = func(h: u64) -> Slice(u8) {
   if h == 0 { return ""; }
   return make_slice(Slice(u8), sym_addr(h), sym_len(h));
 };
 
-// 一个名字段写进格式化游标；0 号句柄不写任何字节。
 let put_sym = func(c: fm.Cursor, h: u64) -> fm.Cursor {
   return fm.write_str(c, sym_slice(h));
 };
 
-// 名字的公共头：虚拟模块用登记的前缀，其余一律 s<源号>__。
 let put_head = func(c: fm.Cursor, src: u64, pf: u64) -> fm.Cursor {
   if pf != 0 { return put_sym(c, pf); }
   let c1: fm.Cursor = fm.write_str(c, "s");
@@ -60,7 +54,6 @@ let put_head = func(c: fm.Cursor, src: u64, pf: u64) -> fm.Cursor {
   return fm.write_str(c2, "__");
 };
 
-// 已写完的格式化消息驻留成符号。
 let intern_done = func(c: fm.Cursor) -> u64 {
   let done: Slice(u8) = fm.fmt_done(c);
   return hr.sym_intern(done.ptr, done.len);
@@ -79,8 +72,6 @@ pub let copy_sym = func(dst: Mut(u8), h: u64) -> u64 {
   return len;
 };
 
-// 虚拟模块登记了名字前缀时用 <前缀><名字><尾巴>，否则退回 s<源号>__<名字><尾巴>。
-// 尾巴为 0 表示没有。s<源号>__ 形式对 vmod >= 1000 本身已经唯一。
 pub let qual_full = func(s: Mut(st.State), src: u64, name: u64, tail: u64) -> u64 {
   let pf: u64 = if src >= 1000 { mod_lookup_prefix(s, src) } else { 0 };
   let c0: fm.Cursor = put_head(fm.fmt_begin(), src, pf);
@@ -92,22 +83,16 @@ pub let qual = func(s: Mut(st.State), src: u64, name: u64) -> u64 {
   return qual_full(s, src, name, 0);
 };
 
-// s<源号>__<前缀><十进制>
 pub let qual_num = func(s: Mut(st.State), src: u64, prefix: u64, v: u64) -> u64 {
   let c0: fm.Cursor = put_head(fm.fmt_begin(), src, 0);
   let c1: fm.Cursor = put_sym(c0, prefix);
   return intern_done(fm.write_u64(c1, v));
 };
 
-// 当前模块号：内联 module / 函子实例体内是虚拟模块号，文件顶层就是源号。
 pub let cur = func(s: Mut(st.State)) -> u64 { return st.st_scope(s); };
 
 let in_cur = func(s: Mut(st.State), name: u64) -> u64 { return qual(s, cur(s), name); };
 
-// --- 模块表 -------------------------------------------------------------
-// 条目 48 字节：[别名符号, 源号, 种类, 导入方模块号, 封签模块号, 名字前缀]。
-// 别名是文件局部的：两份源各自 import 同一个别名指不同目标时不能互相串。
-// 种类：导入的模块、open 链接、父模块链接、虚拟模块（内联 module / 函子实例）。
 pub let mod_kind_import = func() -> u64 { return 1; };
 pub let mod_kind_open = func() -> u64 { return 2; };
 pub let mod_kind_parent = func() -> u64 { return 4; };
@@ -131,21 +116,18 @@ pub let mod_add = func(s: Mut(st.State), alias: u64, src: u64, kind: u64) -> u64
   return 1;
 };
 
-// open 链接：owner 按 seal 视图引入 target_mod 的全部公开名字。
 pub let mod_add_open = func(s: Mut(st.State), owner: u64, target_mod: u64, seal: u64) -> u64 {
   let p: Mut(ModEntry) = mod_add_in(s, owner, 0, target_mod, mod_kind_open(), seal, 0);
   if is_null(p) { return 0; }
   return 1;
 };
 
-// 父模块链接：名字查找可以沿这条链上溯。
 pub let mod_set_parent = func(s: Mut(st.State), child_mod: u64, parent_mod: u64) -> u64 {
   let p: Mut(ModEntry) = mod_add_in(s, child_mod, 0, parent_mod, mod_kind_parent(), 0, 0);
   if is_null(p) { return 0; }
   return 1;
 };
 
-// 虚拟模块登记：src 就是模块号本身，名字前缀供限定名拼装。
 pub let mod_register_vmod = func(s: Mut(st.State), vmod: u64, prefix: u64) -> u64 {
   let p: Mut(ModEntry) = mod_add_in(s, vmod, 0, vmod, mod_kind_vmod(), 0, prefix);
   if is_null(p) { return 0; }
@@ -163,7 +145,6 @@ let mod_kind = func(p: Mut(ModEntry)) -> u64 { return p.kind; };
 let mod_seal = func(p: Mut(ModEntry)) -> u64 { return p.seal; };
 let mod_prefix = func(p: Mut(ModEntry)) -> u64 { return p.prefix; };
 
-// (导入方, 别名) → 源号 + 1；未命中回 0。
 pub let mod_lookup = func(s: Mut(st.State), alias: u64) -> u64 {
   let m: Mut(ModEntry) = mod_lookup_lex(s, cur(s), alias, 0);
   if is_null(m) { return 0; }
@@ -177,7 +158,6 @@ let entry_scan = func(s: Mut(st.State), owner: u64, alias: u64, i: u64, n: u64) 
   return entry_scan(s, owner, alias, i + 1, n);
 };
 
-// (导入方, 别名) → 条目；别名 0 视为未命中，回空引用。
 pub let mod_lookup_entry = func(s: Mut(st.State), owner: u64, alias: u64) -> Mut(ModEntry) {
   if alias == 0 { return null_ref(Mut(ModEntry)); }
   return entry_scan(s, owner, alias, 0, mod_count(s));
@@ -190,12 +170,10 @@ let mod_name_scan = func(s: Mut(st.State), src: u64, i: u64, n: u64) -> u64 {
   return mod_name_scan(s, src, i + 1, n);
 };
 
-// 源号 → 该源的模块别名符号（导入时登记，供源号反查）；未登记回 0。
 let mod_name_of = func(s: Mut(st.State), src: u64) -> u64 {
   return mod_name_scan(s, src, 0, mod_count(s));
 };
 
-// 虚拟模块号 → 名字前缀（0 表示没有前缀）。
 let prefix_scan = func(s: Mut(st.State), vmod: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let p: Mut(ModEntry) = mod_at(s, i);
@@ -209,7 +187,6 @@ let mod_lookup_prefix = func(s: Mut(st.State), vmod: u64) -> u64 {
   return prefix_scan(s, vmod, 0, mod_count(s));
 };
 
-// 子模块 → 父模块号 + 1；没有父模块回 0。0 号模块可以是父模块，编码后 0 仍然无歧义。
 let parent_scan = func(s: Mut(st.State), child_mod: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let p: Mut(ModEntry) = mod_at(s, i);
@@ -221,7 +198,6 @@ let mod_parent = func(s: Mut(st.State), child_mod: u64) -> u64 {
   return parent_scan(s, child_mod, 0, mod_count(s));
 };
 
-// 沿父模块链查导入别名条目；深度上限 16。
 let mod_lookup_lex = func(s: Mut(st.State), modv: u64, alias: u64, depth: u64) -> Mut(ModEntry) {
   if depth > 16 { return null_ref(Mut(ModEntry)); }
   if alias == 0 { return null_ref(Mut(ModEntry)); }
@@ -232,8 +208,6 @@ let mod_lookup_lex = func(s: Mut(st.State), modv: u64, alias: u64, depth: u64) -
   return mod_lookup_lex(s, par1 - 1, alias, depth + 1);
 };
 
-// --- 模块符号表 ---------------------------------------------------------
-// 条目 96 字节：[种类, 裸名, 模块号, 限定名, 签名, 形状号, 标记, 声明下标, 源号, 只读, Fn TypeId, 公开标志]。
 pub let sym_kind_struct = func() -> u64 { return 1; };
 pub let sym_kind_enum = func() -> u64 { return 2; };
 pub let sym_kind_func = func() -> u64 { return 3; };
@@ -245,13 +219,11 @@ pub let sym_kind_mod = func() -> u64 { return 8; };
 pub let sym_kind_sig = func() -> u64 { return 9; };
 pub let sym_kind_type_alias = func() -> u64 { return 10; };
 
-// 名字键：AST 给出的符号句柄按出现位置分配，同一文本在不同位置句柄不同，
-// 所以查表前统一把原文重新 intern 一次，得到按内容稳定的键。
 let name_key = func(s: Mut(st.State), h: u64) -> u64 {
   if h == 0 { return 0; }
   let n: u64 = sym_len(h);
   if n == 0 { return 0; }
-  // 符号池已经映射进 guest 空间，可以直接按内容查表，不必复制文本。
+
   let f: u64 = hr.sym_find(sym_addr(h), n);
   if f != 0 { return f; }
   return h;
@@ -286,28 +258,23 @@ pub let sym_mod = func(p: Mut(SymEntry)) -> u64 { return p.modv; };
 pub let sym_qual = func(p: Mut(SymEntry)) -> u64 { return p.qual; };
 pub let sym_sig = func(p: Mut(SymEntry)) -> Mut(u8) { return p.sig; };
 pub let sym_shape = func(p: Mut(SymEntry)) -> u64 { return p.shape; };
-// 标记：生成器函数是否已经编译过体（0 未编译，1 已编译）。
+
 pub let sym_flag = func(p: Mut(SymEntry)) -> u64 { return p.flag; };
 pub let sym_set_flag = func(p: Mut(SymEntry), v: u64) -> u64 { p.flag = v; return v; };
 
-// 声明所在的源号与源里的节点下标：inject 要在沙箱里跑生成器，生成器的体
-// 可能还没编过，需要凭这两个值回到它的声明位置补编。
 pub let sym_decl = func(p: Mut(SymEntry)) -> u64 { return p.decl; };
 pub let sym_set_decl = func(p: Mut(SymEntry), v: u64) -> u64 { p.decl = v; return v; };
 pub let sym_src = func(p: Mut(SymEntry)) -> u64 { return p.src; };
 pub let sym_set_src = func(p: Mut(SymEntry), v: u64) -> u64 { p.src = v; return v; };
 
-// 静态数据是否只读：ro 表与字符串不允许被赋值。
 pub let sym_ro = func(p: Mut(SymEntry)) -> u64 { return p.ro_flag; };
 pub let sym_set_ro = func(p: Mut(SymEntry), v: u64) -> u64 { p.ro_flag = v; return v; };
 pub let sym_fnid = func(p: Mut(SymEntry)) -> u64 { return p.fnid; };
 pub let sym_set_fnid = func(p: Mut(SymEntry), v: u64) -> u64 { p.fnid = v; return v; };
 
-// 公开标志：跨模块可见性判定的依据。
 pub let sym_pub = func(p: Mut(SymEntry)) -> u64 { return p.pub_flag; };
 pub let sym_set_pub = func(p: Mut(SymEntry), v: u64) -> u64 { p.pub_flag = v; return v; };
 
-// AST 的符号句柄按出现位置分配，同名不同位置句柄不同，比名一律走这条。
 let sym_same = func(a: u64, b: u64) -> u64 { return hr.sym_same(a, b); };
 
 let sym_scan = func(s: Mut(st.State), mod: u64, name: u64, i: u64, n: u64) -> Mut(SymEntry) {
@@ -323,7 +290,6 @@ let sym_scan = func(s: Mut(st.State), mod: u64, name: u64, i: u64, n: u64) -> Mu
   return sym_scan(s, mod, name, i + 1, n);
 };
 
-// 名字是不是一个已知的结构类型（聚合构造只在结构名后跟花括号时成立）。
 pub let is_struct_name = func(s: Mut(st.State), sym: u64) -> u64 {
   let e: Mut(SymEntry) = find_here(s, sym);
   if is_null(e) { return 0; }
@@ -331,12 +297,10 @@ pub let is_struct_name = func(s: Mut(st.State), sym: u64) -> u64 {
   return 0;
 };
 
-// (模块号, 裸名) → 条目；未命中回空引用。严格本模块查找，不上溯。
 pub let sym_find = func(s: Mut(st.State), mod: u64, name: u64) -> Mut(SymEntry) {
   return sym_scan(s, mod, name, 0, sym_count(s));
 };
 
-// 从 modv 的父模块开始沿父链查模块种类的符号；深度上限 16。
 let parent_mod_sym = func(s: Mut(st.State), modv: u64, name: u64, depth: u64) -> Mut(SymEntry) {
   if depth > 16 { return null_ref(Mut(SymEntry)); }
   let par1: u64 = mod_parent(s, modv);
@@ -349,7 +313,6 @@ let parent_mod_sym = func(s: Mut(st.State), modv: u64, name: u64, depth: u64) ->
   return parent_mod_sym(s, par, name, depth + 1);
 };
 
-// 可见性：本模块符号与公开符号可见，其余一律不可见。
 let sym_is_visible = func(s: Mut(st.State), sym: Mut(SymEntry), cur_mod: u64) -> u64 {
   if is_null(sym) { return 0; }
   if sym.modv == cur_mod { return 1; }
@@ -357,7 +320,6 @@ let sym_is_visible = func(s: Mut(st.State), sym: Mut(SymEntry), cur_mod: u64) ->
   return 0;
 };
 
-// 跨模块查名：可见性通过后，若带封签视图则封签模块必须公开同名符号。
 pub let sym_lookup_in = func(s: Mut(st.State), target_mod: u64, seal_mod: u64, name: u64, cur_mod: u64) -> Mut(SymEntry) {
   let e: Mut(SymEntry) = sym_find(s, target_mod, name);
   if is_null(e) { return null_ref(Mut(SymEntry)); }
@@ -370,8 +332,6 @@ pub let sym_lookup_in = func(s: Mut(st.State), target_mod: u64, seal_mod: u64, n
   return e;
 };
 
-// 路径的一跳：先在 owner_mod 里找名字，再把它当作子模块，回子模块号。
-// 子模块的封签视图记在 out_seal 里。未命中回 0。
 pub let resolve_child_mod = func(s: Mut(st.State), owner_mod: u64, seal_mod: u64, name: u64, cur_mod: u64, out_seal: Mut(u64)) -> u64 {
   let e: Mut(SymEntry) = sym_lookup_in(s, owner_mod, seal_mod, name, cur_mod);
   if is_null(e) == 0 {
@@ -395,7 +355,6 @@ pub let resolve_child_mod = func(s: Mut(st.State), owner_mod: u64, seal_mod: u64
   return 0;
 };
 
-// 路径的后续各跳；不动点回落入的模块号，断链回 0。
 let path_step = func(s: Mut(st.State), ss: MutSlice(u64), i: u64, n: u64, owner: u64, seal: u64, cur_mod: u64, out_seal: Mut(u64)) -> u64 {
   if i >= n { return owner; }
   let nm: u64 = ss[i];
@@ -405,7 +364,6 @@ let path_step = func(s: Mut(st.State), ss: MutSlice(u64), i: u64, n: u64, owner:
   return path_step(s, ss, i + 1, n, nx, ns, cur_mod, out_seal);
 };
 
-// 多级路径：first_name 之后还有 nsegs 个名字段，落点是模块号。
 pub let mod_resolve_path = func(s: Mut(st.State), cur_mod: u64, first_name: u64, segs: Mut(u64), nsegs: u64, out_seal: Mut(u64)) -> u64 {
   let m: u64 = resolve_child_mod(s, cur_mod, 0, first_name, cur_mod, out_seal);
   if m == 0 { return 0; }
@@ -415,7 +373,6 @@ pub let mod_resolve_path = func(s: Mut(st.State), cur_mod: u64, first_name: u64,
   return path_step(s, ss, 0, nsegs, m, sl, cur_mod, out_seal);
 };
 
-// 本模块按 open 链接引入的名字：逐条按封签视图跨模块查。
 let open_scan = func(s: Mut(st.State), owner: u64, name: u64, cur_mod: u64, i: u64, n: u64) -> Mut(SymEntry) {
   if i >= n { return null_ref(Mut(SymEntry)); }
   let p: Mut(ModEntry) = mod_at(s, i);
@@ -426,7 +383,6 @@ let open_scan = func(s: Mut(st.State), owner: u64, name: u64, cur_mod: u64, i: u
   return open_scan(s, owner, name, cur_mod, i + 1, n);
 };
 
-// 一个模块自身的名字表加它的 open 面；都没中再沿父模块链上溯。
 let here_at = func(s: Mut(st.State), walk_mod: u64, name: u64, cur_mod: u64, depth: u64) -> Mut(SymEntry) {
   if depth > 16 { return null_ref(Mut(SymEntry)); }
   let e: Mut(SymEntry) = sym_find(s, walk_mod, name);
@@ -438,7 +394,6 @@ let here_at = func(s: Mut(st.State), walk_mod: u64, name: u64, cur_mod: u64, dep
   return here_at(s, par1 - 1, name, cur_mod, depth + 1);
 };
 
-// 当前模块里查一个裸名。
 pub let find_here = func(s: Mut(st.State), name: u64) -> Mut(SymEntry) {
   return here_at(s, cur(s), name, cur(s), 0);
 };

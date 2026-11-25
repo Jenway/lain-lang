@@ -1,17 +1,5 @@
-// std::json —— 编译期结构体序列化、JSON DOM 与解析器。
-//
-// 两条互不依赖的路径：
-//   * write_struct / StructCodec：编译期展开 fields_of(T)，把字段值直接写进
-//     调用方的 MutSlice(u8)；叶子字段（u64 / i64 / bool / Slice(u8)）由见证
-//     模块分派，全程没有运行期反射表。JSON 键取自 fields_of(T) 的字段名。
-//   * parse / stringify：JsonVal 节点、键、字符串全部从调用方给的
-//     std::mem.BumpArena 切出，节点之间以绝对地址串成兄弟链表，因此一块
-//     arena 可以整体释放，不会留下碎片。解析器用显式栈迭代，不递归。
 let mem = import("std::mem");
 
-// ---------------------------------------------------------------------------
-// 写出原语：所有写入都先核对缓冲剩余长度，越界回 false，绝不静默截断。
-// ---------------------------------------------------------------------------
 pub let put_byte = func(buf: MutSlice(u8), pos: Mut(u64), b: u8) -> bool {
   if deref(pos) >= buf.len {
     return false;
@@ -73,7 +61,6 @@ let put_control = func(buf: MutSlice(u8), pos: Mut(u64), c: u8) -> bool {
   return put_byte(buf, pos, hex_digit(lo));
 };
 
-// 带引号的 JSON 字符串：转义 \" \\ \n \t \r 与其余控制字符。
 pub let put_string = func(buf: MutSlice(u8), pos: Mut(u64), s: Slice(u8)) -> bool {
   if put_byte(buf, pos, 34) == false {
     return false;
@@ -113,10 +100,6 @@ pub let put_key = func(buf: MutSlice(u8), pos: Mut(u64), name: Slice(u8)) -> boo
   return put_byte(buf, pos, 58);
 };
 
-// ---------------------------------------------------------------------------
-// 叶子见证：每种标量把自己的写法规约成同一条 write 签名。
-// 值按值传递，避免对 bool 取地址。
-// ---------------------------------------------------------------------------
 pub let JsonLeaf = sig {
   pub let Self: Type;
   pub let write: Fn((Self, MutSlice(u8), Mut(u64)) -> bool);
@@ -162,10 +145,6 @@ pub let write_leaf = func(v: T, buf: MutSlice(u8), pos: Mut(u64)) ?{ T: Type, l:
   return l.write(v, buf, pos);
 };
 
-// ---------------------------------------------------------------------------
-// 编译期结构体序列化：一个函子把 fields_of(T) 展开成字段写入序列。
-// 键就是 fields_of(T) 里各字段的 name；调用方用 ?{ c: StructCodec(T) } 直接实例化。
-// ---------------------------------------------------------------------------
 pub let JsonStructCodec = sig {
   pub let Self: Type;
   pub let encode: Fn((Self, MutSlice(u8), Mut(u64)) -> bool);
@@ -201,11 +180,6 @@ pub let write_struct = func(val: Ref(T), buf: MutSlice(u8), pos: Mut(u64)) ?{ T:
   return c.encode(deref(val), buf, pos);
 };
 
-// ---------------------------------------------------------------------------
-// DOM：节点从 BumpArena 切出，兄弟节点以绝对地址串成单向链表。
-// child / next / tail 为 0 表示没有；arena 的块起点非零，0 不会与真节点撞车。
-// 文本与键直接以 Slice(u8) 字段保存，切片内容本身仍在 arena 里。
-// ---------------------------------------------------------------------------
 pub let JsonKind = enum {
   Null
   True
@@ -216,8 +190,6 @@ pub let JsonKind = enum {
   Obj
 };
 
-// JsonVal.kind 保存的是枚举的码值，调用方可以直接写 kind: 0 构造节点；
-// kind_enum / kind_code 在码值与枚举之间转换。
 pub let kind_code = func(k: JsonKind) -> u64 {
   return match k {
     Null => 0,
@@ -299,7 +271,6 @@ let link_child = func(parent: Mut(JsonVal), spot: u64) {
   deref(parent).count = deref(parent).count + 1;
 };
 
-// 跳过空白：把 pos 推到首个非空白字节并返回新位置。
 pub let skip_ws = func(input: Slice(u8), pos: Mut(u64)) -> u64 {
   loop c(i: u64 = deref(pos), done: bool = false) while done == false {
     if i >= input.len {
@@ -393,8 +364,6 @@ let decode_escape = func(ch: u8, out: Mut(u8)) -> bool {
   return false;
 };
 
-// 先扫到收尾引号并算出解码后长度，再从 arena 切出恰好大小的缓冲写入。
-// 结果以 Slice(u8) 交出。
 let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out: Mut(Slice(u8))) -> bool {
   deref(pos) = deref(pos) + 1;
   let end: u64 = 0;
@@ -461,7 +430,6 @@ let parse_string = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: 
   return true;
 };
 
-// 标量：null / true / false / 字符串 / 整数。容器由 parse 的显式栈处理。
 let parse_scalar = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), pos: Mut(u64), out: Mut(JsonVal)) -> bool {
   let ch: u8 = peek(input, pos);
   if ch == 110 {
@@ -624,9 +592,6 @@ pub let parse = func(arena: Mut(mem.BumpArena.Arena), input: Slice(u8), out: Mut
   return pos == input.len;
 };
 
-// ---------------------------------------------------------------------------
-// stringify：逐节点递归写出；数组与对象都沿 next 链表遍历。
-// ---------------------------------------------------------------------------
 let stringify_val = func(v: Ref(JsonVal), buf: MutSlice(u8), pos: Mut(u64)) -> bool {
   let kind: JsonKind = kind_enum(deref(v).kind);
   let shape: u64 = match kind {

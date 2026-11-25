@@ -1,10 +1,3 @@
-// src/sema/effects/lower.lain —— 效应的 LainIR 降解：声明、perform、handle、
-// resume 与运行期处理器链。
-//
-// 运行期通道住在静态数据 __eff_state 里：
-//   [status_tag@0, payload_bits@8, resume_val@16, oneshot_used@24]
-// 可恢复处理器另有一条静态帧区链：__eff_top 指向栈顶帧，一帧 16 字节 =
-// [处理器过程指针@0, 上一帧指针@8]。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ir = import("src::sema::ir_emit");
@@ -28,7 +21,6 @@ let infer = import("src::sema::effects::infer");
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern effects_block(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 = lainc_stmt_block;
 
-// --- 语法树读取 -----------------------------------------------------------
 let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
 let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
 let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
@@ -37,8 +29,8 @@ let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
 let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
-let dl_paren = func() -> u64 { return ax.dl_paren(); };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
+let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
 let no_slot = func() -> u64 { return ax.no_slot(); };
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
 let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
@@ -51,15 +43,12 @@ let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
 let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
 let emit_slots = func(k: Mut(st.State), j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); };
 
-// --- 效应声明 -------------------------------------------------------------
 pub let register_effect = func(k: Mut(st.State), name: u64, bodyg: u64, param_tid: u64, is_pub: u64) -> Mut(modules.SymEntry) {
   let se: Mut(modules.SymEntry) = modules.sym_add(k, row.kind_effect(), modules.cur(k), name, param_tid, null_ref(Mut(u8)), bodyg);
   let sp: u64 = modules.sym_set_pub(se, is_pub);
   return se;
 };
 
-// let 名 = effect { ... } 或 let 名 = Factory(...) 返回 Effect。
-// 返回声明之后的下标；0 表示这个右值不是效应声明。
 pub let effect_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64) -> u64 {
   let n: u64 = n_count(g);
   if e >= n { return 0; }
@@ -90,7 +79,6 @@ pub let effect_symbol = func(k: Mut(st.State), name: u64) -> Mut(modules.SymEntr
   return se;
 };
 
-// --- 运行期通道 -----------------------------------------------------------
 let state_name = func(k: Mut(st.State)) -> u64 {
   return ir.sym_lit("__eff_state", 11);
 };
@@ -116,7 +104,6 @@ let state_addr = func(k: Mut(st.State)) -> u64 {
   return res;
 };
 
-// 运行期读写辅助：base 可以是一个数据符号，也可以是一个地址寄存器。
 let load_u64 = func(k: Mut(st.State), base: u64, off: u64) -> u64 {
   let p: u64 = agg.off_of(k, base, off);
   let t: Mut(ty.Ty) = t64(k);
@@ -141,9 +128,6 @@ let store_val = func(k: Mut(st.State), base: u64, off: u64, v: Mut(ty.Val)) -> u
   return agg.store_at(k, base, off, c, t);
 };
 
-// 帧区：__eff_top 指向栈顶帧，__eff_hcur 是帧区的下一个空位；
-// 一帧 16 字节 = [处理器过程指针@0, 上一帧指针@8]。帧住在静态帧区而不是
-// 过程栈上，因此某个过程带着未恢复的帧提前 return 时，剩下的指针仍然可读写。
 let handler_top_name = func(k: Mut(st.State)) -> u64 {
   return ir.sym_lit("__eff_top", 9);
 };
@@ -158,8 +142,6 @@ let handler_frames_name = func(k: Mut(st.State)) -> u64 {
 
 let hframe_bytes = func() -> u64 { return 16384; };
 
-// Trap 处理器计数：进入带 Trap 分支的 handle 时加一，离开体时减一。
-// 中止发生时它说话：非零就说明有处理器会接，零就是没人接。
 let trap_depth_name = func(k: Mut(st.State)) -> u64 {
   return ir.sym_lit("__eff_trap", 10);
 };
@@ -198,7 +180,6 @@ let trap_depth_load = func(k: Mut(st.State)) -> u64 {
   return load_u64(k, g, 0);
 };
 
-// 计数增减：kind 取 INST_ADD 或 INST_SUB。
 let trap_depth_step = func(k: Mut(st.State), kind: u64, delta: u64) -> u64 {
   let g: u64 = ensure_trap_depth(k);
   let cur: u64 = load_u64(k, g, 0);
@@ -214,8 +195,6 @@ let trap_depth_step = func(k: Mut(st.State), kind: u64, delta: u64) -> u64 {
   return res;
 };
 
-// 未接住的中止：1 / (code - code) 在 C99 与 VM 里都是确定性的算术陷阱。
-// 商写回 __eff_state 的 tag 字段，除法结果因此始终是活的，优化器删不掉。
 let emit_trap = func(k: Mut(st.State), payload: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = t64(k);
   let pv: Mut(ty.Val) = new_val(k);
@@ -246,7 +225,6 @@ let proc_addr = func(k: Mut(st.State), name: u64) -> Mut(ty.Val) {
   return v;
 };
 
-// u64 与地址互转：BITCAST 会把新类型登到指令上，后面用同一份值当指针才过验。
 let as_addr = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Val) {
   let at: Mut(ty.Ty) = ir.taddr(k);
   let out: Mut(ty.Val) = new_val(k);
@@ -287,7 +265,6 @@ let cond_u64 = func(k: Mut(st.State), kind: u64, a: u64, imm: u64) -> u64 {
   return res;
 };
 
-// 动态结果槽：在当前位置发 #alloca，不占过程入口预排的槽池。
 let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
   let n: u64 = st.st_next_tmp(k);
   let j: u64 = 1000000 + n;
@@ -303,14 +280,12 @@ let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
   return j;
 };
 
-// 进入可恢复 handle：帧记 (处理器过程, 上一帧)，__eff_top 与 __eff_hcur 上推一格。
-// 返回保存本帧地址的槽号，body 结束后用它弹出。
 let push_eff_frame = func(k: Mut(st.State), fnname: u64) -> u64 {
   let g: u64 = ensure_handler(k);
   let gc: u64 = ensure_hcur(k);
   let gf: u64 = ensure_hframes(k);
   let u64t: Mut(ty.Ty) = t64(k);
-  // 首次使用：游标指向帧区首地址。
+
   let cur0: u64 = load_u64(k, gc, 0);
   let cinit: u64 = cond_u64(k, codes.InstKind.Eq as u64, cur0, 0);
   let ir0: u64 = ir.region_begin(k);
@@ -335,7 +310,6 @@ let push_eff_frame = func(k: Mut(st.State), fnname: u64) -> u64 {
   return slot;
 };
 
-// 退出：__eff_top 回到本帧记录的上一帧，游标回到本帧开头。
 let pop_eff_frame = func(k: Mut(st.State), slot: u64) -> u64 {
   let g: u64 = ensure_handler(k);
   let gc: u64 = ensure_hcur(k);
@@ -377,7 +351,6 @@ pub let propagate = func(k: Mut(st.State)) -> u64 {
   return ir.emit_if(k, 0, cond, re, 0);
 };
 
-// --- 效应序号（运行期 state_tag 的高位） ----------------------------------
 let eff_seq = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> u64 {
   let c: Mut(row.EffCtx) = row.ctx(k);
   let fb: Mut(u64) = box(k);
@@ -410,32 +383,31 @@ let runtime_tag = func(k: Mut(st.State), bodyg: u64, param_tid: u64, op_index: u
   return seq * 256 + op_index;
 };
 
-// --- resume ---------------------------------------------------------------
 pub let resume_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let r: Mut(row.ResumeState) = row.top_resume(k);
   let n: u64 = n_count(g);
   if is_null(r) {
     let m: Ref(u8) = "resume outside handler";
     let d: u64 = ir.diag(k, n_at(g, i), 1, m, 22);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return i + 1;
   }
   if r.ret_tid == tb.never_tid(k) {
     let m2: Ref(u8) = "cannot resume abortive effect";
     let d2: u64 = ir.diag(k, n_at(g, i), 1, m2, 29);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
   if r.count >= 1 {
     let m3: Ref(u8) = "one-shot continuation resumed multiple times";
     let d3: u64 = ir.diag(k, n_at(g, i), 1, m3, 44);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
   if st.st_loopdepth(k) > r.base_loop {
     let m4: Ref(u8) = "one-shot continuation resumed multiple times";
     let d4: u64 = ir.diag(k, n_at(g, i), 1, m4, 44);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
   r.count = r.count + 1;
@@ -465,7 +437,6 @@ pub let resume_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   return j;
 };
 
-// --- perform --------------------------------------------------------------
 let payload_bits = func(k: Mut(st.State), argsg: u64, info: Mut(row.OpInfo)) -> Mut(ty.Val) {
   let v: Mut(ty.Val) = new_val(k);
   if info.np == 0 {
@@ -476,7 +447,7 @@ let payload_bits = func(k: Mut(st.State), argsg: u64, info: Mut(row.OpInfo)) -> 
   if info.np > 1 {
     let m: Ref(u8) = "effect op needs one payload";
     let d: u64 = ir.diag(k, 0, 1, m, 27);
-    st.st_fail(k, ax.e_unsup());
+    st.st_fail(k, ax.FailKind.Unsup as u64);
     ty.val_none(v);
     return v;
   }
@@ -487,8 +458,6 @@ let payload_bits = func(k: Mut(st.State), argsg: u64, info: Mut(row.OpInfo)) -> 
   return v;
 };
 
-// 在词法上直接包住 perform 的 handle 里做内联恢复：
-// 处理器分支在 perform 的位置求值，resume(r) 就是这个表达式的值。
 let inline_handler = func(k: Mut(st.State), bodyg: u64, param_tid: u64) -> Mut(row.HandlerRec) {
   let c: Mut(row.EffCtx) = row.ctx(k);
   let i: u64 = c.hn;
@@ -560,9 +529,6 @@ let arm_inline = func(k: Mut(st.State), h: Mut(row.HandlerRec), bodyg: u64, para
   return 1;
 };
 
-// 可恢复操作的同步派发：沿 __eff_top 链调用处理器过程，
-// 处理器臂里 resume 的返回值就是这个 perform 的值。
-// 没有活动帧时退回旧通道：写 __eff_state 并交回 0。
 let resumable_dispatch = func(k: Mut(st.State), tag: u64, payload: Mut(ty.Val), info: Mut(row.OpInfo), out: Mut(ty.Val)) -> u64 {
   let g: u64 = ensure_handler(k);
   let u64t: Mut(ty.Ty) = t64(k);
@@ -574,8 +540,7 @@ let resumable_dispatch = func(k: Mut(st.State), tag: u64, payload: Mut(ty.Val), 
   let cond: u64 = cond_u64(k, codes.InstKind.Ne as u64, ty.vn(topu), 0);
   let slot: u64 = alloc_dyn_slot(k);
   let tr: u64 = ir.region_begin(k);
-  // 派发成功就是一次正常求值：把状态通道上的旧 tag 清掉，
-  // 否则外层 handle 的正常完成分支会把旧 tag 误当成待处理事件。
+
   let sa0: u64 = state_addr(k);
   let sc0: u64 = store_lit(k, sa0, 0, 0);
   let fnv: Mut(ty.Val) = new_val(k);
@@ -620,7 +585,7 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
   let n: u64 = n_count(g);
   let j: u64 = i + 1;
   if j >= n or is_name(g, j) == 0 {
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return j;
   }
   let bodyg: u64 = 0;
@@ -632,7 +597,7 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
     if fj == 0 or st.st_ok(k) != 0 or ctf.v_kind(v) != 11 {
       let m: Ref(u8) = "unknown effect";
       let d: u64 = ir.diag(k, n_at(g, j), 1, m, 14);
-      st.st_fail(k, ax.e_unbound());
+      st.st_fail(k, ax.FailKind.Unbound as u64);
       return j + 2;
     }
     bodyg = ctf.v_a(v);
@@ -643,24 +608,24 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
     if is_null(se) {
       let m2: Ref(u8) = "unknown effect";
       let d2: u64 = ir.diag(k, n_at(g, j), 1, m2, 14);
-      st.st_fail(k, ax.e_unbound());
+      st.st_fail(k, ax.FailKind.Unbound as u64);
       return j + 1;
     }
     bodyg = modules.sym_shape(se);
     param_tid = modules.sym_qual(se);
     j2 = j + 1;
   }
-  if j2 + 1 >= n { st.st_fail(k, ax.e_ast()); return j2; }
+  if j2 + 1 >= n { st.st_fail(k, ax.FailKind.Ast as u64); return j2; }
   if is_group(g, j2) == 0 and n_sym(g, j2) == s.p_dot() {
-    if is_name(g, j2 + 1) == 0 { st.st_fail(k, ax.e_ast()); return j2 + 1; }
-    if j2 + 2 >= n or is_group(g, j2 + 2) == 0 { st.st_fail(k, ax.e_ast()); return j2 + 2; }
+    if is_name(g, j2 + 1) == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return j2 + 1; }
+    if j2 + 2 >= n or is_group(g, j2 + 2) == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return j2 + 2; }
     let opname: u64 = n_sym(g, j2 + 1);
     let argsg: u64 = n_at(g, j2 + 2);
     let info: Mut(row.OpInfo) = row.op_find(k, bodyg, opname);
     if info.found == 0 {
       let m3: Ref(u8) = "unknown effect op";
       let d3: u64 = ir.diag(k, n_at(g, j2 + 1), 1, m3, 17);
-      st.st_fail(k, ax.e_unbound());
+      st.st_fail(k, ax.FailKind.Unbound as u64);
       return j2 + 3;
     }
     let is_trap: u64 = infer.is_trap_shape(k, bodyg, param_tid);
@@ -670,7 +635,7 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
         if added == 0 {
           let m4: Ref(u8) = "unhandled effect";
           let d4: u64 = ir.diag(k, n_at(g, j), 1, m4, 16);
-          st.st_fail(k, ax.e_type());
+          st.st_fail(k, ax.FailKind.Type as u64);
           return j2 + 3;
         }
       }
@@ -688,14 +653,13 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
 
     }
     if info.abortive == 0 {
-      // 可恢复操作：沿运行期处理器链同步取回 resume 值。
+
       let dd: u64 = resumable_dispatch(k, tag, payload, info, out);
       return j2 + 3;
     }
     let base: u64 = state_addr(k);
     if is_trap == 1 {
-      // 环境 Trap：谁写不写 !{ Trap } 都一样。运行期有活跃的 Trap 处理器
-      // 就把事件写进通道交出去；没人接时正常模式就地终止，--release-fast 跳过。
+
       let deep: u64 = trap_depth_load(k);
       let active: u64 = cond_u64(k, codes.InstKind.Ne as u64, deep, 0);
       let tr: u64 = ir.region_begin(k);
@@ -730,11 +694,10 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
     }
     return j2 + 3;
   }
-  st.st_fail(k, ax.e_ast());
+  st.st_fail(k, ax.FailKind.Ast as u64);
   return j2;
 };
 
-// --- handle ---------------------------------------------------------------
 let find_with = func(g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return n; }
@@ -742,7 +705,6 @@ let find_with = func(g: u64, i: u64) -> u64 {
   return find_with(g, i + 1);
 };
 
-// 读取词节点文本的第 k 个字节；越界读由节点文本长度自行保证。
 let tok_byte = func(ag: u64, i: u64, k: u64) -> u64 {
   let h: u64 = n_at(ag, i);
   let p: Ref(u8) = ax.lit_addr(h);
@@ -750,11 +712,9 @@ let tok_byte = func(ag: u64, i: u64, k: u64) -> u64 {
   return b as u64;
 };
 
-// => 在两种 AST 里长得不一样：前端 reader 给出单个两字节词，内核 meta 解析器
-// 给出相邻的 = 与 > 两个词。两种形态都要接受。
 let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
   let n: u64 = n_count(ag);
-  if i >= n { st.st_fail(k, ax.e_ast()); return i + 1; }
+  if i >= n { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
   if is_group(ag, i) == 0 {
     let h: u64 = n_at(ag, i);
     if h != 0 and ax.lit_len(h) == 2 {
@@ -764,7 +724,7 @@ let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
   if i + 1 < n and is_group(ag, i + 1) == 0 {
     if n_sym(ag, i) == s.p_eq() and n_sym(ag, i + 1) == s.o_gt() { return i + 2; }
   }
-  st.st_fail(k, ax.e_ast());
+  st.st_fail(k, ax.FailKind.Ast as u64);
   return i + 1;
 };
 
@@ -793,7 +753,6 @@ let scan_resume = func(ag: u64, i: u64, end: u64) -> u64 {
   return scan_resume(ag, i + 1, end);
 };
 
-// 在给定效应行里按 op 名找定义；命中第一条就够。
 let resolve_op_row = func(k: Mut(st.State), r: Mut(row.EffRow), opname: u64) -> Mut(row.OpInfo) {
   if is_null(r) == 0 {
     let i: u64 = 0;
@@ -853,7 +812,6 @@ let arm_at = func(h: Mut(row.HandlerRec), i: u64) -> Mut(row.HArm) {
   return ptr_cast(Mut(row.HArm), ptr_cast(Mut(u8), h.arms) + i * 88);
 };
 
-// 解析 handle 分支，返回 HandlerRec。cand 是候选效应行。
 let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(row.EffRow), cnt: u64) -> Mut(row.HandlerRec) {
   let h: Mut(row.HandlerRec) = arm_new(k, ag, cnt);
   let n: u64 = n_count(ag);
@@ -894,7 +852,7 @@ let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(row.EffRow), cnt: u64
       if is_null(info) {
         let m: Ref(u8) = "unknown effect op";
         let d: u64 = ir.diag(k, n_at(ag, j), 1, m, 17);
-        st.st_fail(k, ax.e_unbound());
+        st.st_fail(k, ax.FailKind.Unbound as u64);
         break it(n);
       }
       a.bodyg = 0;
@@ -926,11 +884,10 @@ let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(row.EffRow), cnt: u64
       if a.abortive == 1 and a.has_resume == 1 {
         let m2: Ref(u8) = "cannot resume abortive effect";
         let d2: u64 = ir.diag(k, n_at(ag, j), 1, m2, 29);
-        st.st_fail(k, ax.e_type());
+        st.st_fail(k, ax.FailKind.Type as u64);
         break it(n);
       }
-      // 每个臂的候选效应来自 cand；找到定义后给出运行期 tag。
-      // tag 的身份参数是效应自身的类型实参，与操作负载类型无关。
+
       let owner: u64 = owner_effect(k, cand, nm, info);
       let etid: u64 = owner_param(k, cand, owner);
       a.bodyg = owner;
@@ -945,8 +902,6 @@ let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(row.EffRow), cnt: u64
   return h;
 };
 
-// 效应身份参数：参数化效应取具体类型实参，非参数化效应为 0。
-// 操作负载类型只决定 payload 的表示，不参与运行期 tag。
 let owner_param = func(k: Mut(st.State), cand: Mut(row.EffRow), owner: u64) -> u64 {
   let fb: Mut(u64) = box(k);
   box_put(fb, 0);
@@ -977,7 +932,6 @@ let owner_param = func(k: Mut(st.State), cand: Mut(row.EffRow), owner: u64) -> u
   return res - 1;
 };
 
-// 找出 op 属于哪个具体效应：候选行里第一个定义了这个 op 的效应。
 let owner_effect = func(k: Mut(st.State), cand: Mut(row.EffRow), opname: u64, info: Mut(row.OpInfo)) -> u64 {
   if is_null(cand) == 0 {
     let i: u64 = 0;
@@ -1005,10 +959,9 @@ let owner_effect = func(k: Mut(st.State), cand: Mut(row.EffRow), opname: u64, in
   return res;
 };
 
-// --- 处理器派发 -----------------------------------------------------------
 let push_handler = func(k: Mut(st.State), h: Mut(row.HandlerRec)) -> u64 {
   let c: Mut(row.EffCtx) = row.ctx(k);
-  if c.hn >= c.hcap { return st.st_fail(k, ax.e_frame()); }
+  if c.hn >= c.hcap { return st.st_fail(k, ax.FailKind.Frame as u64); }
   let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.handlers) + c.hn * 8);
   deref(p) = h as u64;
   c.hn = c.hn + 1;
@@ -1026,8 +979,6 @@ let disp_at = func(c: Mut(row.EffCtx), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.disp) + i * 48);
 };
 
-// 处理器分支体里一旦用到 handle 所在过程的局部量，就不能编进独立过程：
-// 此时只保留词法内联恢复，不登记派发过程。
 let scan_names = func(k: Mut(st.State), g: u64, i: u64, end: u64, b1: u64, b2: u64) -> u64 {
   if i >= end { return 0; }
   if is_group(g, i) == 1 {
@@ -1059,12 +1010,11 @@ let disp_needs_env = func(k: Mut(st.State), h: Mut(row.HandlerRec)) -> u64 {
   return box_get(fb);
 };
 
-// 为一个 handle 登记可恢复处理器。名字先给出，过程体等到外层过程收尾后再编。
 let enqueue_disp = func(k: Mut(st.State), h: Mut(row.HandlerRec)) -> u64 {
   if h.has_resumable == 0 { return 0; }
   if disp_needs_env(k, h) == 1 { return 0; }
   let c: Mut(row.EffCtx) = row.ctx(k);
-  if c.dn >= c.dcap { return st.st_fail(k, ax.e_frame()); }
+  if c.dn >= c.dcap { return st.st_fail(k, ax.FailKind.Frame as u64); }
   let seq: u64 = st.st_next_tmp(k);
   let pf: u64 = s.intern("_effh", 5);
   let nm: u64 = modules.qual_num(k, st.st_src(k), pf, seq);
@@ -1133,9 +1083,6 @@ let disp_arm_region = func(k: Mut(st.State), ag: u64, ar: Mut(row.HArm), pay: Mu
   return ir.region_end(k);
 };
 
-// 每个 handle 生成一个 (tag, payload, frame) -> u64 的处理器过程。
-// 过程执行期间把 __eff_top 退到上一帧（分支体里的 perform 归外层管），
-// 收尾时把本帧重新置顶，再把分支算出的值作为 resume 值返回。
 pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let c: Mut(row.EffCtx) = row.ctx(k);
   if c.dn == 0 { return 0; }
@@ -1183,8 +1130,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let tagv: Mut(ty.Val) = new_val(k);
   ty.val_ref(tagv, tag, u64t);
   let resname: u64 = ir.fresh_t(k);
-  // 上一帧：帧里存的是 {过程指针@0, 上一帧指针@8}。指针值保持地址类型，
-  // 只在存盘、比较与形参位置转成 u64。
+
   let at: Mut(ty.Ty) = ir.taddr(k);
   let framev: Mut(ty.Val) = new_val(k);
   ty.val_ref(framev, frm, u64t);
@@ -1203,7 +1149,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
     let ca: u64 = ir.case_add(k, ar.tag, cr);
     i = i + 1;
   };
-  // 默认分支：本处理器不管这个 tag，交给上一帧；没有上一帧就记录未处理并回 0。
+
   let dr: u64 = ir.region_begin(k);
   let has_prev: u64 = cond_u64(k, codes.InstKind.Ne as u64, ty.vn(prevu), 0);
   let pr: u64 = ir.region_begin(k);
@@ -1239,7 +1185,7 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let nre: u64 = ir.region_end(k);
   let pifv: u64 = ir.fresh_t(k);
   let pif: u64 = ir.emit_if(k, pifv, has_prev, pre, nre);
-  // 把 if 的结果作为 switch 默认分支的结果交出去。
+
   ir.args_reset(k);
   let r0: u64 = ir.region_result(k, u64t);
   let pifv2: Mut(ty.Val) = new_val(k);
@@ -1319,7 +1265,6 @@ let row_no_abortive = func(k: Mut(st.State), r: Mut(row.EffRow)) -> u64 {
   return 1;
 };
 
-// 这个处理器有没有 Trap 分支：有就说明 handle 体在运行期可能接住中止。
 let has_trap_arm = func(k: Mut(st.State), h: Mut(row.HandlerRec)) -> u64 {
   let found: u64 = loop a(i: u64 = 0) while i < h.n {
     let ar: Mut(row.HArm) = arm_at(h, i);
@@ -1344,7 +1289,6 @@ let can_inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry)) -> u64 {
   return row_no_abortive(k, r);
 };
 
-// 把无参过程体直接编进当前位置：return 变成跳出内联循环。
 let inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let src: u64 = modules.sym_src(se);
   let root: u64 = hr.source_root(src);
@@ -1383,13 +1327,13 @@ let inline_call = func(k: Mut(st.State), se: Mut(modules.SymEntry), want: Mut(ty
 pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   let wi: u64 = find_with(g, i + 1);
-  if wi >= n { st.st_fail(k, ax.e_ast()); return n; }
+  if wi >= n { st.st_fail(k, ax.FailKind.Ast as u64); return n; }
   if wi + 1 >= n or is_group(g, wi + 1) == 0 or delim_of(g, wi + 1) != dl_brace() {
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return wi + 1;
   }
   let ag: u64 = n_at(g, wi + 1);
-  // 直接调用目标：handle f(x) with { ... }。
+
   let direct: u64 = 0;
   if wi == i + 3 and is_name(g, i + 1) == 1 and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == dl_paren() {
     direct = 1;
@@ -1447,8 +1391,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     return wi + 2;
   }
   let caught: Mut(row.EffRow) = ptr_cast(Mut(row.EffRow), hr0.row);
-  // 可恢复处理器：把 (过程, 上一帧) 帧压到链表顶，body 里任意调用深度的
-  // perform 都沿这条链找回它；帧住静态帧区，提前 return 也不会留下野指针。
+
   let hs: u64 = if dname != 0 { push_eff_frame(k, dname) } else { no_slot() };
   let cw: u64 = if gen_first == 1 { 0 } else { row.push_frame(k, caught) };
   let ph: u64 = if gen_first == 1 { 0 } else { push_handler(k, hr0) };
@@ -1493,7 +1436,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   let sel: u64 = load_u64(k, base, 0);
   let sel_ty: Mut(ty.Ty) = t64(k);
   let resname: u64 = ir.fresh_t(k);
-  // case 0：正常完成或 return 分支。
+
   let r0: u64 = ir.region_begin(k);
   let m0: u64 = env.env_mark(k);
   let term0: Mut(u64) = box(k);
@@ -1536,7 +1479,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   env.env_release(k, m0);
   let cr0: u64 = ir.region_end(k);
   ir.case_add(k, 0, cr0);
-  // 各 op 分支。
+
   let ci: u64 = 0;
   let added: u64 = loop ac(i: u64 = 0) while i < hr0.n {
     let ar: Mut(row.HArm) = arm_at(hr0, i);
@@ -1547,7 +1490,7 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
     }
     i = i + 1;
   };
-  // 没被本处理器拦截的效应继续外传。
+
   let dr: u64 = ir.region_begin(k);
   if prev != 1 {
     let d: u64 = emit_default_return(k);

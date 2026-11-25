@@ -1,18 +1,3 @@
-// std::collections::vec —— 分配器策略驱动的可增长向量函子。
-//
-// 元素存储由 mem.TypedAllocator 见证交出：增长时经 al.alloc 领取一片 MutSlice(T)，
-// 切片的 len 就是容量，因此容器只需要 (buf, len, alloc) 三个字段。
-// 缺省见证是 mem.SystemTypedAlloc(T)，宿主堆上的容器写作 Vec(u64)；
-// 换见证就换策略：Vec(u64) ?{ al: mem.TypedAlloc(u64, mem.BumpArena) } 落在线性
-// arena 上，Vec(u64) ?{ al: mem.TypedAlloc(u64, mem.BudgetTracker) } 记账每一次
-// 领取与归还。
-//
-// 所有权：值参数在过程返回时由语言按所有权值析构，因此 push / set 的元素参数
-// 在过程内以内容拷贝写进容器存储；调用方交出的原值在过程返回时析构，容器持有
-// 的是与它互相独立的副本。Copy 元素的行为与拷贝完全一致。
-//
-// 函子只依赖语言核心（struct / loop / 引用族 / Uninit）与 std::mem 的分配器签名，
-// 同一份源码在 lainir-run 虚拟机与 C99 后端上行为一致。
 let mem = import("std::mem");
 let option = import("std::option");
 
@@ -23,7 +8,7 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
     pub let Opt = opt.Opt;
 
     pub let Self = struct {
-      // 已领取的整块存储；buf.len 是容量，有效元素数是下面的 len。
+
       buf: MutSlice(T),
       len: u64,
       alloc: al.Self,
@@ -31,7 +16,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
 
     pub let Vec = Self;
 
-    // 距块起点第 i 个元素的地址。
     let elem_at = func(base: u64, i: u64) -> Mut(T) {
       return ptr_cast(Mut(T), base + i * (size_of(T) as u64));
     };
@@ -52,7 +36,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return deref(v).len == 0;
     };
 
-    // 保证容量至少为 need；增长时按两倍申请，分配失败回 false 且容器保持原样。
     pub let reserve = func(v: Mut(Self), need: u64) -> bool {
       let cur: u64 = deref(v).buf.len;
       if cur >= need {
@@ -81,12 +64,10 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return true;
     };
 
-    // 不领取任何块的空容器：第一次 push 时才向分配器申请。
     pub let with_alloc = func(a: al.Self) -> Self {
       return Self { buf: empty_buf(), len: 0, alloc: a };
     };
 
-    // 预领 wanted 个元素的空间；分配器拒绝时回退成空容器。
     pub let with_capacity = func(a: al.Self, wanted: u64) -> Self {
       if wanted == 0 {
         return Self { buf: empty_buf(), len: 0, alloc: a };
@@ -96,7 +77,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return Self { buf: block, len: 0, alloc: a };
     };
 
-    // 逐元素析构，然后归还整块存储并清零两个字段。
     pub let drop = func(v: Mut(Self)) {
       let n: u64 = deref(v).len;
       let block: MutSlice(T) = deref(v).buf;
@@ -114,7 +94,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       deref(v).len = 0;
     };
 
-    // 尾部追加：先备足容量，再把元素内容写进新槽位。
     pub let push = func(v: Mut(Self), item: T) -> bool {
       let n: u64 = deref(v).len;
       let ok: bool = reserve(v, n + 1);
@@ -127,7 +106,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return ok;
     };
 
-    // 尾部取出一个元素，所有权交给调用方；空容器回 None。
     pub let pop = func(v: Mut(Self)) -> opt.Opt {
       let n: u64 = deref(v).len;
       if n == 0 {
@@ -138,7 +116,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return opt.some(deref(slot));
     };
 
-    // 有效区间内按下标读取；调用方保证 i < len。
     pub let get = func(v: Ref(Self), i: u64) -> T {
       let slot: Mut(T) = elem_at(deref(v).buf.ptr as u64, i);
       return deref(slot);
@@ -160,7 +137,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return opt.some(deref(elem_at(deref(v).buf.ptr as u64, i)));
     };
 
-    // 覆盖有效区间内的元素：旧元素先析构，新元素内容接管该槽位。
     pub let set = func(v: Mut(Self), i: u64, item: T) -> bool {
       let ok: bool = i < deref(v).len;
       if ok {
@@ -173,7 +149,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return ok;
     };
 
-    // 清空：逐元素析构，块本身留给后续 push 复用。
     pub let clear = func(v: Mut(Self)) {
       let n: u64 = deref(v).len;
       let base: u64 = deref(v).buf.ptr as u64;
@@ -199,10 +174,6 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return make_slice(MutSlice(T), deref(v).buf.ptr, deref(v).len);
     };
 
-    // 无参构造：整个 Self 取零值。缺省见证（mem.SystemTypedAlloc）的句柄
-    // 零值就是 mem.SystemAlloc.new() 本身；别的见证的 Self 要由调用方带着
-    // 参数给出（BumpArena 的后端块、BudgetTracker 的预算），走 with_alloc /
-    // with_capacity。零值见证上构造出的容器不会增长：分配器回 0，push 回 false。
     pub let new = func() -> Self {
       let s: Self = Self { };
       return s;

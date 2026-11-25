@@ -1,13 +1,3 @@
-// 接口与 VTable 原型：静态反射读出类型名，inject 生成接口基础设施，
-// 多态函数只认 Shape 胖指针，经由 VTable 里的函数地址做间接调用。
-//
-// 生成出来的东西等价于：
-//   let Shape_VTable = struct { area: addr scale: addr };
-//   let Shape = struct { data: addr vtable: addr };
-//   let shape_area = func(s: Shape) -> i64 { ... icall[(addr) -> i64](f, d) };
-//   let shape_scale = func(s: Shape, k: i64) -> i64 { ... icall[(addr, i64) -> i64](f, d, k) };
-//   let circle_vtable: Shape_VTable = Shape_VTable { area: symbol_addr("circle_area") ... };
-//   let as_shape_Circle = func(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, circle_vtable); return 1; };
 let Circle = struct { r: i64 };
 let Rect = struct { w: i64 h: i64 };
 
@@ -16,7 +6,6 @@ let circle_scale = func(self: addr, k: i64) -> i64 { let v: i64 = load(self); re
 let rect_area = func(self: addr) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h; };
 let rect_scale = func(self: addr, k: i64) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h * k; };
 
-// --- 文本写入 -------------------------------------------------------------
 let puts = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let c: u8 = load(p + k);
@@ -30,14 +19,12 @@ let lit = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   return puts(b, i, p, n);
 };
 
-// 每条声明之间要换行：顶层声明以行或分号分隔，拼在一起的文本解析不了。
 let nl = func(b: addr, i: u64) -> u64 {
   let c: u8 = 10;
   store(b + i, c);
   return i + 1;
 };
 
-// 类型名转小写，用来拼方法名与静态数据名：Circle -> circle。
 let putlow = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let c8: u8 = load(p + k);
@@ -49,15 +36,12 @@ let putlow = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   return i + n;
 };
 
-// 双引号单独写出：生成出来的文本里要包链接名。
 let putq = func(b: addr, i: u64) -> u64 {
   let q: u8 = 34;
   store(b + i, q);
   return i + 1;
 };
 
-// --- 生成器 -------------------------------------------------------------
-// 每个具体类型一套：静态 VTable + 把数据指针与 VTable 绑进胖指针的构造器。
 let bind = func(b: addr, i: u64, tid: u64) -> u64 {
   let tn: addr = meta_type_name(tid);
   let tl: u64 = meta_type_name_len(tid);
@@ -82,7 +66,6 @@ let bind = func(b: addr, i: u64, tid: u64) -> u64 {
   return nl(b, k7);
 };
 
-// inject 的生成器入口：返回缓冲起点，长度由编译器扫 0 字节得出。
 let iface_gen = func(t1: u64, t2: u64) -> addr {
   let b: addr = meta_out();
   let j0: u64 = nl(b, lit(b, 0, "let Shape_VTable = struct { area: addr scale: addr };", len("let Shape_VTable = struct { area: addr scale: addr };")));
@@ -95,8 +78,6 @@ let iface_gen = func(t1: u64, t2: u64) -> addr {
 
 inject(iface_gen(Circle, Rect));
 
-// --- 多态 ---------------------------------------------------------------
-// 这个函数完全不知道 a 与 b 背后是哪种具体类型。
 let eval_shapes = func(a: Shape, b: Shape, k: i64) -> i64 {
   return shape_area(a) + shape_scale(b, k);
 };

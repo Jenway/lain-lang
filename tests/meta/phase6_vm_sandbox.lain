@@ -1,12 +1,3 @@
-// Phase 6.3：纯 Lain 的确定性沙箱执行引擎。
-//
-// 内存里搭一个多过程 LAINIR 映像：入口过程走 #alloca/#store/#load、#if、
-// #loop（带 CONTINUE/BREAK）、#switch、对自身的递归调用，并调用一个 extern
-// 能力过程；能力表通过 ?{ caps: HostCaps } 见证分派。映像必须被 verify_module
-// 判为 0，装载进 VSpace 后在 vm_apply 里跑出确定结果。
-//
-// 五个负面场景各自收敛成确定 Trap：燃料耗尽、越界访存、写只读窗口、
-// 除零与裸地址逃逸。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
@@ -16,9 +7,6 @@ let eng = import("src::vm::engine");
 
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-// 手工模块工作区：28 条指令、10 个区域、2 个过程、4 个形参、1 个类型、
-// 1 个分支、VF_SCRATCH() 个字的验证器 scratch 与 10 行区域下标表。160 个
-// 字块共 20480 字节，实际占用 18784 字节。
 let arena_blocks: Array(Array(u64, 16), 160) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
@@ -60,7 +48,6 @@ let win_blocks: Array(Array(u64, 16), 32) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
 
-// 装载表 + 映像 + 地址空间对象。
 let layout_blocks: Array(Array(u64, 16), 96) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
@@ -93,7 +80,6 @@ let cap_blocks: Array(Array(u64, 16), 16) = [
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk,
   zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk, zero_blk];
 
-// 各表的槽数。
 let N_INSTS = func() -> u64 { return 28; };
 let N_REGIONS = func() -> u64 { return 10; };
 let N_PROCS = func() -> u64 { return 2; };
@@ -109,10 +95,6 @@ let layout_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(layout_bloc
 let tcb_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(tcb_blocks)); };
 let cap_ptr = func() -> Mut(u8) { return ptr_cast(Mut(u8), mut_of(cap_blocks)); };
 
-// 各表的字节边界由槽数推出：每张表的结尾取 vf 的 *_slot 越过最后一条记录后的
-// 地址，所以记录自身变大（IrInst 现为 512 字节）时偏移自动跟随。当前布局：
-// 指令 0..14336、区域 ..14816、过程 ..14944、形参 ..15040、类型 ..15056、
-// 分支 ..15072，随后是 VF_SCRATCH() 个字的 scratch 与 10 行 16 字的下标表。
 let insts_base = func() -> Mut(vf.IrInst) {
   return ptr_cast(Mut(vf.IrInst), arena_ptr());
 };
@@ -223,10 +205,6 @@ let set_regions = func(tr: Ref(vf.IrType)) -> u64 {
   return 0;
 };
 
-// 入口过程（名 1）带一个 u64 形参；extern 能力过程（名 2，link 707）。
-// 递归调用的是同一个入口过程，所以返回的是整条结果链：f(0)=9，
-// f(1)=0+(1+9)+9=19，f(2)=1+(2+19)+9=31，f(3)=3+(3+31)+9=46，
-// n=4 时 f(4)=6+(4+46)+7=63（104 命中 switch 分支）。
 let build_sandbox = func() -> vf.IrModule {
   let t: Mut(vf.IrType) = type_p(0);
   deref(t) = vf.type_bits(64);
@@ -395,9 +373,6 @@ let build_sandbox = func() -> vf.IrModule {
       scratch_base());
 };
 
-// 诊断/陷阱用的小模块走常规 IrBuilder：容量 8 条指令、8 个区域足够。
-// 区域持有的指令下标表放在全局 arena 里：builder 只保存指针，栈上的数组在
-// 构建过程返回后就失效了。
 let small_ptr = func() -> Mut(u8) {
   return arena_ptr();
 };
@@ -484,7 +459,6 @@ let build_divzero = func() -> vf.IrModule {
   return vf.builder_module(b, 92);
 };
 
-// 通用执行：重新初始化地址空间，重新装载映像，按配额跑一次 apply。
 let run_image = func(m: vf.IrModule, quota: eng.VmQuota, caps: Mut(eng.VmCapTable),
                      entry: u64, args: Slice(u64)) -> eng.VmResult {
   let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
@@ -519,7 +493,6 @@ let run_image = func(m: vf.IrModule, quota: eng.VmQuota, caps: Mut(eng.VmCapTabl
   return eng.vm_apply(ref_of(deref(img)), space, caps, quota, 1, entry, args, tcb_arena);
 };
 
-// 宿主的 VmCaps 见证：用冻结的能力表按 link_name 分派。
 let HostCapsSig = sig {
   pub let Self: Type;
   pub let invoke: Fn((Mut(Self), u64, Slice(u64)) -> u64);
@@ -553,13 +526,11 @@ let main = func() -> i64 {
   if reg != 1 { return 10; }
   if fz != 1 { return 11; }
 
-  // ?{ caps: HostCaps } 见证分派：5 + 100 = 105。
   let probe_words: Array(u64, 1) = [5];
   let probe_args: Slice(u64) = make_slice(Slice(u64), ptr_cast(Ref(u64), ref_of(probe_words)), 1);
   let seen: u64 = invoke_cap(caps, 707, probe_args) ?{ caps: HostCaps };
   if seen != 105 { return 12; }
 
-  // --- 正常路径：多过程映像 ------------------------------------------------
   let m: vf.IrModule = build_sandbox();
   let ve: u64 = checks.verify_module(ref_of(m));
   if ve != 0 { return 20 + ve as i64; }
@@ -571,7 +542,6 @@ let main = func() -> i64 {
   if ok.trap_kind != eng.TRAP_NONE() { return 31; }
   if ok.result_val.bits != 63 { return 32; }
 
-  // --- (a) 燃料耗尽 --------------------------------------------------------
   let mf: vf.IrModule = build_fuel();
   let ef: u64 = checks.verify_module(ref_of(mf));
   if ef != 0 { return 40; }
@@ -582,7 +552,6 @@ let main = func() -> i64 {
   if rf.status != eng.SLICE_TRAPPED() { return 41; }
   if rf.trap_kind != eng.TRAP_FUEL() { return 42; }
 
-  // --- (b) 越界访存 --------------------------------------------------------
   let mo: vf.IrModule = build_oob();
   let eo: u64 = checks.verify_module(ref_of(mo));
   if eo != 0 { return 50; }
@@ -590,18 +559,16 @@ let main = func() -> i64 {
   if ro.status != eng.SLICE_TRAPPED() { return 51; }
   if ro.trap_kind != eng.TRAP_MEMORY_OOB() { return 52; }
 
-  // --- (c) 写只读窗口 ------------------------------------------------------
   let space: Mut(vs.VmSpace) = ptr_cast(Mut(vs.VmSpace), layout_ptr() + 10240);
   let mem: MutSlice(u8) = make_slice(MutSlice(u8), mem_ptr(), 14336);
   let wins: MutSlice(vs.Window) = make_slice(MutSlice(vs.Window),
       ptr_cast(Mut(vs.Window), win_ptr()), 32);
   let s0: u64 = vs.vspace_new(mem, wins, space);
-  let hro: vs.Handle = vs.map_window(space, 36864, 8, vs.MEM_READ());
+  let hro: vs.Handle = vs.map_window(space, 36864, 8, vs.Access.Read as u64);
   if vs.handle_none(hro) == 1 { return 60; }
   let wr: u64 = vs.vm_store(space, 36864, 8, 63);
-  if wr != vs.TRAP_MEM_PROT() { return 61; }
+  if wr != (vs.Trap.MemProt as u64) { return 61; }
 
-  // --- (d) 除零 ------------------------------------------------------------
   let mz: vf.IrModule = build_divzero();
   let ez: u64 = checks.verify_module(ref_of(mz));
   if ez != 0 { return 70; }
@@ -609,11 +576,10 @@ let main = func() -> i64 {
   if rz.status != eng.SLICE_TRAPPED() { return 71; }
   if rz.trap_kind != eng.TRAP_ARITH_DOMAIN() { return 72; }
 
-  // --- (e) 裸地址逃逸 ------------------------------------------------------
-  let esc0: u64 = vs.check_no_addr_escape(space, 0, 8, vs.MEM_READ());
-  if esc0 != vs.TRAP_MEM_BOUNDS() { return 80; }
-  let esc1: u64 = vs.check_no_addr_escape(space, 4294967296, 8, vs.MEM_READ());
-  if esc1 == vs.TRAP_NONE() { return 81; }
+  let esc0: u64 = vs.check_no_addr_escape(space, 0, 8, vs.Access.Read as u64);
+  if esc0 != (vs.Trap.MemBounds as u64) { return 80; }
+  let esc1: u64 = vs.check_no_addr_escape(space, 4294967296, 8, vs.Access.Read as u64);
+  if esc1 == (vs.Trap.None as u64) { return 81; }
 
   return 63;
 };

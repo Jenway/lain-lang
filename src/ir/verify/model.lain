@@ -1,17 +1,8 @@
-// LAINIR 模块表示：类型类别、操作数类别、错误码、记录结构与构造器。
-//
-// 表示用平坦下标：过程、区域、指令、分支各自放在连续记录里，彼此用下标引用。
-// 所有聚合都用 Mut 指针加计数表示，调用方用 IrBuilder 在一块原始字节区上顺序
-// 追加记录，构造过程不产生任何堆分配。静态验证在 src::ir::verify::checks。
 let codes = import("src::ir::ir_codes");
 
-// --- 类型类别 -------------------------------------------------------------
-// 物理类型类别取自 ir_codes 的 TyKind；void 与 bool 是本层额外区分的两个类别，
-// 编号接在 ir_codes 的四种之后（Addr 为 3）。
 pub let IR_TYPE_VOID: u64 = 5;
 pub let IR_TYPE_BOOL: u64 = 4;
 
-// --- 验证器错误码 ---------------------------------------------------------
 pub let ERR_OK = func() -> u64 { return 0; };
 pub let ERR_BAD_OPCODE = func() -> u64 { return 1; };
 pub let ERR_UNDEF_VAL = func() -> u64 { return 2; };
@@ -19,22 +10,14 @@ pub let ERR_TYPE_MISMATCH = func() -> u64 { return 3; };
 pub let ERR_NO_TERM = func() -> u64 { return 4; };
 pub let ERR_DUP_DEF = func() -> u64 { return 5; };
 pub let ERR_BAD_SWITCH = func() -> u64 { return 6; };
-// 绑定表耗尽：这是一个容量上限，与重复定义无关，必须报成自己的错误码。
+
 pub let ERR_BIND_CAP = func() -> u64 { return 7; };
 
-// --- 容量上限 -------------------------------------------------------------
 pub let MAX_OPERANDS = func() -> u64 { return 16; };
 pub let MAX_RESULTS = func() -> u64 { return 2; };
-// 一个过程验证沿途同时可见的参数与指令结果上限，也是模块 scratch 里绑定
-// 表的槽数：宿主原语样例的 main 就要 84 条，旧的 64 条会把它误判成重复
-// 定义。模块 scratch 由调用方按自己的 arena 分配（宿主切割测试里整个 IR
-// arena 不到 40KB，还要装两个模块），所以这个数不能定得太大，96 是两者
-// 之间的取值。
+
 pub let MAX_BINDINGS = func() -> u64 { return 96; };
-// 真实模块（宿主构造的 IR）用的绑定表槽数放在验证器自己的静态区里，不占
-// 模块 scratch；验证与文本发射都走这张表，所以小 arena 的切割测试仍然只
-// 需要 96 槽的那块 scratch。4096 个元素的数组字面量逐元素发 #lea，绑定数
-// 随元素同步增长，所以这张表按 4200 槽准备。
+
 pub let LARGE_BINDINGS = func() -> u64 { return 4200; };
 pub let MAX_LOOPS = func() -> u64 { return 8; };
 pub let MAX_DEPTH = func() -> u64 { return 64; };
@@ -46,10 +29,8 @@ pub let PARAM_CAP = func() -> u64 { return 8; };
 pub let TYPE_CAP = func() -> u64 { return 4; };
 pub let CASE_CAP = func() -> u64 { return 4; };
 
-// 没有区域的哨兵值。
 pub let NO_REGION = func() -> u64 { return 4294967295; };
 
-// --- 数据结构 -------------------------------------------------------------
 pub let IrType = struct {
   kind: u64,
   width: u64,
@@ -152,8 +133,7 @@ pub let IrProc = struct {
   name: u64,
   link_name: u64,
   is_extern: u64,
-  // extern 过程的调用约定属性：abi 与 lib 各自是一个下发的编号，
-  // is_variadic 置 1 表示实参个数可以多于形参个数。
+
   abi: u64,
   lib: u64,
   is_variadic: u64,
@@ -177,7 +157,6 @@ pub let IrModule = struct {
   scratch: Mut(u64),
 };
 
-// --- 构造器 ---------------------------------------------------------------
 pub let op_zero = func() -> IrOperand {
   return IrOperand { kind: codes.OperandKind.Value as u64, name: 0, bits: 0 };
 };
@@ -327,7 +306,6 @@ pub let module_new = func(name: u64, procs: Ref(IrProc), proc_count: u64,
   };
 };
 
-// --- 指令修改 -------------------------------------------------------------
 let set_op = func(it: Mut(IrInst), i: u64, op: IrOperand) -> u64 {
   if i == 0 { it.op0_kind = op.kind; it.op0_name = op.name; it.op0_bits = op.bits; }
   if i == 1 { it.op1_kind = op.kind; it.op1_name = op.name; it.op1_bits = op.bits; }
@@ -420,7 +398,6 @@ pub let proc_set_extern = func(p: Mut(IrProc), link: u64) -> u64 {
   return 0;
 };
 
-// 调用约定属性可以单独写在带函数体的过程上，所以这里不碰 is_extern 与 body。
 pub let proc_set_abi = func(p: Mut(IrProc), abi: u64, lib: u64, is_variadic: u64) -> u64 {
   p.abi = abi;
   p.lib = lib;
@@ -428,7 +405,6 @@ pub let proc_set_abi = func(p: Mut(IrProc), abi: u64, lib: u64, is_variadic: u64
   return 0;
 };
 
-// --- 记录读取 -------------------------------------------------------------
 pub let inst_op = func(it: IrInst, i: u64) -> IrOperand {
   if i == 0 { return IrOperand { kind: it.op0_kind, name: it.op0_name, bits: it.op0_bits }; }
   if i == 1 { return IrOperand { kind: it.op1_kind, name: it.op1_name, bits: it.op1_bits }; }
@@ -463,9 +439,6 @@ pub let param_ty = func(p: IrParam) -> IrType {
   return IrType { kind: p.ty_kind, width: p.ty_width };
 };
 
-// 每块记录区都是一张定长元素表：先按元素类型造一个下标视图，再取元素地址。
-// 视图的元素个数只写进类型元数据并决定下标步长，不分配存储；65536 是覆盖
-// 所有调用方容量的视图上限，真实容量由调用方的计数把关。
 pub let inst_slot = func(base: Ref(IrInst), i: u64) -> Mut(IrInst) {
   let view: Mut(Array(IrInst, 65536)) = ptr_cast(Mut(Array(IrInst, 65536)), base);
   return mut_of(deref(view)[i]);
@@ -526,7 +499,6 @@ pub let case_at_ref = func(base: Ref(IrCase), i: u64) -> IrCase {
   return s[i];
 };
 
-// --- 构造器（顺序追加到原始字节区）---------------------------------------
 pub let IrBuilder = struct {
   insts: Mut(IrInst),
   inst_count: u64,

@@ -1,12 +1,3 @@
-// src/vm/engine/run.lain —— CU：单步推进、进入子过程、跑到终态与整段执行。
-//
-// 位置约定与内核一致：分派**之前**不推进 position。算子执行期间
-// cur_region/cur_position 就是当前这条指令；分派之后，如果算子没换帧也没动位置，
-// CU 才把 position 推进一格。
-//
-// 引擎不分配：帧栈、SSA 值槽与实参暂存区都在调用方给的一块字节区里按容量切出来。
-// 引擎不调度：一次只推进一个 TCB。引擎不吞故障：出问题就地记进 TCB 并返回
-// SLICE_TRAPPED，由宿主决定诊断与回收。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let vs = import("src::vm::vspace");
@@ -14,7 +5,6 @@ let im = import("src::vm::image");
 let st = import("src::vm::engine::state");
 let ops = import("src::vm::engine::ops");
 
-// 推进一步。前置条件：TCB 处于 RUNNING；不满足时不动任何状态，原样返回当前切片结果。
 pub let vm_step = func(tcb: Mut(st.TCB)) -> st.VmResult {
   if tcb.state == st.VM_BLOCKED() {
     tcb.slice = st.SLICE_BLOCKED();
@@ -37,7 +27,7 @@ pub let vm_step = func(tcb: Mut(st.TCB)) -> st.VmResult {
   }
   tcb.cur_region = frame.region;
   tcb.cur_position = frame.position;
-  // 区域末尾落下 = 顺序离开这个区域；产出值的区域落下是错的。
+
   if frame.position >= rec.inst_count {
     if rec.result_count > 0 {
       st.trap_now(tcb, st.TRAP_STATE(), st.ST_REGION_NO_RESULT());
@@ -58,8 +48,7 @@ pub let vm_step = func(tcb: Mut(st.TCB)) -> st.VmResult {
   let ran: u64 = ops.dispatch(tcb, inst);
   tcb.steps = tcb.steps + 1;
   if ran != st.SLICE_RUNNABLE() { return st.result_of(tcb); }
-  // 普通指令由 CU 统一推进位置；CONTINUE 主动把位置重置到 0，它的「没有变化」
-  // 恰恰就是回跳，不能再被当成落下一条指令。控制流指令自己管位置。
+
   if tcb.frame_count == saved_count {
     let now: Mut(st.Frame) = st.tcb_frame_ptr(tcb, tcb.frame_count - 1);
     let stays: u64 = if (now.region == saved_region) and (now.position == saved_position) { 1 } else { 0 };
@@ -70,7 +59,6 @@ pub let vm_step = func(tcb: Mut(st.TCB)) -> st.VmResult {
   return st.result_of(tcb);
 };
 
-// 进入一个子过程：压根帧、把参数绑到最前面几个槽、置 RUNNING。
 pub let vm_tcb_start = func(tcb: Mut(st.TCB), entry: u64, args: Slice(u64)) -> u64 {
   if tcb.frame_count != 0 {
     return st.vm_reject(tcb, st.ST_ALREADY_STARTED());
@@ -134,7 +122,6 @@ let bind_entry_args = func(tcb: Mut(st.TCB), sub: im.SubInfo, args: Slice(u64), 
   return bind_entry_args(tcb, sub, args, i + 1);
 };
 
-// 跑到终态：DONE / TRAPPED / BLOCKED。燃料耗尽在 vm_step 里直接变成 Trap。
 let run_to_end = func(tcb: Mut(st.TCB)) -> st.VmResult {
   let spun: st.VmResult = loop spin(step: st.VmResult = vm_step(tcb)) while step.status == st.SLICE_RUNNABLE() {
     step = vm_step(tcb);
@@ -142,8 +129,6 @@ let run_to_end = func(tcb: Mut(st.TCB)) -> st.VmResult {
   return spun;
 };
 
-// apply 的物理契约：独立栈租约、独立 TCB、限额执行、终态交付。
-// arena 里切出帧栈与值槽；栈租约按 max_stack_bytes 向 space 申请，结束后释放。
 pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                         caps: Mut(st.VmCapTable), quota: st.VmQuota, owner: u64,
                         entry: u64, args: Slice(u64),
@@ -155,7 +140,6 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
   return vm_apply_traced(image, space, caps, quota, owner, entry, args, arena, empty, count);
 };
 
-// 与 vm_apply 相同，只是多挂一块轨迹缓冲区。空切片等价于不挂。
 pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                                caps: Mut(st.VmCapTable), quota: st.VmQuota, owner: u64,
                                entry: u64, args: Slice(u64), arena: MutSlice(u8),

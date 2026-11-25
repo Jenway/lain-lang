@@ -1,11 +1,8 @@
-// C99 写入器与查询基础：输出缓冲、符号名、类型文本、过程索引、C ABI 原型表与可达性分析。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let tab = import("src::host::symtab");
 let os = import("std::os");
 
-// 符号表由调用方通过 set_syms 交进来，C99 后端只在这一个格子里保存它的堆地址。
-// 调用方没有交表时格子保持 0，名字退化成 "anon" 或句柄的十进制值。
 let g_syms: Array(u64, 1) = [0];
 
 let syms_cells = func() -> MutSlice(u64) {
@@ -23,11 +20,6 @@ let syms_get = func() -> Mut(tab.HostSymTab) {
   return ptr_cast(Mut(tab.HostSymTab), cells[0]);
 };
 
-// --- writer ---------------------------------------------------------------
-// deferred 置 1 的 writer 处在「库前导 + 独立入口」形态：过程声明与过程体必须等到
-// emit_entry_main 拿到入口符号之后再发射，否则无法判定哪些过程真的可达。
-// split 置 1 的 writer 处在分片形态：非 extern 过程不带 static，数据定义与外部声明
-// 分开发射，过程声明与过程体由调用方按文件切分。
 pub let C99Writer = struct {
   buf: MutSlice(u8),
   len: u64,
@@ -36,7 +28,6 @@ pub let C99Writer = struct {
   split: u64,
 };
 
-// 关联类型导出：调用方可以按 UFCS 写成 w.put_str(...)。
 pub let Self = C99Writer;
 
 pub let new_writer = func(buf: MutSlice(u8)) -> C99Writer {
@@ -141,7 +132,6 @@ pub let put_u64_lit = func(w: Mut(C99Writer), v: u64) -> u64 {
   return put_byte(w, 41);
 };
 
-// --- C99 类型 -------------------------------------------------------------
 pub let c_type_name = func(t: vf.IrType) -> Slice(u8) {
   if t.kind == vf.IR_TYPE_VOID { return "void"; }
   if t.kind == codes.TyKind.Addr as u64 { return "void *"; }
@@ -175,7 +165,6 @@ pub let type_byte_size = func(t: vf.IrType) -> u64 {
   return n;
 };
 
-// --- 符号名 ---------------------------------------------------------------
 let sym_byte = func(h: u64, i: u64) -> u64 {
   let s: Mut(tab.HostSymTab) = syms_get();
   if is_null(s) { return 0; }
@@ -234,8 +223,6 @@ pub let put_sanitized = func(w: Mut(C99Writer), h: u64) -> u64 {
   return 1;
 };
 
-// 自定义过程的名字只在同一份 C 文本里互相引用，用符号句柄的十进制值命名即可，
-// 不需要宿主符号表；extern 过程必须保留 link_name 的原文才能对上宿主 C 符号。
 pub let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
   if p.is_extern == 1 {
     if p.link_name != 0 { return put_sanitized(w, p.link_name); }
@@ -245,8 +232,6 @@ pub let emit_proc_name = func(w: Mut(C99Writer), p: vf.IrProc) -> u64 {
   return put_u64_dec(w, p.name);
 };
 
-// 模块级数据符号与局部值共用同一个 C 名字空间：两者都是 v<句柄>，句柄在同一个
-// 符号表里唯一，所以 OperandKind.Value 引用任何一个都落到同一个 C 标识符上。
 pub let emit_data_name = func(w: Mut(C99Writer), h: u64) -> u64 {
   let rc: u64 = put_str(w, "v");
   return put_u64_dec(w, h);
@@ -257,7 +242,6 @@ pub let emit_value_name = func(w: Mut(C99Writer), h: u64) -> u64 {
   return put_u64_dec(w, h);
 };
 
-// --- 模块查询 -------------------------------------------------------------
 pub let it_ty = func(it: vf.IrInst) -> vf.IrType {
   return vf.inst_ty(it);
 };
@@ -295,8 +279,6 @@ let find_proc_linear = func(m: Ref(vf.IrModule), name: u64, i: u64) -> u64 {
   return found;
 };
 
-// O(1) 过程名哈希索引：emit_value_ref 在每条指令的每个 OperandKind.Value 上都要查一次
-// find_proc，线性扫描在大型模块上会退化成数十亿次结构体拷贝。
 let PIDX_CAP = func() -> u64 { return 16384; };
 let g_pidx_meta: Array(u64, 4) = [0, 0, 0, 0];
 
@@ -469,9 +451,6 @@ pub let result_type = func(m: Ref(vf.IrModule), it: vf.IrInst, i: u64) -> vf.IrT
   return vf.inst_ty(it);
 };
 
-// 前导文本已经 #include 了这些标准头文件，重复声明只会和头文件里的原型冲突。
-// Win32 的 kernel32 符号不在这里：它们的头文件只在 _WIN32 下引入，由下面的 C ABI
-// 原型表区分「Windows 上跳过、其他平台自己声明」。
 pub let is_c_stdlib_symbol = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   if sym_equals(h, "malloc") == 1 { return 1; }
@@ -503,12 +482,6 @@ pub let extern_link_of = func(p: vf.IrProc) -> u64 {
   return p.name;
 };
 
-// --- C ABI 原型表 ---------------------------------------------------------
-// LAINIR 的形参只保留类型种类与位宽：@extern 里写成 Fn((Mut(u8)) -> c_uint) 的
-// 回调参数落进 IR 就是 TY_ADDR，C 函数指针的完整签名在 IR 里已经丢失。凡是 C
-// 头文件或 C ABI 对形参有函数指针要求的符号，都由这张表补回 C 侧类型；同一张表
-// 还决定该符号的声明由谁负责：标准头文件、windows.h，或者本后端。
-// 0 表示符号不在表内。
 pub let c_abi_id = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   if sym_equals(h, "CreateThread") == 1 { return 1; }
@@ -520,15 +493,12 @@ pub let c_abi_id = func(h: u64) -> u64 {
   return 0;
 };
 
-// 声明的归属：0 由本后端发射；1 前导文本的标准头文件已经声明；2 只有 windows.h
-// 在 _WIN32 下声明，本后端只在其他平台发射，避免和 dllimport 原型重复。
 pub let c_abi_decl_kind = func(id: u64) -> u64 {
   if id == 0 { return 0; }
   if id == 6 { return 1; }
   return 2;
 };
 
-// 表内形参的 C 类型文本；返回空切片表示该位形参没有表项，回落到 IR 类型。
 pub let c_abi_param_type = func(id: u64, i: u64) -> Slice(u8) {
   if id == 1 {
     if i == 0 { return "void *"; }
@@ -568,14 +538,11 @@ pub let c_abi_param_is_fn = func(id: u64, i: u64) -> u64 {
   return 0;
 };
 
-// Windows 上这些回调形参的类型由 windows.h 提供，直接传值就能编译；其他平台
-// 的 C 原型是本后端发射的，必须把值投到 typedef 的函数指针类型上。
 pub let c_abi_param_is_win_fn = func(id: u64, i: u64) -> u64 {
   if (id == 1) and (i == 2) { return 1; }
   return 0;
 };
 
-// 同一个 C 符号被多个模块以不同的本地名字绑定：只发射第一次出现的声明。
 pub let extern_link_seen = func(m: Ref(vf.IrModule), link: u64, limit: u64) -> u64 {
   if link == 0 { return 0; }
   let found: u64 = loop c(at: u64 = 0) while 1 {
@@ -587,13 +554,6 @@ pub let extern_link_seen = func(m: Ref(vf.IrModule), link: u64, limit: u64) -> u
   return found;
 };
 
-// --- 死过程剪除 -----------------------------------------------------------
-// 过程在 LAINIR 里只有两种引用形态：INST_CALL 的 symbol 记录的直接调用目标，以及任
-// 何指令操作数里能被解析成过程的 OperandKind.Value（取函数地址、间接调用的目标）。模块级数据
-// 只有原始字节、没有重定位表，数据段无法持有过程引用，所以除入口之外不存在根。
-// 可达性用标记表加队列做广度优先扩散：标记表某格为 1 表示对应过程可达。
-// 标记表长度交回 0 表示无法判定（过程数为零或容量申请失败），此时调用方按
-// 「全部过程可达」处理。
 let reach_table = func(raw: u64, n: u64) -> MutSlice(u64) {
   return make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), n);
 };
@@ -602,7 +562,6 @@ let reach_empty = func() -> MutSlice(u64) {
   return make_slice(MutSlice(u64), null_ref(Mut(u64)), 0);
 };
 
-// 名字能解析成过程且尚未标记时，标记并压入队列，交回新的队尾。
 let mark_proc_ref = func(m: Ref(vf.IrModule), name: u64, mark: MutSlice(u64),
                          queue: MutSlice(u64), tail: u64) -> u64 {
   if name == 0 { return tail; }
@@ -655,7 +614,6 @@ let scan_region_procs = func(m: Ref(vf.IrModule), ri: u64, mark: MutSlice(u64),
   return out;
 };
 
-// 入口过程未知时把每个过程都标为可达，调用方因此发射全部过程。
 pub let compute_reachable_procs = func(m: Ref(vf.IrModule), entry_proc: u64) -> MutSlice(u64) {
   let n: u64 = m.proc_count;
   if n == 0 { return reach_empty(); }

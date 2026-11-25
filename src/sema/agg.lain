@@ -1,9 +1,3 @@
-// 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
-// 形状记录 128 字节头，成员记录在独立数组里（每项 64 字节）。
-// 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、
-// 10 Uninit、11 Fn、12 Type、13 C 风格整数枚举。
-// 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
-// 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ir = import("src::sema::ir_emit");
@@ -48,11 +42,11 @@ pub let ShapeKind = enum(u64) {
   Mut = 7,
   Slice = 8,
   MutSlice = 9,
-  // 未初始化存储：物理上与 Mut 一样是一个指针字，但解引用被拒绝。
+
   Uninit = 10,
   Fn = 11,
   Type = 12,
-  // C 风格整数枚举：值是底层整数的字面量，不是带标签的聚合。
+
   CEnum = 13
 };
 
@@ -71,16 +65,13 @@ pub let kind_cenum = func() -> u64 { return ShapeKind.CEnum as u64; };
 
 pub let shp_ptr = func(sh: u64) -> Mut(Shape) { return ptr_cast(Mut(Shape), sh); };
 
-// 一条形状记录的字节数（成员不内联，这 128 字节只是头部）。
 pub let shp_rec = func() -> u64 { return 128; };
 
-// 形状表下标换算。
 pub let shape_at = func(k: Mut(st.State), i: u64) -> u64 {
   let b: Mut(u8) = st.st_shpbase(k);
   return (b + i * shp_rec()) as u64;
 };
 
-// 成员区初始槽数。
 let mem_init = func() -> u64 { return 8; };
 
 let align_up = func(v: u64, a: u64) -> u64 {
@@ -121,7 +112,6 @@ pub let shp_size = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); retur
 pub let shp_align = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.align; };
 pub let shp_count = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.count; };
 
-// 数组/字符串的元素个数（与成员数不同：成员恒为 1 条元素类型描述）。
 pub let shp_len = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.length; };
 pub let shp_static = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.is_static; };
 pub let shp_set_static = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.is_static = v; return v; };
@@ -133,8 +123,7 @@ pub let shp_ret = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return
 pub let shp_set_ret = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.ret_tid = v; return v; };
 pub let shp_sig = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.sig; };
 pub let shp_set_sig = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.sig = v; return v; };
-// 整数枚举的底层整数：位宽与符号性。枚举形状不用 elem / ret_tid，
-// 这两个槽在 kind_cenum 下专存底层位宽与符号性。
+
 pub let shp_und_w = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.elem; };
 pub let shp_und_sg = func(sh: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); return p.ret_tid; };
 pub let shp_set_under = func(sh: u64, w: u64, sg: u64) -> u64 {
@@ -152,7 +141,6 @@ pub let shp_has_drop = func(sh: u64) -> u64 {
 };
 pub let shp_set_has_drop = func(sh: u64, v: u64) -> u64 { let p: Mut(Shape) = shp_ptr(sh); p.has_drop = v; return v; };
 
-// 成员区在独立的持久块里，按需扩容。
 pub let mem_at = func(sh: u64, i: u64) -> Mut(Member) {
   let base: Mut(u8) = ptr_cast(Mut(u8), shp_mem(sh));
   return ptr_cast(Mut(Member), base + i * 64);
@@ -173,7 +161,6 @@ let mem_copy = func(dst: Mut(Member), src: Mut(Member), n: u64, i: u64) -> u64 {
   return mem_copy(dst, src, n, i + 1);
 };
 
-// 成员区满时翻倍：旧块随编译结束一起作废。
 let mem_reserve = func(s: Mut(st.State), sh: u64, need: u64) -> u64 {
   let cap: u64 = shp_memcap(sh);
   if need <= cap { return 1; }
@@ -198,13 +185,11 @@ pub let mem_w = func(m: Mut(Member)) -> u64 { return m.w; };
 let mem_sg = func(m: Mut(Member)) -> u64 { return m.sg; };
 pub let mem_sh = func(m: Mut(Member)) -> u64 { return m.sh; };
 
-// 成员的类型描述。
 pub let mem_ty = func(k: Mut(st.State), m: Mut(Member), out: Mut(ty.Ty)) -> u64 {
   let save: u64 = ty.ty_save(out, m.k, m.w, m.sg);
   return ty.ty_set_sh(out, m.sh);
 };
 
-// 某个类型描述占多少字节、要对齐到几。
 pub let type_size = func(k: u64, w: u64, sub: u64) -> u64 {
   if sub != 0 { return shp_size(sub); }
   if k == 3 { return 8; }
@@ -240,8 +225,6 @@ pub let add_member = func(s: Mut(st.State), sh: u64, name: u64, off: u64, tag: u
   return m;
 };
 
-// struct 字段：偏移按字段对齐向上取整，头里的「已用字节」推进到字段末尾，
-// 「对齐」取最大值。
 pub let field_add = func(s: Mut(st.State), sh: u64, name: u64, k: u64, w: u64, sg: u64, sub: u64) -> Mut(Member) {
   let p: Mut(Shape) = shp_ptr(sh);
   let a: u64 = type_align(k, w, sub);
@@ -253,7 +236,6 @@ pub let field_add = func(s: Mut(st.State), sh: u64, name: u64, k: u64, w: u64, s
   return add_member(s, sh, name, off, 0, 1, k, w, sg, sub);
 };
 
-// enum 变体：标签号就是加入顺序，载荷起点一律对齐到 1 之后的位置。
 pub let variant_add = func(s: Mut(st.State), sh: u64, name: u64, has: u64, k: u64, w: u64, sg: u64,
                  sub: u64) -> Mut(Member) {
   let p: Mut(Shape) = shp_ptr(sh);
@@ -267,7 +249,6 @@ pub let variant_add = func(s: Mut(st.State), sh: u64, name: u64, has: u64, k: u6
   return add_member(s, sh, name, off, tag, has, k, w, sg, sub);
 };
 
-// 整数枚举：底层整数决定字宽与符号性，变体名只携带自己的判别值。
 pub let cenum_new = func(s: Mut(st.State), name: u64, w: u64, sg: u64) -> u64 {
   let sh: u64 = shp_new(s, kind_cenum(), name, st.st_src(s));
   let p: Mut(Shape) = shp_ptr(sh);
@@ -278,7 +259,6 @@ pub let cenum_new = func(s: Mut(st.State), name: u64, w: u64, sg: u64) -> u64 {
   return sh;
 };
 
-// 变体记录：tag 存判别值（构造顺序不再有意义），没有载荷。
 pub let cenum_variant_add = func(s: Mut(st.State), sh: u64, name: u64, value: u64) -> Mut(Member) {
   let p: Mut(Shape) = shp_ptr(sh);
   let i: u64 = p.count;
@@ -297,8 +277,6 @@ pub let cenum_variant_add = func(s: Mut(st.State), sh: u64, name: u64, value: u6
   return m;
 };
 
-// 整数枚举的类型描述：底层位宽与符号性加形状号，形状号保证与同名底层整数
-// （以及另一个不同枚举）在 ty_same 上严格区分。
 pub let cenum_ty = func(sh: u64, out: Mut(ty.Ty)) -> u64 {
   let w: u64 = shp_und_w(sh);
   let sg: u64 = shp_und_sg(sh);
@@ -306,14 +284,12 @@ pub let cenum_ty = func(sh: u64, out: Mut(ty.Ty)) -> u64 {
   return ty.ty_set_sh(out, sh);
 };
 
-// 一个变体值就是该枚举类型的整数常量。
 pub let cenum_lit = func(k: Mut(st.State), sh: u64, value: u64, out: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let a: u64 = cenum_ty(sh, t);
   return ty.val_lit(out, value, t);
 };
 
-// 数组与字符串：一个成员，描述元素类型。
 pub let array_new = func(s: Mut(st.State), kind: u64, n: u64, k: u64, w: u64, sg: u64, sub: u64) -> u64 {
   let sh: u64 = shp_new(s, kind, 0, st.st_src(s));
   let esz: u64 = type_size(k, w, sub);
@@ -326,7 +302,6 @@ pub let array_new = func(s: Mut(st.State), kind: u64, n: u64, k: u64, w: u64, sg
   return sh;
 };
 
-// 声明结束后把总大小补齐到对齐边界。
 pub let finish = func(s: Mut(st.State), sh: u64) -> u64 {
   let p: Mut(Shape) = shp_ptr(sh);
   let a0: u64 = p.align;
@@ -336,7 +311,6 @@ pub let finish = func(s: Mut(st.State), sh: u64) -> u64 {
   return 0;
 };
 
-// (名字) → 成员记录；未命中回空引用。
 let mem_scan = func(sh: u64, name: u64, i: u64, n: u64) -> Mut(Member) {
   if i >= n { return null_ref(Mut(Member)); }
   let m: Mut(Member) = mem_at(sh, i);
@@ -351,10 +325,8 @@ pub let mem_find = func(sh: u64, name: u64) -> Mut(Member) {
 
 pub let mem_index = func(sh: u64, i: u64) -> Mut(Member) { return mem_at(sh, i); };
 
-// --- 发射 ---------------------------------------------------------------
-// 按形状开一块新存储，返回 #alloca 的结果名；out 收下一个「聚合指针值」。
 pub let new_obj = func(k: Mut(st.State), sh: u64, out: Mut(ty.Val)) -> u64 {
-  // 空聚合没有载荷，但 #alloca 的尺寸必须非零：开 1 字节让验证器与后端都接受。
+
   let raw: u64 = shp_size(sh);
   let size: u64 = if raw == 0 { 1 } else { raw };
   let res: u64 = ir.fresh_t(k);
@@ -369,7 +341,6 @@ pub let new_obj = func(k: Mut(st.State), sh: u64, out: Mut(ty.Val)) -> u64 {
   return res;
 };
 
-// 同理，开一块 n 字节的裸存储（切片头、临时聚合都用它）。
 pub let new_bytes = func(k: Mut(st.State), n: u64, al: u64, out: Mut(ty.Val)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
@@ -382,15 +353,12 @@ pub let new_bytes = func(k: Mut(st.State), n: u64, al: u64, out: Mut(ty.Val)) ->
   return res;
 };
 
-// obj + off 的地址名。
 pub let off_of = func(k: Mut(st.State), obj: u64, off: u64) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let ins: u64 = ir.emit_lea(k, res, obj, 0, 1, off);
   return res;
 };
 
-// 值聚合形状：struct / enum / 数组 / 切片在内联位置上按整块字节存放。
-// Ref / Mut / Fn 物理上只是一个指针字，不属于值聚合。
 pub let is_value_shape = func(sh: u64) -> u64 {
   if sh == 0 { return 0; }
   let kd: u64 = shp_kind(sh);
@@ -402,13 +370,11 @@ pub let is_value_shape = func(sh: u64) -> u64 {
   return 0;
 };
 
-// tp 描述的是内联块（而不是一个机器字）。
 pub let is_value_agg = func(tp: Mut(ty.Ty)) -> u64 {
   if ty.tk(tp) != (codes.TyKind.Addr as u64) { return 0; }
   return is_value_shape(ty.tsh(tp));
 };
 
-// 把 src_ptr 起 size 字节搬到 dst_obj + dst_off：先按 8 字节字搬，尾部逐字节搬。
 pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_ptr: u64,
                 size: u64) -> u64 {
   let t64: Mut(ty.Ty) = ir.tbits(k, 64);
@@ -444,7 +410,6 @@ pub let copy_bytes_at = func(k: Mut(st.State), dst_obj: u64, dst_off: u64, src_p
   return size;
 };
 
-// bool 这类位宽不足一字节的整数类型，在内存里统一按 1 字节存（排除 TY_ADDR 等 w==0 类型）。
 let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
   if ty.tk(tp) != (codes.TyKind.Bits as u64) { return 0; }
   return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
@@ -454,7 +419,6 @@ let byte_t = func(k: Mut(st.State)) -> Mut(ty.Ty) {
   return ir.tbits(k, 8);
 };
 
-// 把 val 零扩到 1 字节的 t8 后放进 out（字面量直接按 8 位重写）。
 let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   if ty.vlit(v) == 1 { return ty.val_lit(out, ty.vbits(v), t8); }
   let res: u64 = ir.fresh_t(k);
@@ -464,7 +428,6 @@ let widen_byte = func(k: Mut(st.State), v: Mut(ty.Val), t8: Mut(ty.Ty), out: Mut
   return ty.val_ref(out, res, t8);
 };
 
-// 把读回的 1 字节值截到 tp 的位宽。
 let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
@@ -473,8 +436,6 @@ let narrow_byte = func(k: Mut(st.State), raw: u64, tp: Mut(ty.Ty)) -> u64 {
   return res;
 };
 
-// 把 val（已按 tp 解释）写到 obj + off。值聚合的 val 里装的是源字节的地址，
-// 必须整块搬到 obj + off，不能只搬一个指针字。
 pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), tp: Mut(ty.Ty)) -> u64 {
   if is_value_agg(tp) == 1 {
     let sh: u64 = ty.tsh(tp);
@@ -496,7 +457,6 @@ pub let store_at = func(k: Mut(st.State), obj: u64, off: u64, val: Mut(ty.Val), 
   return ir.emit_mem(k, codes.InstKind.Store as u64, 0, tp, 0);
 };
 
-// 从 obj + off 读一个 tp，结果放进 out。值聚合直接给那块的地址（内联视图）。
 pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let p: u64 = off_of(k, obj, off);
   if is_value_agg(tp) == 1 {
@@ -518,7 +478,6 @@ pub let load_at = func(k: Mut(st.State), obj: u64, off: u64, tp: Mut(ty.Ty), out
   return ty.val_ref(out, res, tp);
 };
 
-// 把 obj + off 起 size 字节清零：先按 8 字节字写 0，尾部逐字节写 0。
 pub let zero_at = func(k: Mut(st.State), obj: u64, off: u64, size: u64) -> u64 {
   let t64: Mut(ty.Ty) = ir.tbits(k, 64);
   let words: u64 = size / 8;
@@ -543,7 +502,6 @@ pub let zero_at = func(k: Mut(st.State), obj: u64, off: u64, size: u64) -> u64 {
   return size;
 };
 
-// 读枚举标签（一个字节）。
 let tag_read = func(k: Mut(st.State), obj: u64) -> u64 {
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
   let res: u64 = ir.fresh_t(k);
@@ -553,7 +511,6 @@ let tag_read = func(k: Mut(st.State), obj: u64) -> u64 {
   return res;
 };
 
-// 写枚举标签。
 pub let tag_write = func(k: Mut(st.State), obj: u64, tag: u64) -> u64 {
   let t8: Mut(ty.Ty) = ir.tbits(k, 8);
   let rc: u64 = ir.args_reset(k);
@@ -562,7 +519,6 @@ pub let tag_write = func(k: Mut(st.State), obj: u64, tag: u64) -> u64 {
   return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t8, 0);
 };
 
-// 枚举投影：标签命中就读载荷，否则给 0。out 收一个 res_ty 值。
 pub let variant_proj = func(k: Mut(st.State), sh: u64, obj: u64, name: u64, res_ty: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let m: Mut(Member) = mem_find(sh, name);
   if is_null(m) {
@@ -614,14 +570,10 @@ let proj_zero = func(k: Mut(st.State), res_ty: Mut(ty.Ty)) -> u64 {
   return ir.region_end(k);
 };
 
-// --- 值聚合与 sret -------------------------------------------------------
-// struct / enum / Array / Slice / MutSlice 在 LAINIR 里是多字节块，按值返回必须
-// 由调用方给出目标块（sret）。Ref / Mut / Fn 物理上只是一个指针字，绝不走 sret。
 let sret_shape = func(sh: u64) -> u64 { return is_value_shape(sh); };
 
 pub let sret_ty = func(t: Mut(ty.Ty)) -> u64 { return sret_shape(ty.tsh(t)); };
 
-// 整块拷贝：先按 8 字节段搬，剩下的尾字节逐字节搬。
 let copy_words = func(k: Mut(st.State), dst: u64, src: u64, n: u64) -> u64 {
   let t8: Mut(ty.Ty) = ir.tbits(k, 64);
   let i: u64 = loop w(j: u64 = 0) while j < n {
@@ -652,9 +604,6 @@ pub let copy_block = func(k: Mut(st.State), dst: u64, src: u64, size: u64) -> u6
   return copy_tail(k, dst, src, words * 8, rest);
 };
 
-// --- Drop 发射 -----------------------------------------------------------
-// 在 obj 指向的那块存储上依次执行本身的 drop 过程与各字段的 drop，
-// 字段按声明逆序处理，与局部量的出块顺序一致。
 let drop_member_at = func(k: Mut(st.State), sh: u64, obj: u64, i: u64) -> u64 {
   if i == 0 { return 0; }
   let idx: u64 = i - 1;

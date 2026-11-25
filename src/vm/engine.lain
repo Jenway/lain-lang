@@ -1,33 +1,11 @@
-// src/vm/engine.lain —— 确定性沙箱执行引擎（Lain-VM 的 CU + ALU）。
-//
-// 引擎不分配：帧栈、SSA 值槽与实参暂存区都在调用方给的一块字节区里按容量切出来。
-// 引擎不调度：一次只推进一个 TCB。引擎不吞故障：出问题就地记进 TCB 并返回
-// SLICE_TRAPPED，由宿主决定诊断与回收。
-//
-// 位置约定与内核一致：分派**之前**不推进 position。算子执行期间
-// cur_region/cur_position 就是当前这条指令；分派之后，如果算子没换帧也没动位置，
-// 引擎才把 position 推进一格。
-//
-// 地址模型：`#addr` 是单字无类型数值，引擎只做位模式算术。合法性完全由
-// `VSpace` 的可访问窗口在访问那一刻判定；构造（`#lea`、`#alloca`）不判权限。
-//
-// 浮点：当前前端没有 f64 类型，浮点算子与浮点比较一律以 TRAP_UNIMPLEMENTED
-// 确定性拒绝（状态 1072），不做任何静默错值。整数、位、比较、转换、访存、
-// 调用与结构化控制流全部实现。
-//
-// 本文件是门面：执行状态在 src/vm/engine/state.lain，单条指令的语义在
-// src/vm/engine/ops.lain，CU 与整段执行在 src/vm/engine/run.lain。这里把它们的
-// 公开名字按原名重新导出，调用方从 engine 取这些名字照旧可用。
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
 let st = import("src::vm::engine::state");
 let run = import("src::vm::engine::run");
 
-// --- 上限 -----------------------------------------------------------------
 pub let MAX_OPERANDS = func() -> u64 { return st.MAX_OPERANDS(); };
 pub let MAX_RESULTS = func() -> u64 { return st.MAX_RESULTS(); };
 
-// --- 执行状态与切片结果 ----------------------------------------------------
 pub let VM_READY = func() -> u64 { return st.VM_READY(); };
 pub let VM_RUNNING = func() -> u64 { return st.VM_RUNNING(); };
 pub let VM_DEAD = func() -> u64 { return st.VM_DEAD(); };
@@ -38,7 +16,6 @@ pub let SLICE_DONE = func() -> u64 { return st.SLICE_DONE(); };
 pub let SLICE_TRAPPED = func() -> u64 { return st.SLICE_TRAPPED(); };
 pub let SLICE_BLOCKED = func() -> u64 { return st.SLICE_BLOCKED(); };
 
-// --- 故障分类 -------------------------------------------------------------
 pub let TRAP_NONE = func() -> u64 { return st.TRAP_NONE(); };
 pub let TRAP_MEMORY_OOB = func() -> u64 { return st.TRAP_MEMORY_OOB(); };
 pub let TRAP_ALIGNMENT = func() -> u64 { return st.TRAP_ALIGNMENT(); };
@@ -53,14 +30,12 @@ pub let TRAP_CALL_DEPTH = func() -> u64 { return st.TRAP_CALL_DEPTH(); };
 pub let TRAP_UNIMPLEMENTED = func() -> u64 { return st.TRAP_UNIMPLEMENTED(); };
 pub let TRAP_STACK_OVERFLOW = func() -> u64 { return st.TRAP_STACK_OVERFLOW(); };
 
-// --- 配额 -----------------------------------------------------------------
 pub let VmQuota = st.VmQuota;
 
 pub let quota_new = func(max_steps: u64, max_stack_bytes: u64, max_call_depth: u64) -> VmQuota {
   return st.quota_new(max_steps, max_stack_bytes, max_call_depth);
 };
 
-// --- 值 -------------------------------------------------------------------
 pub let VmValue = st.VmValue;
 
 pub let value_zero = func() -> VmValue {
@@ -71,7 +46,6 @@ pub let value_bits = func(bits: u64, width: u64) -> VmValue {
   return st.value_bits(bits, width);
 };
 
-// --- 最大值与位宽助手 -----------------------------------------------------
 pub let max_u64 = func() -> u64 {
   return st.max_u64();
 };
@@ -92,8 +66,6 @@ pub let type_size = func(kind: u64, width: u64) -> u64 {
   return st.type_size(kind, width);
 };
 
-// --- 能力空间 -------------------------------------------------------------
-// 宿主能力的契约：Self 是宿主自己的状态类型，invoke 吃掉它、符号号与参数词。
 pub let VmCaps = sig {
   pub let Self: Type;
   pub let invoke: Fn((Mut(Self), u64, Slice(u64)) -> u64);
@@ -138,7 +110,6 @@ pub let caps_find = func(t: Mut(VmCapTable), link_name: u64, i: u64) -> u64 {
   return st.caps_find(t, link_name, i);
 };
 
-// VmCaps 的引擎侧见证：一张冻结过的能力表就是它的 Self。
 pub let VmCapHost: VmCaps = module {
   pub let Self = VmCapTable;
   pub let invoke = func(self: Mut(VmCapTable), link_name: u64, args: Slice(u64)) -> u64 {
@@ -146,7 +117,6 @@ pub let VmCapHost: VmCaps = module {
   };
 };
 
-// --- 同步端点 -------------------------------------------------------------
 pub let EP_IDLE = func() -> u64 { return st.EP_IDLE(); };
 pub let EP_SENDER_PARKED = func() -> u64 { return st.EP_SENDER_PARKED(); };
 pub let EP_RECEIVER_PARKED = func() -> u64 { return st.EP_RECEIVER_PARKED(); };
@@ -184,27 +154,20 @@ pub let endpoint_cancel = func(ep: Mut(Endpoint), who: u64) -> u64 {
   return st.endpoint_cancel(ep, who);
 };
 
-// --- 调用轨迹 -------------------------------------------------------------
 pub let VmTraceEvent = st.VmTraceEvent;
 
 pub let TRACE_ENTER = func() -> u64 { return st.TRACE_ENTER(); };
 pub let TRACE_EXIT = func() -> u64 { return st.TRACE_EXIT(); };
 pub let TRACE_TRAP = func() -> u64 { return st.TRACE_TRAP(); };
 
-// --- 帧与 TCB -------------------------------------------------------------
 pub let Frame = st.Frame;
 
 pub let TCB = st.TCB;
 
-// TCB 的 UFCS 入口：调用方 use 本模块后可以写 tcb.vm_step()、tcb.vm_tcb_steps()
-// 这类形式，接收者可以是 TCB、Ref(TCB) 或 Mut(TCB)。
 pub let Self = TCB;
 
-// 引擎对外交出的执行结果。result_width/result_bits 是可直接读的摊平副本；
-// result_val 指向同一个值（当前前端把聚合字段表示成指针，所以这里就是指针）。
 pub let VmResult = st.VmResult;
 
-// --- TCB 的读写面 ---------------------------------------------------------
 pub let vm_tcb_state = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_state(tcb); };
 pub let vm_tcb_steps = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_steps(tcb); };
 pub let vm_tcb_stack_peak = func(tcb: Ref(TCB)) -> u64 { return st.vm_tcb_stack_peak(tcb); };
@@ -256,7 +219,6 @@ pub let vm_tcb_resume = func(tcb: Mut(TCB)) -> u64 {
   return st.vm_tcb_resume(tcb);
 };
 
-// --- 容量与切分 -----------------------------------------------------------
 pub let frame_cap_of = func(image: Ref(im.VmImage), quota: VmQuota) -> u64 {
   return st.frame_cap_of(image, quota);
 };
@@ -293,25 +255,18 @@ pub let vm_tcb_free = func(tcb: Mut(TCB)) -> u64 {
   return st.vm_tcb_free(tcb);
 };
 
-// --- 结果装配 -------------------------------------------------------------
-// 只知故障类别时的装配失败结果。
 pub let vm_result_trap = func(trap_kind: u64) -> VmResult {
   return st.vm_result_trap(trap_kind);
 };
 
-// --- CU -------------------------------------------------------------------
-// 推进一步。前置条件：TCB 处于 RUNNING；不满足时不动任何状态，原样返回当前切片结果。
 pub let vm_step = func(tcb: Mut(TCB)) -> VmResult {
   return run.vm_step(tcb);
 };
 
-// 进入一个子过程：压根帧、把参数绑到最前面几个槽、置 RUNNING。
 pub let vm_tcb_start = func(tcb: Mut(TCB), entry: u64, args: Slice(u64)) -> u64 {
   return run.vm_tcb_start(tcb, entry, args);
 };
 
-// apply 的物理契约：独立栈租约、独立 TCB、限额执行、终态交付。
-// arena 里切出帧栈与值槽；栈租约按 max_stack_bytes 向 space 申请，结束后释放。
 pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                         caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
                         entry: u64, args: Slice(u64),
@@ -319,7 +274,6 @@ pub let vm_apply = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
   return run.vm_apply(image, space, caps, quota, owner, entry, args, arena);
 };
 
-// 与 vm_apply 相同，只是多挂一块轨迹缓冲区。空切片等价于不挂。
 pub let vm_apply_traced = func(image: Ref(im.VmImage), space: Mut(vs.VmSpace),
                                caps: Mut(VmCapTable), quota: VmQuota, owner: u64,
                                entry: u64, args: Slice(u64), arena: MutSlice(u8),

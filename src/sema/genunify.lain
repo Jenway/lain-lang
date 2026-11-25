@@ -1,5 +1,3 @@
-// genunify.lain —— ?{} 编译期形参解析、实参类型模式合一与单态化缓存。
-// 单向依赖 state/ast/sym/agg/modules/tyreg/ctypes/ctfor/ctprim/ctfn。
 let st = import("src::driver::state");
 let ax = import("src::sema::ast");
 let s = import("src::driver::sym");
@@ -53,7 +51,6 @@ pub let word_at = func(arr: Mut(u64), idx: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), arr) + idx * 8);
 };
 
-// 编译期形参项 24B：[name@0, ty_start@8, ty_end@16]；最多 8 项。
 pub let ct_skip_ty = func(qg: u64, i: u64) -> u64 {
   let n: u64 = ax.n_count(qg);
   if i >= n { return i; }
@@ -73,9 +70,9 @@ pub let parse_ctparams = func(k: Mut(st.State), qg: u64, i: u64, out: Mut(CtPara
   let n: u64 = ax.n_count(qg);
   if i >= n { return idx; }
   if ax.is_comma(qg, i) == 1 { return parse_ctparams(k, qg, i + 1, out, idx); }
-  if idx >= 8 { ctf.fail_msg(k, "too many comptime params", 24, ax.e_ast()); return idx; }
+  if idx >= 8 { ctf.fail_msg(k, "too many comptime params", 24, ax.FailKind.Ast as u64); return idx; }
   if ax.is_name(qg, i) == 0 or ctf.has_tok(qg, i + 1, s.p_colon()) == 0 {
-    ctf.fail_msg(k, "bad comptime param", 18, ax.e_ast());
+    ctf.fail_msg(k, "bad comptime param", 18, ax.FailKind.Ast as u64);
     return idx;
   }
   let te: u64 = ct_skip_ty(qg, i + 2);
@@ -101,13 +98,12 @@ pub let ct_find = func(ctp_tbl: Mut(CtParamRec), nct: u64, name: u64, i: u64) ->
   return ct_find(ctp_tbl, nct, name, i + 1);
 };
 
-// --- 类型模式合一 ---------------------------------------------------------
 let bind_or_check = func(k: Mut(st.State), idx: u64, kind: u64, val: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
   let bp: Mut(u64) = word_at(bound, idx);
   let slot: Mut(ctf.CtVal) = val_at(vals, idx);
   if deref(bp) == 1 {
     if slot.kind != kind or slot.a != val {
-      ctf.fail_msg(k, "type inference conflict", 23, ax.e_type());
+      ctf.fail_msg(k, "type inference conflict", 23, ax.FailKind.Type as u64);
       return 0;
     }
     return 1;
@@ -152,7 +148,7 @@ pub let unify_type = func(k: Mut(st.State), pg: u64, i: u64, end: u64, arg_tid: 
     if idx != 999 { return bind_or_check(k, idx, 1, arg_tid, vals, bound); }
     return 1;
   }
-  if ax.is_name(pg, i) == 1 and ctf.has_delim(pg, i + 1, ax.dl_paren()) == 1 {
+  if ax.is_name(pg, i) == 1 and ctf.has_delim(pg, i + 1, ax.Delim.Paren as u64) == 1 {
     let nm: u64 = ax.n_sym(pg, i);
     if nm == s.t_ref() { return unify_wrap(k, pg, i, end, agg.kind_ref(), arg_tid, ctp_tbl, nct, vals, bound); }
     if nm == s.t_mut() { return unify_wrap(k, pg, i, end, agg.kind_mut(), arg_tid, ctp_tbl, nct, vals, bound); }
@@ -181,8 +177,6 @@ pub let unify_type = func(k: Mut(st.State), pg: u64, i: u64, end: u64, arg_tid: 
   return 1;
 };
 
-// --- 单态化缓存（住在 st_mono_blk，每条 288 字节） -------------------------
-// [tpl_e@0, nct@8, mangled_q@16, concrete_sg@24, vals(8*24B)@32]
 let wrec_eq = func(w1: Mut(WitnessRec), w2: Mut(WitnessRec)) -> u64 {
   if w1 as u64 == w2 as u64 { return 1; }
   let n1: u64 = w1.nf;
@@ -205,7 +199,7 @@ let wrec_eq = func(w1: Mut(WitnessRec), w2: Mut(WitnessRec)) -> u64 {
 let val_eq = func(v1: Mut(ctf.CtVal), v2: Mut(ctf.CtVal)) -> u64 {
   if v1.kind != v2.kind { return 0; }
   if v1.a != v2.a { return 0; }
-  // 模块见证额外比对封签视图，同一模块的两种收窄视图不算同一实例。
+
   if v1.kind == 9 and v1.b != v2.b { return 0; }
   if v1.kind == 7 {
     return wrec_eq(ptr_cast(Mut(WitnessRec), v1.b), ptr_cast(Mut(WitnessRec), v2.b));
@@ -248,7 +242,7 @@ pub let cache_put = func(k: Mut(st.State), tpl_e: u64, nct: u64, q: u64, sg: Mut
   let gb: Mut(MonoBlk) = ptr_cast(Mut(MonoBlk), st.st_mono_blk(k));
   let base: Mut(u8) = cache_base(k);
   let n: u64 = gb.n;
-  if n >= 128 { ctf.fail_msg(k, "mono cache full", 15, ax.e_ast()); return 0; }
+  if n >= 128 { ctf.fail_msg(k, "mono cache full", 15, ax.FailKind.Ast as u64); return 0; }
   let raw: Mut(u8) = base + n * 288;
   let rec: Mut(MonoCacheRec) = ptr_cast(Mut(MonoCacheRec), raw);
   rec.tpl_e = tpl_e;

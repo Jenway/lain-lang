@@ -1,13 +1,3 @@
-// LAINIR 模块的内存映像：把平坦的 IrModule 变成引擎直接可用的执行形态。
-//
-// 装载期做三件事：
-//   1. 把静态数据段与代码段排进 VSpace 的窗口（只读 / 读写 / 可调用）；
-//   2. 给过程、区域、指令、操作数引用与结果槽建立平坦下标表；
-//   3. 把每个 #switch 的分支装进一张开放寻址表，另外提供按 (指令, 选择子)
-//      一次散列定位的查表接口。
-//
-// 词法作用域在装载期消解成 (帧距离, 槽号)：运行期只做两次数组索引。
-// 所有表的容量由调用方给，装载器只检查够不够，从不自己分配。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let vspace = import("src::vm::vspace");
@@ -15,11 +5,9 @@ let vspace = import("src::vm::vspace");
 pub let NO_INDEX = func() -> u64 { return 4294967295; };
 pub let NO_REGION = func() -> u64 { return 4294967295; };
 
-// 代码入口是确定性的虚拟编号，不是宿主地址；代码窗口就登记在这个基址上。
 let CODE_BASE = func() -> u64 { return 268435456; };
 let CODE_ENTRY_SIZE = func() -> u64 { return 8; };
 
-// 装载器的诊断码：0 表示装载成功，其余每一项对应一种容量或引用错误。
 pub let ImageErr = enum(u64) {
   Ok = 0,
   RegionCap = 1,
@@ -35,8 +23,6 @@ pub let ImageErr = enum(u64) {
   MapRw = 11,
   MapCode = 12
 };
-
-pub let ERR_OK = func() -> u64 { return ImageErr.Ok as u64; };
 
 pub let ImageRegion = struct {
   image_id: u64,
@@ -70,7 +56,6 @@ pub let InstMeta = struct {
   sub_index: u64,
 };
 
-// 一个装载后的操作数引用：字面量、符号地址、子过程入口、或某个外层帧的槽。
 pub let OperandRef = struct {
   is_literal: u64,
   is_symbol: u64,
@@ -80,7 +65,6 @@ pub let OperandRef = struct {
   symbol_index: u64,
 };
 
-// 循环参数的初值引用：在父帧里求值。
 pub let ParamInit = struct {
   init_ref: OperandRef,
   bits: u64,
@@ -92,7 +76,6 @@ pub let CaseInfo = struct {
   region: u64,
 };
 
-// 模块级静态数据符号：名字与它映射到的虚拟地址。
 pub let DataSym = struct {
   symbol: u64,
   vaddr: u64,
@@ -112,8 +95,6 @@ pub let SubInfo = struct {
   result_count: u64,
 };
 
-// 七张平坦表都写成 (指针, 长度) 标量对：嵌套的 MutSlice 字段经由调用方指针
-// 写入时当前前端会多解一层引用，平铺成标量就绕开了这条路径。
 pub let VmImage = struct {
   ir: Ref(vf.IrModule),
   space: Mut(vspace.VmSpace),
@@ -264,13 +245,11 @@ let literal_ref = func() -> OperandRef {
   };
 };
 
-// 区域里的第 i 条指令在模块平坦指令表里的下标。
 let region_inst = func(r: vf.IrRegion, i: u64) -> u64 {
   let ids: Slice(u64) = make_slice(Slice(u64), r.insts, r.inst_count);
   return ids[i];
 };
 
-// --- 量尺寸 ---------------------------------------------------------------
 let count_insts = func(m: Ref(vf.IrModule), r: vf.IrRegion, t: Mut(ImageSizes),
                        i: u64) -> u64 {
   if i >= r.inst_count { return 0; }
@@ -351,8 +330,6 @@ pub let image_measure = func(m: Ref(vf.IrModule)) -> ImageSizes {
   return out;
 };
 
-// --- 名字作用域 -----------------------------------------------------------
-// found=1 时 slot 命中；found=0 时 slot 是走完这一段之后的游标。
 let Lookup = struct {
   found: u64,
   distance: u64,
@@ -385,7 +362,6 @@ let scan_results = func(m: Ref(vf.IrModule), r: vf.IrRegion, name: u64, slot: u6
   return scan_results(m, r, name, hit.slot, i + 1);
 };
 
-// 一个区域的作用域：过程签名参数（只有根区域有）、区域参数、按指令顺序的结果。
 let lookup_region = func(c: Mut(Loader), region_id: u64, name: u64) -> Lookup {
   let img: Mut(VmImage) = c.img;
   let regions: MutSlice(ImageRegion) = m_regions(img);
@@ -417,7 +393,6 @@ let resolve_walk = func(c: Mut(Loader), region_id: u64, name: u64,
   return resolve_walk(c, rec.parent, name, distance + 1);
 };
 
-// --- 分支散列 -------------------------------------------------------------
 let case_hash = func(owner: u64, value: u64) -> u64 {
   let h: u64 = (value ^ (owner * 1469598103934665603)) * 1099511628211;
   return h ^ (h / 4294967296);
@@ -438,7 +413,6 @@ let case_index_insert = func(c: Mut(Loader), at: u64) -> u64 {
   return 0;
 };
 
-// --- 过程表 ---------------------------------------------------------------
 let find_proc = func(c: Mut(Loader), name: u64) -> u64 {
   let img: Mut(VmImage) = c.img;
   let procs: MutSlice(SubInfo) = m_procs(img);
@@ -451,8 +425,6 @@ let find_proc = func(c: Mut(Loader), name: u64) -> u64 {
   return NO_INDEX();
 };
 
-// --- 模块级符号 -----------------------------------------------------------
-// 数据符号在装载表里按调用方给定的顺序查；过程入口只认非 extern 且确实有函数体的。
 let find_data_sym = func(c: Mut(Loader), name: u64) -> u64 {
   let img: Mut(VmImage) = c.img;
   if is_null(img.data_syms) { return NO_INDEX(); }
@@ -476,7 +448,6 @@ let find_body_proc = func(c: Mut(Loader), name: u64) -> u64 {
   return NO_INDEX();
 };
 
-// --- 装载 -----------------------------------------------------------------
 let push_operand = func(c: Mut(Loader), op: OperandRef) -> u64 {
   let img: Mut(VmImage) = c.img;
   let operands: MutSlice(OperandRef) = m_operands(img);
@@ -657,7 +628,6 @@ let load_inst = func(c: Mut(Loader), rec: ImageRegion, r: vf.IrRegion, sub_index
   return deref(meta);
 };
 
-// 前序装载：父区域一定排在子区域前面。
 let add_region = func(c: Mut(Loader), region_id: u64, parent: u64, extra: u64,
                       depth: u64, sub_index: u64) -> u64 {
   if region_id == NO_REGION() { return NO_REGION(); }
@@ -702,8 +672,6 @@ let add_region = func(c: Mut(Loader), region_id: u64, parent: u64, extra: u64,
   if rec.slot_count > img.max_slots { img.max_slots = rec.slot_count; }
   img.inst_count = img.inst_count + r.inst_count;
 
-  // 先登记自己再装指令：解析外层名字要沿 parent 链走，链上每个区域都必须是
-  // 已经写进表里的记录。
   regions[id] = rec;
   let final_slot: u64 = loop pos(pos: u64 = 0, slot: u64 = rec.param_slots)
       while pos < r.inst_count {
@@ -778,7 +746,6 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
   out.case_mask = if layout.case_index_len > 0 { layout.case_index_len - 1 } else { 0 };
   zero_cases(make_slice(MutSlice(u64), layout.case_index_ptr, layout.case_index_len));
 
-  // 先把过程名全部登记完，再装函数体：直接调用与入口地址解析都不受声明顺序影响。
   let procs: MutSlice(SubInfo) = m_procs(out);
   let i: u64 = loop i(i: u64 = 0) while i < m.proc_count {
     let p: vf.IrProc = vf.proc_at_ref(m.procs, i);
@@ -817,14 +784,12 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
   };
   if loader.err != 0 { return loader.err; }
 
-  // 静态数据段排进地址空间：只读一段、读写一段。句柄只在本过程里用来回滚，
-  // 不写进映像（值类型字段经由调用方指针写入也会多解一层引用）。
   let ro_h: vspace.Handle = vspace.no_handle();
   let rw_h: vspace.Handle = vspace.no_handle();
   if layout.ro.len > 0 {
     let ro: vspace.Handle = vspace.map_window(space, layout.ro_base,
                                               layout.ro.len as u64,
-                                              vspace.MEM_READ());
+                                              vspace.Access.Read as u64);
     if vspace.handle_none(ro) == 1 { return ImageErr.MapRo as u64; }
     ro_h = ro;
     let t: u64 = vspace.init_window(space, ro, layout.ro);
@@ -833,7 +798,7 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
   if layout.rw.len > 0 {
     let rw: vspace.Handle = vspace.map_window(space, layout.rw_base,
                                               layout.rw.len as u64,
-                                              vspace.MEM_READ() | vspace.MEM_WRITE());
+                                              (vspace.Access.Read as u64) | (vspace.Access.Write as u64));
     if vspace.handle_none(rw) == 1 {
       if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
       return ImageErr.MapRw as u64;
@@ -843,11 +808,10 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
     if t != 0 { return t; }
   }
 
-  // 代码段：每条子过程一个入口，长度固定；权限是 READ | CALL。
   if m.proc_count > 0 {
     let bytes: u64 = m.proc_count * CODE_ENTRY_SIZE();
     let code: vspace.Handle = vspace.map_window(space, CODE_BASE(), bytes,
-                                                vspace.MEM_READ() | vspace.MEM_CALL());
+                                                (vspace.Access.Read as u64) | (vspace.Access.Call as u64));
     if vspace.handle_none(code) == 1 {
       if layout.ro.len > 0 { vspace.unmap_window(space, ro_h); }
       if layout.rw.len > 0 { vspace.unmap_window(space, rw_h); }
@@ -857,7 +821,6 @@ pub let image_load_with_data = func(m: Ref(vf.IrModule), space: Mut(vspace.VmSpa
   return ImageErr.Ok as u64;
 };
 
-// --- 引擎查询 -------------------------------------------------------------
 let empty_region = func() -> ImageRegion {
   return ImageRegion {
     image_id: NO_INDEX(),
@@ -923,8 +886,6 @@ pub let vm_result_slot = func(img: Ref(VmImage), region_id: u64, pos: u64,
   return results[meta.result_base + i];
 };
 
-// 循环参数的初值在父帧求值；当前 LAINIR 的 #loop 不带初值操作数，所以默认是
-// 字面量 0，与 C99 后端对区域参数的零初始化一致。
 pub let vm_param_init = func(img: Ref(VmImage), region_id: u64,
                              param_index: u64) -> ParamInit {
   let rec: ImageRegion = vm_region(img, region_id);
@@ -997,7 +958,6 @@ pub let vm_max_slots = func(img: Ref(VmImage)) -> u64 {
   return img.max_slots;
 };
 
-// 直接按表下标取一个分支，O(1)。
 pub let case_at = func(img: Ref(VmImage), base: u64, i: u64) -> CaseInfo {
   let cases: MutSlice(CaseInfo) = r_cases(img);
   if (base + i) >= img.case_count {
@@ -1006,7 +966,6 @@ pub let case_at = func(img: Ref(VmImage), base: u64, i: u64) -> CaseInfo {
   return cases[base + i];
 };
 
-// 运行期 #switch 分派：一次散列后线性探测，装载期已把负载控制在 1/2 以下。
 pub let switch_region = func(img: Ref(VmImage), inst_index: u64, selector: u64) -> u64 {
   if inst_index >= img.inst_count { return NO_REGION(); }
   let insts: MutSlice(InstMeta) = r_insts(img);

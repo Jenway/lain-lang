@@ -1,9 +1,3 @@
-// src/sema/effects/row.lain —— 效应行表示、编译期上下文与声明布局解析。
-//
-// 效应行是 (tag, a, b) 三元组的定长数组：tag 0 存 (效应声明的体组, 类型实参)，
-// tag 1 只存名字符号，留给还没绑定到声明上的写法。EffCtx 只存指针与计数器，
-// 数组在首次使用时从持久池分配一次；上下文本身住在 State 的独立效应槽位里，
-// 过程栈帧、处理器表、恢复状态与内联状态各自是一张定长表。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let s = import("src::driver::sym");
@@ -16,7 +10,6 @@ let ctf = import("src::comptime::ctfor");
 let ctfn = import("src::comptime::ctfn");
 let tb = import("src::sema::tbuild");
 
-// --- 语法树读取 -----------------------------------------------------------
 let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
 let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
 let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
@@ -25,16 +18,14 @@ let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
 let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
-let dl_paren = func() -> u64 { return ax.dl_paren(); };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
+let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
 let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
 let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
 
-// 效应符号种类。modules.lain 只枚举到 10，这里沿用同一张符号表。
 pub let kind_effect = func() -> u64 { return 11; };
 
-// --- 编译期上下文 ---------------------------------------------------------
 pub let EffRow = struct {
   n: u64,
   cap: u64,
@@ -158,7 +149,6 @@ let ctx_new = func(k: Mut(st.State)) -> Mut(EffCtx) {
   return c;
 };
 
-// 上下文指针住在 State 的独立效应槽位里。
 pub let ctx = func(k: Mut(st.State)) -> Mut(EffCtx) {
   let slot: Mut(u64) = st.st_eff_slot(k);
   let p: u64 = deref(slot);
@@ -175,7 +165,6 @@ pub let clear_aborts = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(
 pub let take_aborts = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(k); let v: u64 = c.last_aborts; c.last_aborts = 0; return v; };
 pub let mark_abort = func(k: Mut(st.State)) -> u64 { let c: Mut(EffCtx) = ctx(k); c.last_aborts = 1; return 1; };
 
-// --- 效应行 ---------------------------------------------------------------
 let row_alloc = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
   let r: Mut(EffRow) = ptr_cast(Mut(EffRow), st.st_alloc(k, 24));
   r.n = 0;
@@ -186,7 +175,6 @@ let row_alloc = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
 
 pub let row_empty = func(k: Mut(st.State)) -> Mut(EffRow) { return row_alloc(k, 64); };
 
-// 推断出来的效应行跨源存活：私有过程可能在别的源里被引用。
 pub let row_alloc_p = func(k: Mut(st.State), cap: u64) -> Mut(EffRow) {
   let r: Mut(EffRow) = ptr_cast(Mut(EffRow), st.st_ralloc(k, 24));
   r.n = 0;
@@ -241,10 +229,9 @@ let row_union = func(k: Mut(st.State), a: Mut(EffRow), b: Mut(EffRow)) -> Mut(Ef
   return out;
 };
 
-// 帧栈：函数体与 handle 体各压一层。
 pub let push_frame = func(k: Mut(st.State), row: Mut(EffRow)) -> u64 {
   let c: Mut(EffCtx) = ctx(k);
-  if c.fn >= c.fcap { return st.st_fail(k, ax.e_frame()); }
+  if c.fn >= c.fcap { return st.st_fail(k, ax.FailKind.Frame as u64); }
   let p: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), c.frames) + c.fn * 8);
   deref(p) = row as u64;
   c.fn = c.fn + 1;
@@ -263,7 +250,6 @@ pub let frame_at = func(c: Mut(EffCtx), i: u64) -> Mut(EffRow) {
   return ptr_cast(Mut(EffRow), deref(p));
 };
 
-// 当前允许的效应并集：用于没有直接调用目标的 handle。
 pub let frames_row = func(k: Mut(st.State)) -> Mut(EffRow) {
   let c: Mut(EffCtx) = ctx(k);
   let r: Mut(EffRow) = row_empty(k);
@@ -277,8 +263,6 @@ pub let frames_row = func(k: Mut(st.State)) -> Mut(EffRow) {
   return r;
 };
 
-// --- 签名布局 -------------------------------------------------------------
-// 从形参组之后开始：可选 !{...}、可选 -> T、可选 !{...}、体。
 pub let layout_from = func(k: Mut(st.State), g: u64, a0: u64) -> Mut(FnLayout) {
   let n: u64 = n_count(g);
   let l: Mut(FnLayout) = ptr_cast(Mut(FnLayout), st.st_alloc(k, 32));
@@ -318,7 +302,6 @@ pub let fn_layout = func(k: Mut(st.State), g: u64, pg_i: u64) -> Mut(FnLayout) {
   return layout_from(k, g, pg_i + 1);
 };
 
-// --- op 声明扫描 ---------------------------------------------------------
 let count_commas = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
   if i >= n { return acc; }
   if is_comma(g, i) == 1 { return count_commas(g, i + 1, n, acc + 1); }
@@ -395,7 +378,6 @@ pub let op_find = func(k: Mut(st.State), bodyg: u64, opname: u64) -> Mut(OpInfo)
   return info;
 };
 
-// --- 效应行解析 -----------------------------------------------------------
 pub let skip_seps = func(g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
@@ -410,7 +392,6 @@ let set_ctx = func(k: Mut(st.State), src: u64, modv: u64) -> u64 {
   return 1;
 };
 
-// 按已经定位到的效应行组直接解析。
 let row_parse_body = func(k: Mut(st.State), bg: u64, src: u64, modv: u64) -> Mut(EffRow) {
   let r: Mut(EffRow) = row_alloc(k, 64);
   let saved_src: u64 = st.st_src(k);
@@ -455,14 +436,11 @@ let row_parse_body = func(k: Mut(st.State), bg: u64, src: u64, modv: u64) -> Mut
   return r;
 };
 
-// 效应行句柄是效应行组的 AST 节点句柄：嵌套模块里的函数也能直接定位。
 pub let row_from_hdr = func(k: Mut(st.State), src: u64, modv: u64, grp: u64) -> Mut(EffRow) {
   if grp == 0 { return row_empty(k); }
   return row_parse_body(k, grp, src, modv);
 };
 
-// 无载荷枚举变体的裸写法 Opt.None：member 只认带花括号/小括号的构造，补一条。
-// 整数枚举的 `Enum.Variant` 也走这里，产出一个底层整数常量。
 pub let bare_variant = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   if i + 2 >= n { return 0; }
@@ -477,7 +455,7 @@ pub let bare_variant = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
   let sh: u64 = modules.sym_shape(se);
   let m: Mut(agg.Member) = agg.mem_find(sh, n_sym(g, i + 2));
   if is_null(m) { return 0; }
-  // 整数枚举的变体是底层整数常量，不是带标签的聚合对象。
+
   if agg.shp_kind(sh) == agg.kind_cenum() {
     agg.cenum_lit(k, sh, agg.mem_tag(m), out);
     return i + 3;
@@ -490,14 +468,13 @@ pub let bare_variant = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
   return i + 3;
 };
 
-// --- resume 状态 ----------------------------------------------------------
 let resume_at = func(c: Mut(EffCtx), i: u64) -> Mut(ResumeState) {
   return ptr_cast(Mut(ResumeState), ptr_cast(Mut(u8), c.resumes) + i * 32);
 };
 
 pub let push_resume = func(k: Mut(st.State), mode: u64, ret_tid: u64, base_loop: u64) -> u64 {
   let c: Mut(EffCtx) = ctx(k);
-  if c.rn >= c.rcap { return st.st_fail(k, ax.e_frame()); }
+  if c.rn >= c.rcap { return st.st_fail(k, ax.FailKind.Frame as u64); }
   let r: Mut(ResumeState) = resume_at(c, c.rn);
   r.mode = mode;
   r.ret_tid = ret_tid;
@@ -520,14 +497,13 @@ pub let top_resume = func(k: Mut(st.State)) -> Mut(ResumeState) {
   return resume_at(c, c.rn - 1);
 };
 
-// --- 内联调用状态 ---------------------------------------------------------
 let inline_at = func(c: Mut(EffCtx), i: u64) -> Mut(InlineState) {
   return ptr_cast(Mut(InlineState), ptr_cast(Mut(u8), c.inl) + i * 40);
 };
 
 pub let push_inline = func(k: Mut(st.State), label: u64, slot: u64, tp: u64) -> u64 {
   let c: Mut(EffCtx) = ctx(k);
-  if c.inn >= c.inc { return st.st_fail(k, ax.e_frame()); }
+  if c.inn >= c.inc { return st.st_fail(k, ax.FailKind.Frame as u64); }
   let s: Mut(InlineState) = inline_at(c, c.inn);
   s.active = 1;
   s.label = label;

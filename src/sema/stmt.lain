@@ -1,6 +1,3 @@
-// stmt.lain —— 语句编排：let、左值赋值、return、break/continue、语句分派与块遍历。
-// 表达式求值经外部链接回到 core（expr 是互递归的另一半），块的归属留在本文件，
-// 所以 flow.lain 的分支体也指回这里。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
@@ -43,12 +40,12 @@ let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
 let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
 let skip_semi = func(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
 let no_slot = func() -> u64 { return ax.no_slot(); };
-let e_ast = func() -> u64 { return ax.e_ast(); };
-let e_type = func() -> u64 { return ax.e_type(); };
-let e_unsup = func() -> u64 { return ax.e_unsup(); };
-let e_frame = func() -> u64 { return ax.e_frame(); };
+let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
+let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
+let e_unsup = func() -> u64 { return ax.FailKind.Unsup as u64; };
+let e_frame = func() -> u64 { return ax.FailKind.Frame as u64; };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
 let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
 let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_val(k, v); };
@@ -61,7 +58,6 @@ let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 
 let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
 let find_loop = func(k: Mut(st.State), label: u64, has_label: u64) -> u64 { return cx.find_loop(k, label, has_label); };
 
-// 点号路径：从 i 起把名字段收进表里，返回路径之后的下标，段数写进 cnt。
 let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(u64), n: u64) -> u64 {
   if i >= n { return i; }
   if is_name(g, i) == 0 { return i; }
@@ -76,7 +72,6 @@ let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(
   return i + 1;
 };
 
-// 名字段序列 → 模块号；首段走编译期绑定与 use 激活的模块，后续各段逐跳下探。
 let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u64)) -> u64 {
   if cnt == 0 { return 0; }
   let first: u64 = deref(segs);
@@ -88,12 +83,10 @@ let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u6
   return modules.mod_resolve_path(k, m0, deref(rest), tail, cnt - 2, seal);
 };
 
-// 函数体内的模块绑定：右值是 module { ... }、已有模块路径或返回 Module 的函子调用时，
-// 名字只进编译期绑定栈，不占运行期栈槽。返回下一个语句的下标，无绑定回 0。
 let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
   let n: u64 = n_count(g);
   if e >= n { return 0; }
-  // module { ... }：分配虚拟模块号，就地编掉成员声明。
+
   if n_sym(g, e) == s.k_module() and e + 1 < n and is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == dl_brace() {
     let bodyg: u64 = n_at(g, e + 1);
     let vmod: u64 = st.st_next_vmod(k);
@@ -109,8 +102,8 @@ let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
     if st.st_ok(k) == 0 { let bd: u64 = ctf.bind(k, name, 9, vmod, 0); }
     return skip_semi(g, e + 2);
   }
-  // 返回 Module 的函子调用：Lain 编译期解释器直接给出模块号与封签。
-  if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == ax.dl_paren() {
+
+  if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == ax.Delim.Paren as u64 {
     let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
     let fc: u64 = ctfn.eval_factory_call(k, g, e, v);
     if fc != 0 {
@@ -121,7 +114,7 @@ let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
       }
     }
   }
-  // 裸名或点号路径：整条语句就是一个模块路径时才当作模块绑定。
+
   if is_name(g, e) == 1 {
     let segs: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
     let cnt: Mut(u64) = box(k);
@@ -136,7 +129,6 @@ let ct_module_rhs = func(k: Mut(st.State), g: u64, e: u64, name: u64) -> u64 {
   return 0;
 };
 
-// 块内 use / open：use 激活模块参与 Witness 检索，open 把公开面接进当前模块。
 let stmt_use = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   let is_use: u64 = if n_sym(g, i) == s.k_use() { 1 } else { 0 };
@@ -167,7 +159,6 @@ let stmt_use = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return skip_semi(g, end);
 };
 
-// 封签标注：let R: SomeSig = ... 里的 SomeSig 不是类型，跳过标注解析。
 let sig_ann = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
   let n: u64 = n_count(g);
   if j0 >= n { return 0; }
@@ -207,7 +198,7 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let mb: u64 = ct_module_rhs(k, g, e, name);
   if mb != 0 { return mb; }
   let v: Mut(ty.Val) = new_val(k);
-  // 没有标注时用 i64 作提示：整数字面量据此定类型，推不出来再报错。
+
   let hint: Mut(ty.Ty) = new_ty(k);
   if ty.ty_known(t) == 1 { ty.ty_at(hint, t); } else { ty.ty_bits(hint, 64, 1); }
   let nj: u64 = core_expr(k, g, e, 0, hint, v);
@@ -216,7 +207,7 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let vt: Mut(ty.Ty) = new_ty(k);
   if ty.ty_known(t) == 1 {
     ty.ty_at(vt, t);
-    // 标注是无形状指针而右值带形状时保留形状，长度与字段信息都在形状里。
+
     if ty.tk(t) == 3 and ty.tsh(t) == 0 and ty.tsh(ty.vty(v)) != 0 {
       let sh: u64 = ty.tsh(ty.vty(v));
       let sv: u64 = ty.ty_set_sh(vt, sh);
@@ -236,7 +227,7 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     }
   }
   if ty.ty_known(vt) == 0 {
-    // 推导不出来只有两种来源：右值根本没有值（void 调用），或者类型无从确定。
+
     let absent: u64 = if ty.vn(v) != 0 { 0 } else { 1 };
     let m1: Ref(u8) = "void value";
     let m2: Ref(u8) = "cannot infer type";
@@ -246,7 +237,7 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
     st.st_fail(k, e_type());
     return nj;
   }
-  // 标注类型与右值类型可能不同（字符串→切片要现造 16 字节头，Mut→Ref 只改标注）。
+
   let cv: Mut(ty.Val) = new_val(k);
   let c1: u64 = coerce(k, v, ty.vty(v), vt, cv);
   if st.st_ok(k) != 0 { return nj; }
@@ -262,8 +253,6 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return skip_semi(g, nj);
 };
 
-// --- 左值 -----------------------------------------------------------------
-// 起点与每一步的表达式求值由 core 编排，几何与写入在 lval.lain。
 let stmt_assign = func(k: Mut(st.State), g: u64, i: u64, eqj: u64) -> u64 {
   let r: Mut(lv.LvalRec) = lv.rec_new(k);
   let a: u64 = lv.parse_base(k, g, i, r);
@@ -293,7 +282,6 @@ let stmt_assign = func(k: Mut(st.State), g: u64, i: u64, eqj: u64) -> u64 {
   return skip_semi(g, j);
 };
 
-// return 的表达式恰好是裸局部名时，!Copy 值按隐式 reloc 处理：所有权交给调用方。
 let return_local = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
   let off: u64 = drop.bare_local(k, g, j0);
   if off != 0 and env.env_is_noncopy(k, off) == 1 { return drop.mark_relocated(k, off); }
@@ -329,7 +317,7 @@ let stmt_return = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 
   let rp: u64 = st.st_retptr(k);
   let j0: u64 = i + 1;
   let has: u64 = if j0 < n_count(g) and is_semi(g, j0) == 0 { 1 } else { 0 };
-  // sret：把返回值整块拷进隐藏出参，过程本身没有返回值。
+
   if rp != 0 and has == 1 {
     let v: Mut(ty.Val) = new_val(k);
     let j: u64 = core_expr(k, g, j0, 0, rt, v);
@@ -421,8 +409,6 @@ let stmt_continue = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u6
   return skip_semi(g, j2);
 };
 
-// comptime for 序列：按编译期序列逐次绑定循环变量，把体当普通语句编译，
-// 不发射任何运行期 #loop。每轮结束后释放运行期与编译期绑定栈，防止泄露到后续语句/函数。
 let stmt_ctfor = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   let d: Mut(ctf.ForDesc) = ctf.for_open(k, g, i);
   if st.st_ok(k) != 0 { return i + 1; }
@@ -442,9 +428,6 @@ let stmt_ctfor = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   return body + 1;
 };
 
-// --- comptime if ----------------------------------------------------------
-// 条件只在编译期求值：字面量、true/false、comptime for 的循环变量、
-// size_of / align_of / field_count 查询与目标系统查询，按算符优先级折叠成整数。
 let cb_target_os = func() -> u64 { return s.intern("target_os", 9); };
 let cb_is_windows = func() -> u64 { return s.intern("is_windows", 10); };
 let cb_is_linux = func() -> u64 { return s.intern("is_linux", 8); };
@@ -487,7 +470,7 @@ let cond_atom = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
   if i >= n { ctf.fail_msg(k, "empty comptime if condition", 27, e_ast()); return i; }
   let h: u64 = n_at(g, i);
   if is_group_node(h) == 1 {
-    if ax.delim(h) == ax.dl_paren() {
+    if ax.delim(h) == ax.Delim.Paren as u64 {
       let j: u64 = cond_expr(k, h, 0, 0, out);
       if st.st_ok(k) == 0 and j != n_count(h) { ctf.fail_msg(k, "bad comptime if condition", 25, e_ast()); }
       return i + 1;
@@ -506,7 +489,7 @@ let cond_atom = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
     return i + 1;
   }
   if name == 0 { ctf.fail_msg(k, "condition is not comptime-known", 31, e_type()); return i + 1; }
-  if i + 1 < n and is_group(g, i + 1) == 1 and ax.delim_of(g, i + 1) == ax.dl_paren() {
+  if i + 1 < n and is_group(g, i + 1) == 1 and ax.delim_of(g, i + 1) == ax.Delim.Paren as u64 {
     let ag: u64 = n_at(g, i + 1);
     if is_os_query(name) == 1 {
       if n_count(ag) != 0 { ctf.fail_msg(k, "os query takes no args", 22, e_ast()); return i + 2; }
@@ -549,7 +532,6 @@ let cond_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, out: Mut(ctf.C
   return cond_tail(k, g, j, minp, out);
 };
 
-// 条件必须整条耗尽到条件与体组之间的边界，否则说明它依赖了运行期的值。
 pub let comptime_cond = func(k: Mut(st.State), g: u64, i: u64, stop: u64) -> u64 {
   let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
   let j: u64 = cond_expr(k, g, i, 0, v);
@@ -559,8 +541,6 @@ pub let comptime_cond = func(k: Mut(st.State), g: u64, i: u64, stop: u64) -> u64
   return if ctf.v_a(v) != 0 { 1 } else { 0 };
 };
 
-// comptime if 的结构：[comptime if <条件> { 体 } [else { 体 }]]。
-// 条件区间是 [cond_i, stop_i)，stop_i 是第一个花括号组的下标。
 pub let CtIf = struct {
   cond_i: u64,
   stop_i: u64,
@@ -601,7 +581,6 @@ pub let ctif_open = func(k: Mut(st.State), g: u64, i: u64) -> Mut(CtIf) {
   return d;
 };
 
-// 选中的体组：条件为真取 then，否则取 else；没有选中的分支时回 0。
 pub let ctif_body = func(k: Mut(st.State), g: u64, d: Mut(CtIf)) -> u64 {
   let t: u64 = comptime_cond(k, g, d.cond_i, d.stop_i);
   if st.st_ok(k) != 0 { return 0; }
@@ -609,7 +588,6 @@ pub let ctif_body = func(k: Mut(st.State), g: u64, d: Mut(CtIf)) -> u64 {
   return d.no;
 };
 
-// comptime if 语句：只编译选中的分支，另一分支既不做类型检查也不降级。
 let stmt_ctif = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 {
   let d: Mut(CtIf) = ctif_open(k, g, i);
   if st.st_ok(k) != 0 { return d.next_i; }
@@ -625,8 +603,6 @@ let stmt_ctif = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64
   return skip_semi(g, d.next_i);
 };
 
-// 语句位置上被丢掉的值：Copy 值（u64 / bool / 指针等）直接不要；
-// 带 drop 的值在语句位置上无法确定所有权，要求调用方显式绑定。
 let stmt_discard = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 {
   let sh: u64 = ty.tsh(ty.vty(v));
   if agg.shp_has_drop(sh) == 0 { return 0; }
@@ -636,8 +612,6 @@ let stmt_discard = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 {
   return 0;
 };
 
-// while <条件> { 体 }：条件每轮重求，break/continue 与 loop ... while 完全一致。
-// 语句位置与表达式位置共用这一条实现（core 的 expr_prefix 直接调它）。
 pub let stmt_while = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val), term: Mut(u64)) -> u64 {
   let n: u64 = n_count(g);
   let d: u64 = st.st_loopdepth(k);
@@ -821,7 +795,7 @@ pub let block_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot
   let ctm: u64 = ctf.mark(k);
   let em: u64 = env.env_mark(k);
   let r: u64 = block_walk(k, g, i, term, slot, tp);
-  // 整块必然终结时不在返回指令之后再发 drop；路径上的 drop 已由 return 发过。
+
   if box_get(term) == 0 { let dr: u64 = drop.drop_from(k, em); }
   gv.release(k, gm);
   ctf.release(k, ctm);

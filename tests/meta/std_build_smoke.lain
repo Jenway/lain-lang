@@ -1,12 +1,9 @@
-// std::build 回归：目标环境、构建图登记、依赖链接、以及双哈希增量判定。
-// 仅改函数体时接口哈希不变 -> 下游全部跳过；签名变化 -> 接口哈希翻转，下游必须重编。
-// 全部判定成立时返回值恰为 97。
 let bld = import("std::build");
 
 use bld;
 
 let main = func() -> i64 {
-  // --- 目标环境 ---
+
   let os_linux: bld.Os = bld.Os.Linux { };
   let arch_x86: bld.Arch = bld.Arch.X86_64 { };
   let opt_safe: bld.OptMode = bld.OptMode.ReleaseSafe { };
@@ -27,7 +24,6 @@ let main = func() -> i64 {
     ReleaseFast => 0,
   };
 
-  // --- 构建图 ---
   let g: bld.Graph = bld.new_graph(env);
 
   let name_core: Slice(u8) = "core";
@@ -50,7 +46,7 @@ let main = func() -> i64 {
 
   let e1: u64 = g.link(app, core);
   let e2: u64 = g.link(tst, core);
-  // 重复登记同一条依赖边必须被拒绝。
+
   let dup: u64 = g.link(app, core);
 
   let cnt: u64 = g.count;
@@ -63,10 +59,8 @@ let main = func() -> i64 {
   let app_art: bld.Artifact = g.get(app);
   let core_art: bld.Artifact = g.get(core);
 
-  // --- 双哈希增量判定 ---
-  // 仅函数体改变：源码哈希变了，接口哈希不变。
   let src_app_body: Slice(u8) = "pub let main = func() -> i64 { return core_sqrt(64); };";
-  // 签名改变：返回类型从 i64 变成 u64，接口哈希跟着变。
+
   let iface_app_sig: Slice(u8) = "main() -> u64";
 
   let h_src_old: u64 = bld.fnv1a_bytes(src_app);
@@ -84,17 +78,15 @@ let main = func() -> i64 {
   let key_flip: u64 = if key_body != key_sig { 1 } else { 0 };
   let key_stable: u64 = if key_old == key_again { 1 } else { 0 };
 
-  // 体变：本单元重编（1），下游看接口哈希不变（1）-> 下游跳过。
   let own_rebuild: u64 = g.needs_rebuild(app, h_src_new, h_iface_old);
   let down_skip: u64 = bld.interface_unchanged(app_art.iface_hash, h_iface_old);
-  // 签名变化：接口哈希翻转（0）-> 下游必须重编。
+
   let down_flip: u64 = bld.interface_unchanged(app_art.iface_hash, h_iface_new);
-  // 依赖方自身未变：不需要重编。
+
   let core_still: u64 = g.needs_rebuild(core, core_art.src_hash, core_art.iface_hash);
-  // 非法 id 一律按必重编处理。
+
   let bad_rebuild: u64 = g.needs_rebuild(99, h_src_old, h_iface_old);
 
-  // 每一项偏差都必须是 0；正确时返回 97。
   let bias: i64 = (env_hit - 3)
     + (opt_hit - 1)
     + ((edges as i64) - 2)

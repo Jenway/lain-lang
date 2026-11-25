@@ -1,26 +1,13 @@
-// src/host/symtab.lain —— 纯 Lain 的宿主符号表与工作区分配器（HostSymTab）。
-//
-// 符号按原文驻留：同一段字节反复驻留拿回同一个句柄。句柄从 1 起，0 专门表示
-// 「没有符号」，因此开放寻址表的空槽可以直接存 0。桶里存的是句柄本身，槽位
-// 数量恒为符号容量的两倍，装载率不超过一半，探测链一定遇到空槽。
-//
-// 全部存储由调用方一次性交给 symtab_new：在一块原始字节区里切出桶表、条目
-// 表，剩下的字节是一个共享区段。符号文本从区段低端向上增长，工作区分配从
-// 区段高端向下增长，两者相向而行，任何一方都不会预先占掉另一方用不上的
-// 空间。区段里的字节只增不减，构造过程中没有任何额外分配。
 let mem = import("std::mem");
 let fmt = import("std::fmt");
 let os = import("std::os");
 
-// --- 记录 -------------------------------------------------------------------
-// 一个符号：原文在共享区段里的起点、字节数与整段原文的散列值。
 pub let SymEntry = struct {
   off: u64,
   len: u64,
   hash: u64,
 };
 
-// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与细节值。
 pub let HostSymTab = struct {
   buckets: Mut(u32),
   bucket_cap: u64,
@@ -32,54 +19,29 @@ pub let HostSymTab = struct {
   pool_used: u64,
   arena_used: u64,
   arena_peak: u64,
-  err_msg_ptr: Ref(u8),
-  err_msg_len: u64,
-  err_detail: u64,
 };
 
-// --- 违例出口 ---------------------------------------------------------------
-// 全部宿主模块的违例出口都只做三件事：记下上下文、打一行说明、就地终止。
-// 说明文本一律是静态字面量，生命周期不依赖调用方的帧；说明行固定是
-// "[host_trap] <msg> (detail=<u64>)\n"，格式化的落脚点只有 std::fmt 的静态
-// 字符池，所以递增区耗尽或堆分配失败的时候这一行仍然打得出来。
-pub let trap_note = func(msg: Slice(u8), detail: u64) -> u64 {
+pub let trap_note = func(msg: Slice(u8), detail: u64) -> () {
   let c0: fmt.Cursor = fmt.fmt_begin();
   let c1: fmt.Cursor = fmt.write_str(c0, "[host_trap] ");
   let c2: fmt.Cursor = fmt.write_str(c1, msg);
   let c3: fmt.Cursor = fmt.write_str(c2, " (detail=");
   let c4: fmt.Cursor = fmt.write_u64(c3, detail);
   let c5: fmt.Cursor = fmt.write_str(c4, ")\n");
-  return os.eprint(fmt.fmt_done(c5));
+  os.eprint(fmt.fmt_done(c5));
 };
 
-let trap_record = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
-  t.err_msg_ptr = msg.ptr;
-  t.err_msg_len = msg.len;
-  t.err_detail = detail;
+let trap_with = func(msg: Slice(u8), detail: u64) -> u64 {
+  trap_note(msg, detail);
+  let dead: u64 = mem.trap_abort(detail);
+  return dead;
+};
+
+pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
+  trap_note(msg, detail);
   return 0;
 };
 
-// 只报告、不终止：发射期等位置的违例出口记下上下文、打一行说明，再由自己的
-// 就地终止。
-pub let trap_report = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
-  let seen: u64 = trap_record(t, msg, detail);
-  return trap_note(msg, detail);
-};
-
-let trap_with = func(t: Mut(HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
-  let seen: u64 = trap_record(t, msg, detail);
-  let noted: u64 = trap_note(msg, detail);
-  return mem.halt_now(detail);
-};
-
-pub let last_err_msg = func(t: Mut(HostSymTab)) -> Slice(u8) {
-  return make_slice(Slice(u8), t.err_msg_ptr, t.err_msg_len);
-};
-
-pub let last_err_detail = func(t: Mut(HostSymTab)) -> u64 { return t.err_detail; };
-
-// --- 记录地址 ---------------------------------------------------------------
-// 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
 let slot_at = func(t: Mut(HostSymTab), i: u64) -> Mut(u32) {
   return t.buckets + i * 4;
 };
@@ -88,33 +50,30 @@ let entry_at = func(t: Mut(HostSymTab), h: u64) -> Mut(SymEntry) {
   return t.entries + (h - 1) * size_of(SymEntry);
 };
 
-// --- 容量与布局 -------------------------------------------------------------
 let align8 = func(n: u64) -> u64 { return (n + 7) / 8 * 8; };
 let align16 = func(n: u64) -> u64 { return (n + 15) / 16 * 16; };
 
-// 不大于 n 的最大 2 的幂。n 至少为 1。
 let pow2_floor = func(n: u64) -> u64 {
   return loop f(c: u64 = 1) while c * 2 <= n { c = c * 2; };
 };
 
 let check_total = func(total: u64) -> u64 {
-  if total < 2048 { return mem.halt_now(total); }
+  if total < 2048 { return trap_with("HostSymTab::symtab_new: buffer below 2048 bytes", total); }
   return total;
 };
 
-// 条目下标必须能塞进 32 位桶表。
 let check_entry_cap = func(cap: u64) -> u64 {
-  if cap > 2147483647 { return mem.halt_now(cap); }
+  if cap > 2147483647 {
+    return trap_with("HostSymTab::symtab_new: entry capacity exceeds 32 bits", cap);
+  }
   return cap;
 };
 
 let check_region = func(total: u64, fixed: u64) -> u64 {
-  if fixed >= total { return mem.halt_now(fixed); }
+  if fixed >= total { return trap_with("HostSymTab::symtab_new: no bytes left for the region", fixed); }
   return total - fixed;
 };
 
-// 把一整块缓冲区交给 HostSymTab：每 128 字节预算给一个符号，桶表是符号容量
-// 的两倍，桶表与条目表之后的字节全部并进共享区段。
 pub let symtab_new = func(buf: MutSlice(u8)) -> HostSymTab {
   let total: u64 = check_total(buf.len);
   let entry_cap: u64 = check_entry_cap(pow2_floor(total / 128));
@@ -141,13 +100,9 @@ pub let symtab_new = func(buf: MutSlice(u8)) -> HostSymTab {
     pool_used: 0,
     arena_used: 0,
     arena_peak: 0,
-    err_msg_ptr: null_ref(Ref(u8)),
-    err_msg_len: 0,
-    err_detail: 0,
   };
 };
 
-// --- 水位查询 ---------------------------------------------------------------
 pub let sym_count = func(t: Mut(HostSymTab)) -> u64 { return t.count; };
 pub let sym_capacity = func(t: Mut(HostSymTab)) -> u64 { return t.entry_cap; };
 pub let bucket_capacity = func(t: Mut(HostSymTab)) -> u64 { return t.bucket_cap; };
@@ -159,8 +114,6 @@ pub let free_bytes = func(t: Mut(HostSymTab)) -> u64 {
   return t.region_cap - t.pool_used - t.arena_used;
 };
 
-// --- 散列与比较 -------------------------------------------------------------
-// FNV-1a，64 位。乘法按 64 位回绕，散列值只用来选桶与做快速排除。
 let hash_basis = func() -> u64 { return 0xcbf29ce484222325; };
 let hash_prime = func() -> u64 { return 0x100000001b3; };
 
@@ -172,7 +125,6 @@ let hash_bytes = func(p: Ref(u8), n: u64) -> u64 {
   };
 };
 
-// 驻留池里 off 起的 n 个字节与外部原文是否逐字节相同。
 let pool_same = func(t: Mut(HostSymTab), off: u64, n: u64, p: Ref(u8)) -> u64 {
   let kept: Slice(u8) = make_slice(Slice(u8), t.region + off, n);
   let src: Slice(u8) = make_slice(Slice(u8), p, n);
@@ -182,7 +134,6 @@ let pool_same = func(t: Mut(HostSymTab), off: u64, n: u64, p: Ref(u8)) -> u64 {
   };
 };
 
-// 池内两段原文是否逐字节相同。
 let pool_eq = func(t: Mut(HostSymTab), oa: u64, ob: u64, n: u64) -> u64 {
   let a: Slice(u8) = make_slice(Slice(u8), t.region + oa, n);
   let b: Slice(u8) = make_slice(Slice(u8), t.region + ob, n);
@@ -199,17 +150,12 @@ let entry_match = func(t: Mut(HostSymTab), h: u64, hash: u64, p: Ref(u8), n: u64
   return pool_same(t, e.off, n, p);
 };
 
-// --- 句柄检查 ---------------------------------------------------------------
-// 句柄 0 与超过当前符号数的句柄都没有对应条目。
 let check_handle = func(t: Mut(HostSymTab), h: u64) -> u64 {
-  if h == 0 { return trap_with(t, "HostSymTab::check_handle: zero handle", h); }
-  if h > t.count { return trap_with(t, "HostSymTab::check_handle: handle out of range", h); }
+  if h == 0 { return trap_with("HostSymTab::check_handle: zero handle", h); }
+  if h > t.count { return trap_with("HostSymTab::check_handle: handle out of range", h); }
   return h;
 };
 
-// --- 桶表探测 ---------------------------------------------------------------
-// 从散列值选定的桶开始顺序探测，落到空槽就说明原文不在表里。整张表扫完仍
-// 没有空槽说明桶表已经损坏：返回的表尾下标必然大于符号数。
 let probe_find = func(t: Mut(HostSymTab), hash: u64, p: Ref(u8), n: u64) -> u64 {
   let start: u64 = hash % t.bucket_cap;
   let res: u64 = loop f(k: u64 = 0) while k < t.bucket_cap {
@@ -221,11 +167,10 @@ let probe_find = func(t: Mut(HostSymTab), hash: u64, p: Ref(u8), n: u64) -> u64 
     if entry_match(t, h, hash, p, n) == 1 { break f(h); }
     k = k + 1;
   };
-  if res > t.count { return trap_with(t, "HostSymTab::probe_find: bucket table corrupt", res); }
+  if res > t.count { return trap_with("HostSymTab::probe_find: bucket table corrupt", res); }
   return res;
 };
 
-// 把句柄写进第一个空槽。符号数不超过桶数的一半，因此空槽必然存在。
 let probe_place = func(t: Mut(HostSymTab), hash: u64, h: u64) -> u64 {
   let start: u64 = hash % t.bucket_cap;
   let at: u64 = loop f(k: u64 = 0) while k < t.bucket_cap {
@@ -234,16 +179,14 @@ let probe_place = func(t: Mut(HostSymTab), hash: u64, h: u64) -> u64 {
     if deref(s) == 0 { break f(i); }
     k = k + 1;
   };
-  if at >= t.bucket_cap { return trap_with(t, "HostSymTab::probe_place: bucket table full", at); }
+  if at >= t.bucket_cap { return trap_with("HostSymTab::probe_place: bucket table full", at); }
   let slot: Mut(u32) = slot_at(t, at);
   deref(slot) = h as u32;
   return at;
 };
 
-// --- 驻留池低端 -------------------------------------------------------------
-// 符号文本从共享区段的低端向上紧排，返回可写入的起点偏移。
 let room_pool = func(t: Mut(HostSymTab), n: u64) -> u64 {
-  if n > free_bytes(t) { return trap_with(t, "HostSymTab::room_pool: symbol pool exhausted", n); }
+  if n > free_bytes(t) { return trap_with("HostSymTab::room_pool: symbol pool exhausted", n); }
   return t.pool_used;
 };
 
@@ -257,17 +200,13 @@ let copy_pool = func(t: Mut(HostSymTab), off: u64, p: Ref(u8), n: u64) -> u64 {
   return i;
 };
 
-// --- 符号接口 ---------------------------------------------------------------
-// 驻留：原文已在表里就交回原句柄，否则先把条目容量与区段空间都核一遍，再
-// 依次写正文、写条目、挂进桶表。容量不足时在第一处终止，区段里不留任何
-// 半条记录。
 pub let sym_intern = func(t: Mut(HostSymTab), p: Ref(u8), n: u64) -> u64 {
-  if n == 0 { return trap_with(t, "HostSymTab::sym_intern: empty symbol text", n); }
+  if n == 0 { return trap_with("HostSymTab::sym_intern: empty symbol text", n); }
   let hash: u64 = hash_bytes(p, n);
   let have: u64 = probe_find(t, hash, p, n);
   if have != 0 { return have; }
   if t.count >= t.entry_cap {
-    return trap_with(t, "HostSymTab::sym_intern: entry capacity exhausted", t.count);
+    return trap_with("HostSymTab::sym_intern: entry capacity exhausted", t.count);
   }
   let off: u64 = room_pool(t, n);
   let copied: u64 = copy_pool(t, off, p, n);
@@ -282,14 +221,12 @@ pub let sym_intern = func(t: Mut(HostSymTab), p: Ref(u8), n: u64) -> u64 {
   return h;
 };
 
-// 查找：原文不在表里就回 0，不写入任何字节。
 pub let sym_find = func(t: Mut(HostSymTab), p: Ref(u8), n: u64) -> u64 {
   if n == 0 { return 0; }
   let hash: u64 = hash_bytes(p, n);
   return probe_find(t, hash, p, n);
 };
 
-// 两个句柄的原文是否相同。句柄按出现位置分配时只能按内容比。
 pub let sym_same = func(t: Mut(HostSymTab), a: u64, b: u64) -> u64 {
   let ha: u64 = check_handle(t, a);
   let hb: u64 = check_handle(t, b);
@@ -302,7 +239,7 @@ pub let sym_same = func(t: Mut(HostSymTab), a: u64, b: u64) -> u64 {
 };
 
 let trap_ref = func(t: Mut(HostSymTab), cause: u64) -> Ref(u8) {
-  let dead: u64 = trap_with(t, "HostSymTab::sym_addr: handle out of range", cause);
+  trap_with("HostSymTab::sym_addr: handle out of range", cause);
   return ptr_cast(Ref(u8), t.region);
 };
 
@@ -318,23 +255,20 @@ pub let sym_len = func(t: Mut(HostSymTab), h: u64) -> u64 {
   return e.len;
 };
 
-// --- 工作区高端 -------------------------------------------------------------
-// 对齐必须是 2 的幂且不超过 4096，0 表示取默认的 16。
 let check_align = func(align: u64) -> u64 {
   let a: u64 = loop f(x: u64 = align) while x == 0 { x = 16; };
-  if (a & (a - 1)) != 0 { return mem.halt_now(align); }
-  if a > 4096 { return mem.halt_now(align); }
+  if (a & (a - 1)) != 0 {
+    return trap_with("HostSymTab::mem_alloc: align is not a power of two", align);
+  }
+  if a > 4096 { return trap_with("HostSymTab::mem_alloc: align exceeds 4096", align); }
   return a;
 };
 
 let trap_mut = func(t: Mut(HostSymTab), msg: Slice(u8), cause: u64) -> Mut(u8) {
-  let dead: u64 = trap_with(t, msg, cause);
+  trap_with(msg, cause);
   return t.region;
 };
 
-// 从共享区段的高端向下分配：先按绝对地址把起点压到 align 的整数倍，再核
-// 这一块不得越过符号文本当前的水位。区段长度与低端水位都不参与对齐计算，
-// 因此返回的地址无论 align 多大都是真对齐的。
 pub let mem_alloc = func(t: Mut(HostSymTab), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = check_align(align);
   if bytes > free_bytes(t) {

@@ -1,17 +1,5 @@
-// 静态反射 + 编译期代码注入的库级 SoA 原型。
-//
-// Vec3 是普通的按结构体排列（AoS）类型。下面这些函数都是运行在 Lain-VM 里的
-// 普通 .lain 代码：soa_gen 在编译期被 inject 调用，从反射表里读出 Vec3 的
-// 字段名与偏移，把 Vec3_SoA 与它的 pack / 逐字段读取函数写成文本交回编译器，
-// 编译器再把这段文本当成新的源码单元编译进同一个模块。
-//
-// 生成出来的东西等价于：
-//   let Vec3_SoA = struct { x: i64 y: i64 z: i64 };
-//   let soa_pack = func(p: addr, a: Vec3) -> u64 { ... };
-//   let soa_x = func(p: addr) -> i64 { ... };
 let Vec3 = struct { x: i64 y: i64 z: i64 };
 
-// --- 文本写入 -------------------------------------------------------------
 let puts = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let j: u64 = i + k;
@@ -22,7 +10,6 @@ let puts = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   return i + n;
 };
 
-// 十进制写出：生成出来的代码里偏移必须是字面量。
 let putn = func(b: addr, i: u64, v: u64) -> u64 {
   if v >= 10 {
     let j: u64 = putn(b, i, v / 10);
@@ -34,7 +21,6 @@ let putn = func(b: addr, i: u64, v: u64) -> u64 {
   return i + 1;
 };
 
-// --- 生成器 -------------------------------------------------------------
 let decl = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   if k >= n { return i; }
   let j0: u64 = if k == 0 { i } else { puts(b, i, " ", 1) };
@@ -61,7 +47,6 @@ let pack = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   return pack(b, j4, tid, k + 1, n);
 };
 
-// SoA 侧每个字段占满 8 字节槽位。
 let acc = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   if k >= n { return i; }
   let nm: addr = meta_field_name(tid, k);
@@ -91,14 +76,12 @@ let gen = func(b: addr, i: u64, tid: u64) -> u64 {
   return acc(b, j9, tid, 0, n);
 };
 
-// inject 的生成器入口：返回缓冲起点，长度由编译器扫 0 字节得出。
 let soa_gen = func(tid: u64) -> addr {
   let b: addr = meta_out();
   let n: u64 = gen(b, 0, tid);
   return b;
 };
 
-// --- 编译期折叠的反射查询 -------------------------------------------------
 let size_folded: u64 = meta_type_size(Vec3);
 let count_folded: u64 = meta_field_count(Vec3);
 let off_folded: u64 = meta_field_offset(Vec3, 1);

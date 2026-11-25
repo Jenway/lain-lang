@@ -1,15 +1,7 @@
-// Phase 6.2：纯 Lain 的 Reader 与 AstOut。
-//
-// Reader 把一段多行源码切成平铺的 RawAst：根组、花括号组、方括号组、圆括号组、
-// let / module / func / -> / => 的记号、行注释跳过与字符串转义都按零关键字规则处理。
-// 节点计数、组的孩子表、记号文本切片与 1 基行列号逐个核对；畸形输入必须给出
-// 确定的错误码与位置。随后 AstOut 先开一次事务、造节点、回滚并确认水位复位，
-// 再开第二次事务造一棵 (sum(1, 2)) 的展开子树并提交，核对提交后的结构，返回 62。
 let r = import("src::frontend::reader");
 let ao = import("src::meta::ast_out");
+let meta = import("src::meta::ast");
 
-// 静态工作区：Reader 的 RawAst Arena 与 AstOut 的追加缓冲区都放在这里。
-// 每块 128 字节；Reader 给 128 块（16384 字节），AstOut 给 32 块（4096 字节）。
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 let reader_blocks: Array(Array(u64, 16), 128) = [
@@ -44,14 +36,10 @@ let out_ptr = func() -> Mut(u8) {
   return ptr_cast(Mut(u8), mut_of(out_blocks));
 };
 
-// 正常源码：11 行，含两处行注释、模块、let、func、-> 与 =>、花括号组、方括号组、
-// 圆括号组，以及字符串里的 \n 转义（Reader 原样保留反斜杠与 n 两个字节）。
 let source: Slice(u8) = "// header comment\nlet pair = module {\n  pub let make = func(a: i64, b: i64) -> Pair {\n    return Pair { a: a, b: b };\n  };\n  pub let first = func(p: Pair) -> i64 => p.a;\n};\n// second comment\nlet arena: Array(u64, 2) = [1, 2];\nlet tag = \"line\\nbreak\";\nlet tuple = (1, 2, 3);";
 
-// 畸形源码：花括号里出现圆括号闭合符。
 let bad_mismatch: Slice(u8) = "let a = { 1 )";
 
-// 畸形源码：字符串字面量没有收尾引号。
 let bad_string: Slice(u8) = "let s = \"abc";
 
 let bytes_eq = func(a: Slice(u8), b: Slice(u8), i: u64) -> u64 {
@@ -74,110 +62,100 @@ let out_text_is = func(a: Mut(ao.AstOut), id: u64, lit: Slice(u8)) -> u64 {
 };
 
 let main = func() -> i64 {
-  // --- Reader：正常源码的结构与位置 ---------------------------------------
+
   let rb: MutSlice(u8) = make_slice(MutSlice(u8), reader_ptr(), 16384);
   let ast: r.RawAst = r.parse(source, rb);
-  if ast.kind != r.RD_OK() { return 10; }
-  // 8 个组（含根）+ 72 个记号 = 80 个节点。
+  if ast.kind != r.ReadStatus.Ok as u64 { return 10; }
+
   if ast.node_count != 80 { return 11; }
   if ast.child_count != 79 { return 12; }
 
   let root: r.RawNode = r.node_get(ast.nodes, ast.root);
-  if root.kind != r.RAW_ROOT() { return 13; }
+  if root.kind != r.RawKind.Root as u64 { return 13; }
   if root.child_count != 24 { return 14; }
 
-  // 顶层第 1 个记号是 let，从第 2 行第 1 列开始。
   let t0: u64 = r.child_id(ast, ast.root, 0);
   let n0: r.RawNode = r.node_get(ast.nodes, t0);
   let s0: r.Span = r.node_span(ast, t0);
-  if n0.kind != r.RAW_TOKEN_IDENT() { return 15; }
+  if n0.kind != r.RawKind.TokenIdent as u64 { return 15; }
   if node_text_is(ast, t0, "let") == 0 { return 16; }
   if s0.line != 2 { return 17; }
   if s0.col != 1 { return 18; }
 
-  // 顶层第 2 个记号是 pair，第 2 行第 5 列。
   let t1: u64 = r.child_id(ast, ast.root, 1);
   let s1: r.Span = r.node_span(ast, t1);
   if node_text_is(ast, t1, "pair") == 0 { return 19; }
   if s1.line != 2 { return 20; }
   if s1.col != 5 { return 21; }
 
-  // 第 5 个孩子是 module 的花括号组：第 2 行第 19 列，23 个孩子。
   let body: u64 = r.child_id(ast, ast.root, 4);
   let nb: r.RawNode = r.node_get(ast.nodes, body);
   let sb: r.Span = r.node_span(ast, body);
-  if nb.kind != r.RAW_GROUP_BRACE() { return 22; }
+  if nb.kind != r.RawKind.GroupBrace as u64 { return 22; }
   if nb.child_count != 23 { return 23; }
   if sb.line != 2 { return 24; }
   if sb.col != 19 { return 25; }
 
-  // 模块体里的 make 参数圆括号组：第 3 行第 22 列，7 个孩子。
   let params: u64 = r.child_id(ast, body, 5);
   let np: r.RawNode = r.node_get(ast.nodes, params);
   let sp: r.Span = r.node_span(ast, params);
-  if np.kind != r.RAW_GROUP_PAREN() { return 26; }
+  if np.kind != r.RawKind.GroupParen as u64 { return 26; }
   if np.child_count != 7 { return 27; }
   if sp.line != 3 { return 28; }
   if sp.col != 22 { return 29; }
 
-  // 模块体里的 `=>` 是单个双字节记号，位置在第 6 行第 40 列。
   let arrow: u64 = r.child_id(ast, body, 18);
   let na: r.RawNode = r.node_get(ast.nodes, arrow);
   let sa: r.Span = r.node_span(ast, arrow);
-  if na.kind != r.RAW_TOKEN_PUNCT() { return 30; }
+  if na.kind != r.RawKind.TokenPunct as u64 { return 30; }
   if node_text_is(ast, arrow, "=>") == 0 { return 31; }
   if sa.line != 6 { return 32; }
   if sa.col != 40 { return 33; }
 
-  // 方括号组 [1, 2]：3 个孩子，首尾都是数字记号。
   let square: u64 = r.child_id(ast, ast.root, 12);
   let nsq: r.RawNode = r.node_get(ast.nodes, square);
-  if nsq.kind != r.RAW_GROUP_BRACKET() { return 34; }
+  if nsq.kind != r.RawKind.GroupBracket as u64 { return 34; }
   if nsq.child_count != 3 { return 35; }
   let sq0: u64 = r.child_id(ast, square, 0);
   let sq2: u64 = r.child_id(ast, square, 2);
   if node_text_is(ast, sq0, "1") == 0 { return 36; }
   if node_text_is(ast, sq2, "2") == 0 { return 37; }
 
-  // 字符串记号保留转义的原始字节：`"line\nbreak"` 共 13 字节，第 10 行第 11 列。
   let strtok: u64 = r.child_id(ast, ast.root, 17);
   let nst: r.RawNode = r.node_get(ast.nodes, strtok);
   let sst: r.Span = r.node_span(ast, strtok);
-  if nst.kind != r.RAW_TOKEN_STRING() { return 38; }
+  if nst.kind != r.RawKind.TokenString as u64 { return 38; }
   if node_text_is(ast, strtok, "\"line\\nbreak\"") == 0 { return 39; }
   if sst.line != 10 { return 40; }
   if sst.col != 11 { return 41; }
   if sst.len != 13 { return 42; }
 
-  // 圆括号组 (1, 2, 3)：5 个孩子。
   let tuple: u64 = r.child_id(ast, ast.root, 22);
   let ntu: r.RawNode = r.node_get(ast.nodes, tuple);
-  if ntu.kind != r.RAW_GROUP_PAREN() { return 43; }
+  if ntu.kind != r.RawKind.GroupParen as u64 { return 43; }
   if ntu.child_count != 5 { return 44; }
   let tu4: u64 = r.child_id(ast, tuple, 4);
   if node_text_is(ast, tu4, "3") == 0 { return 45; }
 
-  // --- Reader：畸形输入的错误码与位置 -------------------------------------
   let rb2: MutSlice(u8) = make_slice(MutSlice(u8), reader_ptr(), 16384);
   let bad: r.RawAst = r.parse(bad_mismatch, rb2);
-  if bad.kind != r.RD_ERR_MISMATCH() { return 50; }
+  if bad.kind != r.ReadStatus.ErrMismatch as u64 { return 50; }
   if bad.err_offset != 12 { return 51; }
   if bad.err_line != 1 { return 52; }
   if bad.err_col != 13 { return 53; }
 
   let rb3: MutSlice(u8) = make_slice(MutSlice(u8), reader_ptr(), 16384);
   let open: r.RawAst = r.parse(bad_string, rb3);
-  if open.kind != r.RD_ERR_STRING() { return 55; }
+  if open.kind != r.ReadStatus.ErrString as u64 { return 55; }
   if open.err_offset != 8 { return 56; }
   if open.err_line != 1 { return 57; }
   if open.err_col != 9 { return 58; }
 
-  // --- AstOut：第一次事务，写节点后回滚 -----------------------------------
   let ob: Mut(u8) = out_ptr();
   let a0: ao.AstOut = ao.ast_out_init(ob, 16, 16, 64, 4);
   let out: Mut(ao.AstOut) = mut_of(a0);
   if ao.node_count(out) != 0 { return 60; }
-  if ao.root_of(out) != ao.NO_NODE() { return 61; }
+  if ao.root_of(out) != meta.NO_NODE() { return 61; }
   let tx1: u64 = ao.tx_begin(out);
   let s_let: u64 = ao.mk_token(out, 0, 0, 0, "let");
   let s_x: u64 = ao.mk_token(out, 0, 0, 0, "x");
@@ -185,17 +163,16 @@ let main = func() -> i64 {
   kids1[0] = s_let as u32;
   kids1[1] = s_x as u32;
   let k1: Slice(u32) = make_slice(Slice(u32), ptr_cast(Ref(u32), ref_of(kids1)), 2);
-  let g1: u64 = ao.mk_group(out, ao.DL_NONE(), 0, k1);
+  let g1: u64 = ao.mk_group(out, meta.Delim.None as u64, 0, k1);
   if ao.node_count(out) != 3 { return 90; }
   if ao.child_total(out) != 2 { return 63; }
   let rb1: u64 = ao.tx_rollback(out, tx1);
-  if rb1 != ao.NO_NODE() { return 64; }
+  if rb1 != meta.NO_NODE() { return 64; }
   if ao.node_count(out) != 0 { return 65; }
   if ao.child_total(out) != 0 { return 66; }
   if ao.pool_total(out) != 0 { return 67; }
-  if ao.root_of(out) != ao.NO_NODE() { return 68; }
+  if ao.root_of(out) != meta.NO_NODE() { return 68; }
 
-  // --- AstOut：第二次事务，造 (sum(1, 2)) 子树并提交 ----------------------
   let tx2: u64 = ao.tx_begin(out);
   let t_sum: u64 = ao.mk_token(out, 0, 0, 0, "sum");
   let t_one: u64 = ao.mk_token(out, 0, 0, 0, "1");
@@ -206,28 +183,27 @@ let main = func() -> i64 {
   arg_kids[1] = t_comma as u32;
   arg_kids[2] = t_two as u32;
   let ka: Slice(u32) = make_slice(Slice(u32), ptr_cast(Ref(u32), ref_of(arg_kids)), 3);
-  let args: u64 = ao.mk_group(out, ao.DL_PAREN(), 0, ka);
+  let args: u64 = ao.mk_group(out, meta.Delim.Paren as u64, 0, ka);
   let call_kids: Array(u32, 2) = [0, 0];
   call_kids[0] = t_sum as u32;
   call_kids[1] = args as u32;
   let kc: Slice(u32) = make_slice(Slice(u32), ptr_cast(Ref(u32), ref_of(call_kids)), 2);
-  let call: u64 = ao.mk_group(out, ao.DL_PAREN(), 0, kc);
+  let call: u64 = ao.mk_group(out, meta.Delim.Paren as u64, 0, kc);
   let committed: u64 = ao.tx_commit(out, tx2, call);
   if committed != call { return 69; }
   if ao.root_of(out) != call { return 70; }
   if ao.node_count(out) != 6 { return 71; }
   if ao.child_total(out) != 5 { return 72; }
 
-  // 提交后的树：根是圆括号组 (sum(1, 2))，两个孩子分别是 sum 与内层参数组。
-  if ao.node_kind(out, call) != ao.KIND_GROUP() { return 73; }
-  if ao.node_delim(out, call) != ao.DL_PAREN() { return 74; }
+  if ao.node_kind(out, call) != meta.NodeKind.Group as u64 { return 73; }
+  if ao.node_delim(out, call) != meta.Delim.Paren as u64 { return 74; }
   if ao.child_count(out, call) != 2 { return 75; }
   let c0: u64 = ao.child_at(out, call, 0);
   let c1: u64 = ao.child_at(out, call, 1);
-  if ao.node_kind(out, c0) != ao.KIND_TOKEN() { return 76; }
+  if ao.node_kind(out, c0) != meta.NodeKind.Token as u64 { return 76; }
   if out_text_is(out, c0, "sum") == 0 { return 77; }
-  if ao.node_kind(out, c1) != ao.KIND_GROUP() { return 78; }
-  if ao.node_delim(out, c1) != ao.DL_PAREN() { return 79; }
+  if ao.node_kind(out, c1) != meta.NodeKind.Group as u64 { return 78; }
+  if ao.node_delim(out, c1) != meta.Delim.Paren as u64 { return 79; }
   if ao.child_count(out, c1) != 3 { return 80; }
   let a0h: u64 = ao.child_at(out, c1, 0);
   let a1h: u64 = ao.child_at(out, c1, 1);

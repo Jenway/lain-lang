@@ -1,7 +1,3 @@
-// tyreg.lain —— 逻辑类型注册表（TypeId）与只读反射表：编号、物理投影、表布局与打包。
-// 查询原语的 IR 内联发射在 reflect.lain，那边单向 import 本文件。
-// 逻辑种类：0 bits、1 floats、2 vec、3 ptr、4 struct、5 enum、6 Ref、7 Mut、
-// 8 Slice、9 MutSlice、10 Array、11 Fn、12 void、13 Type。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let agg = import("src::sema::agg");
@@ -53,14 +49,13 @@ pub let lk_type = func() -> u64 { return 13; };
 pub let lk_of_shape = func(sk: u64) -> u64 {
   if sk == agg.kind_struct() { return lk_struct(); }
   if sk == agg.kind_enum() { return lk_enum(); }
-  // 整数枚举物理上就是底层整数标量。
+
   if sk == agg.kind_cenum() { return lk_bits(); }
   if sk == agg.kind_array() { return lk_array(); }
   if sk == agg.kind_string() { return lk_array(); }
   if sk == agg.kind_ref() { return lk_ref(); }
   if sk == agg.kind_mut() { return lk_mut(); }
-  // Uninit 与 Mut 物理上相同（一个指针字），逻辑种类沿用 Mut，
-  // 未初始化这一事实由形状种类表达。
+
   if sk == agg.kind_uninit() { return lk_mut(); }
   if sk == agg.kind_slice() { return lk_slice(); }
   if sk == agg.kind_mutslice() { return lk_mutslice(); }
@@ -69,19 +64,17 @@ pub let lk_of_shape = func(sk: u64) -> u64 {
   return lk_void();
 };
 
-// 注册表条目 40 字节：[逻辑种类 0, 位宽 8, 符号性 16, 形状 24]。
 let reg_size = func() -> u64 { return 40; };
-// 反射表每类型 576 字节：64 字节头 + 16 条 32 字节字段记录。
+
 pub let stride = func() -> u64 { return 576; };
 pub let field_cap = func() -> u64 { return 16; };
-// 注册表初始行数；满了翻倍重分配。0 号行是保留行，真实类型占 1..cnt。
+
 let reg_init_cap = func() -> u64 { return 64; };
 
 pub let reflect_name = func() -> u64 { return s.intern("__meta_reflect", 14); };
 pub let buffer_name = func() -> u64 { return s.intern("__meta_buf", 10); };
 pub let buffer_bytes = func() -> u64 { return 8192; };
 
-// --- 类型注册表 -------------------------------------------------------------
 let reg_at = func(k: Mut(st.State), i: u64) -> Mut(TypeRegEntry) {
   let b: Mut(u8) = st.st_tybase(k);
   return ptr_cast(Mut(TypeRegEntry), b + i * 40);
@@ -101,11 +94,6 @@ let reg_hit = func(k: Mut(st.State), i: u64, kk: u64, w: u64, sg: u64, sh: u64) 
   return 0;
 };
 
-// --- 类型索引 ---------------------------------------------------------------
-// 开放寻址槽表紧贴在注册表条目区之后，容量恒为条目容量的两倍，装载因子不超过
-// 一半；整块跟条目区一起在持久池里按 State 分配，多个 State 的索引各自独立。
-// 槽里存 TypeId，0 表示空槽；命中判定一律回到注册表条目上比对四个字段，
-// 哈希碰撞只增加探测步数，不改变查询结果。
 let idx_cap = func(k: Mut(st.State)) -> u64 { return st.st_tycap(k) * 2; };
 
 let idx_word = func(k: Mut(st.State), i: u64) -> Mut(u64) {
@@ -113,7 +101,6 @@ let idx_word = func(k: Mut(st.State), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), b + reg_size() * st.st_tycap(k) + i * 8);
 };
 
-// 索引区字节数：条目容量两倍的 u64 槽位。
 let idx_bytes = func(cap: u64) -> u64 { return cap * 16; };
 
 let idx_zero = func(k: Mut(st.State), n: u64) -> u64 {
@@ -124,7 +111,6 @@ let idx_zero = func(k: Mut(st.State), n: u64) -> u64 {
   return n;
 };
 
-// FNV-1a 累乘四个字段，再用 splitmix64 的收尾混合把高位打散。
 let idx_mix = func(kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let h0: u64 = 0xcbf29ce484222325;
   let h1: u64 = (h0 ^ kk) * 0x100000001b3;
@@ -136,7 +122,6 @@ let idx_mix = func(kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   return h6 ^ (h6 >> 33);
 };
 
-// 沿探测链找同键条目：命中返回它的 TypeId，未命中返回 0。
 let idx_find = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let cap: u64 = idx_cap(k);
   let start: u64 = idx_mix(kk, w, sg, sh) % cap;
@@ -157,7 +142,6 @@ let idx_find = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 
   return hit;
 };
 
-// 占用探测链上的第一个空槽。条目数不到容量的一半，必有空槽。
 let idx_put = func(k: Mut(st.State), id: u64) -> u64 {
   let p: Mut(TypeRegEntry) = reg_at(k, id - 1);
   let cap: u64 = idx_cap(k);
@@ -174,7 +158,6 @@ let idx_put = func(k: Mut(st.State), id: u64) -> u64 {
   return 1;
 };
 
-// 翻倍重分配之后把已有条目重新散布进新槽表。
 let reg_rehash = func(k: Mut(st.State), n: u64) -> u64 {
   let i: u64 = loop r(id: u64 = 1) while id <= n {
     let put: u64 = idx_put(k, id);
@@ -194,7 +177,6 @@ let reg_init = func(k: Mut(st.State)) -> u64 {
   return 1;
 };
 
-// 翻倍：新块从持久池里取，旧块随编译结束一起作废。
 let reg_grow = func(k: Mut(st.State)) -> u64 {
   let n: u64 = reg_count(k);
   let ncap: u64 = st.st_tycap(k) * 2;
@@ -215,7 +197,6 @@ let reg_grow = func(k: Mut(st.State)) -> u64 {
   return reg_rehash(k, n);
 };
 
-// 登记一个类型并回它的 TypeId（1 起）；同种类同宽同符号性同形状共用编号。
 pub let ty_add = func(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let e: u64 = reg_init(k);
   if st.st_ok(k) != 0 { return 0; }
@@ -243,8 +224,6 @@ pub let ty_shape = func(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEn
 
 pub let void_tid = func(k: Mut(st.State)) -> u64 { return ty_add(k, lk_void(), 0, 0, 0); };
 
-// 把一个形状归到一个 TypeId：形状还没编号就现登记。
-// 整数枚举用底层位宽与符号性登记，形状号保证它与同宽整数、与另一个枚举都不同。
 pub let tid_of_shape = func(k: Mut(st.State), sh: u64) -> u64 {
   let got: u64 = agg.shp_tid(sh);
   if got != 0 { return got; }
@@ -258,7 +237,6 @@ pub let tid_of_shape = func(k: Mut(st.State), sh: u64) -> u64 {
   return id;
 };
 
-// 把一个 Ty 归到一个 TypeId：带形状的按形状找，形状还没编号就现登记。
 pub let tid_of = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
   if ty.ty_known(t) == 0 { return void_tid(k); }
   let sh: u64 = ty.tsh(t);
@@ -266,17 +244,14 @@ pub let tid_of = func(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
   return ty_add(k, ty.tk(t), ty.tw(t), ty.tsg(t), 0);
 };
 
-// 物理投影：逻辑类型 → 代码发射用的 Ty。
 pub let project = func(k: Mut(st.State), id: u64, out: Mut(ty.Ty)) -> u64 {
-  // 0 表示「没有类型」：操作声明不带结果类型、以及 return 分支，tid 都留 0。
-  // 不能拿 0 当条目下标去读注册表，0 - 1 会落到注册表之外，读回一段无关字节。
+
   if id == 0 { return ty.ty_none(out); }
   let lk: u64 = ty_kind(k, id);
   let w: u64 = ty_width(k, id);
   let sg: u64 = ty_signed(k, id);
   let sh: u64 = ty_shape(k, id);
-  // 整数枚举登记为标量种类但带形状号，投影必须保留它，否则物理投影会
-  // 退化成裸整数、与底层整数混淆。其余标量形状号（类型句柄）沿用裸投影。
+
   if lk <= 3 {
     let a: u64 = ty.ty_save(out, lk, w, sg);
     if lk == lk_bits() and sh != 0 { return ty.ty_set_sh(out, sh); }
@@ -327,7 +302,6 @@ pub let type_name = func(k: Mut(st.State), i: u64) -> u64 {
   return scalar_name(ty_kind(k, i), ty_width(k, i), ty_signed(k, i));
 };
 
-// --- 反射表 ----------------------------------------------------------------
 let seed_fields = func(k: Mut(st.State), sh: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
   let m: Mut(agg.Member) = agg.mem_at(sh, i);
@@ -412,9 +386,6 @@ let fill_type = func(k: Mut(st.State), base: Mut(u8), i: u64, n: u64, pos: u64) 
   return fill_type(k, base, i + 1, n, fill_fields(k, base, p, sh, 0, lim, pos2));
 };
 
-// 把整张表铺进当前模块：只读表 + 一块可写的生成输出缓冲。
-// 判重看数据段本身：临时模块是从主模块克隆出来的，克隆那一刻已经铺好的表
-// 跟着一起过去了；而模块句柄会被回收复用，只看编号会漏铺。
 pub let prepare = func(k: Mut(st.State)) -> u64 {
   let key: u64 = st.st_mod(k) + 1;
   let dn0: u64 = reflect_name();

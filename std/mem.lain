@@ -1,15 +1,5 @@
-// std::mem —— 分配器接口、宿主堆、线性分配器与分配预算记账。
-//
-// 分层：
-//   * Allocator 是模块签名（concept）：alloc / free 两个公开成员构成见证接口。
-//     alloc 拿到块就回非零地址，拿不到回 0；两个过程都纯，任何后端都能兑现。
-//   * OomErr 是耗尽效应，操作不可恢复：分配失败之后不存在「继续原路径」的语义。
-//     效应由本文件的 *_or 入口就地捕获，把耗尽换成调用方给的退路地址。
-//   * SystemAlloc / BumpArena / BudgetTracker 是三份具体策略，都满足 Allocator。
 let os = import("std::os");
 
-// 载荷类型由效应参数登记：运行期 tag 由 (效应, 参数类型) 算出，
-// 发起与拦截两端的 tag 因此一致。
 let OomOf = func(B: Type) -> Effect {
   return effect {
     op oom(bytes: B) -> Never;
@@ -24,9 +14,6 @@ pub let Allocator = sig {
   pub let free: Fn((Mut(Self), u64) -> u64);
 };
 
-// 见证驱动的分派：按第一实参的类型找到满足 Allocator 的模块并转发 alloc。
-// 编译期约束在调用点求值，所以调用方文件要让 `Allocator` 这个名字可见
-// （`open mem;`），并把选中的策略模块激活到当前作用域（`use mem.SystemAlloc;`）。
 pub let alloc_with = func(a: Mut(S), bytes: u64)
   ?{ S: Type, al: Allocator }
   -> u64
@@ -34,7 +21,6 @@ pub let alloc_with = func(a: Mut(S), bytes: u64)
   return al.alloc(a, bytes);
 };
 
-// 纯结果与效应之间的唯一桥：地址为 0 就在这里发起 oom，之后不再回到调用点。
 let require_oom = func(ptr: u64, bytes: u64) -> u64 !{ OomErr } {
   if ptr == 0 {
     perform OomErr.oom(bytes);
@@ -43,36 +29,19 @@ let require_oom = func(ptr: u64, bytes: u64) -> u64 !{ OomErr } {
   return ptr;
 };
 
-// ---------------------------------------------------------------------------
-// 中止原语：不可恢复的失败在这里终止程序。
-//
-// 标准库里的定向陷阱（预算下溢、arena 装不下、格式化池写满）都是调用方的
-// 不变量被破坏，没有可恢复的语义，因此只提供两条中止路径：
-//   * trap_abort 走 Trap 效应，控制流交给最近的处理器，处理器拿到原因码；
-//   * halt_now 在没有处理器可交时用整除零陷阱就地终止，VM 与 C99 后端都是
-//     确定性的，且它不是效应，调用方无需在效应行里声明。
-// 各模块只调用这两条原语，不再各自复制一份陷阱单元。
 pub let Trap = effect {
   op trap(code: u64) -> Never;
 };
 
-// 中止性操作：perform 之后控制流交给最近的 Trap 处理器，永不回到调用点。
 pub let trap_abort = func(code: u64) !{ Trap } -> Never {
   perform Trap.trap(code);
 };
 
-// 让除数为零这件事在运行期才成立，编译期折叠不掉这条除法。
 pub let halt_now = func(cause: u64) -> u64 {
   let zero: u64 = cause - cause;
   return 1 / zero;
 };
 
-// ---------------------------------------------------------------------------
-// carve：静态 arena 的切块原语。
-//
-// 后端块由调用方提供：base 是块起点，cap 是块字节数。块的首字是游标，
-// 载荷从第 8 字节起；起点与长度都补成 8 字节的整数倍，因此返回地址始终
-// 8 字节对齐。切不出时立即中止：调用方没有可继续的路径。
 pub let carve = func(base: u64, cap: u64, bytes: u64) -> u64 {
   let head: Mut(u64) = ptr_cast(Mut(u64), base);
   let used: u64 = deref(head);
@@ -86,9 +55,6 @@ pub let carve = func(base: u64, cap: u64, bytes: u64) -> u64 {
   return base + 8 + start;
 };
 
-// ---------------------------------------------------------------------------
-// SystemAlloc：宿主堆。alloc 拿到块回非零地址，宿主拒绝时回 0。
-// ---------------------------------------------------------------------------
 pub let SystemHandle = struct { tag: u64 };
 
 pub let SystemAlloc = module {
@@ -110,7 +76,6 @@ pub let SystemAlloc = module {
   };
 };
 
-// 宿主拒绝申请时以 fallback 作为地址继续。
 pub let system_alloc_or = func(h: Mut(SystemHandle), bytes: u64, fallback: u64) -> u64 {
   return handle require_oom(SystemAlloc.alloc(h, bytes), bytes) with {
     return(v) => v,
@@ -118,17 +83,10 @@ pub let system_alloc_or = func(h: Mut(SystemHandle), bytes: u64, fallback: u64) 
   };
 };
 
-// ---------------------------------------------------------------------------
-// BumpArena：固定后端块上的线性分配器。
-//
-// 每次 alloc 只推进游标，代价是 O(1)；单块不可回收，reset 一次性丢弃全部块。
-// 起点与长度都补成 8 字节的整数倍，返回地址因此始终 8 字节对齐。
-// ---------------------------------------------------------------------------
 let ArenaBacking = struct {
   bytes: Array(u8, 8192),
 };
 
-// 空字面量让顶层聚合走「整块先清零再写字段」的数据登记，得到一块可写静态存储。
 let arena_backing: ArenaBacking = ArenaBacking { };
 
 let ArenaCapacity: u64 = 8192;
@@ -142,12 +100,10 @@ pub let BumpArena = module {
 
   pub let Self = Arena;
 
-  // 后端块由调用方提供：base 是块起点，cap 是块的字节数。
   pub let over = func(base: u64, cap: u64) -> Arena {
     return Arena { base: base, cap: cap, used: 0 };
   };
 
-  // 静态后端块：整块归本模块所有，重复调用返回互相覆盖的视图，只取一份。
   pub let new = func() -> Arena {
     return Arena { base: ptr_of(arena_backing), cap: ArenaCapacity, used: 0 };
   };
@@ -162,7 +118,6 @@ pub let BumpArena = module {
     return deref(a).base + start;
   };
 
-  // 线性分配器没有逐块回收：落在块内的地址原样确认，块外的地址报 0。
   pub let free = func(a: Mut(Arena), ptr: u64) -> u64 {
     if ptr < deref(a).base {
       return 0;
@@ -173,7 +128,6 @@ pub let BumpArena = module {
     return 1;
   };
 
-  // 丢弃全部块。
   pub let reset = func(a: Mut(Arena)) -> u64 {
     deref(a).used = 0;
     return 1;
@@ -192,7 +146,6 @@ pub let BumpArena = module {
   };
 };
 
-// 后端块装不下时以 fallback 作为地址继续。
 pub let bump_alloc_or = func(a: Mut(BumpArena.Arena), bytes: u64, fallback: u64) -> u64 {
   return handle require_oom(BumpArena.alloc(a, bytes), bytes) with {
     return(v) => v,
@@ -200,13 +153,6 @@ pub let bump_alloc_or = func(a: Mut(BumpArena.Arena), bytes: u64, fallback: u64)
   };
 };
 
-// ---------------------------------------------------------------------------
-// BudgetTracker：宿主堆上的记账分配器。
-//
-// 每个宿主块前置 8 字节的块长度头，free 据此回退 live_bytes。
-// alloc 先核验上限再向宿主申请，超限或宿主拒绝都回 0，并把 deny_count 加一。
-// 程序收尾时 live_bytes 非零即为泄漏。
-// ---------------------------------------------------------------------------
 pub let BudgetTracker = module {
   pub let Tracker = struct {
     live_bytes: u64,
@@ -285,7 +231,6 @@ pub let BudgetTracker = module {
     return deref(t).limit_bytes;
   };
 
-  // 尚未归还的字节数；收尾时非零说明有泄漏。
   pub let leaked = func(t: Ref(Tracker)) -> u64 {
     return deref(t).live_bytes;
   };
@@ -295,7 +240,6 @@ pub let BudgetTracker = module {
   };
 };
 
-// 预算超限时以 fallback 作为地址继续，deny_count 已经记下这次拒绝。
 pub let budget_alloc_or = func(t: Mut(BudgetTracker.Tracker), bytes: u64, fallback: u64) -> u64 {
   return handle require_oom(BudgetTracker.alloc(t, bytes), bytes) with {
     return(v) => v,
@@ -303,9 +247,6 @@ pub let budget_alloc_or = func(t: Mut(BudgetTracker.Tracker), bytes: u64, fallba
   };
 };
 
-// ---------------------------------------------------------------------------
-// TypedAllocator：面向元素类型 T 的切片级分配器签名，以及从字节级 Allocator 适配。
-// ---------------------------------------------------------------------------
 pub let TypedAllocator = sig {
   pub let Self: Type;
   pub let Elem: Type;

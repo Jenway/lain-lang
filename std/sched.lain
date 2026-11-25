@@ -1,21 +1,6 @@
-// std::sched —— 调度器接口（concept）与同一条契约下的两份具体策略。
-//
-// 分层：
-//   * Scheduler 是模块签名：schedule 交出一件工作，wait_all 等到全部工作结束。
-//     两者都以 Mut(Self) 接收自身，所以策略可以携带自己的记账与句柄。
-//   * InlineScheduler 就地执行：schedule 直接调用 work(ctx)，executed 记录完成件数。
-//   * PoolScheduler 交给 std::pool 的线程池：schedule 走 pool_submit，
-//     wait_all 走 pool_wait_all，池的建立与关闭仍由调用方负责。
-//   * dispatch / wait_idle 是按第一实参类型找到见证模块的分派入口，
-//     调用点要让 `Scheduler` 这个名字可见（`open sched;`），
-//     并把选中的策略模块激活到当前作用域（`use sched.InlineScheduler;`
-//     或 `use sched.PoolScheduler;`），或直接写 `?{ sc: sched.PoolScheduler }`。
 let mem = import("std::mem");
 let pool = import("std::pool");
 
-// 一件待执行的工作：work 与 ctx 成对出现，next 串起同一批次。
-// 结构的类型声明里不允许指名它自己，链接因此以 Mut(u8) 承载地址，
-// 导航走 work_node_next / work_node_link。
 pub let WorkNode = struct {
   next: Mut(u8),
   work: Fn((Mut(u8)) -> u64),
@@ -45,11 +30,6 @@ pub let Scheduler = sig {
   pub let wait_all: Fn((Mut(Self)) -> u64);
 };
 
-// ---------------------------------------------------------------------------
-// InlineScheduler：单线程就地执行。
-// schedule 在返回之前已经把工作跑完，因此 wait_all 无需等待，
-// 只回报开场至今完成的件数。
-// ---------------------------------------------------------------------------
 pub let InlineSched = struct { executed: u64 };
 
 pub let InlineScheduler = module {
@@ -74,16 +54,11 @@ pub let InlineScheduler = module {
   };
 };
 
-// ---------------------------------------------------------------------------
-// PoolScheduler：把工作交给调用方建立的多线程池。
-// schedule 的返回值就是 pool_submit 的入队结果：队列已满时为 false。
-// ---------------------------------------------------------------------------
 pub let PoolSched = struct { pool: Mut(pool.ThreadPool) };
 
 pub let PoolScheduler = module {
   pub let Self = PoolSched;
 
-  // 池由调用方建立并负责 pool_shutdown，本模块不持有池的所有权。
   pub let new = func(p: Mut(pool.ThreadPool)) -> PoolSched {
     return PoolSched { pool: p };
   };
@@ -101,7 +76,6 @@ pub let PoolScheduler = module {
   };
 };
 
-// 见证驱动的分派：按第一实参的类型找到满足 Scheduler 的模块并转发。
 pub let dispatch = func(s: Mut(S), work: Fn((Mut(u8)) -> u64), ctx: Mut(u8))
   ?{ S: Type, sc: Scheduler }
   -> bool
@@ -116,20 +90,6 @@ pub let wait_idle = func(s: Mut(S))
   return sc.wait_all(s);
 };
 
-// ---------------------------------------------------------------------------
-// 结构化并发：Spawn 效应。
-//
-// 效应的操作只携带一个负载，work 与 ctx 因此装进 SpawnRequest。
-// run_pool_scope 是 Spawn 的处理器：建立作用域、跑完 body，等到池中全部工作
-// 结束后才返回。作用域退出时作用域内派生的工作全部完成，这就是结构化并发的
-// 收尾保证。spawn_work 把工作交给当前作用域的池；没有作用域时以除零陷阱
-// 终止，绝不在无作用域的情况下静默丢弃工作。
-//
-// 处理器为什么是普通过程：编译器只为词法上包住 perform 的 handle 生成可恢复
-// 续体，跨过程的可恢复处理器没有实现（跨过程的 perform 只把状态标签写到全局
-// 状态后返回零值）。作用域因此落在模块内的静态槽上，body 的签名仍以
-// !{ Spawn } 如实记录它能发起什么，并通过 run_pool_scope 的形参类型传递。
-// ---------------------------------------------------------------------------
 pub let SpawnRequest = struct {
   work: Fn((Mut(u8)) -> u64),
   ctx: Mut(u8),
@@ -139,7 +99,6 @@ pub let Spawn = effect {
   op spawn(req: SpawnRequest) -> bool;
 };
 
-// 当前作用域的池，0 表示没有作用域。嵌套的 run_pool_scope 用局部量还原上一层。
 let scope_slot: Array(u64, 1) = [0];
 
 let current_pool = func() -> Mut(pool.ThreadPool) {

@@ -1,11 +1,8 @@
-// Concept-based polymorphism: Monoid sig + module witnesses + generic array fold
-// + witness override + generic SoA setter
 let io = import("std::io");
 
 let Vec2 = struct { x: i64, y: i64 };
 let Vec3 = struct { x: i64, y: i64, z: i64 };
 
-// 1. Monoid 是一份模块签名：Self 加上 zero / combine 两个公开成员
 let Monoid = sig {
   pub let Self: Type;
   pub let zero: Fn(() -> Self);
@@ -20,7 +17,6 @@ let i64_mul = func(a: i64, b: i64) -> i64 { return a * b; };
 let vec2_zero = func() -> Vec2 { return Vec2 { x: 0, y: 0 }; };
 let vec2_add = func(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y }; };
 
-// 三份 Monoid 实现模块；同一个类型可以有任意多份策略
 let SumI64: Monoid = module {
   pub let Self = i64;
   pub let zero = func() -> i64 { return i64_zero(); };
@@ -39,11 +35,9 @@ let ProdI64: Monoid = module {
   pub let combine = func(a: i64, b: i64) -> i64 { return i64_mul(a, b); };
 };
 
-// use 把模块激活为当前作用域的 Witness
 use SumI64;
 use SumVec2;
 
-// 2. Generic fixed-array fold: deduces T, N and resolves the Monoid witness automatically
 let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid } -> T {
   let acc: T = m.zero();
   comptime for i in 0..N {
@@ -52,12 +46,10 @@ let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid } -> T 
   return acc;
 };
 
-// Generic 3-way combine (also tests struct return through the witness)
 let combine3 = func(a: T, b: T, c: T) ?{ T: Type, m: Monoid } -> T {
   return m.combine(m.combine(a, b), c);
 };
 
-// 3. Generic SoA type constructor and generic field setter
 let make_soa = func(T: Type, N: u64) -> Type {
   let b = record_begin();
   comptime for f in fields_of(T) {
@@ -77,19 +69,17 @@ let soa_set = func(s: Mut(SoA), idx: u64, v: T) ?{ SoA: Type, T: Type } {
 
 let main = func() -> i64 {
   let nums: Array(i64, 4) = [2, 3, 4, 5];
-  let sum_n: i64 = fold_arr(ref_of(nums)); // 2+3+4+5 = 14
+  let sum_n: i64 = fold_arr(ref_of(nums));
 
-  // Override the witness explicitly with the multiplicative monoid module
-  let prod_n: i64 = fold_arr(ref_of(nums)) ?{ m: ProdI64 }; // 2*3*4*5 = 120
+  let prod_n: i64 = fold_arr(ref_of(nums)) ?{ m: ProdI64 };
 
-  let vsum: Vec2 = combine3(Vec2 { x: 10, y: 1 }, Vec2 { x: 20, y: 2 }, Vec2 { x: 0, y: 0 }); // { 30, 3 }
+  let vsum: Vec2 = combine3(Vec2 { x: 10, y: 1 }, Vec2 { x: 20, y: 2 }, Vec2 { x: 0, y: 0 });
 
   let s2: Vec2SoA = Vec2SoA { x: [0, 0, 0], y: [0, 0, 0] };
   let s3: Vec3SoA = Vec3SoA { x: [0, 0, 0], y: [0, 0, 0], z: [0, 0, 0] };
   soa_set(mut_of(s2), 1, vsum);
   soa_set(mut_of(s3), 2, Vec3 { x: 7, y: 8, z: 9 });
 
-  // 14 + 120 + (30 + 3) + (7 + 8 + 9) = 191
   let total: i64 = sum_n + prod_n + s2.x[1] + s2.y[1] + s3.x[2] + s3.y[2] + s3.z[2];
   io.println(f"sum_n={sum_n}");
   io.println(f"prod_n={prod_n}");

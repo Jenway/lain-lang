@@ -1,8 +1,6 @@
-// 自举流水线的机械部分：Reader、事务化 AstOut、LAINIR 构造/校验、VM 执行与
-// C99 发射。示例本身只负责阶段编排、效应门控与报告；这里不含 f"..." 插值，
-// 所以不受展开阶段对「带插值的源根最多 227 个子节点」的限制。
 let r = import("src::frontend::reader");
 let ao = import("src::meta::ast_out");
+let meta = import("src::meta::ast");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
 let c99 = import("src::backend::c99");
@@ -11,8 +9,6 @@ let im = import("src::vm::image");
 let eng = import("src::vm::engine");
 let codes = import("src::ir::ir_codes");
 
-// 工作区是一块顶层静态存储：空聚合字面量让整块先清零再登记成数据块，字段在
-// 数据块里原地可写。总容量 24576 字节。
 let BlocksStore = struct {
   bytes: Array(u8, 24576),
 };
@@ -60,7 +56,6 @@ let list_ref = func() -> Ref(u64) {
 
 let source: Slice(u8) = "let expr = f(a, 1 + 2);\nlet table: Array(u64, 3) = [3, 5, 8];\nlet tag = \"self\";";
 
-// --- Reader -----------------------------------------------------------------
 pub let ReaderFacts = struct {
   kind: u64,
   nodes: u64,
@@ -77,7 +72,6 @@ pub let run_reader = func() -> ReaderFacts {
   };
 };
 
-// --- 事务化 AstOut ----------------------------------------------------------
 pub let ExpandFacts = struct {
   nodes: u64,
   kids: u64,
@@ -98,7 +92,7 @@ pub let run_expand = func() -> ExpandFacts {
   first_kids[1] = t_x as u32;
   let first_slice: Slice(u32) = make_slice(Slice(u32),
       ptr_cast(Ref(u32), ref_of(first_kids)), 2);
-  let first: u64 = ao.mk_group(a, ao.DL_NONE(), 0, first_slice);
+  let first: u64 = ao.mk_group(a, meta.Delim.None as u64, 0, first_slice);
   let rolled: u64 = ao.tx_rollback(a, tx1);
 
   let tx2: u64 = ao.tx_begin(a);
@@ -112,13 +106,13 @@ pub let run_expand = func() -> ExpandFacts {
   arg_kids[2] = t_two as u32;
   let args_slice: Slice(u32) = make_slice(Slice(u32),
       ptr_cast(Ref(u32), ref_of(arg_kids)), 3);
-  let args: u64 = ao.mk_group(a, ao.DL_PAREN(), 0, args_slice);
+  let args: u64 = ao.mk_group(a, meta.Delim.Paren as u64, 0, args_slice);
   let call_kids: Array(u32, 2) = [0, 0];
   call_kids[0] = t_sum as u32;
   call_kids[1] = args as u32;
   let call_slice: Slice(u32) = make_slice(Slice(u32),
       ptr_cast(Ref(u32), ref_of(call_kids)), 2);
-  let call: u64 = ao.mk_group(a, ao.DL_PAREN(), 0, call_slice);
+  let call: u64 = ao.mk_group(a, meta.Delim.Paren as u64, 0, call_slice);
   let committed: u64 = ao.tx_commit(a, tx2, call);
 
   return ExpandFacts {
@@ -130,7 +124,6 @@ pub let run_expand = func() -> ExpandFacts {
   };
 };
 
-// --- LAINIR 构造 ------------------------------------------------------------
 let build_module = func() -> vf.IrModule {
   let b0: vf.IrBuilder = vf.builder_new(at(module_off()));
   let b: Mut(vf.IrBuilder) = mut_of(b0);
@@ -180,7 +173,6 @@ pub let run_verify = func() -> ModuleFacts {
   };
 };
 
-// --- VM 执行 ----------------------------------------------------------------
 pub let VmFacts = struct {
   status: u64,
   trap: u64,
@@ -239,7 +231,6 @@ pub let run_vm = func() -> VmFacts {
   };
 };
 
-// --- C99 发射 ---------------------------------------------------------------
 pub let C99Facts = struct {
   bytes: u64,
   hash: u64,
@@ -262,10 +253,6 @@ pub let reset = func() -> u64 {
   return zero_all();
 };
 
-// --- 阶段门控：中止性效应 ---------------------------------------------------
-// 插值展开会重建源根；当同一个文件同时含有效应声明与 f"..." 时，当前的
-// Expand 遍次会把 handle 与 ensure 的效应行拆开，导致未处理的效应报错。
-// 所以效应机制放在这个不含插值的模块里，示例只调用处理完毕的纯函数。
 let Stage = effect {
   op fail(code: i64) -> Never;
 };

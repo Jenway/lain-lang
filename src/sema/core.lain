@@ -1,6 +1,3 @@
-// core.lain —— 互递归核：Pratt 表达式、if、loop 与语句。
-// expr 调 if/loop（expr_prefix 分派），if/loop/语句又调 expr 求条件与初值；
-// lain0 的 import 是单向的，互递归的函数必须住在同一个文件里，这一层因此不可再拆。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
@@ -29,7 +26,6 @@ let gv = import("src::sema::witness");
 let gn = import("src::sema::generics");
 let ef = import("src::sema::effects");
 
-// --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
 let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
 let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
@@ -44,8 +40,8 @@ let is_group_node = func(h: u64) -> u64 { return ax.is_group_node(h); };
 let node_sym = func(h: u64) -> u64 { return ax.node_sym(h); };
 let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
 let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
-let dl_paren = func() -> u64 { return ax.dl_paren(); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
+let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
 let is_digit_token = func(g: u64, i: u64) -> u64 { return ax.is_digit_token(g, i); };
@@ -53,12 +49,12 @@ let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
 let skip_semi = func(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); };
 let num_value = func(p: Ref(u8), n: u64) -> u64 { return ax.num_value(p, n); };
 let no_slot = func() -> u64 { return ax.no_slot(); };
-let e_ast = func() -> u64 { return ax.e_ast(); };
-let e_unbound = func() -> u64 { return ax.e_unbound(); };
-let e_type = func() -> u64 { return ax.e_type(); };
-let e_op = func() -> u64 { return ax.e_op(); };
-let e_unsup = func() -> u64 { return ax.e_unsup(); };
-let e_frame = func() -> u64 { return ax.e_frame(); };
+let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
+let e_unbound = func() -> u64 { return ax.FailKind.Unbound as u64; };
+let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
+let e_op = func() -> u64 { return ax.FailKind.Op as u64; };
+let e_unsup = func() -> u64 { return ax.FailKind.Unsup as u64; };
+let e_frame = func() -> u64 { return ax.FailKind.Frame as u64; };
 let t64 = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.t64(k); };
 let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
@@ -77,17 +73,16 @@ let alloc_res_slot = func(k: Mut(st.State)) -> u64 { return cx.alloc_res_slot(k)
 let loop_head = func(k: Mut(st.State), g: u64, j: u64, ob: Mut(cx.LoopHeadOut)) -> u64 { return cx.loop_head(k, g, j, ob); };
 let find_loop = func(k: Mut(st.State), label: u64, has_label: u64) -> u64 { return cx.find_loop(k, label, has_label); };
 let ti32 = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.ti32(k); };
-let dl_bracket = func() -> u64 { return ax.dl_bracket(); };
+let dl_bracket = func() -> u64 { return ax.Delim.Bracket as u64; };
 let tok_first = func(g: u64, i: u64) -> u64 { return ax.tok_first(g, i); };
 let lit_addr = func(h: u64) -> Ref(u8) { return ax.lit_addr(h); };
 let lit_len = func(h: u64) -> u64 { return ax.lit_len(h); };
 
-// --- 表达式 -------------------------------------------------------------
 let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
-  // as 转换
+
   if is_group(g, i) == 0 {
     if n_sym(g, i) == s.k_as() {
       let t: Mut(ty.Ty) = new_ty(k);
@@ -98,7 +93,7 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
       return expr_tail(k, g, j, minp, want, out);
     }
   }
-  // 后缀：下标 table[i]、成员 x.y、Fn 值的直接调用 f(a)
+
   if is_group(g, i) == 1 {
     if delim_of(g, i) == dl_bracket() { return sub_expr(k, g, i, minp, want, out); }
     if delim_of(g, i) == dl_paren() {
@@ -124,10 +119,9 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
   let p: u64 = ty.prec(op);
   if p == 0 { return i; }
   if p < minp { return i; }
-  // 二元：右操作数以左操作数的类型为提示
+
   let rv_val: Mut(ty.Val) = new_val(k);
-  // 左操作数是地址时，右操作数的提示类型必须是整数（否则 a + 512 里的字面量会变成地址）。
-  // 逻辑与/或的右操作数是独立布尔条件，不能把 lhs 的 bool(#bits<1>) 当成 rhs 子表达式的提示。
+
   let is_logic: u64 = if op == s.k_and() or op == s.k_or() { 1 } else { 0 };
   let hint: Mut(ty.Ty) = if is_logic == 1 { tnone(k) } else {
     if ty.tk(ty.vty(out)) == 3 { t64(k) } else { ty.vty(out) }
@@ -144,7 +138,7 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
       if ty.ty_known(want) == 1 { ty.ty_at(opt, want); } else { ty.ty_i32(opt); }
     }
   }
-  // 指针加整数：一律发 #lea（verify 要求 base 是指针）
+
   if ty.tk(opt) == 3 {
     if op == s.o_plus() {
       if ty.tk(lt) == 3 and ty.tk(rt) != 3 {
@@ -219,8 +213,6 @@ let prefix_neg = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: M
   return j + 1;
 };
 
-// 反射分派：认 meta_* 查询与类型名。实参必须在这里用 expr 递归求值，
-// 所以钩子只能留在本文件；表结构与发射逻辑都在 reflect.lain。
 let reflect_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   if is_name(g, i) == 0 { return 0; }
   let m: u64 = rf.mode_of(n_sym(g, i));
@@ -248,8 +240,6 @@ let reflect_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), ou
   return i + 2;
 };
 
-// 名字后跟花括号的聚合构造：struct 条目直接命中，类型别名看它的逻辑形状是否 struct。
-// 模块名先换成它导出的 pub let Self，再按同一套规则判。
 let brace_struct_at = func(k: Mut(st.State), sym: u64) -> u64 {
   let e: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
   if is_null(e) { return 0; }
@@ -296,7 +286,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     ty.val_lit(out, b, t);
     return i + 1;
   }
-  // func (形参) [-> 返回] { 体 }：产物是一个 Fn(...) 值。
+
   if sym == s.k_func() {
     if i + 1 < n and is_group(g, i + 1) == 1 {
       return an.func_expr(k, g, i, want, out);
@@ -339,7 +329,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     return flow.match_compile(k, g, i, want, out, t);
   }
   if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
-  // 名字 . 名字：编译期 Witness 成员/调用、FieldInfo 投影、变体/导入/变量字段
+
   if i + 2 < n and is_group(g, i + 1) == 0 and is_name(g, i) == 1 {
     if n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
       if env.env_find(k, sym) == 0 {
@@ -376,7 +366,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       return me.dotted(k, g, i, want, out);
     }
   }
-  // Factory(实参).成员：函子调用返回 Module 时直接取它的成员。
+
   if i + 3 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() and is_group(g, i + 2) == 0 and n_sym(g, i + 2) == s.p_dot() and is_name(g, i + 3) == 1 {
       let mv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
@@ -404,7 +394,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       }
     }
   }
-  // Name(args...) { 字段... }：类型工厂构造结果直接初始化结构体。
+
   if i + 2 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
     if delim_of(g, i + 1) == dl_paren() and delim_of(g, i + 2) == dl_brace() {
       let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
@@ -424,8 +414,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       }
     }
   }
-  // 名字 { 字段... }：聚合构造。只有结构名后跟花括号才算构造，
-  // 否则 if 语句里的条件变量会被误当成构造名。
+
   if i + 1 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_brace() {
       if brace_struct_at(k, sym) == 1 {
@@ -433,11 +422,10 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       }
     }
   }
-  // 编译期反射与类型句柄：类型名在表达式位置折成 TypeId 字面量，
-  // meta_* 查询就地展开成 #lea / #load。两者都不生成辅助过程。
+
   let rq: u64 = reflect_prefix(k, g, i, want, out);
   if rq != 0 { return rq; }
-  // 间接调用：icall[(形参) -> 返回](目标, 实参...)。
+
   if sym == s.b_icall() and i + 2 < n {
     if is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
       return cl.icall_call(k, g, i, want, out);
@@ -447,7 +435,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     if delim_of(g, i + 1) == dl_paren() {
       let ue: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
       if bi.is_builtin(sym) == 1 and is_null(ue) == 1 { return me.builtin_call(k, g, i, want, out); }
-      // size_of / align_of / field_count：编译期折成 u64 常量。
+
       let qc: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
       let qh: u64 = ctf.query_fold(k, qc, g, i);
       if st.st_ok(k) != 0 { return i + 2; }
@@ -455,7 +443,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
         ty.val_lit(out, ctf.v_a(qc), t64(k));
         return i + 2;
       }
-      // 局部 Fn(...) 值：按签名发间接调用。
+
       let fo: u64 = env.env_find(k, sym);
       if fo != 0 {
         let ft: Mut(ty.Ty) = new_ty(k);
@@ -472,7 +460,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
           }
         }
       }
-      // ?{} 泛型函数调用：单态化调度
+
       let ge: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
       if is_null(ge) == 0 {
         if modules.sym_kind(ge) == modules.sym_kind_generic() {
@@ -491,7 +479,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       return cl.icall_call(k, g, i, want, out);
     }
   }
-  // 编译期常量（comptime for 的循环变量）：折成字面量参与运行期表达式（局部运行期绑定优先）。
+
   if env.env_find(k, sym) == 0 {
     let cv: Mut(ctf.CtVal) = ctf.lookup(k, sym);
     if is_null(cv) == 0 {
@@ -508,9 +496,6 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   return cl.var_ref(k, g, i, want, out);
 };
 
-// --- eval ---------------------------------------------------------------
-// eval(算得出来的东西)：把内层表达式编进独立的临时模块，交给 Lain VM 跑出标量，
-// 再当作字面量交回外层。运行期局部量在求值时不可见，引用它们会报未绑定。
 let eval_fail = func(k: Mut(st.State), tmp: u64, saved_mod: u64, saved_sp: u64, code: u64, out: Mut(ty.Val), back: u64) -> u64 {
   cpt.release(tmp);
   st.st_set_mod(k, saved_mod);
@@ -527,8 +512,7 @@ let eval_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mu
   env.env_release(k, 0);
   let tmp: u64 = cpt.clone(k);
   st.st_set_mod(k, tmp);
-  // 临时模块拿到的是克隆那一刻的主模块，可能还没有反射表：先把表铺进去，
-  // 内层表达式里的 meta_* 查询才能落到真实数据段上。
+
   let pr: u64 = rf.prepare(k);
   if st.st_ok(k) != 0 {
     return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
@@ -582,9 +566,6 @@ let eval_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mu
   return i + 2;
 };
 
-// --- 表达式处理器的具体实现（挂在核心分派后面，避免膨胀上半部） --------------
-
-// #lea 的独立发射点：base 是地址值，idx 是整数或字面量。
 let lea_emit = func(k: Mut(st.State), base: Mut(ty.Val), idx: Mut(ty.Val), t: Mut(ty.Ty)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
@@ -596,8 +577,6 @@ let lea_emit = func(k: Mut(st.State), base: Mut(ty.Val), idx: Mut(ty.Val), t: Mu
   return res;
 };
 
-// 下标：base[i] → #lea(元素基址, i, 元素字节宽, 0)。
-// 切片的元素基址是 16 字节头里的 ptr；数组/表直接用自身地址。
 let elem_of_arr = func(k: Mut(st.State), sh: u64, et: Mut(ty.Ty)) -> u64 {
   let elem: Mut(agg.Member) = agg.mem_index(sh, 0);
   let r: u64 = agg.mem_ty(k, elem, et);
@@ -644,7 +623,7 @@ let sub_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty
   let ins: u64 = ir.emit(k, codes.InstKind.Lea as u64, res, ir.taddr(k));
   let ignored: u64 = j;
   if sliced == 1 {
-    // 切片的 s[i] 是元素值本身：标量按真实位宽读，聚合给那块视图。
+
     let ev: Mut(ty.Val) = new_val(k);
     if rv.deref_loads(ty.tsh(et)) == 1 {
       let el: u64 = agg.load_at(k, res, 0, et, ev);
@@ -669,7 +648,6 @@ let sub_expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty
   return expr_tail(k, g, i + 1, minp, want, out);
 };
 
-// 局部数组字面量：按期望的 Array(T, N) 开栈块，逐个元素强制后写入。
 let arr_fill = func(k: Mut(st.State), g: u64, i: u64, idx: u64, base: u64, esz: u64, et: Mut(ty.Ty),
               cnt: u64) -> u64 {
   let n: u64 = n_count(g);
@@ -684,14 +662,12 @@ let arr_fill = func(k: Mut(st.State), g: u64, i: u64, idx: u64, base: u64, esz: 
   return arr_fill(k, g, j, idx + 1, base, esz, et, cnt);
 };
 
-// 重复字面量 [值; N] 的分号位置：返回分号之后的下标，没有分号回 0。
 let rep_sep = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if is_semi(g, i) == 1 { return i + 1; }
   return rep_sep(g, i + 1, n);
 };
 
-// [值; N] 的 N：单个编译期整数常量（字面量或 comptime 绑定）。
 let rep_len = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if i + 1 != n {
     let m: Ref(u8) = "array repeat needs a compile-time length";
@@ -713,7 +689,6 @@ let rep_len = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   return 0;
 };
 
-// 非零元素的重复：逐个元素写入，值只求值一次。
 let rep_fill = func(k: Mut(st.State), base: u64, cnt: u64, esz: u64,
                val: Mut(ty.Val), et: Mut(ty.Ty)) -> u64 {
   let done: u64 = loop f(j: u64 = 0) while j < cnt {
@@ -723,8 +698,6 @@ let rep_fill = func(k: Mut(st.State), base: u64, cnt: u64, esz: u64,
   return done;
 };
 
-// [值; N]：元素类型取自标注的数组形状，没有标注时取值的类型。
-// 全零值时整块按字清零，不逐个元素发射 #store。
 let arr_rep = func(k: Mut(st.State), g: u64, i: u64, grp: u64, sep: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(grp);
   let cnt: u64 = rep_len(k, grp, sep, n);
@@ -750,7 +723,7 @@ let arr_rep = func(k: Mut(st.State), g: u64, i: u64, grp: u64, sep: u64, want: M
     let elem: Mut(agg.Member) = agg.mem_index(wsh, 0);
     let e1: u64 = agg.mem_ty(k, elem, et);
   }
-  // 没有标注时用 i64 作提示：整数字面量据此定类型。
+
   let hint: Mut(ty.Ty) = new_ty(k);
   if shaped == 1 { ty.ty_at(hint, et); } else { ty.ty_bits(hint, 64, 1); }
   let v: Mut(ty.Val) = new_val(k);
@@ -819,7 +792,6 @@ let arr_lit = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(
   return i + 1;
 };
 
-// 字符串数据：登记一块 ro 数据，值指向它，类型带长度形状。
 let emit_str_data = func(k: Mut(st.State), text: Ref(u8), len: u64, out: Mut(ty.Val)) -> u64 {
   let src: u64 = st.st_src(k);
   let seq: u64 = st.st_next_str(k);
@@ -833,7 +805,6 @@ let emit_str_data = func(k: Mut(st.State), text: Ref(u8), len: u64, out: Mut(ty.
   return dname;
 };
 
-// 字符串字面量：字面量文本经 emit_str_data 变成 ro 静态数据。
 let str_lit = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
   let h: u64 = n_at(g, i);
   let text: Ref(u8) = lit_addr(h) + 1;

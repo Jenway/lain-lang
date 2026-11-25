@@ -1,30 +1,15 @@
-// src/host/source_host.lain —— 纯 Lain 的宿主源码管理与统一 AST 句柄层（HostSources）。
-//
-// 源码单元的文本由调用方持有，HostSources 只记下它的起点与长度。每个单元的
-// Reader Arena 与源码记录表都从 HostSymTab 的共享工作区切出：Reader 先拿一段
-// 零长度 Arena 跑计数遍，用 RawAst.needed 算出确切字节数，再一次性切出这块
-// 空间并填表，因此没有预留、没有扩容、没有复制。
-//
-// 节点句柄沿用一套编码，把两类来源放进同一条查询通道：
-//   AST_IN   (1 << 28) | (源码号 << 20) | 节点下标    Reader 的 RawAst 节点
-//   AST_OUT  (2 << 28) | 节点下标                    AstOut 的合成节点
-//   SYM      (3 << 28) | 符号号                      宿主符号表句柄
-// 统一后的节点类别只有词与组两种；Reader 的四种词都归一词，四种组都归一为组。
-// 词的文本对两类来源都落在各自 Arena 里，组没有文本。
-//
-// AstOut 的事务与构造原语在这里翻译句柄：开事务、提交、回滚，以及带符号与
-// 来源节点的造词、按统一句柄数组造组。事务之外造节点由 AstOut 自己拒绝。
-//
-// 任何容量不足、句柄类别不符、下标越界、源码号越界都在发生位置就地终止；
-// 终止之前把说明文本与细节值写进 HostSources，调用方事后可以用
-// last_err_msg / last_err_detail 读出崩溃点上下文。
-
 let sym = import("src::host::symtab");
 let rd = import("src::frontend::reader");
 let ao = import("src::meta::ast_out");
+let meta = import("src::meta::ast");
 let mem = import("std::mem");
 
-// --- 句柄编码 ---------------------------------------------------------------
+let trap_with = func(msg: Slice(u8), detail: u64) -> u64 {
+  sym.trap_note(msg, detail);
+  let dead: u64 = mem.trap_abort(detail);
+  return dead;
+};
+
 pub let CLASS_AST_IN = func() -> u64 { return 1; };
 pub let CLASS_AST_OUT = func() -> u64 { return 2; };
 pub let CLASS_SYM = func() -> u64 { return 3; };
@@ -35,10 +20,8 @@ let INDEX_MASK = func() -> u64 { return 0x0FFFFFFF; };
 let SOURCE_MASK = func() -> u64 { return 0xFF; };
 let SLOT_MASK = func() -> u64 { return 0xFFFFF; };
 
-// 没有节点：整字全 1，类别位为 0，不会与任何真实句柄混同。
 pub let NO_NODE = func() -> u64 { return 0xFFFFFFFF; };
 
-// 没有源码：源码号从这里开始不合法。
 pub let NO_SOURCE = func() -> u64 { return 0xFFFFFFFF; };
 
 let handle_ast_in = func(source: u64, slot: u64) -> u64 {
@@ -60,14 +43,13 @@ let slot_of = func(h: u64) -> u64 { return h & SLOT_MASK(); };
 let out_index_of = func(h: u64) -> u64 { return h & INDEX_MASK(); };
 
 let out_handle = func(index: u64) -> u64 {
-  if index == ao.NO_NODE() { return NO_NODE(); }
-  if index > INDEX_MASK() { return mem.halt_now(index); }
+  if index == meta.NO_NODE() { return NO_NODE(); }
+  if index > INDEX_MASK() {
+    return trap_with("source_host: out_handle index overflow", index);
+  }
   return handle_ast_out(index);
 };
 
-// --- 记录 -------------------------------------------------------------------
-// 源码记录全部平铺成标量：Reader 的 RawAst 也拆成字段存放，避免嵌套结构体
-// 字段在按值写入时多解一层引用。查询时再拼回 RawAst 值。
 pub let Source = struct {
   name: u64,
   text_ptr: Ref(u8),
@@ -78,7 +60,7 @@ pub let Source = struct {
   ast_child_count: u64,
   ast_spans: Ref(rd.Span),
   ast_root: u64,
-  // 展开遍次重建过的源根句柄；0 表示仍在用 Reader 交出的原始根。
+
   root_handle: u64,
   ast_kind: u64,
   ast_err_line: u64,
@@ -88,9 +70,6 @@ pub let Source = struct {
   ast_bytes: u64,
 };
 
-// err_* 记录最近一次 source_add 被拒绝的原因；成功时全部清零。
-// err_msg_ptr / err_msg_len / err_detail 记录最近一次违例终止的说明文本与
-// 细节值：宿主在发生位置就地崩溃，崩溃之前先把上下文留在记录里。
 pub let HostSources = struct {
   syms: Mut(sym.HostSymTab),
   out: Mut(ao.AstOut),
@@ -104,37 +83,12 @@ pub let HostSources = struct {
   err_col: u64,
   err_offset: u64,
   err_needed: u64,
-  err_msg_ptr: Ref(u8),
-  err_msg_len: u64,
-  err_detail: u64,
 };
 
-// 关联模块的自指类型，供 h.last_err_detail() 这类 UFCS 调用检索。
 pub let Self = HostSources;
 
-// --- 违例出口 ---------------------------------------------------------------
-// 说明文本一律是静态字面量，生命周期不依赖调用方的帧。先写记录、再打一行
-// 说明，最后终止。
-let trap_with = func(h: Mut(HostSources), msg: Slice(u8), detail: u64) -> u64 {
-  h.err_msg_ptr = msg.ptr;
-  h.err_msg_len = msg.len;
-  h.err_detail = detail;
-  let seen: u64 = sym.trap_note(msg, detail);
-  return mem.halt_now(detail);
-};
-
-pub let last_err_msg = func(h: Mut(HostSources)) -> Slice(u8) {
-  return make_slice(Slice(u8), h.err_msg_ptr, h.err_msg_len);
-};
-
-pub let last_err_detail = func(h: Mut(HostSources)) -> u64 {
-  return h.err_detail;
-};
-
-// --- 记录地址 ---------------------------------------------------------------
-// 现代 Lain 的指针加法按字节推进，所以区间内定位一律显式乘上元素宽度。
 let trap_source = func(h: Mut(HostSources), cause: u64) -> Mut(Source) {
-  let dead: u64 = trap_with(h, "source_host: source index out of range", cause);
+  trap_with("source_host: source index out of range", cause);
   return h.sources;
 };
 
@@ -143,18 +97,19 @@ let source_at = func(h: Mut(HostSources), src: u64) -> Mut(Source) {
   return h.sources + src * size_of(Source);
 };
 
-let trap_ref = func(h: Mut(HostSources), msg: Slice(u8), cause: u64) -> Ref(u8) {
-  let dead: u64 = trap_with(h, msg, cause);
+let trap_ref = func(msg: Slice(u8), cause: u64) -> Ref(u8) {
+  trap_with(msg, cause);
   return null_ref(Ref(u8));
 };
 
-// --- 构造 -------------------------------------------------------------------
-// 源码记录表与造组用的孩子暂存区都从符号表的共享工作区切出。源码单元的 Reader
-// Arena 在 source_add 里按确切字节数单独切。
 pub let host_sources_new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut),
                                 source_cap: u64, kids_cap: u64) -> HostSources {
-  if source_cap == 0 { return mem.halt_now(source_cap); }
-  if kids_cap == 0 { return mem.halt_now(kids_cap); }
+  if source_cap == 0 {
+    trap_with("source_host: host_sources_new zero source capacity", source_cap);
+  }
+  if kids_cap == 0 {
+    trap_with("source_host: host_sources_new zero kids capacity", kids_cap);
+  }
   let src_bytes: u64 = source_cap * size_of(Source);
   let kid_bytes: u64 = kids_cap * 4;
   let src_mem: Mut(u8) = sym.mem_alloc(syms, src_bytes, 8);
@@ -167,14 +122,11 @@ pub let host_sources_new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut),
     source_count: 0,
     kids: ptr_cast(Mut(u32), kid_mem),
     kids_cap: kids_cap,
-    err_kind: rd.RD_OK(),
+    err_kind: rd.ReadStatus.Ok as u64,
     err_line: 0,
     err_col: 0,
     err_offset: 0,
     err_needed: 0,
-    err_msg_ptr: null_ref(Ref(u8)),
-    err_msg_len: 0,
-    err_detail: 0,
   };
 };
 
@@ -183,16 +135,12 @@ pub let new = func(syms: Mut(sym.HostSymTab), out: Mut(ao.AstOut), source_cap: u
   return host_sources_new(syms, out, source_cap, kids_cap);
 };
 
-// --- 诊断字段 ---------------------------------------------------------------
 let clear_error = func(h: Mut(HostSources)) {
-  h.err_kind = rd.RD_OK();
+  h.err_kind = rd.ReadStatus.Ok as u64;
   h.err_line = 0;
   h.err_col = 0;
   h.err_offset = 0;
   h.err_needed = 0;
-  h.err_msg_ptr = null_ref(Ref(u8));
-  h.err_msg_len = 0;
-  h.err_detail = 0;
 };
 
 let fail_with = func(h: Mut(HostSources), ast: rd.RawAst) -> u64 {
@@ -210,51 +158,48 @@ pub let last_error_col = func(h: Mut(HostSources)) -> u64 { return h.err_col; };
 pub let last_error_offset = func(h: Mut(HostSources)) -> u64 { return h.err_offset; };
 pub let last_error_needed = func(h: Mut(HostSources)) -> u64 { return h.err_needed; };
 
-// --- 源码管理 ---------------------------------------------------------------
 pub let source_count = func(h: Mut(HostSources)) -> u64 { return h.source_count; };
 
-// 登记一份源码。name 为空表示没有路径（片段），此时 source_name 返回 0。
-// 词法或语法错误不是宿主故障：写诊断并交回 NO_SOURCE，宿主水位不动。
 pub let source_add = func(h: Mut(HostSources), name: Slice(u8), text: Slice(u8)) -> u64 {
   clear_error(h);
   if h.source_count >= h.source_cap {
-    return trap_with(h, "source_host: source_add capacity", h.source_count);
+    return trap_with("source_host: source_add capacity", h.source_count);
   }
-  // 计数遍：零长度 Arena 不会写任何字节，只在容量不足时把确切需求放进 needed。
+
   let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
   let counted: rd.RawAst = rd.parse(text, probe);
-  if counted.kind != rd.RD_ERR_CAPACITY() {
-    if counted.kind != rd.RD_OK() { return fail_with(h, counted); }
-    return trap_with(h, "source_host: source_add unexpected reader kind",
+  if counted.kind != rd.ReadStatus.ErrCapacity as u64 {
+    if counted.kind != rd.ReadStatus.Ok as u64 { return fail_with(h, counted); }
+    return trap_with("source_host: source_add unexpected reader kind",
                      counted.kind);
   }
   let need: u64 = counted.needed;
   if need == 0 {
-    return trap_with(h, "source_host: source_add empty arena need", need);
+    return trap_with("source_host: source_add empty arena need", need);
   }
   let block: Mut(u8) = sym.mem_alloc(h.syms, need, 8);
   let arena: MutSlice(u8) = make_slice(MutSlice(u8), block, need);
   let ast: rd.RawAst = rd.parse(text, arena);
-  if ast.kind != rd.RD_OK() {
-    return trap_with(h, "source_host: source_add reparse failed", ast.kind);
+  if ast.kind != rd.ReadStatus.Ok as u64 {
+    return trap_with("source_host: source_add reparse failed", ast.kind);
   }
   if ast.root > SLOT_MASK() {
-    return trap_with(h, "source_host: source_add root slot overflow", ast.root);
+    return trap_with("source_host: source_add root slot overflow", ast.root);
   }
   if ast.node_count > SLOT_MASK() {
-    return trap_with(h, "source_host: source_add node count overflow",
+    return trap_with("source_host: source_add node count overflow",
                      ast.node_count);
   }
   let id: u64 = h.source_count;
   if id > SOURCE_MASK() {
-    return trap_with(h, "source_host: source_add source id overflow", id);
+    return trap_with("source_host: source_add source id overflow", id);
   }
-  // 只有解析成功的源码才名字进符号表，被拒绝的源码不留下符号。
+
   let name_sym: u64 = 0;
   if name.len > 0 {
     name_sym = sym.sym_intern(h.syms, name.ptr, name.len);
     if name_sym > INDEX_MASK() {
-      return trap_with(h, "source_host: source_add name symbol overflow",
+      return trap_with("source_host: source_add name symbol overflow",
                        name_sym);
     }
   }
@@ -279,28 +224,22 @@ pub let source_add = func(h: Mut(HostSources), name: Slice(u8), text: Slice(u8))
   return id;
 };
 
-// 把一段文本登记成匿名源码单元，供宏展开期临时求值使用。
 pub let ast_parse_snippet = func(h: Mut(HostSources), text: Slice(u8)) -> u64 {
   let empty: Slice(u8) = "";
   return source_add(h, empty, text);
 };
 
-// 源码的名字符号号；匿名源码回 0。这里交回符号表原生编号，句柄包装由
-// 需要 SYM 句柄的调用方自己做。
 pub let source_name = func(h: Mut(HostSources), src: u64) -> u64 {
   let rec: Mut(Source) = source_at(h, src);
   return rec.name;
 };
 
-// --- 诊断定位 ---------------------------------------------------------------
-// 源码正文的只读视图；源码号越界回空切片。
 pub let source_text_slice = func(h: Mut(HostSources), src: u64) -> Slice(u8) {
   if src >= h.source_count { return ""; }
   let rec: Mut(Source) = h.sources + src * size_of(Source);
   return make_slice(Slice(u8), rec.text_ptr, rec.text_len);
 };
 
-// 解析遍次记下的出错行列；解析成功的源码两者都是 0。
 pub let source_err_line = func(h: Mut(HostSources), src: u64) -> u64 {
   let rec: Mut(Source) = source_at(h, src);
   return rec.ast_err_line;
@@ -311,13 +250,11 @@ pub let source_err_col = func(h: Mut(HostSources), src: u64) -> u64 {
   return rec.ast_err_col;
 };
 
-// 解析遍次记下的出错字节偏移；解析成功时为 0。
 pub let source_err_offset = func(h: Mut(HostSources), src: u64) -> u64 {
   let rec: Mut(Source) = source_at(h, src);
   return rec.ast_err_offset;
 };
 
-// 第 line 行的行首偏移；line 为 0 或 1 都落在正文起点，行号越界回正文长度。
 let line_origin = func(text: Slice(u8), line: u64) -> u64 {
   if line <= 1 { return 0; }
   return loop c(i: u64 = 0, want: u64 = 1, start: u64 = 0) while i <= text.len {
@@ -332,7 +269,6 @@ let line_origin = func(text: Slice(u8), line: u64) -> u64 {
   };
 };
 
-// 1 基的 (line, col) 换算成字节偏移。列按字节推进，与 Reader 记下的列一致。
 pub let line_col_offset = func(text: Slice(u8), line: u64, col: u64) -> u64 {
   let start: u64 = line_origin(text, line);
   let ahead: u64 = if col == 0 { 0 } else { col - 1 };
@@ -341,7 +277,6 @@ pub let line_col_offset = func(text: Slice(u8), line: u64, col: u64) -> u64 {
   return at;
 };
 
-// 把平铺的字段拼回 Reader 的 RawAst 值。组与孩子的下标都在里面。
 let source_ast = func(rec: Mut(Source)) -> rd.RawAst {
   return rd.RawAst {
     nodes: rec.ast_nodes,
@@ -359,8 +294,6 @@ let source_ast = func(rec: Mut(Source)) -> rd.RawAst {
   };
 };
 
-// 源码根组的节点句柄。展开遍次把根换成 AstOut 里的新树以后，这里交回那棵
-// 新树的根，符号登记的节点下标才会落在同一棵树上。
 pub let source_root = func(h: Mut(HostSources), src: u64) -> u64 {
   let rec: Mut(Source) = source_at(h, src);
   let cooked: u64 = rec.root_handle;
@@ -369,8 +302,6 @@ pub let source_root = func(h: Mut(HostSources), src: u64) -> u64 {
   return handle_ast_in(src, ast.root);
 };
 
-// 记下展开后的源根；后续按源码号取根都走这里换上的树。源码号越界或根句柄为
-// 空时交回 NO_SOURCE，由调用方按编译失败处理。
 pub let set_source_root = func(h: Mut(HostSources), src: u64, root: u64) -> u64 {
   if src >= h.source_count { return NO_SOURCE(); }
   if root == 0 { return NO_SOURCE(); }
@@ -379,9 +310,8 @@ pub let set_source_root = func(h: Mut(HostSources), src: u64, root: u64) -> u64 
   return root;
 };
 
-// --- Reader 节点读取 --------------------------------------------------------
-let trap_raw = func(h: Mut(HostSources), cause: u64) -> rd.RawNode {
-  let dead: u64 = trap_with(h, "source_host: node index out of range", cause);
+let trap_raw = func(cause: u64) -> rd.RawNode {
+  trap_with("source_host: node index out of range", cause);
   return rd.RawNode {
     kind: 0,
     flags: 0,
@@ -394,33 +324,31 @@ let trap_raw = func(h: Mut(HostSources), cause: u64) -> rd.RawNode {
 let raw_at = func(h: Mut(HostSources), src: u64, slot: u64) -> rd.RawNode {
   let rec: Mut(Source) = source_at(h, src);
   let ast: rd.RawAst = source_ast(rec);
-  if slot >= ast.node_count { return trap_raw(h, slot); }
+  if slot >= ast.node_count { return trap_raw(slot); }
   return rd.node_get(ast.nodes, slot);
 };
 
 let is_raw_group = func(kind: u64) -> u64 {
-  if kind >= rd.RAW_GROUP_PAREN() { return 1; }
+  if kind >= rd.RawKind.GroupParen as u64 { return 1; }
   return 0;
 };
 
 let raw_group_delim = func(kind: u64) -> u64 {
-  if kind == rd.RAW_GROUP_PAREN() { return 40; }
-  if kind == rd.RAW_GROUP_BRACKET() { return 91; }
-  if kind == rd.RAW_GROUP_BRACE() { return 123; }
+  if kind == rd.RawKind.GroupParen as u64 { return 40; }
+  if kind == rd.RawKind.GroupBracket as u64 { return 91; }
+  if kind == rd.RawKind.GroupBrace as u64 { return 123; }
   return 0;
 };
 
-// --- 统一节点查询 -----------------------------------------------------------
-// 词与组这两个类别与 AstOut 的取值一致，两类来源因此可以共用同一套判断。
 pub let ast_kind = func(h: Mut(HostSources), node: u64) -> u64 {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
     let n: rd.RawNode = raw_at(h, source_of(node), slot_of(node));
-    if is_raw_group(n.kind) == 1 { return ao.KIND_GROUP(); }
-    return ao.KIND_TOKEN();
+    if is_raw_group(n.kind) == 1 { return meta.NodeKind.Group as u64; }
+    return meta.NodeKind.Token as u64;
   }
   if cls == CLASS_AST_OUT() { return ao.node_kind(h.out, out_index_of(node)); }
-  return trap_with(h, "source_host: ast_kind unknown handle class", node);
+  return trap_with("source_host: ast_kind unknown handle class", node);
 };
 
 pub let ast_delim = func(h: Mut(HostSources), node: u64) -> u64 {
@@ -430,14 +358,13 @@ pub let ast_delim = func(h: Mut(HostSources), node: u64) -> u64 {
     return raw_group_delim(n.kind);
   }
   if cls == CLASS_AST_OUT() { return ao.node_delim(h.out, out_index_of(node)); }
-  return trap_with(h, "source_host: ast_delim unknown handle class", node);
+  return trap_with("source_host: ast_delim unknown handle class", node);
 };
 
 pub let ast_sym = func(h: Mut(HostSources), node: u64) -> u64 {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
-    // Reader 只产出零语义形式：词的文本按需驻留，与 C 版解析器把每个词都
-    // 驻留成 SymId 的行为一致。组没有符号。
+
     let src: u64 = source_of(node);
     let slot: u64 = slot_of(node);
     let n: rd.RawNode = raw_at(h, src, slot);
@@ -448,7 +375,7 @@ pub let ast_sym = func(h: Mut(HostSources), node: u64) -> u64 {
     if sp.len == 0 { return 0; }
     let id: u64 = sym.sym_intern(h.syms, rec.text_ptr + sp.offset, sp.len);
     if id > INDEX_MASK() {
-      return trap_with(h, "source_host: ast_sym symbol overflow", id);
+      return trap_with("source_host: ast_sym symbol overflow", id);
     }
     return handle_sym(id);
   }
@@ -456,14 +383,13 @@ pub let ast_sym = func(h: Mut(HostSources), node: u64) -> u64 {
     let id: u64 = ao.node_sym(h.out, out_index_of(node));
     if id == 0 { return 0; }
     if id > INDEX_MASK() {
-      return trap_with(h, "source_host: ast_sym stored symbol overflow", id);
+      return trap_with("source_host: ast_sym stored symbol overflow", id);
     }
     return handle_sym(id);
   }
-  return trap_with(h, "source_host: ast_sym unknown handle class", node);
+  return trap_with("source_host: ast_sym unknown handle class", node);
 };
 
-// 词没有孩子，回 0；调用方不必先判种类。
 pub let ast_child_count = func(h: Mut(HostSources), node: u64) -> u64 {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
@@ -472,7 +398,7 @@ pub let ast_child_count = func(h: Mut(HostSources), node: u64) -> u64 {
     return n.child_count;
   }
   if cls == CLASS_AST_OUT() { return ao.child_count(h.out, out_index_of(node)); }
-  return trap_with(h, "source_host: ast_child_count unknown handle class", node);
+  return trap_with("source_host: ast_child_count unknown handle class", node);
 };
 
 pub let ast_child = func(h: Mut(HostSources), node: u64, i: u64) -> u64 {
@@ -482,30 +408,29 @@ pub let ast_child = func(h: Mut(HostSources), node: u64, i: u64) -> u64 {
     let slot: u64 = slot_of(node);
     let n: rd.RawNode = raw_at(h, src, slot);
     if is_raw_group(n.kind) == 0 {
-      return trap_with(h, "source_host: ast_child on token node", node);
+      return trap_with("source_host: ast_child on token node", node);
     }
     if i >= n.child_count {
-      return trap_with(h, "source_host: ast_child index out of range", i);
+      return trap_with("source_host: ast_child index out of range", i);
     }
     let rec: Mut(Source) = source_at(h, src);
     let ast: rd.RawAst = source_ast(rec);
     let child: u64 = rd.child_id(ast, slot, i);
     if child > SLOT_MASK() {
-      return trap_with(h, "source_host: ast_child slot overflow", child);
+      return trap_with("source_host: ast_child slot overflow", child);
     }
     return handle_ast_in(src, child);
   }
   if cls == CLASS_AST_OUT() {
     let child: u64 = ao.child_at(h.out, out_index_of(node), i);
     if child > INDEX_MASK() {
-      return trap_with(h, "source_host: ast_child index overflow", child);
+      return trap_with("source_host: ast_child index overflow", child);
     }
     return handle_ast_out(child);
   }
-  return trap_with(h, "source_host: ast_child unknown handle class", node);
+  return trap_with("source_host: ast_child unknown handle class", node);
 };
 
-// 词文本的起点。组没有文本，回空引用。
 pub let ast_literal_addr = func(h: Mut(HostSources), node: u64) -> Ref(u8) {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
@@ -521,14 +446,13 @@ pub let ast_literal_addr = func(h: Mut(HostSources), node: u64) -> Ref(u8) {
   if cls == CLASS_AST_OUT() {
     let a: Mut(ao.AstOut) = h.out;
     let idx: u64 = out_index_of(node);
-    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return null_ref(Ref(u8)); }
+    if ao.node_kind(a, idx) != meta.NodeKind.Token as u64 { return null_ref(Ref(u8)); }
     let text: Slice(u8) = ao.text_of(a, idx);
     return text.ptr;
   }
-  return trap_ref(h, "source_host: ast_literal_addr unknown handle class", node);
+  return trap_ref("source_host: ast_literal_addr unknown handle class", node);
 };
 
-// 词文本的字节数。组没有文本，回 0。
 pub let ast_literal_len = func(h: Mut(HostSources), node: u64) -> u64 {
   let cls: u64 = class_of(node);
   if cls == CLASS_AST_IN() {
@@ -544,45 +468,41 @@ pub let ast_literal_len = func(h: Mut(HostSources), node: u64) -> u64 {
   if cls == CLASS_AST_OUT() {
     let a: Mut(ao.AstOut) = h.out;
     let idx: u64 = out_index_of(node);
-    if ao.node_kind(a, idx) != ao.KIND_TOKEN() { return 0; }
+    if ao.node_kind(a, idx) != meta.NodeKind.Token as u64 { return 0; }
     let text: Slice(u8) = ao.text_of(a, idx);
     return text.len;
   }
-  return trap_with(h, "source_host: ast_literal_len unknown handle class", node);
+  return trap_with("source_host: ast_literal_len unknown handle class", node);
 };
 
-// --- AstOut 事务桥 ----------------------------------------------------------
 let root_index = func(h: Mut(HostSources), root: u64) -> u64 {
-  if root == NO_NODE() { return ao.NO_NODE(); }
+  if root == NO_NODE() { return meta.NO_NODE(); }
   if class_of(root) != CLASS_AST_OUT() {
-    return trap_with(h, "source_host: ast_tx_commit root not ast_out", root);
+    return trap_with("source_host: ast_tx_commit root not ast_out", root);
   }
   return out_index_of(root);
 };
 
-// 符号句柄只接受 0（没有符号）或 SYM 类别。
 let sym_index = func(h: Mut(HostSources), v: u64) -> u64 {
   if v == 0 { return 0; }
   if class_of(v) != CLASS_SYM() {
-    return trap_with(h, "source_host: symbol handle not sym class", v);
+    return trap_with("source_host: symbol handle not sym class", v);
   }
   return out_index_of(v);
 };
 
-// 来源节点可以是任一类 AST 句柄；AstOut 只把它当驻留键的一段。
 let origin_key = func(h: Mut(HostSources), v: u64) -> u64 {
   if v == 0 { return 0; }
   if v == NO_NODE() { return NO_NODE(); }
   let cls: u64 = class_of(v);
   if (cls == CLASS_AST_IN()) or (cls == CLASS_AST_OUT()) { return v; }
-  return trap_with(h, "source_host: origin handle not an ast node", v);
+  return trap_with("source_host: origin handle not an ast node", v);
 };
 
 pub let ast_tx_begin = func(h: Mut(HostSources)) -> u64 {
   return ao.tx_begin(h.out);
 };
 
-// 根句柄必须是本次事务里构造的 AstOut 节点，或者 NO_NODE。
 pub let ast_tx_commit = func(h: Mut(HostSources), tx: u64, root: u64) -> u64 {
   let idx: u64 = root_index(h, root);
   let committed: u64 = ao.tx_commit(h.out, tx, idx);
@@ -594,7 +514,6 @@ pub let ast_tx_rollback = func(h: Mut(HostSources), tx: u64) -> u64 {
   return out_handle(restored);
 };
 
-// 造词：sym 是符号句柄，origin 是来源节点句柄，text 是原始字节。
 pub let ast_mk_token = func(h: Mut(HostSources), sym_handle: u64, origin: u64,
                             text: Slice(u8)) -> u64 {
   let sym_id: u64 = sym_index(h, sym_handle);
@@ -603,13 +522,9 @@ pub let ast_mk_token = func(h: Mut(HostSources), sym_handle: u64, origin: u64,
   return out_handle(id);
 };
 
-// 造组：kids 是紧排的 32 位统一句柄，逐个翻成 AstOut 下标后写进暂存区。
-// AstOut 的孩子表只存自己节点表里的下标，所以来自 Reader 的词（AST_IN）先按
-// 原文拷成 AstOut 里的词再进孩子表；Reader 的组没法这样拷（它的孩子又都是
-// Reader 句柄），调用方必须先递归展开成 AstOut 组。
 let token_index = func(h: Mut(HostSources), kid: u64) -> u64 {
-  if ast_kind(h, kid) != ao.KIND_TOKEN() {
-    return trap_with(h, "source_host: ast_mk_group expects token node", kid);
+  if ast_kind(h, kid) != meta.NodeKind.Token as u64 {
+    return trap_with("source_host: ast_mk_group expects token node", kid);
   }
   let sym_id: u64 = sym_index(h, ast_sym(h, kid));
   let text: Slice(u8) = make_slice(Slice(u8), ast_literal_addr(h, kid),
@@ -620,14 +535,14 @@ let token_index = func(h: Mut(HostSources), kid: u64) -> u64 {
 pub let ast_mk_group = func(h: Mut(HostSources), delim: u64, kids: Slice(u32)) -> u64 {
   let n: u64 = kids.len;
   if n > h.kids_cap {
-    return trap_with(h, "source_host: ast_mk_group kids capacity", n);
+    return trap_with("source_host: ast_mk_group kids capacity", n);
   }
   let i: u64 = loop c(i: u64 = 0) while i < n {
     let raw: u32 = kids[i];
     let kid: u64 = raw as u64;
     let idx: u64 = if class_of(kid) == CLASS_AST_IN() { token_index(h, kid) } else {
       if class_of(kid) != CLASS_AST_OUT() {
-        return trap_with(h, "source_host: ast_mk_group unknown kid class", kid);
+        return trap_with("source_host: ast_mk_group unknown kid class", kid);
       }
       out_index_of(kid)
     };

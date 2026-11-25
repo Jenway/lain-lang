@@ -1,5 +1,3 @@
-// test.lain —— 根目录库级测试入口（类比 `go test ./...`）。
-// 聚合标准库与编译器核心套件，通过 `std::test` 输出统一 PASS/FAIL 汇总。
 let coro = import("std::coro");
 let io = import("std::io");
 let os = import("std::os");
@@ -35,7 +33,6 @@ use Map64;
 use mem.BumpArena;
 use mem.BudgetTracker;
 
-// --- 语言核心覆盖：match 穷尽性、定长数组与切片、字符串转义、UFCS ---
 let LangOpt = enum {
   Some(i64)
   None
@@ -49,7 +46,6 @@ let unwrap_plus_one = func(o: LangOpt) -> i64 {
   return value;
 };
 
-// 整数枚举：变体是底层整数常量，与带标签的 ADT 枚举互不影响。
 let LangCode = enum(u64) {
   No = 0,
   Paren = 40,
@@ -157,7 +153,6 @@ let LangVec2Ops = module {
 use LangI64;
 use LangVec2Ops;
 
-// --- 语言核心覆盖：中止性效应与词法尾恢复效应 ---
 let LangDbError = enum {
   Timeout
   Corrupted
@@ -210,7 +205,6 @@ let lang_yield_run = func() -> i64 {
   };
 };
 
-// 跨过程尾恢复：两次 emit 都发生在被调用的过程内部，处理器在调用方。
 let lang_cross_produce = func(n: i64) -> i64 !{ LangYield(i64) } {
   let a: i64 = perform LangYield(i64).emit(n);
   let b: i64 = perform LangYield(i64).emit(n * 2);
@@ -224,7 +218,6 @@ let lang_cross_run = func() -> i64 {
   };
 };
 
-// 嵌套处理器跨过程：内层处理器对同一效应的恢复改写覆盖外层处理器。
 let lang_nested_same_emit5 = func() -> i64 !{ LangYield(i64) } {
   let a: i64 = perform LangYield(i64).emit(5);
   return a;
@@ -250,7 +243,6 @@ let lang_nested_same_run = func() -> i64 {
   };
 };
 
-// 嵌套处理器跨过程：内层处理器处理效应 A，外层处理器接住被调过程内部的效应 B。
 let LangStep = effect {
   op step(x: i64) -> i64;
 };
@@ -284,8 +276,6 @@ let lang_cross_effect_run = func() -> i64 {
   };
 };
 
-// --- comptime if：只编译选中的分支 -----------------------------------------
-// 顶层 comptime if 用 target_os() 逐个比较平台编号，每支声明同一个名字。
 comptime if target_os() == 0 {
   let lang_top_os_code: u64 = 0;
 } else {
@@ -296,7 +286,6 @@ comptime if target_os() == 0 {
   }
 };
 
-// 顶层 comptime if 用 is_*() 选平台；未选中分支的声明不进符号表。
 comptime if is_windows() {
   let lang_top_platform: u64 = 0;
 } else {
@@ -311,12 +300,10 @@ comptime if is_windows() {
   }
 };
 
-// 恒假条件：未选中分支里的未定义标识符与平台专属调用完全不参与编译。
 comptime if is_linux() and is_macos() {
   let lang_top_unreachable: u64 = lang_undefined_top_level_symbol(1);
 };
 
-// 语句级 comptime if：用 is_*() 选平台，选中分支把编号写进外层局部变量。
 let lang_os_statement_pick = func() -> u64 {
   let pick: u64 = 9;
   comptime if is_windows() {
@@ -333,8 +320,6 @@ let lang_os_statement_pick = func() -> u64 {
   return pick;
 };
 
-// 语句级 comptime if：未选中的分支里放未定义标识符，编译期不应看到它们。
-// 每个平台分支的 else 里再套一个同条件分支，那个分支恒不被选中。
 let lang_os_untaken_bits = func() -> u64 {
   let bits: u64 = 0;
   comptime if is_windows() {
@@ -358,7 +343,7 @@ let lang_os_untaken_bits = func() -> u64 {
       bits = bits + lang_undefined_macos_branch(bits);
     };
   };
-  // 恒假条件：整段分支都不编译。
+
   comptime if is_windows() and is_linux() {
     bits = bits + lang_undefined_conjunction_symbol(bits);
   };
@@ -372,7 +357,6 @@ let run_comptime_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::comptime");
   let os_id: u64 = target_os();
 
-  // 四个目标系统谓词互斥且恰好一个成立。
   let os_hits: u64 = 0;
   if is_windows() { os_hits = os_hits + 1; }
   if is_linux() { os_hits = os_hits + 1; }
@@ -381,14 +365,11 @@ let run_comptime_suite = func() -> i64 {
   t.check(mut_of(st), "os predicate covers host", is_windows() or is_linux() or is_macos());
   t.check(mut_of(st), "target_os within known range", os_id <= 2);
 
-  // 语句级 comptime if 选中的分支与 target_os() 完全一致。
   t.eq_u64(mut_of(st), "statement comptime if matches target_os", lang_os_statement_pick(), os_id);
 
-  // 顶层 comptime if：两条声明链各只收一支。
   t.eq_u64(mut_of(st), "top-level comptime if target_os chain", lang_top_os_code, os_id);
   t.eq_u64(mut_of(st), "top-level comptime if is_* chain", lang_top_platform, os_id);
 
-  // 未选中分支被整段跳过：未定义标识符没有报错，且只有单一平台的位被置上。
   let want_bits: u64 = 1;
   if os_id == 1 { want_bits = 2; }
   if os_id == 2 { want_bits = 4; }
@@ -537,7 +518,7 @@ let run_build_suite = func() -> i64 {
   let lib_id: u64 = g.add_static_lib("core", "src/core.lain", "body1", "iface1");
   let app_id: u64 = g.add_executable("app", "src/entry.lain", "body2", "iface2");
   let linked: u64 = g.link(app_id, lib_id);
-  // 每个单元自身一步、每条链接边一步：2 个单元 + 1 条边 = 3
+
   t.eq_u64(mut_of(st), "graph step_count", g.step_count(), 3);
   t.eq_u64(mut_of(st), "graph edge_count", g.edge_count(), 1);
   t.eq_u64(mut_of(st), "graph link", linked, 1);
@@ -584,7 +565,6 @@ let run_os_fmt_suite = func() -> i64 {
 let run_option_mem_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::option_and_mem");
 
-  // --- std::option ---
   let some7: OptI64.Opt = OptI64.some(7);
   let no_val: OptI64.Opt = OptI64.none();
   t.eq_bool(mut_of(st), "option some is_some", OptI64.is_some(some7), true);
@@ -594,7 +574,6 @@ let run_option_mem_suite = func() -> i64 {
   t.eq_i64(mut_of(st), "option unwrap_or some", OptI64.unwrap_or(some7, -1), 7);
   t.eq_i64(mut_of(st), "option unwrap_or none", OptI64.unwrap_or(no_val, -1), -1);
 
-  // --- std::mem.BumpArena ---
   let arena: mem.BumpArena.Arena = mem.BumpArena.new();
   t.eq_u64(mut_of(st), "arena capacity", arena.capacity(), 8192);
   t.eq_u64(mut_of(st), "arena remaining empty", arena.remaining(), 8192);
@@ -612,7 +591,6 @@ let run_option_mem_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "arena reset", arena.reset(), 1);
   t.eq_u64(mut_of(st), "arena remaining reset", arena.remaining(), 8192);
 
-  // --- std::mem.BudgetTracker ---
   let tr: mem.BudgetTracker.Tracker = mem.BudgetTracker.new(64);
   let p0: u64 = tr.alloc(16);
   t.check(mut_of(st), "budget alloc1 nonzero", p0 != 0);
@@ -635,7 +613,6 @@ let run_option_mem_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "budget live 0", tr.live(), 0);
   t.eq_bool(mut_of(st), "budget has_leaks after free", tr.has_leaks(), false);
 
-  // --- std::mem.SystemAlloc ---
   let sa: mem.SystemHandle = mem.SystemAlloc.new();
   let sp: u64 = sa.alloc(128);
   t.check(mut_of(st), "system alloc nonzero", sp != 0);
@@ -675,8 +652,6 @@ let MetaFieldPrinter = func(T: Type) -> Module {
 
 let MetaBoolPrinter = MetaFieldPrinter(MetaBoolRec);
 
-// 纯数据反射描述表：编译期字段事实（name / offset / 类型宽度）与调用方给的类别码
-// 打包进 std::meta.FieldDesc 数组，之后的查询与写出都只是普通函数调用。
 let pack_meta_field_descs = func(dst: MutSlice(meta.FieldDesc), kinds: Slice(u64)) -> u64 {
   let i: u64 = 0;
   comptime for f in fields_of(MetaBoolRec) {
@@ -689,7 +664,6 @@ let pack_meta_field_descs = func(dst: MutSlice(meta.FieldDesc), kinds: Slice(u64
   return i;
 };
 
-// 泛型函数里的 comptime for：单态化后的 T 必须能在编译期绑定里查到。
 let count_fields = func(v: Ref(T)) ?{ T: Type } -> u64 {
   let n: u64 = 0;
   comptime for f in fields_of(T) {
@@ -717,7 +691,6 @@ let run_meta_and_bool_suite = func() -> i64 {
   t.eq_bytes(mut_of(st), "fields_of(T).name Slice(u8)", names, "ok,tag,active");
   t.eq_u64(mut_of(st), "generic comptime for fields_of(T)", count_fields(ref_of(r)), 3);
 
-  // 纯数据反射描述表：打包、求和、按名查找与 CSV 写出。
   let blank: meta.FieldDesc = meta.FieldDesc { name: "", offset: 0, size: 0, kind: 0 };
   let descs: Array(meta.FieldDesc, 3) = [blank, blank, blank];
   let kinds: Array(u64, 3) = [0, 0, 0];
@@ -771,7 +744,7 @@ let thread_worker = func(arg: Mut(u8)) -> c_uint {
   let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), arg);
   let i: u64 = 0;
   loop lp(k: u64 = 0) while k < 1000 {
-    sync.atomic_u64_add(ap, 1, sync.RELAXED());
+    sync.atomic_u64_add(ap, 1, sync.MemOrder.Relaxed as u64);
     k = k + 1;
   };
   return 0;
@@ -779,24 +752,24 @@ let thread_worker = func(arg: Mut(u8)) -> c_uint {
 
 let pool_task_inc = func(arg: Mut(u8)) -> u64 {
   let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), arg);
-  sync.atomic_u64_add(ap, 1, sync.RELAXED());
+  sync.atomic_u64_add(ap, 1, sync.MemOrder.Relaxed as u64);
   return 0;
 };
 
 let sched_task_inc = func(ctx: Mut(u8)) -> u64 {
   let ap: Mut(sync.AtomicU64) = ptr_cast(Mut(sync.AtomicU64), ctx);
-  sync.atomic_u64_add(ap, 1, sync.RELAXED());
+  sync.atomic_u64_add(ap, 1, sync.MemOrder.Relaxed as u64);
   return 0;
 };
 
 let run_sync_thread_meta_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::sync_thread_meta");
   let a: sync.AtomicU64 = sync.atomic_u64_new(10);
-  t.eq_u64(mut_of(st), "atomic load init", sync.atomic_u64_load(mut_of(a), sync.ACQUIRE()), 10);
-  t.eq_u64(mut_of(st), "atomic add old", sync.atomic_u64_add(mut_of(a), 5, sync.SEQ_CST()), 10);
-  t.eq_u64(mut_of(st), "atomic load after add", sync.atomic_u64_load(mut_of(a), sync.ACQUIRE()), 15);
-  t.eq_u64(mut_of(st), "atomic cas old", sync.atomic_u64_cas(mut_of(a), 15, 42, sync.ACQ_REL()), 15);
-  t.eq_u64(mut_of(st), "atomic load after cas", sync.atomic_u64_load(mut_of(a), sync.SEQ_CST()), 42);
+  t.eq_u64(mut_of(st), "atomic load init", sync.atomic_u64_load(mut_of(a), sync.MemOrder.Acquire as u64), 10);
+  t.eq_u64(mut_of(st), "atomic add old", sync.atomic_u64_add(mut_of(a), 5, sync.MemOrder.SeqCst as u64), 10);
+  t.eq_u64(mut_of(st), "atomic load after add", sync.atomic_u64_load(mut_of(a), sync.MemOrder.Acquire as u64), 15);
+  t.eq_u64(mut_of(st), "atomic cas old", sync.atomic_u64_cas(mut_of(a), 15, 42, sync.MemOrder.AcqRel as u64), 15);
+  t.eq_u64(mut_of(st), "atomic load after cas", sync.atomic_u64_load(mut_of(a), sync.MemOrder.SeqCst as u64), 42);
   let lk: sync.SpinLock = sync.spin_new();
   sync.spin_lock(mut_of(lk));
   sync.spin_unlock(mut_of(lk));
@@ -807,7 +780,7 @@ let run_sync_thread_meta_suite = func() -> i64 {
   let t2: thread.Thread = thread.spawn(fn_of(thread_worker), ptr_cast(Mut(u8), mut_of(shared)));
   t.eq_u64(mut_of(st), "thread1 join", thread.join(t1), 0);
   t.eq_u64(mut_of(st), "thread2 join", thread.join(t2), 0);
-  t.eq_u64(mut_of(st), "concurrent atomic_add 2000", sync.atomic_u64_load(mut_of(shared), sync.SEQ_CST()), 2000);
+  t.eq_u64(mut_of(st), "concurrent atomic_add 2000", sync.atomic_u64_load(mut_of(shared), sync.MemOrder.SeqCst as u64), 2000);
 
   let pshared: sync.AtomicU64 = sync.atomic_u64_new(0);
   let tp: Mut(pool.ThreadPool) = pool.pool_new(4, 128);
@@ -820,7 +793,7 @@ let run_sync_thread_meta_suite = func() -> i64 {
   };
   pool.pool_wait_all(tp);
   t.eq_u64(mut_of(st), "pool 100 submits accepted", p_ok, 1);
-  t.eq_u64(mut_of(st), "pool 100 tasks executed", sync.atomic_u64_load(mut_of(pshared), sync.SEQ_CST()), 100);
+  t.eq_u64(mut_of(st), "pool 100 tasks executed", sync.atomic_u64_load(mut_of(pshared), sync.MemOrder.SeqCst as u64), 100);
   t.eq_u64(mut_of(st), "pool shutdown", pool.pool_shutdown(tp), 0);
 
   let is_cnt: sync.AtomicU64 = sync.atomic_u64_new(0);
@@ -828,7 +801,7 @@ let run_sync_thread_meta_suite = func() -> i64 {
   sched.dispatch(mut_of(isched), fn_of(sched_task_inc), ptr_cast(Mut(u8), mut_of(is_cnt))) ?{ sc: sched.InlineScheduler };
   sched.dispatch(mut_of(isched), fn_of(sched_task_inc), ptr_cast(Mut(u8), mut_of(is_cnt))) ?{ sc: sched.InlineScheduler };
   t.eq_u64(mut_of(st), "inline sched wait_idle", sched.wait_idle(mut_of(isched)) ?{ sc: sched.InlineScheduler }, 2);
-  t.eq_u64(mut_of(st), "inline sched counter", sync.atomic_u64_load(mut_of(is_cnt), sync.SEQ_CST()), 2);
+  t.eq_u64(mut_of(st), "inline sched counter", sync.atomic_u64_load(mut_of(is_cnt), sync.MemOrder.SeqCst as u64), 2);
 
   let ps_cnt: sync.AtomicU64 = sync.atomic_u64_new(0);
   let tp2: Mut(pool.ThreadPool) = pool.pool_new(2, 32);
@@ -838,7 +811,7 @@ let run_sync_thread_meta_suite = func() -> i64 {
     psi = psi + 1;
   };
   sched.wait_idle(mut_of(psched)) ?{ sc: sched.PoolScheduler };
-  t.eq_u64(mut_of(st), "pool sched counter", sync.atomic_u64_load(mut_of(ps_cnt), sync.SEQ_CST()), 8);
+  t.eq_u64(mut_of(st), "pool sched counter", sync.atomic_u64_load(mut_of(ps_cnt), sync.MemOrder.SeqCst as u64), 8);
   pool.pool_shutdown(tp2);
 
   let @concat_ident(macro_, val): u64 = 77;
@@ -861,7 +834,6 @@ let run_sync_thread_meta_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
-// --- std::coro：生成器、局部调度与合作式通道 ---
 let CoroBox = struct {
   fiber_a: u64,
   fiber_b: u64,
@@ -950,7 +922,6 @@ let coro_chan_root = func(ctx: Mut(u8)) -> u64 {
 let run_coro_suite = func() -> i64 {
   let st: t.Suite = t.suite("std::coro");
 
-  // --- 生成器：依次发出 0、10、20，末尾回 None ---
   let g: Mut(coro.GenU64.Self) = coro.GenU64.gen(coro_gen_entry, coro_null_ctx());
   let gen_sum: u64 = 0;
   let gen_count: u64 = 0;
@@ -984,7 +955,6 @@ let run_coro_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "gen None at end", end_none, 1);
   t.eq_u64(mut_of(st), "gen drop", coro.GenU64.drop(g), 1);
 
-  // --- 局部调度器：两个协作任务通过 yield_now / sleep_ms 交替 ---
   let box_raw: u64 = os.alloc_bytes(size_of(CoroBox));
   let box: Mut(CoroBox) = ptr_cast(Mut(CoroBox), box_raw);
   box.fiber_a = 0;
@@ -996,7 +966,6 @@ let run_coro_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "fiber task B result", box.fiber_b, 9);
   t.eq_u64(mut_of(st), "fiber total 16", fiber_sum, 16);
 
-  // --- 有界通道：生产者发 1..=5，消费者累加得 15 ---
   let chan_sum: u64 = coro.run_fiber_local(coro_chan_root, fiber_ctx);
   t.eq_u64(mut_of(st), "chan sent 5", box.sent, 5);
   t.eq_u64(mut_of(st), "chan total 15", chan_sum, 15);
@@ -1011,13 +980,11 @@ let wrap_u64_opt = func(v: u64) -> opt.Option(u64) { return OptU64.some(v); };
 let run_lang_core_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::core");
 
-  // match 穷尽性：两个分支都被走到，Some 的载荷被绑定并参与运算。
   let some_val: LangOpt = LangOpt.Some { 41 };
   let none_val: LangOpt = LangOpt.None {};
   t.eq_i64(mut_of(st), "match Some payload", unwrap_plus_one(some_val), 42);
   t.eq_i64(mut_of(st), "match None branch", unwrap_plus_one(none_val), 0);
 
-  // 整数枚举：显式判别值、自增、==/!=、as 双向转换、形参与字段。
   t.eq_u64(mut_of(st), "cenum explicit value", LangCode.Paren as u64, 40);
   t.eq_u64(mut_of(st), "cenum high value", LangCode.Brace as u64, 123);
   t.eq_u64(mut_of(st), "cenum auto increment first", LangAuto.A as u64, 0);
@@ -1037,7 +1004,6 @@ let run_lang_core_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "cenum wildcard match hit", lang_code_wild(LangCode.Brace), 9);
   t.eq_u64(mut_of(st), "cenum wildcard match fallback", lang_code_wild(LangCode.Paren), 4);
 
-  // 定长数组与切片：数组形参、Slice 视图、MutSlice 子切片。
   let arr: Array(u64, 4) = [10, 20, 30, 40];
   let s: Slice(u64) = slice_of(arr);
   t.eq_u64(mut_of(st), "Array(u64, 4) slice len", s.len, 4);
@@ -1049,7 +1015,6 @@ let run_lang_core_suite = func() -> i64 {
   let sub: Slice(u64) = ms;
   t.eq_u64(mut_of(st), "MutSlice narrowing sum", sum_u64_slice(sub), 30);
 
-  // 字符串转义：\n \t \\ \" 各自落成单个字节。
   let esc: Slice(u8) = "a\nb\"c\\";
   t.eq_u64(mut_of(st), "escape len", esc.len, 6);
   t.eq_u64(mut_of(st), "escape byte sum", sum_u8_slice(esc), 430);
@@ -1058,7 +1023,6 @@ let run_lang_core_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "tab len", tabbed.len, 3);
   t.eq_u64(mut_of(st), "tab byte sum", sum_u8_slice(tabbed), 250);
 
-  // UFCS 标量分派：值 / Ref / Mut 三种首参。
   let n: i64 = 5;
   t.eq_i64(mut_of(st), "ufcs scalar value recv", n.twice(), 10);
   t.eq_i64(mut_of(st), "ufcs scalar ref recv", n.peek(), 5);
@@ -1067,14 +1031,12 @@ let run_lang_core_suite = func() -> i64 {
   t.eq_i64(mut_of(st), "ufcs scalar mut recv", n.bump(), 6);
   t.eq_i64(mut_of(st), "ufcs scalar mut persisted", n, 6);
 
-  // UFCS 结构体分派：同样三种首参。
   let v: LangVec2 = LangVec2 { x: 3, y: 4 };
   t.eq_i64(mut_of(st), "ufcs struct value recv", v.len2(), 25);
   t.eq_i64(mut_of(st), "ufcs struct ref recv", v.get_x(), 3);
   t.eq_i64(mut_of(st), "ufcs struct mut recv", v.add_x(5), 8);
   t.eq_i64(mut_of(st), "ufcs struct mut persisted", v.x, 8);
 
-  // Wave B: -> () 空返回、foo().bar / foo().method() 链式调用、类型位置 opt.Option(u64)。
   let ux: u64 = 9;
   unit_inc(mut_of(ux));
   t.eq_u64(mut_of(st), "-> () unit return", ux, 10);
@@ -1085,7 +1047,6 @@ let run_lang_core_suite = func() -> i64 {
   return t.finish(mut_of(st));
 };
 
-// 静态（非参数化）中止性效应：标量参数直接写在 op 声明上，不经过 Effect 工厂。
 let LangFailVal = effect {
   op fail_val(x: i64) -> Never;
 };
@@ -1104,7 +1065,6 @@ let lang_fail_probe = func(x: i64) -> i64 {
   };
 };
 
-// 环境 Trap：Trap 的名字就是身份，签名与调用点都不写 !{ Trap } 或 !。
 let lang_trap_probe = func() -> i64 {
   return handle mem.trap_abort(77) with {
     return(v) => v,
@@ -1112,8 +1072,6 @@ let lang_trap_probe = func() -> i64 {
   };
 };
 
-// 私有 let 过程不写 !{ Raise }：编译器从体内的 perform 与带 ! 的向外调用
-// 推断出效应行，调用点仍然用 ! 表明效应向外传。
 let Raise = effect {
   op fail(code: i64) -> Never;
 };
@@ -1137,37 +1095,29 @@ let lang_priv_run = func() -> i64 {
 let run_effects_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::effects");
 
-  // 中止性效应（-> Never）：值 / 错误 / 停止三条通道。
   t.eq_i64(mut_of(st), "abortive value channel", lang_classify(21, 0), 42);
   t.eq_i64(mut_of(st), "abortive error channel", lang_classify(21, 1), 80);
   t.eq_i64(mut_of(st), "abortive stop channel", lang_classify(21, 2), 20);
-  // 再走一次值通道，确认效应没有残留。
+
   t.eq_i64(mut_of(st), "abortive value channel repeated", lang_classify(21, 0), 42);
 
-  // 静态中止性效应的标量参数回归：helper 内部的 perform 由外层 handle 捕获，
-  // 载荷原样绑定到 fail_val 分支。
   t.eq_i64(mut_of(st), "static abortive scalar pass-through", lang_fail_probe(7), 7);
   t.eq_i64(mut_of(st), "static abortive scalar payload", lang_fail_probe(142), 127);
 
-  // 环境 Trap：中止事件写入通道，handle 的 trap 分支拿到原因码。
   t.eq_i64(mut_of(st), "ambient trap handler", lang_trap_probe(), 77);
-  // 私有过程的推断效应行：priv_raise / priv_forward 都没有注解，
-  // priv_forward 带 ! 调 priv_raise，handle 接住并拿回 55。
+
   t.eq_i64(mut_of(st), "inferred private effect row", lang_priv_run(), 55);
 
-  // 词法尾恢复：两次 emit 各自 resume，续体把加工后的值送回发起点。
   t.eq_i64(mut_of(st), "resumable emit resume", lang_yield_run(), 60);
-  // 跨过程尾恢复：emit 发生在被调过程内部，处理器在调用方。
+
   t.eq_i64(mut_of(st), "cross-proc resumable emit", lang_cross_run(), 60);
-  // 嵌套处理器跨过程：内层对同一效应的恢复覆盖外层。
+
   t.eq_i64(mut_of(st), "nested handle overrides outer", lang_nested_same_run(), 10);
-  // 嵌套处理器跨过程：内层处理 step，外层接住被调过程内部的 tally。
+
   t.eq_i64(mut_of(st), "nested handle cross effect", lang_cross_effect_run(), 16);
   return t.finish(mut_of(st));
 };
 
-// --- 值系统：Uninit / init_at / drop_at / reloc / 固有 drop ---
-// 析构顺序用一个共享计数日志观察：每个 Probe 自带日志指针，drop 把 tag 写进去。
 let RaiiLog = struct {
   buf: MutSlice(u64),
   len: u64,
@@ -1296,12 +1246,10 @@ let raii_fs_missing = func() -> u64 !{ os.IoErr } {
 let run_value_raii_suite = func() -> i64 {
   let st: t.Suite = t.suite("lang::value_raii");
 
-  // 日志缓冲与共享计数。
   let raw: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   let lg0: RaiiLog = raii_log_of(make_slice(MutSlice(u64), ptr_cast(Mut(u64), mut_of(raw)), 16));
   let lg: Mut(RaiiLog) = mut_of(lg0);
 
-  // 1. Uninit(T) + init_at + drop_at。
   let cell: Array(u64, 2) = [0, 0];
   let u: Uninit(RaiiProbe) = ptr_cast(Uninit(RaiiProbe), mut_of(cell));
   let p: Mut(RaiiProbe) = init_at(u, raii_probe_new(lg, 11));
@@ -1311,7 +1259,6 @@ let run_value_raii_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "drop_at drop tag", deref(lg).buf[0], 11);
   deref(lg).len = 0;
 
-  // 1b. Uninit(T) + init_zero（只对没有 drop 的类型开放）。
   let zraw: Array(u64, 2) = [7, 7];
   let zu: Uninit(RaiiZero) = ptr_cast(Uninit(RaiiZero), mut_of(zraw));
   let zp: Mut(RaiiZero) = init_zero(zu);
@@ -1320,14 +1267,12 @@ let run_value_raii_suite = func() -> i64 {
   deref(zp).a = 5;
   t.eq_u64(mut_of(st), "init_zero target writable", deref(zp).a, 5);
 
-  // 2. 局部量按逆声明顺序 drop：块退出 b 先于 a。
   let x: u64 = raii_lifo_block(lg);
   t.eq_u64(mut_of(st), "block exit drop count", deref(lg).len, 2);
   t.eq_u64(mut_of(st), "block exit LIFO first", deref(lg).buf[0], 2);
   t.eq_u64(mut_of(st), "block exit LIFO second", deref(lg).buf[1], 1);
   deref(lg).len = 0;
 
-  // 2b. 提前 return 同样按逆序 drop。
   let y: u64 = raii_lifo_return(lg);
   t.eq_u64(mut_of(st), "early return value", y, 9);
   t.eq_u64(mut_of(st), "early return drop count", deref(lg).len, 2);
@@ -1335,7 +1280,6 @@ let run_value_raii_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "early return LIFO second", deref(lg).buf[1], 3);
   deref(lg).len = 0;
 
-  // 3. return local：所有权交给调用方，本过程不 drop。
   let o: RaiiProbe = raii_owner(lg);
   t.eq_u64(mut_of(st), "return local skips drop", deref(lg).len, 0);
   {
@@ -1346,13 +1290,11 @@ let run_value_raii_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "reloc target drop tag", deref(lg).buf[0], 5);
   deref(lg).len = 0;
 
-  // 3b. reloc 把局部量整体移走，原局部不再 drop。
   let r: u64 = raii_reloc_move(lg);
   t.eq_u64(mut_of(st), "reloc move drop count", deref(lg).len, 1);
   t.eq_u64(mut_of(st), "reloc move drop tag", deref(lg).buf[0], 6);
   deref(lg).len = 0;
 
-  // 3c. 条件 reloc：两条路径都只 drop 一次。
   let c1: u64 = raii_cond_reloc(lg, 1);
   t.eq_u64(mut_of(st), "conditional reloc taken count", deref(lg).len, 1);
   t.eq_u64(mut_of(st), "conditional reloc taken tag", deref(lg).buf[0], 7);
@@ -1362,14 +1304,12 @@ let run_value_raii_suite = func() -> i64 {
   t.eq_u64(mut_of(st), "conditional reloc skipped tag", deref(lg).buf[0], 7);
   deref(lg).len = 0;
 
-  // 4. 复合结构体的 Drop 字段按声明逆序 drop。
   let q: u64 = raii_pair_drop(lg);
   t.eq_u64(mut_of(st), "compound drop count", deref(lg).len, 2);
   t.eq_u64(mut_of(st), "compound drop second field first", deref(lg).buf[0], 9);
   t.eq_u64(mut_of(st), "compound drop first field second", deref(lg).buf[1], 8);
   deref(lg).len = 0;
 
-  // 5. std::fs：File RAII、fs.copy 流式往返、IoErr。
   let fr: u64 = handle raii_fs_roundtrip() with {
     return(v) => v,
     fail(code) => 100 + code,

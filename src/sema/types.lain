@@ -1,4 +1,3 @@
-// 类型与值：全部是 caller 分配的 32 / 56 字节块，只有标量与引用指针参与签名。
 let codes = import("src::ir::ir_codes");
 let s = import("src::driver::sym");
 
@@ -19,8 +18,6 @@ pub let Val = struct {
   tsh: u64
 };
 
-// --- 类型块：k @0，w @8，sg @16，sh @24。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
-// sh 是形状号：非 0 表示指向 struct/enum/数组/字符串，布局在 agg.lain。
 pub let ty_save = func(p: Mut(Ty), k: u64, w: u64, sg: u64) -> u64 {
   p.k = k;
   p.w = w;
@@ -57,7 +54,6 @@ pub let ty_same = func(a: Mut(Ty), b: Mut(Ty)) -> u64 {
   return 1;
 };
 
-// bool 只有 1 位，不能进 #load/#store。
 pub let ty_byte_ok = func(p: Mut(Ty)) -> u64 {
   let w: u64 = p.w;
   if w == 0 { return 0; }
@@ -74,7 +70,6 @@ pub let ty_bits = func(p: Mut(Ty), w: u64, sg: u64) -> u64 {
 
 pub let ty_addr = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TyKind.Addr as u64, 0, 0); };
 
-// 带形状的地址：聚合与数组值在 IR 里一律是指针类型。
 let ty_agg = func(p: Mut(Ty), sh: u64) -> u64 {
   ty_addr(p);
   return ty_set_sh(p, sh);
@@ -84,7 +79,6 @@ pub let ty_i32 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TyKind.Bits a
 pub let ty_u64 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TyKind.Bits as u64, 64, 0); };
 pub let ty_u8 = func(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TyKind.Bits as u64, 8, 0); };
 
-// 类型名 → 类型。认不出来返回 0，调用方负责报错。
 pub let ty_of_sym = func(h: u64, out: Mut(Ty)) -> u64 {
   if h == s.t_i8() { ty_bits(out, 8, 1); return 1; }
   if h == s.t_i16() { ty_bits(out, 16, 1); return 1; }
@@ -106,7 +100,6 @@ pub let ty_of_sym = func(h: u64, out: Mut(Ty)) -> u64 {
   return 0;
 };
 
-// --- 值块：n @0，lit @8，bits @16，类型 @24。
 let val_save = func(p: Mut(Val), n: u64, lit: u64, bits: u64, t: Mut(Ty)) -> u64 {
   p.n = n;
   p.lit = lit;
@@ -150,8 +143,6 @@ pub let val_known = func(p: Mut(Val)) -> u64 {
   return 0;
 };
 
-// --- 算子表 ------------------------------------------------------------
-// 优先级与 seed/lain0/src/Lexer.cpp:306 binaryPrecedence 一致。
 pub let prec = func(h: u64) -> u64 {
   if h == s.k_or() { return 1; }
   if h == s.k_and() { return 2; }
@@ -184,7 +175,6 @@ let is_cmp = func(h: u64) -> u64 {
   return 0;
 };
 
-// 与 seed/lain0/src/Sema.cpp:495 selectBinary 逐条对齐。
 pub let bin_inst = func(h: u64, sg: u64) -> u64 {
   if h == s.o_plus() { return codes.InstKind.Add as u64; }
   if h == s.o_minus() { return codes.InstKind.Sub as u64; }
@@ -228,7 +218,6 @@ pub let bin_inst = func(h: u64, sg: u64) -> u64 {
   return 999;
 };
 
-// 转换指令：0 表示等宽、不需要指令（调用方发 #add(x, 0)）。
 pub let cast_inst = func(fk: u64, fw: u64, fsg: u64, tk: u64, tw: u64) -> u64 {
   if fk == (codes.TyKind.Addr as u64) { return codes.InstKind.Bitcast as u64; }
   if tk == (codes.TyKind.Addr as u64) { return codes.InstKind.Bitcast as u64; }
@@ -242,7 +231,6 @@ pub let cast_inst = func(fk: u64, fw: u64, fsg: u64, tk: u64, tw: u64) -> u64 {
   return codes.InstKind.Trunc as u64;
 };
 
-// 比较的结果是 bool，其它算子的结果是操作数类型。
 pub let result_ty = func(h: u64, t: Mut(Ty), out: Mut(Ty)) -> u64 {
   if is_cmp(h) == 1 { return ty_bool(out); }
   return ty_at(out, t);

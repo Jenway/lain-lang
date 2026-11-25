@@ -1,9 +1,3 @@
-// std::sync —— 原子操作与自旋锁。
-// 原子指令是编译器内建：全部按 64 位字处理，内存序作整数实参原地传入。
-// 原子字分别是 AtomicU64 与 SpinLock 的唯一字段且位于偏移 0，
-// 所以把结构体指针直接转成 Mut(u64) 即得到该原子字的地址。
-
-// 内存序：原子指令接受的序标记集合。
 pub let MemOrder = enum(u64) {
   Relaxed = 0,
   Acquire = 1,
@@ -12,20 +6,11 @@ pub let MemOrder = enum(u64) {
   SeqCst = 4
 };
 
-// 顶层值符号在结构体字段与实参位置上会有物理类型偏差，
-// 因此对外常量写成过程，判别值取自 MemOrder。
-pub let RELAXED = func() -> u64 { return MemOrder.Relaxed as u64; };
-pub let ACQUIRE = func() -> u64 { return MemOrder.Acquire as u64; };
-pub let RELEASE = func() -> u64 { return MemOrder.Release as u64; };
-pub let ACQ_REL = func() -> u64 { return MemOrder.AcqRel as u64; };
-pub let SEQ_CST = func() -> u64 { return MemOrder.SeqCst as u64; };
-
 pub let fence = func(order: u64) -> u64 {
   atomic_fence(order);
   return 0;
 };
 
-// 64 位原子字。val 是唯一字段，位于偏移 0。
 pub let AtomicU64 = struct {
   val: u64,
 };
@@ -45,13 +30,11 @@ pub let atomic_u64_store = func(a: Mut(AtomicU64), v: u64, order: u64) -> u64 {
   return 0;
 };
 
-// 返回加数之前的旧值。
 pub let atomic_u64_add = func(a: Mut(AtomicU64), delta: u64, order: u64) -> u64 {
   let word: Mut(u64) = ptr_cast(Mut(u64), a);
   return atomic_add(word, delta, order);
 };
 
-// 返回旧值：旧值等于 expected 时交换成功。
 pub let atomic_u64_cas = func(a: Mut(AtomicU64), expected: u64, desired: u64, order: u64) -> u64 {
   let word: Mut(u64) = ptr_cast(Mut(u64), a);
   return atomic_cas(word, expected, desired, order);
@@ -73,7 +56,6 @@ pub let AtomicU64Mod = module {
   };
 };
 
-// 自旋锁。locked 为 0 表示空闲，为 1 表示已持有，位于偏移 0。
 pub let SpinLock = struct {
   locked: u64,
 };
@@ -85,7 +67,7 @@ pub let spin_new = func() -> SpinLock {
 pub let spin_lock = func(l: Mut(SpinLock)) -> u64 {
   let word: Mut(u64) = ptr_cast(Mut(u64), l);
   loop c(held: u64 = 0) while held == 0 {
-    let old: u64 = atomic_cas(word, 0, 1, ACQUIRE());
+    let old: u64 = atomic_cas(word, 0, 1, MemOrder.Acquire as u64);
     if old == 0 {
       held = 1;
     }
@@ -95,7 +77,7 @@ pub let spin_lock = func(l: Mut(SpinLock)) -> u64 {
 
 pub let spin_unlock = func(l: Mut(SpinLock)) -> u64 {
   let word: Mut(u64) = ptr_cast(Mut(u64), l);
-  atomic_store(word, 0, RELEASE());
+  atomic_store(word, 0, MemOrder.Release as u64);
   return 0;
 };
 

@@ -1,5 +1,3 @@
-// witness.lain —— 模块见证作用域栈与歧义校验、模块 Witness 校验、?{ m: Mod } 实参求值。
-// 单向依赖 state/types/ast/sym/agg/modules/tyreg/ctypes/ctfor/ctfn/ctx。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ax = import("src::sema::ast");
@@ -37,8 +35,6 @@ let given_at = func(base: Mut(GivenEntry), off: u64) -> Mut(GivenEntry) {
   return ptr_cast(Mut(GivenEntry), ptr_cast(Mut(u8), base) + off);
 };
 
-// --- 记录栈（住在 st_witness_blk，每条 40 字节） ---------------------------
-// [name@0, tid@8, wrec@16, depth@24, implicit@32]
 let g_blk = func(k: Mut(st.State)) -> Mut(GivenBlk) {
   return ptr_cast(Mut(GivenBlk), st.st_witness_blk(k));
 };
@@ -69,7 +65,7 @@ pub let release = func(k: Mut(st.State), m: u64) -> u64 {
 
 pub let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64) -> u64 {
   let u: u64 = g_used(k);
-  if u + 40 > 5120 { ctf.fail_msg(k, "witness table full", 18, ax.e_ast()); return 0; }
+  if u + 40 > 5120 { ctf.fail_msg(k, "witness table full", 18, ax.FailKind.Ast as u64); return 0; }
   let p: Mut(GivenEntry) = given_at(g_base(k), u);
   p.name = name;
   p.tid = tid;
@@ -79,10 +75,6 @@ pub let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, impl
   return g_set_used(k, u + 40);
 };
 
-// --- Phase 4：模块 Witness ------------------------------------------------
-// 模块见证条目记模块信息：[name@0 = 0, tid@8 = 模块号, wrec@16 = 封签视图,
-// depth@24, implicit@32 = 2]。模板搜索只认 implicit == 2。
-
 pub let push_mod_implicit = func(k: Mut(st.State), modv: u64, seal: u64) -> u64 {
   return push_given(k, 0, modv, seal, 2);
 };
@@ -91,7 +83,6 @@ let u64_at = func(arr: Mut(u64), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), arr) + i * 8);
 };
 
-// 模块成员的类型编号：类型别名取限定名，结构/枚举取形状上的类型。
 let type_tid_of = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
   let kd: u64 = modules.sym_kind(m);
   if kd == modules.sym_kind_type_alias() { return modules.sym_qual(m); }
@@ -103,7 +94,6 @@ let type_tid_of = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
   return 0;
 };
 
-// 模块导出的 pub let Self = T 的类型编号；没有则回 0。
 pub let mod_self_tid = func(k: Mut(st.State), modv: u64) -> u64 {
   let e: Mut(modules.SymEntry) = modules.sym_find(k, modv, s.b_self_type());
   if is_null(e) { return 0; }
@@ -111,8 +101,6 @@ pub let mod_self_tid = func(k: Mut(st.State), modv: u64) -> u64 {
   return type_tid_of(k, e);
 };
 
-// --- 签名体里的条目名称解析 ------------------------------------------------
-// 严格的名字点号链：Name ('.' Name)*
 let sig_path_ok = func(g: u64, i: u64, te: u64) -> u64 {
   if i >= te { return 1; }
   if ax.is_name(g, i) == 0 { return 0; }
@@ -130,7 +118,6 @@ let sig_path_names = func(g: u64, i: u64, te: u64, out: Mut(u64), idx: u64) -> u
   return sig_path_names(g, i + 1, te, out, idx);
 };
 
-// 点号链的终止位置（不包含）：从 i 起连续吃 Name ('.' Name)*。
 let path_end_at = func(g: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return i; }
   if ax.is_name(g, i) == 0 { return i; }
@@ -144,7 +131,6 @@ let sig_only = func(e: Mut(modules.SymEntry)) -> Mut(modules.SymEntry) {
   return e;
 };
 
-// 在 base_mod 里按裸名查签名符号。
 let sig_local = func(k: Mut(st.State), base_mod: u64, name: u64) -> Mut(modules.SymEntry) {
   let e: Mut(modules.SymEntry) = modules.sym_find(k, base_mod, name);
   if is_null(e) == 0 { return e; }
@@ -152,7 +138,6 @@ let sig_local = func(k: Mut(st.State), base_mod: u64, name: u64) -> Mut(modules.
   return null_ref(Mut(modules.SymEntry));
 };
 
-// 名字或点号路径在 base_mod 里解析成 sig 符号；不是 sig 回空引用。
 let sig_ref_mod = func(k: Mut(st.State), base_mod: u64, g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
   if sig_path_ok(g, ts, te) == 0 { return null_ref(Mut(modules.SymEntry)); }
   let names: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8 * 17));
@@ -168,12 +153,10 @@ let sig_ref_mod = func(k: Mut(st.State), base_mod: u64, g: u64, ts: u64, te: u64
   return sig_only(modules.sym_lookup_in(k, mv, deref(seal), last, modules.cur(k)));
 };
 
-// 按当前词法作用域解析名称或点号路径对应的 sig。
 pub let sig_at = func(k: Mut(st.State), g: u64, ts: u64, te: u64) -> Mut(modules.SymEntry) {
   return sig_ref_mod(k, modules.cur(k), g, ts, te);
 };
 
-// 签名体里是否声明了 Self：只认 ``[pub] let Self : ...`` 这种形状。
 let sig_has_self_scan = func(g: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return 0; }
   if ax.is_name(g, i) == 1 {
@@ -188,7 +171,6 @@ pub let sig_has_self = func(sig_e: Mut(modules.SymEntry)) -> u64 {
   return sig_has_self_scan(modules.sym_decl(sig_e), 0);
 };
 
-// --- 签名成员核验 ---------------------------------------------------------
 let sig_item_end = func(g: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return i; }
   if ax.is_semi(g, i) == 1 { return i; }
@@ -196,7 +178,7 @@ let sig_item_end = func(g: u64, i: u64) -> u64 {
 };
 
 let sig_deny = func(k: Mut(st.State), emit: u64, m: Ref(u8), n: u64) -> u64 {
-  if emit != 0 { ctf.fail_msg(k, m, n, ax.e_type()); }
+  if emit != 0 { ctf.fail_msg(k, m, n, ax.FailKind.Type as u64); }
   return 0;
 };
 
@@ -208,7 +190,6 @@ let fn_tids_at = func(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, np: u64, sig: Mu
   return fn_tids_at(k, ps, i + 1, np, sig);
 };
 
-// 模块成员是过程时的 Fn 类型编号：优先用登记好的 Fn TypeId，没有则现场拼。
 let fn_tid_of_sym = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
   let fid: u64 = modules.sym_fnid(m);
   if fid != 0 { return fid; }
@@ -219,9 +200,8 @@ let fn_tid_of_sym = func(k: Mut(st.State), m: Mut(modules.SymEntry)) -> u64 {
   return ct.fn_t(k, ireg.tid_of(k, cx.sig_ret(sg)), np, tids as u64);
 };
 
-// 一条签名要求的右侧：抽象类型、子签名或一般类型表达式。
 let sig_check_typed = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), g: u64, mname: u64, m: Mut(modules.SymEntry), ts: u64, te: u64, emit: u64) -> u64 {
-  // let Name : Type;  —— 抽象类型，后续条目里的 Self / Name 由此绑定解出。
+
   if te == ts + 1 and ax.is_name(g, ts) == 1 {
     if ax.n_sym(g, ts) == s.t_type() {
       let tid: u64 = type_tid_of(k, m);
@@ -230,7 +210,7 @@ let sig_check_typed = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), g: u6
       return 1;
     }
   }
-  // let Name : SubSig;  —— 子模块契约。
+
   let sub: Mut(modules.SymEntry) = sig_ref_mod(k, modules.sym_mod(sig_e), g, ts, te);
   if is_null(sub) == 0 {
     if modules.sym_kind(m) != modules.sym_kind_mod() {
@@ -238,7 +218,7 @@ let sig_check_typed = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), g: u6
     }
     return check_mod_matches_sig(k, modules.sym_qual(m), sub, emit);
   }
-  // 一般类型表达式：Fn(...) -> ...、Self、i64 等。
+
   let want_t: Mut(ty.Ty) = ax.new_ty(k);
   let saved_err: u64 = st.st_ok(k);
   cx.parse_type(k, g, ts, want_t);
@@ -263,7 +243,6 @@ let sig_check_typed = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), g: u6
   return sig_deny(k, emit, "sig mismatch: member type differs", 33);
 };
 
-// i 指向 let 之后的名字。
 let sig_check_one = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), g: u64, i: u64, emit: u64) -> u64 {
   if i >= ax.n_count(g) { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
   if ax.is_name(g, i) == 0 { return sig_deny(k, emit, "sig mismatch: bad declaration", 29); }
@@ -291,7 +270,6 @@ let sig_check_items = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.
   return sig_deny(k, emit, "sig mismatch: bad declaration", 29);
 };
 
-// 模块实现是否满足签名：逐条核对公开成员与类型。emit_diag = 0 时只判定、不报错。
 pub let check_mod_matches_sig = func(k: Mut(st.State), impl_modv: u64, sig_e: Mut(modules.SymEntry), emit_diag: u64) -> u64 {
   let saved_src: u64 = st.st_src(k);
   let saved_vmod: u64 = st.st_vmod(k);
@@ -305,7 +283,6 @@ pub let check_mod_matches_sig = func(k: Mut(st.State), impl_modv: u64, sig_e: Mu
   return r;
 };
 
-// 模块候选是否命中：先比对 Self 类型，再逐条核验签名成员。
 let mod_matches_sig = func(k: Mut(st.State), modv: u64, sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64) -> u64 {
   if has_self != 0 {
     if mod_self_tid(k, modv) != self_tid { return 0; }
@@ -320,7 +297,6 @@ let SigPick = struct {
   count: u64
 };
 
-// 从记录区尾部向前扫描模块见证，取最内层深度里唯一命中的模块。
 let sig_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, pick: Mut(SigPick)) -> u64 {
   if off == 0 { return 1; }
   let back: u64 = off - 40;
@@ -348,7 +324,6 @@ let sig_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, sig_e: Mu
   return sig_scan(k, base, back, sig_e, self_tid, has_self, pick);
 };
 
-// 在当前见证记录区里找唯一满足 sig_e 的模块见证；未命中时返回 0 而不报错（供默认值回退）。
 pub let find_sig_implicit_opt = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
   let pick: Mut(SigPick) = ptr_cast(Mut(SigPick), st.st_alloc(k, 32));
   pick.has = 0;
@@ -359,30 +334,27 @@ pub let find_sig_implicit_opt = func(k: Mut(st.State), sig_e: Mut(modules.SymEnt
   if st.st_ok(k) != 0 { return 0; }
   if pick.has == 0 { return 0; }
   if pick.count > 1 {
-    ctf.fail_msg(k, "ambiguous module witness", 24, ax.e_type());
+    ctf.fail_msg(k, "ambiguous module witness", 24, ax.FailKind.Type as u64);
     return 0;
   }
   deref(out_seal) = modules.sym_qual(sig_e);
   return pick.best;
 };
 
-// 在当前见证记录区里找唯一满足 sig_e 的模块见证；封签写成签名自身的封签视图。
 pub let find_sig_implicit = func(k: Mut(st.State), sig_e: Mut(modules.SymEntry), self_tid: u64, has_self: u64, out_seal: Mut(u64)) -> u64 {
   let mv: u64 = find_sig_implicit_opt(k, sig_e, self_tid, has_self, out_seal);
   if st.st_ok(k) != 0 { return 0; }
   if mv == 0 {
-    ctf.fail_msg(k, "missing module witness", 22, ax.e_type());
+    ctf.fail_msg(k, "missing module witness", 22, ax.FailKind.Type as u64);
     return 0;
   }
   return mv;
 };
 
-// --- ?{ m: Mod } 实参是模块时求出模块见证值 ---------------------------------
-// 名字、点号路径、函子调用三种形状；不是模块就回 0，交给常规编译期求值。
 pub let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
   if i >= ax.n_count(g) { return 0; }
   if ax.is_name(g, i) == 0 { return 0; }
-  if ctf.has_delim(g, i + 1, ax.dl_paren()) == 1 {
+  if ctf.has_delim(g, i + 1, ax.Delim.Paren as u64) == 1 {
     let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
     let j: u64 = ctfn.eval_factory_call(k, g, i, tv);
     if j == 0 { return 0; }
@@ -422,15 +394,10 @@ pub let eval_mod_arg = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal
   return 0;
 };
 
-// 编译期 Witness 成员查询的兼容入口：结构见证已随旧式 witness 语法退场，
-// 这里恒回空引用，调用方保留自己的常规编译期投影分支。
 pub let witness_field_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
   return null_ref(Mut(WField));
 };
 
-// --- UFCS 方法检索 --------------------------------------------------------
-// 活跃模块由三处给出：use 压入的模块见证、当前模块自身、以及经 open 或选择性
-// use 把方法名接进当前作用域的模块。越内层的 use 越优先，同层多个候选就是歧义。
 pub let UfcsHit = struct {
   modv: u64,
   count: u64
@@ -443,7 +410,6 @@ let UfcsCand = struct {
   has: u64
 };
 
-// 模块是否为类型 self_tid 提供公开可调用的方法 name。
 pub let ufcs_mod_ok = func(k: Mut(st.State), modv: u64, self_tid: u64, name: u64) -> u64 {
   if modv == 0 { return 0; }
   if mod_self_tid(k, modv) != self_tid { return 0; }
@@ -455,7 +421,6 @@ pub let ufcs_mod_ok = func(k: Mut(st.State), modv: u64, self_tid: u64, name: u64
   return 0;
 };
 
-// 记下一个候选：更深的替换当前胜者，同深不同模块则累加歧义计数。
 let ufcs_note = func(c: Mut(UfcsCand), mv: u64, dp: u64) -> u64 {
   if c.has == 0 {
     c.has = 1;
@@ -488,8 +453,6 @@ let ufcs_scan = func(k: Mut(st.State), base: Mut(GivenEntry), off: u64, self_tid
   return ufcs_scan(k, base, back, self_tid, name, c);
 };
 
-// 当前词法作用域里为 self_tid 提供方法 name 的活跃模块。回 0 表示没有候选；
-// 命中多个同层候选时 hit.count > 1，由调用方报歧义。
 pub let ufcs_method = func(k: Mut(st.State), self_tid: u64, name: u64, hit: Mut(UfcsHit)) -> u64 {
   hit.modv = 0;
   hit.count = 0;
@@ -501,7 +464,7 @@ pub let ufcs_method = func(k: Mut(st.State), self_tid: u64, name: u64, hit: Mut(
   c.has = 0;
   let r0: u64 = ufcs_scan(k, g_base(k), g_used(k), self_tid, name, c);
   if st.st_ok(k) != 0 { return 0; }
-  // 当前模块自身与 open 引入的方法名按最外层计，内层 use 可以遮蔽它们。
+
   let own: u64 = modules.cur(k);
   if ufcs_mod_ok(k, own, self_tid, name) == 1 {
     let r1: u64 = ufcs_note(c, own, 0);

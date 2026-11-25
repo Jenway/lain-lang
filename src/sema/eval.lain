@@ -1,5 +1,3 @@
-// eval.lain —— 源级驱动：phase1 收声明（形状、符号、静态数据、导入），
-// phase2 发过程体。两阶段分开是因为类型与签名必须先于任何函数体可见。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
@@ -38,7 +36,6 @@ let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
 let box_get = func(p: Mut(u64)) -> u64 { return ax.box_get(p); };
 let box_put = func(p: Mut(u64), v: u64) -> u64 { return ax.box_put(p, v); };
 
-// 函子 phase2 队列条目，40 字节：[虚拟模块号, 源号, 体组, 绑定快照, 快照条数]。
 let FqRec = struct {
   vmod: u64,
   src: u64,
@@ -47,14 +44,13 @@ let FqRec = struct {
   cnt: u64
 };
 
-// --- ast / ctx / decl 层转发 --------------------------------------------------
 let n_count = func(g: u64) -> u64 { return ax.n_count(g); };
 let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
 let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
 let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
 let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
-let dl_bracket = func() -> u64 { return ax.dl_bracket(); };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
+let dl_bracket = func() -> u64 { return ax.Delim.Bracket as u64; };
 let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
@@ -63,16 +59,14 @@ let lit_addr = func(h: u64) -> Ref(u8) { return ax.lit_addr(h); };
 let lit_len = func(h: u64) -> u64 { return ax.lit_len(h); };
 let tok_first = func(g: u64, i: u64) -> u64 { return ax.tok_first(g, i); };
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
-let e_ast = func() -> u64 { return ax.e_ast(); };
-let e_type = func() -> u64 { return ax.e_type(); };
+let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
+let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
 let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
 let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
 let parse_params = func(k: Mut(st.State), pg: u64, i: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); };
 let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 { return dl.compile_func(k, g, i); };
 let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 { return dl.compile_top_let(k, g, i); };
 
-// --- 名字工具 -----------------------------------------------------------
-// "_storage" 后缀符号：静态数据一律叫 <前缀><名字>_storage。
 let storage_suffix = func(k: Mut(st.State)) -> u64 {
   let p: Mut(u8) = st.st_scratch(k) + 128;
   let ps: MutSlice(u8) = make_slice(MutSlice(u8), p, 8);
@@ -91,7 +85,6 @@ let storage_name = func(k: Mut(st.State), name: u64) -> u64 {
   return modules.qual_full(k, modules.cur(k), name, storage_suffix(k));
 };
 
-// 找到第一处 '='（类型标注与括号组都跳过）。
 let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if is_group(g, i) == 0 {
@@ -100,14 +93,12 @@ let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
   return find_eq(g, i + 1, n);
 };
 
-// 跳到函数体的 '{' 之后。
 let skip_to_body = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if is_group(g, i) == 1 and delim_of(g, i) == dl_brace() { return i + 1; }
   return skip_to_body(g, i + 1, n);
 };
 
-// 点号路径：从 i 起把名字段收进表里，返回路径之后的下标，段数写进 cnt。
 let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(u64), n: u64) -> u64 {
   if i >= n { return i; }
   if is_name(g, i) == 0 { return i; }
@@ -122,7 +113,6 @@ let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(
   return i + 1;
 };
 
-// 名字段序列 → 模块号；首段走编译期绑定与 use 激活的模块，后续各段逐跳下探。
 let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u64)) -> u64 {
   if cnt == 0 { return 0; }
   let first: u64 = deref(segs);
@@ -134,7 +124,6 @@ let path_resolve = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, seal: Mut(u6
   return modules.mod_resolve_path(k, m0, deref(rest), tail, cnt - 2, seal);
 };
 
-// 沿点号路径逐段下探；某段在目标模块里存在却没通过可见性判定时报私有符号。
 let private_walk = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, m: u64, seal: u64, i: u64) -> u64 {
   if i >= cnt { return 0; }
   let nm: u64 = deref(ptr_cast(Mut(u64), ptr_cast(Mut(u8), segs) + i * 8));
@@ -147,11 +136,10 @@ let private_walk = func(k: Mut(st.State), segs: Mut(u64), cnt: u64, m: u64, seal
   if is_null(raw) != 0 { return 0; }
   let pm: Ref(u8) = "private symbol";
   let pd: u64 = ir.diag(k, 0, 1, pm, 14);
-  st.st_fail(k, ax.e_unbound());
+  st.st_fail(k, ax.FailKind.Unbound as u64);
   return 1;
 };
 
-// 路径解析失败时为「存在但不可见」的那一段补上诊断。
 let private_deny = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
   if cnt < 2 { return 0; }
   let sb: Mut(u64) = box(k);
@@ -160,7 +148,6 @@ let private_deny = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
   return private_walk(k, segs, cnt, m, box_get(sb), 1);
 };
 
-// 名字型封签标注：只有同名符号确实登记为 sig 才算标注。
 let sig_named = func(k: Mut(st.State), g: u64, i: u64) -> Mut(modules.SymEntry) {
   let n: u64 = n_count(g);
   if i >= n { return null_ref(Mut(modules.SymEntry)); }
@@ -171,7 +158,6 @@ let sig_named = func(k: Mut(st.State), g: u64, i: u64) -> Mut(modules.SymEntry) 
   return e;
 };
 
-// 旧式 witness 声明关键字：语法已退场，只保留一句可读的诊断。
 let is_legacy_witness = func(sym: u64) -> u64 {
   if sym == s.intern("given", 5) { return 1; }
   return 0;
@@ -183,14 +169,12 @@ let deny_legacy_witness = func(k: Mut(st.State)) -> u64 {
   return st.st_fail(k, e_ast());
 };
 
-// 名字对应的本模块符号补记公开标志。
 let mark_pub = func(k: Mut(st.State), name: u64, is_pub: u64) -> u64 {
   let e: Mut(modules.SymEntry) = modules.find_here(k, name);
   if is_null(e) { return 0; }
   return modules.sym_set_pub(e, is_pub);
 };
 
-// 顶层 open / use：open 把目标的公开面接进当前模块，use 额外激活 Witness 检索。
 let p1_open = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   let is_use: u64 = if n_sym(g, i) == s.k_use() { 1 } else { 0 };
@@ -220,7 +204,6 @@ let p1_open = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return skip_semi(g, end);
 };
 
-// 函数签名同步登记为一等 Fn 类型，令前向引用也能携带完整类型。
 let fn_type_id = func(k: Mut(st.State), sg: Mut(u8)) -> u64 {
   let np: u64 = cx.sig_np(sg);
   let rt: Mut(ty.Ty) = cx.sig_ret(sg);
@@ -236,7 +219,6 @@ let fn_type_id = func(k: Mut(st.State), sg: Mut(u8)) -> u64 {
   return cty.fn_t(k, ireg.tid_of(k, rt), np, tids as u64);
 };
 
-// --- phase1：声明 --------------------------------------------------------
 let parse_struct_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut(modules.SymEntry) {
   let sh: u64 = agg.shp_new(k, agg.kind_struct(), name, modules.cur(k));
   let n: u64 = n_count(fg);
@@ -279,13 +261,11 @@ let parse_enum_shape = func(k: Mut(st.State), name: u64, q: u64, fg: u64) -> Mut
   return modules.sym_add(k, modules.sym_kind_enum(), modules.cur(k), name, q, null_ref(Mut(u8)), sh);
 };
 
-// --- C 风格整数枚举 ------------------------------------------------------
 let cenum_fail = func(k: Mut(st.State), m: Ref(u8), len: u64) -> u64 {
   let d: u64 = ir.diag(k, 0, 1, m, len);
   return st.st_fail(k, e_type());
 };
 
-// 判别值：负号字面量或编译期整数表达式。
 let cenum_value_at = func(k: Mut(st.State), fg: u64, i: u64, out: Mut(u64)) -> u64 {
   let n: u64 = n_count(fg);
   if i >= n { st.st_fail(k, e_ast()); return i; }
@@ -304,7 +284,6 @@ let cenum_value_at = func(k: Mut(st.State), fg: u64, i: u64, out: Mut(u64)) -> u
   return j2;
 };
 
-// 判别值必须落在底层整数的表示范围内。
 let cenum_fits = func(w: u64, sg: u64, v: u64) -> u64 {
   if w >= 64 { return 1; }
   let lim: u64 = 1 << w;
@@ -323,8 +302,6 @@ let cenum_dup = func(sh: u64, value: u64, i: u64, n: u64) -> u64 {
   return cenum_dup(sh, value, i + 1, n);
 };
 
-// let Name = enum(u64) { A, B = 40, C }：每个变体带一个整数判别值，
-// 没写 = 时从 0 或上一个值加一。
 let parse_cenum_shape = func(k: Mut(st.State), name: u64, q: u64, w: u64, sg: u64, fg: u64) -> Mut(modules.SymEntry) {
   let sh: u64 = agg.cenum_new(k, name, w, sg);
   let n: u64 = n_count(fg);
@@ -355,7 +332,6 @@ let parse_cenum_shape = func(k: Mut(st.State), name: u64, q: u64, w: u64, sg: u6
   return modules.sym_add(k, modules.sym_kind_enum(), modules.cur(k), name, q, null_ref(Mut(u8)), sh);
 };
 
-// 函数签名：phase1 登记，phase2 才编译体（调用点要先看见签名）。
 let find_brace = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if is_group(g, i) == 1 and delim_of(g, i) == dl_brace() { return i; }
@@ -370,7 +346,6 @@ let p1_generic = func(k: Mut(st.State), g: u64, decl_i: u64, pg_i: u64, qmark_i:
   return l.body_i;
 };
 
-// extern 名保持原样：宿主按它注册能力表里的符号。
 let p1_extern = func(k: Mut(st.State), g: u64, i: u64, is_pub: u64) -> u64 {
   let n: u64 = n_count(g);
   let name: u64 = n_sym(g, i + 1);
@@ -398,7 +373,6 @@ let p1_extern = func(k: Mut(st.State), g: u64, i: u64, is_pub: u64) -> u64 {
   return skip_semi(g, j);
 };
 
-// extern 声明的形参逐个登记：宿主按链接名查表，签名必须完整。
 let extern_params = func(k: Mut(st.State), syms: Mut(u64), paramp: Mut(ty.Ty), idx: u64, np: u64) -> u64 {
   if idx >= np { return idx; }
   let nm: u64 = deref(cx.word_idx(syms, idx));
@@ -408,13 +382,8 @@ let extern_params = func(k: Mut(st.State), syms: Mut(u64), paramp: Mut(ty.Ty), i
   return extern_params(k, syms, paramp, idx + 1, np);
 };
 
-// --- 带属性的 extern -------------------------------------------------------
-// @extern(abi="C", lib="m", link="sqrt") [pub] let 名 = func(形参) -> 返回;
-// 属性允许任意子集与任意顺序。三个值按 [abi, lib, link] 铺在一个三字槽里：
-// abi 缺省是 C 调用约定，lib 缺省 0（不属于任何运行库），link 缺省取声明名。
 let abi_c = func() -> u64 { return hr.sym_intern("C", 1); };
 
-// 字符串字面量的内容登记成符号，两侧引号去掉。
 let str_sym = func(h: u64) -> u64 { return hr.sym_intern(lit_addr(h) + 1, lit_len(h) - 2); };
 
 let attr_slot = func(key: u64) -> u64 {
@@ -447,7 +416,6 @@ let attr_parse = func(k: Mut(st.State), ag: u64, i: u64, slots: Mut(u64)) -> u64
   return attr_parse(k, ag, a + 1, slots);
 };
 
-// 读词把 "..." 切成 ".." 与 "."：变参标记可能是单个三点词，也可能是连续点号。
 let dot_pair = func() -> u64 { return hr.sym_intern("..", 2); };
 
 let dot_width = func(sym: u64) -> u64 {
@@ -466,7 +434,6 @@ let dots_end = func(pg: u64, i: u64, n: u64, acc: u64) -> u64 {
   return dots_end(pg, i + 1, n, acc + w);
 };
 
-// 变参标记之后的下标；这里不是变参标记就返回 0。
 let ellipsis_end = func(pg: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if is_group(pg, i) == 1 { return 0; }
@@ -475,14 +442,12 @@ let ellipsis_end = func(pg: u64, i: u64, n: u64) -> u64 {
   return dots_end(pg, i + 1, n, w);
 };
 
-// 形参组里变参标记的下标；没有变参就是组长度。
 let ellipsis_at = func(pg: u64, i: u64, n: u64) -> u64 {
   if i >= n { return n; }
   if ellipsis_end(pg, i, n) != 0 { return i; }
   return ellipsis_at(pg, i + 1, n);
 };
 
-// 变参标记之前的形参：与 parse_params 同形，只是提前在 stop 处收手。
 let params_before = func(k: Mut(st.State), pg: u64, i: u64, stop: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 {
   if i >= stop { return idx; }
   let sym: u64 = n_sym(pg, i);
@@ -540,7 +505,6 @@ let p1_extern_attr = func(k: Mut(st.State), g: u64, ag: u64, i: u64) -> u64 {
   return skip_semi(g, a);
 };
 
-// let M = import("..."): 编译被导入源，再登记别名。
 let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) -> u64 {
   let cur: u64 = st.st_src(k);
   let h: u64 = if i + 1 < n_count(g) and is_group(g, i + 1) == 1 { n_at(g, i + 1) } else { 0 };
@@ -564,7 +528,6 @@ let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) 
   return i + 1;
 };
 
-// sig 成员行尾：扫到分号或成员表末尾。
 let sig_line_end = func(fg: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if is_semi(fg, i) == 1 { return i + 1; }
@@ -577,7 +540,6 @@ let sig_add = func(k: Mut(st.State), fg: u64, smv: u64, mn: u64, kind: u64, from
   return sig_line_end(fg, from, n_count(fg));
 };
 
-// sig 成员：[pub] let 名 ...; 或 type 名 ...; 或裸名(...) -> ...;
 let sig_member = func(k: Mut(st.State), fg: u64, smv: u64, j: u64) -> u64 {
   let n: u64 = n_count(fg);
   if j >= n { return n; }
@@ -598,7 +560,6 @@ let sig_member = func(k: Mut(st.State), fg: u64, smv: u64, j: u64) -> u64 {
   return p + 1;
 };
 
-// let S = sig { ... }：分配封签模块号，成员一律按公开面登记，本名登记为 sig 符号。
 let p1_sig = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64) -> u64 {
   let n: u64 = n_count(g);
   if e + 1 >= n or is_group(g, e + 1) == 0 or delim_of(g, e + 1) != dl_brace() {
@@ -619,7 +580,6 @@ let p1_sig = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64) -> u
   return skip_semi(g, e + 2);
 };
 
-// 模块别名：登记 SymEntry（qual = 模块号，decl = 封签，shape 记内联模块的体组）并挂到当前模块名字表上。
 let bind_mod_alias = func(k: Mut(st.State), modv: u64, name: u64, is_pub: u64, sig_e: Mut(modules.SymEntry), seal0: u64, shp: u64) -> u64 {
   let seal: u64 = seal0;
   if is_null(sig_e) == 0 {
@@ -634,7 +594,6 @@ let bind_mod_alias = func(k: Mut(st.State), modv: u64, name: u64, is_pub: u64, s
   return 1;
 };
 
-// let M [: Sig] = module { ... }：分配虚拟模块号，登记并把成员声明收进模块作用域。
 let p1_mod_lit = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64, sig_e: Mut(modules.SymEntry)) -> u64 {
   let n: u64 = n_count(g);
   if e + 1 >= n or is_group(g, e + 1) == 0 or delim_of(g, e + 1) != dl_brace() {
@@ -651,13 +610,12 @@ let p1_mod_lit = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64, 
   let a: u64 = phase1(k, bodyg, 0, n_count(bodyg));
   st.st_set_vmod(k, saved);
   if st.st_ok(k) != 0 { return skip_semi(g, e + 2); }
-  // 过程体要看到固有 drop，所以 Self/drop 的绑定在 phase1 之后立刻完成。
+
   let bd: u64 = drop.bind_self_drop(k, vmod);
   let bm: u64 = bind_mod_alias(k, vmod, name, is_pub, sig_e, 0, bodyg);
   return skip_semi(g, e + 2);
 };
 
-// let R = Functor(...)：返回 Module 时登记模块别名；返回 Type 时交给已有的具名记录路径。
 let p1_factory_mod = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: u64, sig_e: Mut(modules.SymEntry)) -> u64 {
   if is_name(g, e) == 0 { return 0; }
   let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
@@ -668,13 +626,13 @@ let p1_factory_mod = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, i
   if vk == 1 {
     let tid: u64 = ctf.v_a(v);
     let sh: u64 = ireg.ty_shape(k, tid);
-    // 返回无形状的 Type（如 Mut(T)）：直接登记别名，不需要具名记录。
+
     if sh == 0 {
       let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_type_alias(), modules.cur(k), name, tid, null_ref(Mut(u8)), 0);
       let sp: u64 = modules.sym_set_pub(se, is_pub);
       return skip_semi(g, j);
     }
-    // 返回带形状的记录类型：写回名字与模块并登记结构体符号，与 ctfn.type_binding 一致。
+
     agg.shp_set_name(sh, name);
     agg.shp_set_mod(sh, modules.cur(k));
     let se2: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_struct(), modules.cur(k), name, q, null_ref(Mut(u8)), sh);
@@ -687,7 +645,6 @@ let p1_factory_mod = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, i
   return skip_semi(g, j);
 };
 
-// let R [: Sig] = 已有模块路径：登记模块别名，不生成运行期过程。
 let p1_mod_alias = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64, sig_e: Mut(modules.SymEntry)) -> u64 {
   let n: u64 = n_count(g);
   if is_name(g, e) == 0 { return 0; }
@@ -711,7 +668,6 @@ let prim_type_name = func(k: Mut(st.State), name: u64) -> u64 {
   return ty.ty_of_sym(name, t);
 };
 
-// 单段名字是不是类型名：标量、Type/Module、类型参数、struct/enum/类型别名。
 let type_name_at = func(k: Mut(st.State), name: u64) -> u64 {
   if name == s.t_type() or name == s.t_module() { return 1; }
   if prim_type_name(k, name) == 1 { return 1; }
@@ -733,7 +689,6 @@ let type_factory_name = func(name: u64) -> u64 {
   return 0;
 };
 
-// 点号路径最后一段是不是类型名：M.Type / A.B.Self 在此成立。
 let type_path_name = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
   if cnt < 2 { return 0; }
   let seal: Mut(u64) = box(k);
@@ -746,7 +701,7 @@ let type_path_name = func(k: Mut(st.State), segs: Mut(u64), cnt: u64) -> u64 {
     if is_null(raw) == 0 {
       let pm: Ref(u8) = "private symbol";
       let pd: u64 = ir.diag(k, 0, 1, pm, 14);
-      st.st_fail(k, ax.e_unbound());
+      st.st_fail(k, ax.FailKind.Unbound as u64);
     }
     return 0;
   }
@@ -765,18 +720,17 @@ let bind_type_alias = func(k: Mut(st.State), g: u64, e: u64, end: u64, name: u64
   return skip_semi(g, end);
 };
 
-// let Alias = 类型表达式：常量、结构体字面量与枚举变体都不会走到这里。
 let p1_type_alias = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u64) -> u64 {
   let n: u64 = n_count(g);
   if e >= n { return 0; }
   if is_name(g, e) == 0 { return 0; }
-  // 名字后跟括号组：只有复合类型工厂算类型。
+
   if e + 1 < n and is_group(g, e + 1) == 1 {
-    if delim_of(g, e + 1) != ax.dl_paren() { return 0; }
+    if delim_of(g, e + 1) != ax.Delim.Paren as u64 { return 0; }
     if type_factory_name(n_sym(g, e)) == 0 { return 0; }
     return bind_type_alias(k, g, e, e + 2, name, is_pub);
   }
-  // 名字后跟点号：可能是 M.Type，也可能只是常量成员或枚举变体。
+
   if e + 1 < n and n_sym(g, e + 1) == s.p_dot() {
     let segs: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
     let cnt: Mut(u64) = box(k);
@@ -790,7 +744,6 @@ let p1_type_alias = func(k: Mut(st.State), g: u64, e: u64, name: u64, is_pub: u6
   return bind_type_alias(k, g, e, e + 1, name, is_pub);
 };
 
-// 顶层 let：按初值的形状分成「静态数据」与「普通值」两种。
 let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let j0: u64 = i + 2;
@@ -803,7 +756,7 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
   if tb.ty_is_type(t) == 1 {
     let m: Ref(u8) = "type value at runtime";
     let d: u64 = ir.diag(k, 0, 1, m, 21);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return j;
   }
   let e: u64 = expect_sym(k, g, j, s.p_eq());
@@ -813,21 +766,21 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
   if n_sym(g, e) == s.k_import() { return p1_import(k, g, e, name, is_pub); }
   let is_root: u64 = if i >= 2 and is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
   let q: u64 = if is_root == 1 { name } else { modules.qual(k, modules.cur(k), name) };
-  // let 名 = func (形参) [-> 返回] { 体 }：签名先登记，体留给 phase2。
+
   if n_sym(g, e) == s.k_func() { return p1_flet(k, g, e, name, q, is_pub); }
-  // let 名 = sig { 成员 }：封签只登记公开面，没有运行期产物。
+
   if n_sym(g, e) == s.k_sig() { return p1_sig(k, g, e, name, is_pub); }
-  // let 名 [: 封签] = module { 成员 }：虚拟模块，成员就地声明。
+
   if n_sym(g, e) == s.k_module() { return p1_mod_lit(k, g, e, name, is_pub, sig_e); }
-  // let 名 = struct { 字段 }：形状在这里登记，体留给 phase2 跳过。
+
   if n_sym(g, e) == s.k_struct() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
     let se: Mut(modules.SymEntry) = parse_struct_shape(k, name, q, n_at(g, e + 1));
     let sf: u64 = modules.sym_set_flag(se, 1);
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e + 2);
   }
-  // let 名 = enum(u64) { 变体 = 值, ... }：整数枚举，值是底层整数常量。
-  if n_sym(g, e) == s.k_enum() and e + 2 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.dl_paren() and is_group(g, e + 2) == 1 and delim_of(g, e + 2) == dl_brace() {
+
+  if n_sym(g, e) == s.k_enum() and e + 2 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.Delim.Paren as u64 and is_group(g, e + 2) == 1 and delim_of(g, e + 2) == dl_brace() {
     let pg: u64 = n_at(g, e + 1);
     let bt: Mut(ty.Ty) = new_ty(k);
     let bj: u64 = parse_type(k, pg, 0, bt);
@@ -843,19 +796,19 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e + 3);
   }
-  // let 名 = enum { 变体 }：形状在这里登记，体留给 phase2 跳过。
+
   if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == dl_brace() {
     let se: Mut(modules.SymEntry) = parse_enum_shape(k, name, q, n_at(g, e + 1));
     let sf: u64 = modules.sym_set_flag(se, 1);
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e + 2);
   }
-  // let 名 = 编译期函子(...)：返回 Module 的登记为模块别名，返回 Type 的走类型工厂。
+
   let fm: u64 = p1_factory_mod(k, g, e, name, q, is_pub, sig_e);
   if fm != 0 { return fm; }
   let ma: u64 = p1_mod_alias(k, g, e, name, is_pub, sig_e);
   if ma != 0 { return ma; }
-  // let 名 = 编译期类型工厂(...)：求值并登记为具名结构体，不生成运行期过程。
+
   let tbind: u64 = ctfn.type_binding(k, g, e, name, q);
   if tbind != 0 {
     let se2: Mut(modules.SymEntry) = modules.find_here(k, name);
@@ -865,10 +818,10 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
     }
     return skip_semi(g, tbind);
   }
-  // let 名 = 类型表达式：登记类型别名。
+
   let ta: u64 = p1_type_alias(k, g, e, name, is_pub);
   if ta != 0 { return ta; }
-  // 表：[...]
+
   if is_group(g, e) == 1 and delim_of(g, e) == dl_bracket() {
     let sh0: u64 = ty.tsh(t);
     if sh0 == 0 { st.st_fail(k, e_type()); return e; }
@@ -884,7 +837,7 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e + 1);
   }
-  // 字符串
+
   if tok_first(g, e) == 34 {
     let h: u64 = n_at(g, e);
     let dname: u64 = storage_name(k, name);
@@ -897,7 +850,7 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
     let sp: u64 = modules.sym_set_pub(se, is_pub);
     return skip_semi(g, e);
   }
-  // 聚合构造：名字已在形状表里
+
   if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 {
     if delim_of(g, e + 1) == dl_brace() {
       let te: Mut(modules.SymEntry) = modules.find_here(k, n_sym(g, e));
@@ -913,7 +866,7 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
       return skip_semi(g, e + 1);
     }
   }
-  // 普通值：类型块必须跨源存活，arena 每次编新源都会清空。
+
   let vt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_ralloc(k, 32));
   let cpv: u64 = ty.ty_at(vt, t);
   let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_value(), modules.cur(k), name, q, ptr_cast(Mut(u8), vt), 0);
@@ -921,7 +874,6 @@ let p1_let = func(k: Mut(st.State), g: u64, i: u64, n: u64, is_pub: u64) -> u64 
   return skip_semi(g, e);
 };
 
-// let 名 = func ...：名字取 let 这边，签名来自 func 自己。
 let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: u64) -> u64 {
   let n: u64 = n_count(g);
   let a0: u64 = e + 2;
@@ -974,7 +926,6 @@ let p1_flet = func(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64, is_pub: 
   return skip_semi(g, l.next_i);
 };
 
-// force 为 1 时当前组的每条声明都按公开登记，用于 pub { ... } 块。
 let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 {
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
@@ -982,7 +933,7 @@ let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 
   if is_semi(g, i) == 1 { return phase1v(k, g, i + 1, n, force); }
   let sym: u64 = n_sym(g, i);
   let pub_syn: u64 = if sym == s.k_pub() { 1 } else { 0 };
-  // pub { 声明... }：块内直接声明的 let / extern 全部登记为公开。
+
   if pub_syn == 1 and i + 1 < n and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
     let body: u64 = n_at(g, i + 1);
     let a: u64 = phase1v(k, body, 0, n_count(body), 1);
@@ -999,15 +950,15 @@ let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 
     return i + 1;
   }
   if hs == s.k_extern() { let a: u64 = p1_extern(k, g, h, is_pub); return phase1v(k, g, a, n, force); }
-  // @extern(...) [pub] let 名 = func ...;：带 ABI 属性的外部声明。
-  if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == ax.dl_paren() {
+
+  if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 and delim_of(g, i + 2) == ax.Delim.Paren as u64 {
     let a: u64 = p1_extern_attr(k, g, n_at(g, i + 2), i + 3);
     return phase1v(k, g, a, n, force);
   }
   if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1v(k, g, a, n, force); }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
   if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1v(k, g, a, n, force); }
-  // 顶层 comptime if：只收选中分支里的声明，未选中的分支不参与编译。
+
   if hs == s.k_comptime() and i + 1 < n and n_sym(g, i + 1) == s.k_if() {
     let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
     if st.st_ok(k) != 0 { return d.next_i; }
@@ -1016,7 +967,7 @@ let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 
     if body != 0 { let a: u64 = phase1v(k, body, 0, n_count(body), force); }
     return phase1v(k, g, d.next_i, n, force);
   }
-  // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
+
   if hs == s.k_inject() { let a: u64 = inject_decl(k, g, h); return phase1v(k, g, a, n, force); }
   return phase1v(k, g, i + 1, n, force);
 };
@@ -1025,15 +976,14 @@ let phase1 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   return phase1v(k, g, i, n, 0);
 };
 
-// --- phase2：过程体 ------------------------------------------------------
 let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let e: u64 = find_eq(g, i + 2, n) + 1;
   if e >= n { st.st_fail(k, e_ast()); return e; }
   if n_sym(g, e) == s.k_import() { return skip_semi(g, e); }
-  // let 名 = struct/enum { ... }：形状在 phase1 已登记，这里只跳过花括号组。
+
   if n_sym(g, e) == s.k_struct() or n_sym(g, e) == s.k_enum() {
-    if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.dl_paren() {
+    if n_sym(g, e) == s.k_enum() and e + 1 < n and is_group(g, e + 1) == 1 and delim_of(g, e + 1) == ax.Delim.Paren as u64 {
       return skip_semi(g, e + 3);
     }
     return skip_semi(g, e + 2);
@@ -1041,12 +991,12 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
   if is_null(se) { st.st_fail(k, e_ast()); return e; }
   let kd: u64 = modules.sym_kind(se);
-  // 封签、类型别名与效应声明没有过程体。
+
   if kd == modules.sym_kind_sig() or kd == modules.sym_kind_type_alias() { return skip_stmt(g, i + 1, n); }
   if kd == ef.kind_effect() { return skip_stmt(g, i + 1, n); }
-  // 具名结构体与枚举只有形状，没有过程体，不能落到 compile_data_ref。
+
   if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() { return skip_stmt(g, i + 1, n); }
-  // 内联 module { ... }：体组记在 shape 上，保存虚拟模块号后编成员。
+
   if kd == modules.sym_kind_mod() {
     let bodyg: u64 = modules.sym_shape(se);
     if bodyg == 0 or modules.sym_flag(se) == 1 { return skip_semi(g, e + 2); }
@@ -1061,7 +1011,7 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
     return skip_semi(g, e + 2);
   }
   let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
-  // 已编过的声明（inject 为了沙箱 verify 会把注入点之前的值与过程先编出来）不再重复编。
+
   if modules.sym_flag(se) == 1 { return after; }
   if kd == modules.sym_kind_generic() {
     let hdr: Mut(gn.GenHdr) = ptr_cast(Mut(gn.GenHdr), modules.sym_sig(se));
@@ -1080,7 +1030,7 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   }
   let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), modules.sym_sig(se));
   let dname: u64 = storage_name(k, name);
-  // 聚合：字段要写进数据块
+
   if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 {
     if delim_of(g, e + 1) == dl_brace() {
       let sh: u64 = ty.tsh(tv);
@@ -1090,7 +1040,6 @@ let p2_let = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   return dl.compile_data_ref(k, g, i, after, dname, tv);
 };
 
-// 向后扫描整条语句，遇到分号就越过它。
 let skip_stmt = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if is_semi(g, i) == 1 { return i + 1; }
@@ -1104,7 +1053,7 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if is_semi(g, i) == 1 { return phase2(k, g, i + 1, n); }
   let sym: u64 = n_sym(g, i);
   let is_pub: u64 = if sym == s.k_pub() { 1 } else { 0 };
-  // pub { 声明... }：块内声明照常编过程体。
+
   if is_pub == 1 and i + 1 < n and is_group(g, i + 1) == 1 and delim_of(g, i + 1) == dl_brace() {
     let body: u64 = n_at(g, i + 1);
     let a: u64 = phase2(k, body, 0, n_count(body));
@@ -1113,13 +1062,13 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let h: u64 = if is_pub == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }
   let hs: u64 = n_sym(g, h);
-  // @extern(...) let ...; 只有签名没有体：phase1 已登记，这里只跳到分号。
+
   if sym == s.p_at() and n_sym(g, i + 1) == s.k_extern() and is_group(g, i + 2) == 1 {
     let a: u64 = skip_stmt(g, i + 3, n);
     return phase2(k, g, a, n);
   }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
-  // 顶层 comptime if：只编选中分支，分支选择与 phase1 完全一致。
+
   if hs == s.k_comptime() and i + 1 < n and n_sym(g, i + 1) == s.k_if() {
     let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
     if st.st_ok(k) != 0 { return d.next_i; }
@@ -1130,23 +1079,19 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   }
   if hs == s.k_let() { let a: u64 = p2_let(k, g, h, n); return phase2(k, g, a, n); }
   if hs == s.k_extern() {
-    // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
+
     let a: u64 = skip_stmt(g, h + 1, n);
     return phase2(k, g, a, n);
   }
-  // open / use 在 phase1 已生效，这里只跳到分号。
+
   if hs == s.k_open() or hs == s.k_use() { let a: u64 = skip_stmt(g, h + 1, n); return phase2(k, g, a, n); }
-  // 注入在 phase1 已执行过，这里只跳到分号。
+
   if hs == s.k_inject() { let a: u64 = skip_semi(g, h + 2); return phase2(k, g, a, n); }
   return phase2(k, g, i + 1, n);
 };
 
-// --- 驱动 ---------------------------------------------------------------
-// 把一棵已经在手里的树当成 src 这个源的代码来编译：注入的片段必须落在注入点上，
-// 否则它登记出来的 s<源号>__名字 会和当前源里的查找对不上。
 let compile_as = func(k: Mut(st.State), src: u64, root: u64) -> u64 {
-  // 编译一份源会大量消耗 arena；但嵌套编译（inject 片段、import）时外层正在
-  // 编到一半的临时量也在同一块 arena 上，所以这里保存水位、编完再放回去。
+
   let am: u64 = st.st_arenaused(k);
   let sp: u64 = st.st_sp(k);
   let saved_src: u64 = st.st_src(k);
@@ -1157,17 +1102,16 @@ let compile_as = func(k: Mut(st.State), src: u64, root: u64) -> u64 {
   st.st_set_root(k, root);
   st.st_set_vmod(k, 0);
   let mk: u64 = env.env_release(k, 0);
-  // 展开先跑：f"..." 与 match 在细化之前换成基础形式。
+
   let t_exp: u64 = tr.span_begin();
   let exp_root: u64 = ex.expand_root(k, root);
   let ev_exp: u64 = tr.span_end("expand", "lainc", t_exp, src);
   st.st_set_root(k, exp_root);
   if st.st_ok(k) != 0 { return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod); }
-  // 展开换过根以后，符号登记的节点下标属于新树；把新根记回源记录，后续所有
-  // 按源码号取根的查询（泛型实例化、声明回查、效应行）才落在同一棵树上。
+
   let rooted: u64 = hr.set_source_root(src, exp_root);
   if rooted == hr.NO_SOURCE() {
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return restore_arena(k, am, sp, saved_ct, saved_src, saved_root, saved_vmod);
   }
   let n: u64 = n_count(exp_root);
@@ -1178,7 +1122,7 @@ let compile_as = func(k: Mut(st.State), src: u64, root: u64) -> u64 {
   let t_p2: u64 = tr.span_begin();
   let b: u64 = phase2(k, exp_root, 0, n);
   let ev_p2: u64 = tr.span_end("phase2_lower", "lainc", t_p2, n);
-  // 计数事件在还原 arena 之前采，否则 arena 水位已经被回退到本轮起点。
+
   let c_arena: u64 = tr.counter("arena_kb", st.st_arenaused(k) / 1024);
   let c_syms: u64 = tr.counter("symbols", modules.sym_count(k));
   let c_shapes: u64 = tr.counter("shapes", st.st_shpused(k) / agg.shp_rec());
@@ -1206,8 +1150,6 @@ pub let compile_source = func(k: Mut(st.State), src: u64) -> u64 {
   return rc;
 };
 
-// --- 编译期注入 ---------------------------------------------------------
-// 实参只支持编译期字面量：生成器的形状参数是 TypeId 与整数。
 let collect_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, ab: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return idx; }
@@ -1223,7 +1165,7 @@ let fill_lits = func(k: Mut(st.State), ab: Mut(ty.Val), idx: u64, cnt: u64) -> u
   if idx >= cnt { return idx; }
   let v: Mut(ty.Val) = val_idx(ab, idx);
   if ty.vlit(v) != 1 {
-    st.st_fail(k, ax.e_unsup());
+    st.st_fail(k, ax.FailKind.Unsup as u64);
     return idx;
   }
   let a: u64 = ir.arg_int(k, ty.vbits(v));
@@ -1237,14 +1179,12 @@ let scan_len = func(p: Mut(u8), i: u64, cap: u64) -> u64 {
   return scan_len(p, i + 1, cap);
 };
 
-// inject(gen(TypeId, ...))：把生成器放进隔离沙箱跑一遍，取回它写出的源码文本，
-// 解析成新的源码单元，然后按注入点的源编号编译进去。
 let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let pg: u64 = n_at(g, i + 1);
   let fname: u64 = n_sym(pg, 0);
   let fn: Mut(modules.SymEntry) = modules.find_here(k, fname);
-  if is_null(fn) { st.st_fail(k, ax.e_unbound()); return i + 2; }
-  if modules.sym_kind(fn) != modules.sym_kind_func() { st.st_fail(k, ax.e_type()); return i + 2; }
+  if is_null(fn) { st.st_fail(k, ax.FailKind.Unbound as u64); return i + 2; }
+  if modules.sym_kind(fn) != modules.sym_kind_func() { st.st_fail(k, ax.FailKind.Type as u64); return i + 2; }
   let argsg: u64 = n_at(pg, 1);
   let span: u64 = 896;
   let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, span));
@@ -1254,11 +1194,10 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let saved_sp: u64 = st.st_sp(k);
   let saved_src: u64 = st.st_src(k);
   let saved_root: u64 = st.st_root(k);
-  // 沙箱里的生成器会调用同一份源注入点之前声明的函数；临时模块只有调用指令、
-  // 没有被调过程的话，verify 会报 unknown callee。先把这些过程体编出来。
+
   let pre: u64 = phase2(k, saved_root, 0, i);
   if st.st_ok(k) != 0 { return i + 2; }
-  // 生成器声明可能在注入点之后（体还没编），凭声明下标与源号回到原位补编。
+
   let fd: u64 = modules.sym_flag(fn);
   if fd == 0 {
     let dsrc: u64 = modules.sym_src(fn);
@@ -1281,7 +1220,7 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   }
   let tmp: u64 = ct.clone(k);
   st.st_set_mod(k, tmp);
-  // 生成器里的 meta_* 查询要在临时模块里落到真实数据段上。
+
   let pr: u64 = rf.prepare(k);
   if st.st_ok(k) != 0 { return i + 2; }
   let cap: u64 = rf.buffer_bytes();
@@ -1294,8 +1233,7 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let b4: u64 = fill_lits(k, ab, 0, cnt);
   let cres: u64 = ir.fresh_t(k);
   let b5: u64 = ir.emit_call(k, cres, modules.sym_qual(fn), 0);
-  // 返回缓冲的地址必须是一个指针种类的值：#bitcast 由 bits 生出的是位值，
-  // 宿主拿不到可读区段。用 #lea 取符号地址，结果就是真正的指针值。
+
   let buf_ptr: u64 = ir.fresh_t(k);
   let b6: u64 = ir.emit_lea(k, buf_ptr, rf.buffer_name(), 0, 1, 0);
   let b7: u64 = ir.args_reset(k);
@@ -1307,27 +1245,24 @@ let inject_decl = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let rl: u64 = ct.release(tmp);
   st.st_set_mod(k, saved_mod);
   st.st_set_sp(k, saved_sp);
-  if vrc != 0 { st.st_fail(k, ax.e_unsup()); return i + 2; }
-  // apply_bytes 的返回值是宿主抄回来的字节数；0 说明这一趟没拿到东西。
+  if vrc != 0 { st.st_fail(k, ax.FailKind.Unsup as u64); return i + 2; }
+
   let len: u64 = scan_len(out, 0, arc);
-  if len == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
+  if len == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 2; }
   let src2: u64 = ct.snippet(ptr_cast(Ref(u8), out), len);
-  if src2 == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
+  if src2 == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 2; }
   if st.st_done(k, src2) == 1 { return skip_semi(g, i + 2); }
   let dm: u64 = st.st_mark_done(k, src2);
   let root2: u64 = hr.source_root(src2);
-  // 片段登记的名字要带注入点的源号，同源后续声明才找得到它们。
+
   let cc: u64 = compile_as(k, saved_src, root2);
   st.st_set_src(k, saved_src);
   st.st_set_root(k, saved_root);
-  // 片段是当成注入点的源号编的，源记录在片段编译期间指向片段的新根；返回外层
-  // 以后要把根换回外层那棵树，外层后续的查询才对得上外层的下标。
+
   let rroot: u64 = hr.set_source_root(saved_src, saved_root);
   return skip_semi(g, i + 2);
 };
 
-// --- 对外桥接 -------------------------------------------------------------
-// 函数体内的内联 module 体组：由 stmt 在局部作用域里调用。
 @root
 let lainc_eval_phase1_group = func(k: Mut(st.State), g: u64) -> u64 {
   return phase1(k, g, 0, n_count(g));
@@ -1338,8 +1273,6 @@ let lainc_eval_phase2_group = func(k: Mut(st.State), g: u64) -> u64 {
   return phase2(k, g, 0, n_count(g));
 };
 
-// 函子实例化：登记虚拟模块号，先收声明；不在过程里就立即编成员体，
-// 否则把绑定栈快照与体组排进 st_fqbase 等所有过程收尾后补编。
 @root
 let lainc_compile_functor_mod = func(k: Mut(st.State), src: u64, bodyg: u64, parent_modv: u64, vmod: u64) -> u64 {
   let reg: u64 = modules.mod_register_vmod(k, vmod, 0);

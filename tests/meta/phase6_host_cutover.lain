@@ -1,21 +1,11 @@
-// Phase 6.4：纯 Lain 宿主层的端到端切割。
-//
-// 四个宿主模块串联在同一块工作区上：HostSymTab 驻留符号并切出内存，HostSources
-// 登记源码与片段并桥接 AstOut 事务，HostIr 构造、校验、克隆一个三过程模块并
-// 发射 C99，HostVmHost 在全新的 Lain-VM 地址空间里执行克隆模块的标量与字节
-// 入口。所有表都从静态 Arena 里按容量切出，返回值逐项核对后交回 64。
 let sym = import("src::host::symtab");
 let src = import("src::host::source_host");
 let irh = import("src::host::ir_host");
 let vmh = import("src::host::vm_host");
 let ao = import("src::meta::ast_out");
+let meta = import("src::meta::ast");
 let codes = import("src::ir::ir_codes");
 
-// 一块 768 × 128 字节 = 98304 字节的静态 Arena：
-//   [0, 4096)         AstOut 追加缓冲区（构造阶段结束后被 IR 宿主复用）
-//   [0, 78848)        IR 宿主
-//   [78848, 95232)    符号表与源码；符号工作结束后这一段整体回收，依次
-//                     充当 C99 文本缓冲区与 VM 宿主的地址空间
 let zero_blk: Array(u64, 16) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 let arena_blocks: Array(Array(u64, 16), 768) = [
@@ -82,7 +72,6 @@ let main = func() -> i64 {
   let arena: Mut(u8) = arena_ptr();
   if (arena as u64) == 0 { return 89; }
 
-  // --- HostSymTab ---------------------------------------------------------
   let sym_base: Mut(u8) = arena + IR_BYTES();
   let syms0: sym.HostSymTab = sym.symtab_new(make_slice(MutSlice(u8), sym_base, SYM_BYTES()));
   let syms: Mut(sym.HostSymTab) = mut_of(syms0);
@@ -98,7 +87,6 @@ let main = func() -> i64 {
   if sym.sym_find(syms, "beta", 4) != h_beta { return 16; }
   if sym.sym_find(syms, "gamma", 5) != 0 { return 17; }
 
-  // --- HostSources：源码与片段解析 ----------------------------------------
   let out0: ao.AstOut = ao.new(make_slice(MutSlice(u8), arena, 4096));
   let out: Mut(ao.AstOut) = mut_of(out0);
   let hs0: src.HostSources = src.host_sources_new(syms, out, 4, 64);
@@ -109,10 +97,10 @@ let main = func() -> i64 {
   if src.source_count(hs) != 1 { return 21; }
   if sym_is(syms, src.source_name(hs, unit), "phase6/host.lain") == 0 { return 22; }
   let root: u64 = src.source_root(hs, unit);
-  if src.ast_kind(hs, root) != ao.KIND_GROUP() { return 23; }
+  if src.ast_kind(hs, root) != meta.NodeKind.Group as u64 { return 23; }
   if src.ast_child_count(hs, root) != 10 { return 24; }
   let first: u64 = src.ast_child(hs, root, 0);
-  if src.ast_kind(hs, first) != ao.KIND_TOKEN() { return 25; }
+  if src.ast_kind(hs, first) != meta.NodeKind.Token as u64 { return 25; }
   if node_text_is(hs, first, "let") == 0 { return 26; }
   let second: u64 = src.ast_child(hs, root, 1);
   if node_text_is(hs, second, "pair") == 0 { return 27; }
@@ -126,7 +114,6 @@ let main = func() -> i64 {
   let sinner: u64 = src.ast_child(hs, sroot, 0);
   if src.ast_child_count(hs, sinner) != 3 { return 39; }
 
-  // --- AstOut 事务：先回滚，再提交一棵 (sum 1 2) 子树 ---------------------
   let before: u64 = ao.node_count(out);
   let tx0: u64 = src.ast_tx_begin(hs);
   let wasted: u64 = src.ast_mk_token(hs, wrap_sym(h_alpha), 0, "wasted");
@@ -146,17 +133,16 @@ let main = func() -> i64 {
   kids[0] = t0 as u32;
   kids[1] = t1 as u32;
   kids[2] = t2 as u32;
-  let group: u64 = src.ast_mk_group(hs, ao.DL_PAREN(),
+  let group: u64 = src.ast_mk_group(hs, meta.Delim.Paren as u64,
       make_slice(Slice(u32), ptr_cast(Ref(u32), ref_of(kids)), 3));
   let committed: u64 = src.ast_tx_commit(hs, tx1, group);
   if committed == src.NO_NODE() { return 34; }
   if ao.tx_depth(out) != 0 { return 35; }
-  if src.ast_kind(hs, committed) != ao.KIND_GROUP() { return 36; }
+  if src.ast_kind(hs, committed) != meta.NodeKind.Group as u64 { return 36; }
   if src.ast_child_count(hs, committed) != 3 { return 37; }
   let c0: u64 = src.ast_child(hs, committed, 0);
   if node_text_is(hs, c0, "sum") == 0 { return 38; }
 
-  // --- HostIr：三过程模块、校验、克隆与 C99 发射 --------------------------
   let s_mod: u64 = sym.sym_intern(syms, "phase6_cutover", 14);
   let s_twice: u64 = sym.sym_intern(syms, "twice", 5);
   let s_main: u64 = sym.sym_intern(syms, "main", 4);
@@ -202,7 +188,7 @@ let main = func() -> i64 {
   let b4: u64 = irh.ir_arg_int(hir, mod, 1);
   let b5: u64 = irh.ir_inst_mem(hir, mod, codes.InstKind.Alloca as u64, 3000, 1, 64, 0, 0, 8);
   let b6: u64 = irh.ir_args_reset(hir, mod);
-  // 常量 0x4E49414C 小端存下来是 "LAIN"。
+
   let b7: u64 = irh.ir_arg_int(hir, mod, 1313423692);
   let b8: u64 = irh.ir_arg_ref(hir, mod, 3000);
   let b9: u64 = irh.ir_inst_mem(hir, mod, codes.InstKind.Store as u64, 0, 1, 64, 0, 0, 8);
@@ -222,7 +208,6 @@ let main = func() -> i64 {
   let clone_verify: u64 = irh.ir_mod_verify(hir, cloned);
   if clone_verify != 0 { return 47; }
 
-  // --- HostVmHost：在全新地址空间里执行克隆模块 --------------------------
   let vhost: Mut(vmh.VmHost) = vmh.host_new(arena + IR_BYTES(), VM_BYTES(), hir);
   if is_null(vhost) { return 50; }
   let empty: Slice(u64) = make_slice(Slice(u64), null_ref(Ref(u64)), 0);
@@ -251,6 +236,3 @@ let main = func() -> i64 {
   let freed: u64 = irh.ir_mod_free(hir, cloned);
   return 64;
 };
-
-
-

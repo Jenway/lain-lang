@@ -1,16 +1,10 @@
-// std::fs —— 文件系统入口：RAII 文件句柄与便捷的整文件读写、存在性、删除与复制。
-// File 只能由 open 构造，句柄恒为有效值；模块自带的 drop 在离开作用域时
-// 关闭句柄。整文件读取成功拿到的 MutSlice 归调用方所有，用完用 os.free_bytes 归还。
 let option = import("std::option");
 let os = import("std::os");
 
 let OptSlice = option.Option(MutSlice(u8));
 
-// 效应别名：IoErr 与 os.IoErr 是同一份效应声明。效应行里的名字按最后一段
-// 解析，所以导入方写 !{ fs.IoErr } 与 !{ os.IoErr } 指向同一个效应。
 use os.{ IoErr };
 
-// 文件句柄：Self 透明，构造只经由 open，drop 关闭句柄。
 pub let File = module {
   pub {
     let Self = struct {
@@ -22,7 +16,6 @@ pub let File = module {
       os.c_fclose(h);
     };
 
-    // 打开文件：失败就地发起 IoErr.fail(1)，成功把句柄交给 Self。
     let open = func(path: Slice(u8), mode: Slice(u8)) -> Self !{ IoErr } {
       let h: Mut(u8) = os.open_file(path, mode);
       if is_null(h) {
@@ -31,14 +24,12 @@ pub let File = module {
       return Self { handle: h };
     };
 
-    // 读取至多 buf.len 字节，回实际读到的字节数；文件尾回 0。
     let read = func(f: Mut(Self), buf: MutSlice(u8)) -> u64 !{ IoErr } {
       let h: Mut(u8) = deref(f).handle;
       let got: c_size = os.c_fread(buf.ptr, 1, buf.len, h);
       return got as u64;
     };
 
-    // 写出 data.len 字节，短写就地发起 IoErr.fail(2)。
     let write = func(f: Mut(Self), data: Slice(u8)) -> u64 !{ IoErr } {
       let h: Mut(u8) = deref(f).handle;
       let wrote: c_size = if data.len > 0 { os.c_fwrite(data.ptr, 1, data.len, h) } else { 0 };
@@ -54,7 +45,6 @@ pub let exists = func(path: Slice(u8)) -> bool {
   return os.file_exists(path);
 };
 
-// 整文件读取：成功回 Some(可写视图)，失败回 None。视图归调用方所有。
 pub let read_bytes = func(path: Slice(u8)) -> OptSlice.Opt {
   return os.read_file_slice(path);
 };
@@ -67,8 +57,6 @@ pub let remove = func(path: Slice(u8)) -> bool {
   return os.remove_file(path) == 0;
 };
 
-// 复制文件：两个 File 句柄都用栈上的 4096 字节块搬运，任何路径返回时
-// 由 File 自带的 drop 关闭句柄，不额外申请堆内存。
 pub let copy = func(src: Slice(u8), dst: Slice(u8)) !{ IoErr } {
   let in_f: File = File.open(src, "rb")!;
   let out_f: File = File.open(dst, "wb")!;

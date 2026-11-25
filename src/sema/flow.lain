@@ -21,7 +21,7 @@ let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
 let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
 let is_group = func(g: u64, i: u64) -> u64 { return ax.is_group(g, i); };
 let delim_of = func(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); };
-let dl_paren = func() -> u64 { return ax.dl_paren(); };
+let dl_paren = func() -> u64 { return ax.Delim.Paren as u64; };
 let is_comma = func(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); };
 let is_semi = func(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); };
 let is_digit_token = func(g: u64, i: u64) -> u64 { return ax.is_digit_token(g, i); };
@@ -29,11 +29,11 @@ let is_name = func(g: u64, i: u64) -> u64 { return ax.is_name(g, i); };
 let num_value = func(p: Ref(u8), n: u64) -> u64 { return ax.num_value(p, n); };
 let lit_addr = func(h: u64) -> Ref(u8) { return ax.lit_addr(h); };
 let lit_len = func(h: u64) -> u64 { return ax.lit_len(h); };
-let dl_brace = func() -> u64 { return ax.dl_brace(); };
+let dl_brace = func() -> u64 { return ax.Delim.Brace as u64; };
 let no_slot = func() -> u64 { return ax.no_slot(); };
-let e_ast = func() -> u64 { return ax.e_ast(); };
-let e_type = func() -> u64 { return ax.e_type(); };
-let e_frame = func() -> u64 { return ax.e_frame(); };
+let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
+let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
+let e_frame = func() -> u64 { return ax.FailKind.Frame as u64; };
 let tbool = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tbool(k); };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
 let coerce = func(k: Mut(st.State), v: Mut(ty.Val), from: Mut(ty.Ty), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.coerce(k, v, from, to, out); };
@@ -200,9 +200,6 @@ let loop_plain = func(k: Mut(st.State), g: u64, j: u64, out: Mut(ty.Val), f: Mut
   return j + 1;
 };
 
-// --- match ---------------------------------------------------------------
-// 臂的静态记录：种类（0 整数字面量、1 枚举变体、2 通配）、比对值、载荷绑定
-// 名字、成员指针（载荷偏移与类型由它给出）、体起点、体是否是花括号组。
 let Arm = struct {
   kind: u64,
   value: u64,
@@ -223,14 +220,12 @@ let pat_int = func() -> u64 { return 0; };
 let pat_var = func() -> u64 { return 1; };
 let pat_wild = func() -> u64 { return 2; };
 
-// 一条臂发射出来的东西：区域句柄与「体是否必然终结」。
 let ArmOut = struct {
   region: u64,
   term: u64,
   end: u64
 };
 
-// 一次 match 的全部编译状态。resj 在无值类型时为 no_slot。
 let MatchCtx = struct {
   ag: u64,
   sh: u64,
@@ -250,7 +245,6 @@ let MatchCtx = struct {
   resname: u64
 };
 
-// 通配符也可以省略载荷绑定的下划线。
 let wild_sym = func() -> u64 { return s.intern("_", 1); };
 
 let skip_seps = func(ag: u64, i: u64) -> u64 {
@@ -260,7 +254,6 @@ let skip_seps = func(ag: u64, i: u64) -> u64 {
   return i;
 };
 
-// 体的边界：花括号组就一个记号；表达式到顶层的逗号/分号为止。
 let skip_to_sep = func(ag: u64, i: u64) -> u64 {
   if i >= n_count(ag) { return i; }
   if is_comma(ag, i) == 1 { return i; }
@@ -274,7 +267,6 @@ let skip_body = func(ag: u64, b: u64) -> u64 {
   return skip_to_sep(ag, b);
 };
 
-// 模式 -> 一条臂记录。变体模式要求 scrutinee 是枚举；整数模式要求整数。
 let pat_parse = func(k: Mut(st.State), ag: u64, i: u64, sh: u64, a: Mut(Arm)) -> u64 {
   a.bind = 0;
   a.mem = 0;
@@ -342,9 +334,6 @@ let tok_byte = func(p: Ref(u8), k: u64) -> u64 {
   return b as u64;
 };
 
-// `=>` 有两种词法来源：src/frontend/reader.lain 把两个字节落成一个词，
-// seed/kernel/src/meta/tree.c 落成 `=` 与 `>` 两个词。
-// 交回箭头占用的记号个数（1 或 2）；0 表示当前位置不是箭头。
 let arrow_tok = func(ag: u64, i: u64) -> u64 {
   if i >= n_count(ag) { return 0; }
   if is_group(ag, i) == 1 { return 0; }
@@ -373,7 +362,6 @@ let arrow_at = func(k: Mut(st.State), ag: u64, i: u64) -> u64 {
   return i + n;
 };
 
-// 之前的臂是否已经罩住了这条模式（通配符或同值重复）。
 let shadowed = func(arms: Mut(Arm), upto: u64, kind: u64, value: u64, j: u64) -> u64 {
   if j >= upto { return 0; }
   let p: Mut(Arm) = arm_at(arms, j);
@@ -382,8 +370,6 @@ let shadowed = func(arms: Mut(Arm), upto: u64, kind: u64, value: u64, j: u64) ->
   return shadowed(arms, upto, kind, value, j + 1);
 };
 
-// 分支区全部是表达式的时候，switch 直接带结果：每个分支 #yield 自己的值，
-// 不再占一个栈槽。只要有一条花括号体，就退回结果槽（块体只会写槽）。
 let find_arrow = func(ag: u64, i: u64) -> u64 {
   if i >= n_count(ag) { return 0; }
   let n: u64 = arrow_tok(ag, i);
@@ -400,8 +386,6 @@ let all_expr_arms = func(ag: u64, i: u64) -> u64 {
   return all_expr_arms(ag, skip_body(ag, b));
 };
 
-// match 自己的槽从 1000000 起编号，并在当前位置发一条 #alloca：过程入口预排的
-// `_v0..` 池子只装普通 let / 分支结果，match 的临时量不占那份额度。
 let alloc_match_slot = func(k: Mut(st.State)) -> u64 {
   let n: u64 = st.st_next_tmp(k);
   let j: u64 = 1000000 + n;
@@ -417,7 +401,6 @@ let alloc_match_slot = func(k: Mut(st.State)) -> u64 {
   return j;
 };
 
-// 发射一条臂的区域：载荷先取出绑定到局部槽，体按语句块或表达式编译。
 let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(ArmOut)) -> u64 {
   let r: u64 = ir.region_begin(k);
   let mark: u64 = env.env_mark(k);
@@ -499,8 +482,6 @@ let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   return arm_loop(k, c, next);
 };
 
-// 分支区域先全部编完再统一 case_add：嵌套 match 的 switch 会在这儿之前
-// 把自己的分支取走，外层的分支不会和它提前混在同一张表里。
 let add_cases = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   if i >= c.nrec { return i; }
   let a: Mut(Arm) = arm_at(c.arms, i);
@@ -508,7 +489,6 @@ let add_cases = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   return add_cases(k, c, i + 1);
 };
 
-// 枚举的穷尽性：全部变体都要有臂（或存在通配符）。
 let covered = func(arms: Mut(Arm), nrec: u64, tag: u64, j: u64) -> u64 {
   if j >= nrec { return 0; }
   let p: Mut(Arm) = arm_at(arms, j);
@@ -542,7 +522,6 @@ let check_exhaustive = func(k: Mut(st.State), c: Mut(MatchCtx), span: u64) -> u6
   return 0;
 };
 
-// 枚举 scrutinee 取首字节标签当选择子；整数枚举与整数 scrutinee 用值本身。
 let match_selector = func(k: Mut(st.State), cv: Mut(ty.Val), sh: u64, sel_ty: Mut(ty.Ty), obj: Mut(u64)) -> u64 {
   let vt: Mut(ty.Ty) = ty.vty(cv);
   if sh != 0 {

@@ -1,6 +1,3 @@
-// lval.lain —— 通用左值：把 x、p.x、p.pos.x、ref_slot.x[i] 这类目标解析成
-// 「一块能写的存储 + 它的真实类型 + 是否只读」。表达式求值留在 core，
-// 这里只做几何与类型搬运，不反向依赖 core。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
@@ -20,9 +17,6 @@ pub let LvalRec = struct {
   lock: u64
 };
 
-// 记录 128 字节：[存储名字@0, 只读标记@8, ..., 类型@56]。
-// 名字是 IR 里的值名（局部槽、数据符号或 #lea 的结果），不是宿主地址。
-// 只读标记：0 可写，1 只读引用，2 只读切片，3 只读静态表。
 pub let rec_new = func(k: Mut(st.State)) -> Mut(LvalRec) {
   return ptr_cast(Mut(LvalRec), st.st_alloc(k, 128));
 };
@@ -34,7 +28,6 @@ pub let rec_ty = func(r: Mut(LvalRec)) -> Mut(ty.Ty) {
 pub let rec_lock = func(r: Mut(LvalRec)) -> u64 { return r.lock; };
 let rec_set_lock = func(r: Mut(LvalRec), v: u64) -> u64 { r.lock = v; return v; };
 
-// base + idx * scale，idx 允许是寄存器里的值。
 let lea_idx = func(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
@@ -46,10 +39,8 @@ let lea_idx = func(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> 
   return res;
 };
 
-// 槽里存的是块地址（值聚合）还是值本身：结构、枚举、数组、切片存地址。
 let slot_holds_ptr = func(t: Mut(ty.Ty)) -> u64 { return agg.sret_ty(t); };
 
-// 局部名字：槽地址本身就是左值；值聚合先读出槽里存的那块地址。
 let from_local = func(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
   let sn: u64 = ir.slot_name(k, env.env_slot(k, off));
   let t: Mut(ty.Ty) = rec_ty(r);
@@ -66,7 +57,6 @@ let from_local = func(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
   return set_cell(r, res);
 };
 
-// deref(引用)：被指向的那块就是左值；只读引用打上标记 1。
 let from_deref = func(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64 {
   let sh: u64 = ty.tsh(ty.vty(pv));
   let eid: u64 = ct.elem_tid(k, sh);
@@ -77,7 +67,6 @@ let from_deref = func(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64
   return set_cell(r, ty.vn(pv));
 };
 
-// 静态数据：符号本身就是一个模块级的指针；只读表打上标记 3。
 let from_data = func(k: Mut(st.State), e: Mut(modules.SymEntry), r: Mut(LvalRec)) -> u64 {
   let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), modules.sym_sig(e));
   let t: Mut(ty.Ty) = rec_ty(r);
@@ -86,7 +75,6 @@ let from_data = func(k: Mut(st.State), e: Mut(modules.SymEntry), r: Mut(LvalRec)
   return set_cell(r, modules.sym_qual(e));
 };
 
-// 成员：偏移加上去；值聚合字段原地嵌在宿主布局里，直接把偏移后的地址交给调用方。
 let field_step = func(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> u64 {
   let off: u64 = agg.mem_off(m);
   let t: Mut(ty.Ty) = rec_ty(r);
@@ -98,7 +86,6 @@ let field_step = func(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> 
   return set_cell(r, cell);
 };
 
-// 下标：数组直接落在块上；切片先从头里取列指针，只读切片打上标记 2。
 let index_step = func(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = rec_ty(r);
   let sh: u64 = ty.tsh(t);
@@ -127,15 +114,12 @@ let index_step = func(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64
   return set_cell(r, np);
 };
 
-// 写入：由 agg.store_at 统一按目标类型处理标量与值聚合整块拷贝。
 pub let store_value = func(k: Mut(st.State), r: Mut(LvalRec), v: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = rec_ty(r);
   let cell: u64 = rec_cell(r);
   return agg.store_at(k, cell, 0, v, t);
 };
 
-// 语句里第一处 '=' 的位置（到分号为止，括号组整体跳过）；没有则回 0。
-// '==' 是另一个符号，不会误命中。
 pub let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if ax.is_semi(g, i) == 1 { return 0; }
@@ -147,12 +131,10 @@ pub let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
 
 pub let lval_bad = func(k: Mut(st.State), m: Ref(u8), n: u64, back: u64) -> u64 {
   let d: u64 = ir.diag(k, 0, 1, m, n);
-  st.st_fail(k, ax.e_op());
+  st.st_fail(k, ax.FailKind.Op as u64);
   return back;
 };
 
-// 从 pos 起的模块链：还有下一段时先试子模块，末段必须是静态数据。
-// 落定在数据符号上就返回它的下一个位置，后面的 .字段 与 [下标] 留给 parse_walk。
 let module_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64), r: Mut(LvalRec)) -> u64 {
   let n: u64 = ax.n_count(g);
   let name: u64 = ax.n_sym(g, pos);
@@ -173,7 +155,6 @@ let module_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64),
   return pos + 1;
 };
 
-// 模块成员数据 M.var / A.B.var：从首名落定到模块后再逐段走；未命中回 0。
 let module_data_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i + 2 >= n { return 0; }
@@ -192,7 +173,7 @@ pub let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> 
   if sym == s.b_deref() {
     if i + 1 >= ax.n_count(g) { return lval_bad(k, m, 10, i + 1); }
     if ax.is_group(g, i + 1) == 0 { return lval_bad(k, m, 10, i + 1); }
-    if ax.delim_of(g, i + 1) != ax.dl_paren() { return lval_bad(k, m, 10, i + 1); }
+    if ax.delim_of(g, i + 1) != ax.Delim.Paren as u64 { return lval_bad(k, m, 10, i + 1); }
     let pv: Mut(ty.Val) = ax.new_val(k);
     let aty: Mut(ty.Ty) = ir.taddr(k);
     let j: u64 = core_expr(k, ax.n_at(g, i + 1), 0, 0, aty, pv);
@@ -214,8 +195,8 @@ pub let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> 
   if mj != 0 { return mj; }
   let p: Ref(u8) = modules.sym_addr(sym);
   let n: u64 = modules.sym_len(sym);
-  let d: u64 = ir.diag(k, ax.e_unbound(), 1, p, n);
-  st.st_fail(k, ax.e_unbound());
+  let d: u64 = ir.diag(k, ax.FailKind.Unbound as u64, 1, p, n);
+  st.st_fail(k, ax.FailKind.Unbound as u64);
   return i + 1;
 };
 
@@ -243,7 +224,7 @@ pub let parse_walk = func(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(Lva
   let ad: u64 = auto_deref(k, r);
   let ig_ad: u64 = ad;
   if ax.is_group(g, i) == 1 {
-    if ax.delim_of(g, i) != ax.dl_bracket() { return lval_bad(k, m, 10, i); }
+    if ax.delim_of(g, i) != ax.Delim.Bracket as u64 { return lval_bad(k, m, 10, i); }
     let sh: u64 = ty.tsh(rec_ty(r));
     if sh == 0 { return lval_bad(k, m, 10, i); }
     let kd: u64 = agg.shp_kind(sh);
@@ -272,7 +253,7 @@ pub let parse_walk = func(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(Lva
         if interp == 1 {
           let nf: Ref(u8) = "no such field";
           let d: u64 = ir.diag(k, 0, 1, nf, 13);
-          st.st_fail(k, ax.e_op());
+          st.st_fail(k, ax.FailKind.Op as u64);
           return i + 2;
         }
         return lval_bad(k, m, 10, i);

@@ -1,11 +1,7 @@
-// ast.lain —— AST 节点访问与字面量读取。句柄约定见 src/meta/ast_out.lain 与 std/meta.lain。
-// 组的分隔符就是 ASCII 码；根组是 0。
 let hr = import("src::driver::host_rt");
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 
-// --- 常量 ---------------------------------------------------------------
-// 组的分隔符类别；码值就是 ASCII 码。
 pub let Delim = enum(u64) {
   None = 0,
   Paren = 40,
@@ -13,15 +9,8 @@ pub let Delim = enum(u64) {
   Brace = 123
 };
 
-pub let dl_paren = func() -> u64 { return Delim.Paren as u64; };
-pub let dl_bracket = func() -> u64 { return Delim.Bracket as u64; };
-pub let dl_brace = func() -> u64 { return Delim.Brace as u64; };
-
-// 「这个位置没有槽」。
 pub let no_slot = func() -> u64 { return 999999; };
 
-// 裸原语的转出：别的单元要用 AST 原语时走这里，不要在各自文件里重复声明
-// 同一条 extern（同一份台账只能有一处）。
 pub let delim = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   return hr.ast_delim(h);
@@ -29,7 +18,6 @@ pub let delim = func(h: u64) -> u64 {
 pub let lit_addr = func(h: u64) -> Ref(u8) { return hr.ast_literal_addr(h); };
 pub let lit_len = func(h: u64) -> u64 { return hr.ast_literal_len(h); };
 
-// 诊断码，交给 st.st_fail 记录。
 pub let FailKind = enum(u64) {
   Ast = 1,
   Unbound = 2,
@@ -39,18 +27,9 @@ pub let FailKind = enum(u64) {
   Frame = 6
 };
 
-pub let e_ast = func() -> u64 { return FailKind.Ast as u64; };
-pub let e_unbound = func() -> u64 { return FailKind.Unbound as u64; };
-pub let e_type = func() -> u64 { return FailKind.Type as u64; };
-pub let e_op = func() -> u64 { return FailKind.Op as u64; };
-pub let e_unsup = func() -> u64 { return FailKind.Unsup as u64; };
-pub let e_frame = func() -> u64 { return FailKind.Frame as u64; };
-
-// --- 小块内存 -----------------------------------------------------------
 pub let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32)); };
 pub let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ptr_cast(Mut(ty.Val), st.st_alloc(k, 56)); };
 
-// 8 字节临时格：end / term 这类输出位置。
 pub let box = func(k: Mut(st.State)) -> Mut(u64) {
   let p: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
   deref(p) = 0;
@@ -59,7 +38,6 @@ pub let box = func(k: Mut(st.State)) -> Mut(u64) {
 pub let box_put = func(p: Mut(u64), v: u64) -> u64 { deref(p) = v; return v; };
 pub let box_get = func(p: Mut(u64)) -> u64 { return deref(p); };
 
-// --- AST 访问（调用前必须自己保证下标没有越界） -------------------------
 pub let n_count = func(g: u64) -> u64 { return hr.ast_child_count(g); };
 pub let n_at = func(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
@@ -75,7 +53,7 @@ pub let node_count = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   return hr.ast_child_count(h);
 };
-// 节点种类：1 = 词，2 = 组。空组的孩子数是 0，只能靠种类认出来。
+
 pub let node_kind = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   return hr.ast_kind(h);
@@ -116,7 +94,7 @@ pub let is_digit_token = func(g: u64, i: u64) -> u64 {
   if b >= 48 and b <= 57 { return 1; }
   return 0;
 };
-// 分号、逗号是单字节词，直接看字节，省一张符号表。
+
 let tok_is = func(g: u64, i: u64, code: u64) -> u64 {
   if i >= n_count(g) { return 0; }
   if is_group(g, i) == 1 { return 0; }
@@ -131,7 +109,7 @@ let tok_is = func(g: u64, i: u64, code: u64) -> u64 {
 };
 pub let is_semi = func(g: u64, i: u64) -> u64 { return tok_is(g, i, 59); };
 pub let is_comma = func(g: u64, i: u64) -> u64 { return tok_is(g, i, 44); };
-// 名字记号：首字节是字母或下划线。
+
 pub let is_name = func(g: u64, i: u64) -> u64 {
   let b: u64 = tok_first(g, i);
   if b == 95 { return 1; }
@@ -144,7 +122,6 @@ pub let skip_semi = func(g: u64, j: u64) -> u64 {
   return j;
 };
 
-// 十进制 / 0x 十六进制字面量。
 pub let num_value = func(p: Ref(u8), n: u64) -> u64 {
   if n == 0 { return 0; }
   if is_null(p) { return 0; }
@@ -167,23 +144,18 @@ pub let num_value = func(p: Ref(u8), n: u64) -> u64 {
   };
 };
 
-// --- AstOut 事务与结构化构造 -------------------------------------------
-// tx_begin 开一次游标事务，返回值是事务号；提交时交回整棵新树的根节点句柄；
-// 回滚不需要参数，游标直接复位到事务开始时的水位。三个原语都要求宿主已经
-// 挂好输出缓冲区，重复开事务或没有开事务就提交由宿主报错。
 pub let tx_begin = func() -> u64 { return hr.ast_tx_begin(); };
 pub let tx_commit = func(root: u64) -> u64 { return hr.ast_tx_commit(root); };
 pub let tx_rollback = func() -> u64 { return hr.ast_tx_rollback(); };
-// 词：sym 是符号句柄（0 表示没有符号），origin 是被拷贝的源节点句柄
-// （0 表示凭空构造），text/len 是这个词的原始字节。
+
 pub let mk_token = func(sym: u64, origin: u64, text: Ref(u8), len: u64) -> u64 {
   return hr.ast_mk_token(sym, origin, text, len);
 };
-// 凭空造词：没有源节点的常见情形。
+
 pub let mk_token_new = func(sym: u64, text: Ref(u8), len: u64) -> u64 {
   return hr.ast_mk_token(sym, 0, text, len);
 };
-// 组：delim 是分隔符的 ASCII 码，kids 指向紧排的 32 位孩子句柄数组。
+
 pub let mk_group = func(delim: u64, count: u64, kids: Ref(u32)) -> u64 {
   return hr.ast_mk_group(delim, count, kids);
 };

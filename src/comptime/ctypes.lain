@@ -1,6 +1,3 @@
-// ctypes.lain —— 复合类型工厂与转换判定：Ref / Mut / Uninit / Slice / MutSlice / Array / Fn。
-// 一切编号与物理投影都在 tyreg，这里只负责造形状、查重、判可转换性与切片的
-// 16 字节头构造。不 import ctx / core，避免环。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let agg = import("src::sema::agg");
@@ -68,9 +65,6 @@ let scan_fn = func(k: Mut(st.State), ret: u64, np: u64, sig: u64, i: u64, n: u64
   return scan_fn(k, ret, np, sig, i + 1, n);
 };
 
-// --- 工厂 ---------------------------------------------------------------
-// 指针字形：Ref / Mut / Uninit 物理上都是一个 8 字节指针字，
-// 逻辑身份由种类与元素 TypeId 共同决定。
 let ptr_like_t = func(k: Mut(st.State), kind: u64, elem: u64) -> u64 {
   let hit: u64 = scan_kind_elem(k, kind, elem, 0, shapes_used(k));
   if hit != 0 { return hit; }
@@ -123,7 +117,6 @@ pub let array_t = func(k: Mut(st.State), elem: u64, cnt: u64) -> u64 {
   return id;
 };
 
-// sig 是形参 TypeId 数组在持久池里的地址，np 项。
 pub let fn_t = func(k: Mut(st.State), ret: u64, np: u64, sig: u64) -> u64 {
   let hit: u64 = scan_fn(k, ret, np, sig, 0, shapes_used(k));
   if hit != 0 { return hit; }
@@ -139,7 +132,6 @@ pub let fn_t = func(k: Mut(st.State), ret: u64, np: u64, sig: u64) -> u64 {
   return id;
 };
 
-// --- 查询 ---------------------------------------------------------------
 let kind_of = func(sh: u64) -> u64 { return agg.shp_kind(sh); };
 
 pub let elem_tid = func(k: Mut(st.State), sh: u64) -> u64 {
@@ -160,7 +152,6 @@ pub let elem_size = func(k: Mut(st.State), sh: u64) -> u64 {
   return ireg.size_of(k, elem_tid(k, sh));
 };
 
-// Fn 形状 → 24 字节签名记录：[形参个数, 返回类型, 形参类型表]，与 ctx.sig_new 同构。
 let SigRec = struct {
   np: u64,
   ret: Mut(ty.Ty),
@@ -186,21 +177,18 @@ pub let sig_of_fn = func(k: Mut(st.State), sh: u64) -> Mut(u8) {
   return ptr_cast(Mut(u8), rec);
 };
 
-// --- 转换判定 -----------------------------------------------------------
-// 0 同型、1 只改类型（Mut→Ref、MutSlice→Slice）、2 现造切片头、3 位模式直通、
-// 4 数值转换走 cast、9 不允许。
 pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> u64 {
   let fsh: u64 = ty.tsh(from);
   let tsh: u64 = ty.tsh(to);
   if tsh == 0 {
     if fsh == 0 { return 4; }
-    // 带形状的值物理上是指针：落到裸指针只改类型，落到字宽走 cast 的 BITCAST。
+
     if ty.tk(to) == 3 { return 3; }
     if ty.tk(to) == 0 and ty.tw(to) == 64 { return 4; }
     return 9;
   }
   if fsh == 0 {
-    // 反向同理：字宽 → 带形状指针要真发 BITCAST，物理类型不能靠改标注糊过去。
+
     if ty.tk(from) == 3 and ty.tk(to) == 3 { return 3; }
     return 4;
   }
@@ -209,9 +197,7 @@ pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> 
   let tk: u64 = agg.shp_kind(tsh);
   let fe: u64 = agg.shp_elem(fsh);
   let te: u64 = agg.shp_elem(tsh);
-  // 引用之间的元素差异只影响解引用时怎么解释这 8 个字节，物理上都是指针：
-  // 允许改标注（Ref(T) 与 Ref(U) 之间、Ref 与 Mut 的只读方向），禁止 Ref→Mut。
-  // 未初始化存储只能由 drop_at 交出、由 init_at / init_zero 写满：隐式转换一律拒绝。
+
   if tk == agg.kind_uninit() or fk == agg.kind_uninit() { return 9; }
   if tk == agg.kind_mut() {
     if fk == agg.kind_ref() { return 9; }
@@ -239,7 +225,7 @@ pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> 
     }
     return 9;
   }
-  // 两个 Fn 形状即使编号不同，也按签名内容判定是否同型（物理上都是指针）。
+
   if tk == agg.kind_fn() {
     if fk != agg.kind_fn() { return 9; }
     if agg.shp_ret(fsh) != agg.shp_ret(tsh) { return 9; }
@@ -248,11 +234,10 @@ pub let conv_kind = func(k: Mut(st.State), from: Mut(ty.Ty), to: Mut(ty.Ty)) -> 
     if sig_same(agg.shp_sig(fsh), agg.shp_sig(tsh), np, 0) == 1 { return 3; }
     return 9;
   }
-  // 聚合与数组的形状不同就是不同的类型：绝不按「种类相同」放行。
+
   return 9;
 };
 
-// 聚合/数组/字符串的地址值 → 16 字节切片头 {ptr@0, len@8}。
 pub let slice_wrap = func(k: Mut(st.State), v: Mut(ty.Val), from_sh: u64, to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let cnt: u64 = agg.shp_len(from_sh);
   let obj: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));

@@ -1,24 +1,9 @@
-// src/vm/engine/ops.lain —— 单条指令的执行：ALU、位运算、比较、转换、访存、
-// 调用与结构化控制流。
-//
-// 算子执行期间 cur_region/cur_position 就是当前这条指令。位置推进由 CU（run）
-// 统一负责，控制流指令自己管位置。
-//
-// 地址模型：`#addr` 是单字无类型数值，这里只做位模式算术。合法性完全由
-// `VSpace` 的可访问窗口在访问那一刻判定；构造（`#lea`、`#alloca`）不判权限。
-//
-// 浮点：当前前端没有 f64 类型，浮点算子与浮点比较一律以 TRAP_UNIMPLEMENTED
-// 确定性拒绝（状态 1072），不做任何静默错值。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let vs = import("src::vm::vspace");
 let im = import("src::vm::image");
 let st = import("src::vm::engine::state");
 
-// --- ALU：整数 ------------------------------------------------------------
-// 整数算子的分类只做一次：指令码到枚举的映射放在 int_bin_op / int_cmp_op /
-// int_conv_op 里，真正执行语义的地方是对枚举的穷尽 match。新增算子时编译器会
-// 强制在每个分派处补一条，不会静默落进「未知算子」。
 let IntBinOp = enum {
   Add
   Sub
@@ -53,8 +38,6 @@ let int_bin_op = func(k: u64) -> IntBinOp {
   return IntBinOp.Unknown { };
 };
 
-// 有符号除法与取余共用同一组判定：除零、最小负数除以 -1 的溢出。两个算子的
-// 溢出判定完全一致（SREM 也在这里拒），语义与逐个分支的写法相同。
 let signed_div_rem = func(tcb: Mut(st.TCB), x: u64, y: u64, width: u64,
                           want_rem: u64, out: Mut(u64)) -> u64 {
   let one: u64 = 1;
@@ -227,8 +210,6 @@ let op_int_conv = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return st.write_result_bits(tcb, inst, 0, r, target);
 };
 
-// --- ALU：浮点与向量 ------------------------------------------------------
-// 前端没有 f64，浮点算术无法用源码表达；这里确定性拒绝，绝不静默错值。
 let op_float_any = func(tcb: Mut(st.TCB)) -> u64 {
   return st.trap_now(tcb, st.TRAP_UNIMPLEMENTED(), st.ST_FLOAT_UNSUPPORTED());
 };
@@ -237,7 +218,6 @@ let op_vector_any = func(tcb: Mut(st.TCB)) -> u64 {
   return st.trap_now(tcb, st.TRAP_UNIMPLEMENTED(), st.ST_VECTOR_UNSUPPORTED());
 };
 
-// --- 地址与内存 -----------------------------------------------------------
 let op_lea = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let base: st.VmValue = st.value_zero();
   let s0: u64 = st.op_read(tcb, inst, 0, mut_of(base));
@@ -251,8 +231,7 @@ let op_lea = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let displacement: st.VmValue = st.value_zero();
   let s3: u64 = st.op_read(tcb, inst, 3, mut_of(displacement));
   if s3 != 0 { return s3; }
-  // 先把每个 VmValue 的载荷落成独立标量再算：多个聚合局部量的字段直接写在同一个
-  // 表达式里时，当前前端会把它们读串。
+
   let bbits: u64 = base.bits;
   let ibits: u64 = index.bits;
   let sbits: u64 = scale.bits;
@@ -279,7 +258,7 @@ let op_load = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if is_misaligned(inst.align, address.bits) == 1 {
     return st.trap_now(tcb, st.TRAP_ALIGNMENT(), st.ST_ALIGNMENT());
   }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 0 {
+  if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 0 {
     return st.trap_now(tcb, st.TRAP_MEMORY_OOB(), st.ST_LOAD_FAULT());
   }
   let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
@@ -300,8 +279,8 @@ let op_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if is_misaligned(inst.align, address.bits) == 1 {
     return st.trap_now(tcb, st.TRAP_ALIGNMENT(), st.ST_ALIGNMENT());
   }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_WRITE()) == 0 {
-    if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 1 {
+  if vs.vm_check(tcb.space, address.bits, size, vs.Access.Write as u64) == 0 {
+    if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 1 {
       return st.trap_now(tcb, st.TRAP_PERM_VIOLATION(), st.ST_READ_ONLY());
     }
     return st.trap_now(tcb, st.TRAP_MEMORY_OOB(), st.ST_STORE_FAULT());
@@ -310,8 +289,6 @@ let op_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return 0;
 };
 
-// --- 原子访问 -------------------------------------------------------------
-// 单线程 VM 里没有重排，内存序只做取值范围校验：越界或非整型字面量的序就地拒绝。
 let atomic_order_ok = func(inst: vf.IrInst, index: u64) -> u64 {
   if index >= inst.operand_count { return 1; }
   let op: vf.IrOperand = vf.inst_op(inst, index);
@@ -335,7 +312,7 @@ let op_atomic_load = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if is_misaligned(inst.align, address.bits) == 1 {
     return st.trap_now(tcb, st.TRAP_ALIGNMENT(), st.ST_ALIGNMENT());
   }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 0 {
+  if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 0 {
     return st.trap_now(tcb, st.TRAP_MEMORY_OOB(), st.ST_LOAD_FAULT());
   }
   let raw: u64 = vs.vm_load(tcb.space, address.bits, size);
@@ -360,8 +337,8 @@ let op_atomic_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if is_misaligned(inst.align, address.bits) == 1 {
     return st.trap_now(tcb, st.TRAP_ALIGNMENT(), st.ST_ALIGNMENT());
   }
-  if vs.vm_check(tcb.space, address.bits, size, vs.MEM_WRITE()) == 0 {
-    if vs.vm_check(tcb.space, address.bits, size, vs.MEM_READ()) == 1 {
+  if vs.vm_check(tcb.space, address.bits, size, vs.Access.Write as u64) == 0 {
+    if vs.vm_check(tcb.space, address.bits, size, vs.Access.Read as u64) == 1 {
       return st.trap_now(tcb, st.TRAP_PERM_VIOLATION(), st.ST_READ_ONLY());
     }
     return st.trap_now(tcb, st.TRAP_MEMORY_OOB(), st.ST_STORE_FAULT());
@@ -370,7 +347,6 @@ let op_atomic_store = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return 0;
 };
 
-// 单线程里 fence 就是空操作：只校验那个内存序操作数。
 let op_atomic_any = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let k: u64 = inst.kind;
   if k == codes.InstKind.AtomicFence as u64 {
@@ -388,7 +364,7 @@ let op_atomic_any = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
 };
 
 let op_alloca = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
-  // count 是独立的无符号常量，不按元素类型宽度定宽读。
+
   let count: u64 = inst.op0_bits;
   let element: u64 = st.type_size(inst.ty_kind, inst.ty_width);
   let align: u64 = st.STACK_ALIGN();
@@ -429,7 +405,6 @@ let op_alloca = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return st.write_result_bits(tcb, inst, 0, base_addr + used, 64);
 };
 
-// --- 能力调用 -------------------------------------------------------------
 let cap_invoke = func(tcb: Mut(st.TCB), link_name: u64, args: Slice(u64),
                       kind: u64, width: u64, out: Mut(st.VmValue)) -> u64 {
   let hit: u64 = st.caps_find(tcb.caps, link_name, 0);
@@ -449,8 +424,6 @@ let cap_invoke = func(tcb: Mut(st.TCB), link_name: u64, args: Slice(u64),
   return 0;
 };
 
-// 把实参读进 TCB 的暂存区（VmValue 一份、原始词一份）。
-// 超出声明参数位置的实参只有可变参数过程才有，没有类型记录，按 64 位原始值读入。
 let collect_args = func(tcb: Mut(st.TCB), inst: vf.IrInst, params: Ref(vf.IrParam),
                         param_count: u64, arg_base: u64, count: u64, i: u64) -> u64 {
   if i >= count { return 0; }
@@ -491,7 +464,7 @@ let enter_extern = func(tcb: Mut(st.TCB), inst: vf.IrInst, sub_index: u64,
   if arg_count > st.MAX_OPERANDS() {
     return st.trap_now(tcb, st.TRAP_STATE(), st.ST_CALL_OPERANDS());
   }
-  // 同单元已定义过程可以被 extern 别名指回来，此时不进能力表。
+
   if sub.link_name != 0 {
     let redirected: u64 = im.vm_sub_index_by_body(tcb.image, sub.link_name);
     if redirected != im.NO_INDEX() {
@@ -547,14 +520,14 @@ let op_call = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   if inst.symbol != 0 {
     return enter_sub(tcb, inst, meta.sub_index, 0, inst.operand_count, tcb.cur_position);
   }
-  // 间接调用：操作数 0 是目标地址，其余是实参。能不能调用由区段的 CALL 权限说话。
+
   if inst.operand_count == 0 {
     return st.trap_now(tcb, st.TRAP_STATE(), st.ST_CALL_OPERANDS());
   }
   let target: st.VmValue = st.value_zero();
   let s0: u64 = st.op_read_typed(tcb, inst, 0, codes.TyKind.Addr as u64, 64, mut_of(target));
   if s0 != 0 { return s0; }
-  if vs.vm_check(tcb.space, target.bits, 8, vs.MEM_CALL()) == 0 {
+  if vs.vm_check(tcb.space, target.bits, 8, vs.Access.Call as u64) == 0 {
     return st.trap_now(tcb, st.TRAP_MEMORY_OOB(), st.ST_INDIRECT_NO_CALL());
   }
   let sub_index: u64 = im.vm_sub_at(tcb.image, target.bits);
@@ -568,7 +541,6 @@ let op_call = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return enter_sub(tcb, inst, sub_index, 1, inst.operand_count - 1, tcb.cur_position);
 };
 
-// --- 结构化控制流 ---------------------------------------------------------
 let op_if = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   let meta: im.InstMeta = im.vm_inst_meta(tcb.image, tcb.cur_region, tcb.cur_position);
   let condition: st.VmValue = st.value_zero();
@@ -625,12 +597,6 @@ let op_loop = func(tcb: Mut(st.TCB), inst: vf.IrInst) -> u64 {
   return bind_args(tcb, loop_frame.slot_base, rec.param_count, 0);
 };
 
-// 循环初值在父帧求值。
-//
-// 当前 LAINIR 的 #loop 不带初值操作数，装载器只提供字面量初值（image.lain 的
-// 注释与 C99 后端的区域参数零初始化一致）。ParamInit 的引用字段在返回聚合里是
-// 块指针，且指回已退栈的临时块（前端把嵌套聚合表示成指针），读不到；bits 是
-// 标量字段，可安全读取。所以这里按字面量初值执行。
 let literal_operand_ref = func() -> im.OperandRef {
   return im.OperandRef {
     is_literal: 1,
@@ -801,7 +767,6 @@ let op_unreachable = func(tcb: Mut(st.TCB)) -> u64 {
   return st.trap_now(tcb, st.TRAP_UNREACHABLE(), st.ST_UNKNOWN_INST());
 };
 
-// --- 分派 -----------------------------------------------------------------
 let is_int_bin = func(k: u64) -> bool {
   if (k == codes.InstKind.Add as u64) or (k == codes.InstKind.Sub as u64) or (k == codes.InstKind.Mul as u64) { return true; }
   if (k == codes.InstKind.SDiv as u64) or (k == codes.InstKind.UDiv as u64) { return true; }
@@ -855,8 +820,6 @@ let is_atomic = func(k: u64) -> bool {
   return true;
 };
 
-// 指令族的分类结果。分类本身只在这一个阶梯里做一次，dispatch 只对枚举做穷尽
-// match：新增指令族时编译器会在两处同时要求补齐，不会静默落进未知指令。
 let OpClass = enum {
   IntBin
   IntCmp

@@ -1,18 +1,3 @@
-// tools/lainfmt —— Lain 源码格式化器。
-//
-// 用法：lainfmt [--check] [--stdout] <file.lain>
-//   --check   只检查：已经格式化回 0，需要改动回 1。
-//   --stdout  把格式化结果打到标准输出，不写回文件。
-//   默认把格式化结果写回原文件。参数或读写失败回 2。
-//
-// 格式化规则：
-//   * 换行统一成 \n，去掉每行末尾的水平空白；
-//   * 花括号嵌套按 2 空格缩进，以 } 开头的行先退一级；字符串与 // 行注释里的
-//     花括号不参与计数；
-//   * 跨行字符串的续行原样保留，缩进与尾部空白都不动，字符串内容逐字节不变；
-//   * 文件末尾只留一个 \n。
-// 动手之前先交给 src::frontend::reader 做一遍词法检查，括号不配对或者字符串
-// 未终止的文件不会被改写。
 let io = import("std::io");
 let os = import("std::os");
 let option = import("std::option");
@@ -21,7 +6,6 @@ let rd = import("src::frontend::reader");
 
 let OptSlice = option.Option(MutSlice(u8));
 
-// 输出缓冲：容量不够时向宿主重新领一块翻倍大小的，把已有字节搬过去再归还旧块。
 let Out = struct {
   buf: MutSlice(u8),
   len: u64,
@@ -67,7 +51,6 @@ let out_span = func(o: Mut(Out), s: Slice(u8), from: u64, to: u64) {
   };
 };
 
-// 水平空白：空格、制表、纵向制表与换页。
 let is_hspace = func(c: u64) -> bool {
   if c == 32 {
     return true;
@@ -78,14 +61,11 @@ let is_hspace = func(c: u64) -> bool {
   return false;
 };
 
-// 词法状态：0 普通、1 字符串内部、2 行注释内部。
 let Scan = struct {
   state: u64,
   depth: u64,
 };
 
-// 扫过 [from, to)：引号与反斜杠成对跳过，// 之后到行尾不再看，花括号只在普通
-// 状态里改深度。结果为扫完之后的状态与深度，由调用方通过 out 取回。
 let scan_span = func(src: Slice(u8), from: u64, to: u64, st0: u64, d0: u64, out: Mut(Scan)) {
   out.state = st0;
   out.depth = d0;
@@ -124,7 +104,6 @@ let scan_span = func(src: Slice(u8), from: u64, to: u64, st0: u64, d0: u64, out:
   };
 };
 
-// 行尾：第一个 \n 或 \r。
 let line_end = func(src: Slice(u8), from: u64) -> u64 {
   let n: u64 = src.len;
   let r: u64 = loop find(k: u64 = from) while (k < n) and ((src[k] as u64) != 10) and ((src[k] as u64) != 13) {
@@ -133,7 +112,6 @@ let line_end = func(src: Slice(u8), from: u64) -> u64 {
   return r;
 };
 
-// [from, to) 里开头连续水平空白的结束位置。
 let hspace_end = func(src: Slice(u8), from: u64, to: u64) -> u64 {
   let r: u64 = loop lw(k: u64 = from) while (k < to) and is_hspace(src[k] as u64) {
     k = k + 1;
@@ -141,7 +119,6 @@ let hspace_end = func(src: Slice(u8), from: u64, to: u64) -> u64 {
   return r;
 };
 
-// [from, to) 去掉尾部水平空白之后的结束位置。
 let hspace_trim = func(src: Slice(u8), from: u64, to: u64) -> u64 {
   let r: u64 = loop tw(k: u64 = to) while (k > from) and is_hspace(src[k - 1] as u64) {
     k = k - 1;
@@ -149,14 +126,12 @@ let hspace_trim = func(src: Slice(u8), from: u64, to: u64) -> u64 {
   return r;
 };
 
-// 跨行游标：下一行的起点，以及进入这一行时的词法状态与花括号深度。
 let Cursor = struct {
   pos: u64,
   depth: u64,
   st: u64,
 };
 
-// 处理一行：把规范化后的字节写进 o，推进游标。还有下一行回 1，结束回 0。
 let format_line = func(src: Slice(u8), o: Mut(Out), c: Mut(Cursor)) -> u64 {
   let n: u64 = src.len;
   let pos: u64 = c.pos;
@@ -174,7 +149,7 @@ let format_line = func(src: Slice(u8), o: Mut(Out), c: Mut(Cursor)) -> u64 {
   let s0: Scan = Scan { state: c.st, depth: c.depth };
   let s: Mut(Scan) = mut_of(s0);
   if c.st == 1 {
-    // 跨行字符串的续行：原样写出，缩进与尾部空白都属于字符串内容。
+
     out_span(o, src, pos, e);
     out_byte(o, 10);
     scan_span(src, pos, e, 1, c.depth, s);
@@ -185,7 +160,7 @@ let format_line = func(src: Slice(u8), o: Mut(Out), c: Mut(Cursor)) -> u64 {
     let te: u64 = hspace_trim(src, pos, e);
     scan_span(src, pos, te, 0, c.depth, s);
     if s.state == 1 {
-      // 行尾落在字符串内部：被剪掉的那段空白属于字符串内容，必须保留。
+
       te = e;
     }
     if te <= ls {
@@ -212,7 +187,6 @@ let format_line = func(src: Slice(u8), o: Mut(Out), c: Mut(Cursor)) -> u64 {
   return 1;
 };
 
-// 把源码格式化成新缓冲，所有权交给调用方，用完用 os.free_bytes 归还。
 pub let format_source = func(src: Slice(u8)) -> MutSlice(u8) {
   let o0: Out = out_new(src.len * 2 + 16);
   let o: Mut(Out) = mut_of(o0);
@@ -246,7 +220,6 @@ let same = func(a: Slice(u8), b: Slice(u8)) -> bool {
   return same_range(a, b, 0);
 };
 
-// 第 i 个命令行参数：长度向宿主问一次，再复制进一块新领的缓冲。
 let arg = func(i: u64) -> Slice(u8) {
   let n: u64 = os.argv_len(i);
   let cap: u64 = n + 1;
@@ -331,10 +304,10 @@ let main = func() -> i64 {
   }
   let src: MutSlice(u8) = OptSlice.unwrap_or(loaded, make_slice(MutSlice(u8), null_ref(Mut(u8)), 0));
   let text: Slice(u8) = make_slice(Slice(u8), ptr_cast(Ref(u8), src.ptr), src.len);
-  // 词法检查：零长度 Arena 只在容量不足时回 RD_ERR_CAPACITY，那说明切词全部通过。
+
   let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
   let scan: rd.RawAst = rd.parse(text, probe);
-  if (scan.kind != rd.RD_ERR_CAPACITY()) and (scan.kind != rd.RD_OK()) {
+  if (scan.kind != rd.ReadStatus.ErrCapacity as u64) and (scan.kind != rd.ReadStatus.Ok as u64) {
     let el: u64 = scan.err_line;
     let ec: u64 = scan.err_col;
     let ek: u64 = scan.kind;

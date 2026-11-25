@@ -1,18 +1,3 @@
-// expand.lain —— 展开遍次：RawAst -> RawAst。
-// 管线次序是 Expand -> Elaborate -> Lower：展开只认语法形式，不建符号、
-// 不求值、不碰类型。命中的形式经 AstOut 事务重发到输出段，没有命中的源
-// 原样交回，连事务都不开。
-//
-// 本遍次兑现 f"..."：模板按 {表达式} 切段，槽表达式交回 Reader 解析成
-// RawAst，整条模板改写成 std::fmt 的左折叠拼接。
-//   f"hello {name}, id: {id}"
-//   -> __lain_fmt.f_step(__lain_fmt.f_step("hello ", (name), ", id: "), (id), "")
-// 折叠由内向外求值，求值次序就是模板的书写次序；每个槽各自单态化出对应
-// 类型的写入过程。std::fmt 只往静态字符池写字节，全程没有堆分配。源里出现
-// f"..." 时，文件顶部补上 std::fmt 的导入、公开面与四种基础见证。
-// 本遍次同时识别语法宏调用 @name(实参) 与 @name { 实参 }：内建的 AstOut 宏
-// @stringify 与 @concat_ident 直接读出实参原文，就地换成一个记号节点。
-// @extern(...)、@root 与 @macro 声明归别的遍次，判定时排除，原样交回。
 let st = import("src::driver::state");
 let ax = import("src::sema::ast");
 let s = import("src::driver::sym");
@@ -21,9 +6,6 @@ let ct = import("src::comptime::comptime");
 let hr = import("src::driver::host_rt");
 let io = import("std::io");
 
-// --- 输出段的孩子缓冲 ---------------------------------------------------
-// 一个组的孩子在输出段里按紧排的 32 位句柄给出，所以先在暂存区攒一串
-// 4 字节格子，收齐了再交给 mk_group。
 let Builder = struct {
   buf: Mut(u8),
   n: u64,
@@ -52,26 +34,19 @@ let bgroup = func(b: Builder, delim: u64) -> u64 {
   return ax.mk_group(delim, b.n, ptr_cast(Ref(u32), b.buf));
 };
 
-// --- 词的构造 -----------------------------------------------------------
-// 预置声明的名字与三种调用形状里反复出现的词。
 let fmt_alias = func() -> u64 { return s.intern("__lain_fmt", 10); };
 
 let word = func(sym: u64, text: Ref(u8), n: u64) -> u64 {
   return ax.mk_token(sym, 0, text, n);
 };
 
-// __lain_fmt 这个名字在所有模板里都是同一串字节。
 let alias_tok = func() -> u64 { return word(fmt_alias(), "__lain_fmt", 10); };
 let dot_tok = func() -> u64 { return word(s.p_dot(), ".", 1); };
 let comma_tok = func() -> u64 { return word(s.p_comma(), ",", 1); };
 let semi_tok = func() -> u64 { return word(s.intern(";", 1), ";", 1); };
 
-// 空模板段的字面量：模板首尾缺文本时用它占位。
 let empty_tok = func() -> u64 { return word(0, "\"\"", 2); };
 
-// --- 模板切段 -----------------------------------------------------------
-// 一段模板内容：kind 0 是原样文本，1 是插值槽；start/end 是字面量内部的
-// 字节区间（不含两侧引号）。
 let Seg = struct {
   kind: u64,
   start: u64,
@@ -87,8 +62,6 @@ let byte_at = func(p: Ref(u8), i: u64) -> u64 {
   return b as u64;
 };
 
-// 槽里可以嵌套花括号（结构体字面量、嵌套模板），按深度找配对的 '}'。
-// 回 n 表示到模板末尾都没有闭合。
 let close_of = func(p: Ref(u8), i: u64, n: u64, depth: u64) -> u64 {
   if i >= n { return n; }
   let b: u64 = byte_at(p, i);
@@ -109,8 +82,6 @@ let seg_add = func(base: Mut(Seg), cnt: u64, kind: u64, start: u64, end: u64) ->
   return cnt + 1;
 };
 
-// 从 from 起切：普通字节原样走进文本段，`\` 连同下一个字节一起跳过，
-// { 开一个槽并记下配对 } 的位置。
 let split = func(k: Mut(st.State), p: Ref(u8), from: u64, i: u64, n: u64, base: Mut(Seg), cnt: u64) -> u64 {
   if i >= n {
     if i > from { return seg_add(base, cnt, 0, from, i); }
@@ -123,29 +94,26 @@ let split = func(k: Mut(st.State), p: Ref(u8), from: u64, i: u64, n: u64, base: 
   if c0 >= 64 {
     let m: Ref(u8) = "f-string has too many segments";
     let d: u64 = ir.diag(k, 0, 1, m, 30);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return c0;
   }
   let close: u64 = close_of(p, i + 1, n, 1);
   if close >= n {
     let m: Ref(u8) = "f-string interpolation is not closed";
     let d: u64 = ir.diag(k, 0, 1, m, 36);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return c0;
   }
   if close == i + 1 {
     let m: Ref(u8) = "empty f-string interpolation slot";
     let d: u64 = ir.diag(k, 0, 1, m, 33);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return c0;
   }
   let c1: u64 = seg_add(base, c0, 1, i + 1, close);
   return split(k, p, close + 1, close + 1, n, base, c1);
 };
 
-// --- 槽表达式的解析 -----------------------------------------------------
-// 把各槽的原文以 "(槽1), (槽2)" 的形状交给 Reader，一次调用解析出全部槽，
-// 每个槽回一个括号组。拼好的片段存放在暂存区，解析器读完就可以丢弃。
 let put_bytes = func(dst: Mut(u8), at: u64, src: Ref(u8), n: u64) -> u64 {
   if n == 0 { return at; }
   let q: Mut(u8) = dst + at;
@@ -170,19 +138,16 @@ let fill_snippet = func(base: Mut(Seg), i: u64, cnt: u64, p: Ref(u8), dst: Mut(u
   return fill_snippet(base, i + 1, cnt, p, dst, sc + 1);
 };
 
-// 拼接并解析槽表达式，回解析片段所在源单元的根组。
 let parse_slots = func(k: Mut(st.State), p: Ref(u8), size: u64, cnt: u64, base: Mut(Seg)) -> u64 {
   let sbuf: Mut(u8) = st.st_alloc(k, size + cnt * 4 + 8);
   let slen: u64 = fill_snippet(base, 0, cnt, p, sbuf, 0);
   let src: u64 = ct.snippet(ptr_cast(Ref(u8), sbuf), slen);
-  if src == 0 { st.st_fail(k, ax.e_ast()); return 0; }
+  if src == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
   let snip: u64 = hr.source_root(src);
-  if snip == 0 { st.st_fail(k, ax.e_ast()); return 0; }
+  if snip == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
   return snip;
 };
 
-// --- 模板改写 -----------------------------------------------------------
-// 文本段变成字面量实参（需要时重新拼上两侧引号），槽变成一段括号组实参。
 let seg_tok = func(k: Mut(st.State), lit: u64, r: Mut(Seg)) -> u64 {
   let p: Ref(u8) = ax.lit_addr(lit);
   let n: u64 = r.end - r.start;
@@ -195,16 +160,14 @@ let seg_tok = func(k: Mut(st.State), lit: u64, r: Mut(Seg)) -> u64 {
   return word(0, ptr_cast(Ref(u8), buf), at + 1);
 };
 
-// 槽 j 的表达式组：解析片段的第 2j 个孩子。
 let slot_group = func(k: Mut(st.State), root: u64, j: u64) -> u64 {
   let h: u64 = ax.n_at(root, j * 2);
   if h == 0 { return 0; }
   if ax.is_group_node(h) == 0 { return 0; }
-  if ax.delim(h) != ax.dl_paren() { return 0; }
+  if ax.delim(h) != ax.Delim.Paren as u64 { return 0; }
   return h;
 };
 
-// 一步模板的调用：形状总是 (__lain_fmt.f_step(头, 值, 尾))。
 let call_step = func(k: Mut(st.State), cur: u64, v: u64, tail: u64) -> u64 {
   let a0: Builder = new_builder(k, 5);
   let a1: Builder = bpush(a0, cur);
@@ -212,17 +175,15 @@ let call_step = func(k: Mut(st.State), cur: u64, v: u64, tail: u64) -> u64 {
   let a3: Builder = bpush(a2, v);
   let a4: Builder = bpush(a3, comma_tok());
   let a5: Builder = bpush(a4, tail);
-  let ag: u64 = bgroup(a5, ax.dl_paren());
+  let ag: u64 = bgroup(a5, ax.Delim.Paren as u64);
   let b0: Builder = new_builder(k, 4);
   let b1: Builder = bpush(b0, alias_tok());
   let b2: Builder = bpush(b1, dot_tok());
   let b3: Builder = bpush(b2, word(s.intern("f_step", 6), "f_step", 6));
   let b4: Builder = bpush(b3, ag);
-  return bgroup(b4, ax.dl_paren());
+  return bgroup(b4, ax.Delim.Paren as u64);
 };
 
-// 左折叠：每个槽一步，把上一段消息当作这一段的头，尾随文本收在同一个组里。
-// 相邻的两个槽之间、模板首尾缺的文本段都补空串，实参形状总是 (头, 值, 尾)。
 let fold_segs = func(k: Mut(st.State), lit: u64, base: Mut(Seg), i: u64, cnt: u64, snip: u64, cur: u64, j: u64) -> u64 {
   if st.st_ok(k) != 0 { return cur; }
   if i >= cnt { return cur; }
@@ -230,10 +191,10 @@ let fold_segs = func(k: Mut(st.State), lit: u64, base: Mut(Seg), i: u64, cnt: u6
   if g0 == 0 {
     let m: Ref(u8) = "f-string slot is not an expression";
     let d: u64 = ir.diag(k, 0, 1, m, 34);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return cur;
   }
-  // 槽里可能还有模板：展开照样递归下去。
+
   let g: u64 = emit_group(k, g0);
   if st.st_ok(k) != 0 { return cur; }
   let has_tail: u64 = if i + 1 < cnt { 1 } else { 0 };
@@ -255,41 +216,36 @@ let emit_fstring = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let lit: u64 = ax.n_at(g, i + 1);
   let p: Ref(u8) = ax.lit_addr(lit);
   let n: u64 = ax.lit_len(lit);
-  if n < 2 { st.st_fail(k, ax.e_ast()); return 0; }
-  // 内容区间 [1, n-1)：两侧引号不进模板。
+  if n < 2 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
+
   let from: u64 = 1;
   let to: u64 = n - 1;
   let base: Mut(Seg) = ptr_cast(Mut(Seg), st.st_alloc(k, 64 * 24 + 8));
   let cnt: u64 = split(k, p, from, from, to, base, 0);
   if st.st_ok(k) != 0 { return 0; }
   let ns: u64 = slot_count(base, 0, cnt, 0);
-  // 没有槽：整段文本本身就是一个现成的切片值。
+
   if ns == 0 {
     if cnt == 0 { return empty_tok(); }
     return seg_tok(k, lit, seg_at(base, 0));
   }
-  // 折叠每一步领一块消息区，一次插值最多用到槽数 + 1 块；字符池 16 块，
-  // 超过 12 个槽就会绕回自己还在读的那一块，所以在这里拦住。
+
   if ns > 12 {
     let m: Ref(u8) = "f-string has too many slots";
     let d: u64 = ir.diag(k, 0, 1, m, 27);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return 0;
   }
-  // 有槽才需要解析片段：每个槽多出 "()" 与一个逗号。
+
   let snip: u64 = parse_slots(k, p, to - from, cnt, base);
   if st.st_ok(k) != 0 { return 0; }
-  // 序列从文本开始：模板以槽开头时头就是空串。
+
   let head_kind: u64 = deref(seg_at(base, 0)).kind;
   let head: u64 = if head_kind == 0 { seg_tok(k, lit, seg_at(base, 0)) } else { empty_tok() };
   let next: u64 = if head_kind == 0 { 1 } else { 0 };
   return fold_segs(k, lit, base, next, cnt, snip, head, 0);
 };
 
-// --- 语法宏与内建 AstOut 宏 ---------------------------------------------
-// @name(实参) 与 @name { 实参 } 是 Expand 遍次的语法宏调用。内建的
-// @stringify 与 @concat_ident 只读实参原文，产出一个记号节点；其余名字
-// 在这里就地报错，不把 @ 漏给后续遍次当成表达式。
 let put_byte = func(dst: Mut(u8), at: u64, code: u64) -> u64 {
   let q: Mut(u8) = dst + at;
   deref(q) = code as u8;
@@ -297,9 +253,9 @@ let put_byte = func(dst: Mut(u8), at: u64, code: u64) -> u64 {
 };
 
 let close_byte = func(d: u64) -> u64 {
-  if d == ax.dl_paren() { return 41; }
-  if d == ax.dl_bracket() { return 93; }
-  if d == ax.dl_brace() { return 125; }
+  if d == ax.Delim.Paren as u64 { return 41; }
+  if d == ax.Delim.Bracket as u64 { return 93; }
+  if d == ax.Delim.Brace as u64 { return 125; }
   return d;
 };
 
@@ -309,7 +265,6 @@ let bytes_eq = func(a: Ref(u8), b: Ref(u8), n: u64) -> u64 {
   return bytes_eq(a + 1, b + 1, n - 1);
 };
 
-// 记号 h 的原文是否等于给定字节串。
 let text_is = func(h: u64, want: Ref(u8), n: u64) -> u64 {
   if ax.lit_len(h) != n { return 0; }
   let p: Ref(u8) = ax.lit_addr(h);
@@ -317,7 +272,6 @@ let text_is = func(h: u64, want: Ref(u8), n: u64) -> u64 {
   return bytes_eq(p, want, n);
 };
 
-// 节点 h 按源代码书写形式占用的字节数：相邻孩子之间一个空格，组多出两侧分隔符。
 let text_span = func(h: u64) -> u64 {
   if ax.is_group_node(h) == 1 {
     let n: u64 = ax.n_count(h);
@@ -333,7 +287,6 @@ let text_span_seq = func(g: u64, i: u64, acc: u64) -> u64 {
   return text_span_seq(g, i + 1, acc + sep + text_span(ax.n_at(g, i)));
 };
 
-// 把组 g 的全部孩子按书写次序重发进 dst，回新的写入位置。
 let text_write = func(g: u64, i: u64, dst: Mut(u8), at: u64) -> u64 {
   if i >= ax.n_count(g) { return at; }
   let sep: u64 = if i == 0 { at } else { put_byte(dst, at, 32) };
@@ -352,7 +305,6 @@ let text_write = func(g: u64, i: u64, dst: Mut(u8), at: u64) -> u64 {
   return text_write(g, i + 1, dst, put_bytes(dst, sep, p, n));
 };
 
-// 括号组里第 want 个实参，逗号只是分隔符。
 let arg_at = func(grp: u64, i: u64, want: u64) -> u64 {
   if i >= ax.n_count(grp) { return 0; }
   if ax.is_comma(grp, i) == 1 { return arg_at(grp, i + 1, want); }
@@ -360,7 +312,6 @@ let arg_at = func(grp: u64, i: u64, want: u64) -> u64 {
   return arg_at(grp, i + 1, want - 1);
 };
 
-// 记号是不是名字：非组节点，且首字节是字母或下划线。
 let tok_is_name = func(h: u64) -> u64 {
   if h == 0 { return 0; }
   if ax.is_group_node(h) == 1 { return 0; }
@@ -376,11 +327,10 @@ let tok_is_name = func(h: u64) -> u64 {
 
 let macro_fail = func(k: Mut(st.State), m: Ref(u8), n: u64) -> u64 {
   let d: u64 = ir.diag(k, 0, 1, m, n);
-  st.st_fail(k, ax.e_ast());
+  st.st_fail(k, ax.FailKind.Ast as u64);
   return 0;
 };
 
-// @stringify(实参)：实参原文原样变成一个字符串字面量记号。
 let emit_stringify = func(k: Mut(st.State), grp: u64) -> u64 {
   let sz: u64 = text_span_seq(grp, 0, 0);
   let buf: Mut(u8) = st.st_alloc(k, sz + 8);
@@ -390,7 +340,6 @@ let emit_stringify = func(k: Mut(st.State), grp: u64) -> u64 {
   return word(0, ptr_cast(Ref(u8), buf), at2);
 };
 
-// @concat_ident(a, b)：两个名字记号的原文接成一个名字记号。
 let emit_concat_ident = func(k: Mut(st.State), grp: u64) -> u64 {
   let a: u64 = arg_at(grp, 0, 0);
   let b: u64 = arg_at(grp, 0, 1);
@@ -410,8 +359,6 @@ let emit_concat_ident = func(k: Mut(st.State), grp: u64) -> u64 {
   return word(sym, p, at2);
 };
 
-// 第 i 个记号是不是语法宏调用之首：单独的 @ 后面跟名字记号与实参组。
-// @extern / @root / @macro 的源法归别的遍次，这里全部放行。
 let is_macro = func(g: u64, i: u64) -> u64 {
   let h: u64 = ax.n_at(g, i);
   if h == 0 { return 0; }
@@ -419,7 +366,7 @@ let is_macro = func(g: u64, i: u64) -> u64 {
   if ax.tok_first(g, i) != 64 { return 0; }
   if ax.is_name(g, i + 1) == 0 { return 0; }
   let d: u64 = ax.delim_of(g, i + 2);
-  if (d != ax.dl_paren()) and (d != ax.dl_brace()) { return 0; }
+  if (d != ax.Delim.Paren as u64) and (d != ax.Delim.Brace as u64) { return 0; }
   let nm: u64 = ax.n_at(g, i + 1);
   if text_is(nm, "extern", 6) == 1 { return 0; }
   if text_is(nm, "root", 4) == 1 { return 0; }
@@ -445,10 +392,6 @@ let has_macro = func(g: u64, i: u64, cnt: u64) -> u64 {
   return has_macro(g, i + 1, cnt);
 };
 
-// --- 树的复制 -----------------------------------------------------------
-// 组按孩子顺序重发；f"..." 与语法宏调用在这里就地换成展开结果。孩子数受
-// 宿主的 mk_group 容量限制（一次最多 256 个），超出就明确报错而不是让宿主
-// 拒绝整趟编译。
 let emit_kids = func(k: Mut(st.State), g: u64, i: u64, cnt: u64, b: Builder) -> Builder {
   if i >= cnt { return b; }
   if st.st_ok(k) != 0 { return b; }
@@ -476,7 +419,7 @@ let emit_group = func(k: Mut(st.State), g: u64) -> u64 {
   if cnt > 16384 {
     let m: Ref(u8) = "f-string source group has too many children";
     let d: u64 = ir.diag(k, 0, 1, m, 43);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return 0;
   }
   let b: Builder = new_builder(k, cnt + 2);
@@ -485,7 +428,6 @@ let emit_group = func(k: Mut(st.State), g: u64) -> u64 {
   return bgroup(filled, ax.delim(g));
 };
 
-// --- 候选识别 -----------------------------------------------------------
 let word_is = func(g: u64, i: u64, code: u64) -> u64 {
   let h: u64 = ax.n_at(g, i);
   if h == 0 { return 0; }
@@ -494,7 +436,6 @@ let word_is = func(g: u64, i: u64, code: u64) -> u64 {
   return 0;
 };
 
-// 第 i 个记号是不是模板之首：单独的 f 后面紧跟字符串字面量。
 let is_fstring = func(g: u64, i: u64) -> u64 {
   if word_is(g, i, 102) == 0 { return 0; }
   if ax.tok_first(g, i + 1) == 34 { return 1; }
@@ -511,17 +452,11 @@ let has_fs = func(g: u64, i: u64, cnt: u64) -> u64 {
   return has_fs(g, i + 1, cnt);
 };
 
-// --- 预置声明 -----------------------------------------------------------
-// let __lain_fmt = import("std::fmt");
-// use __lain_fmt;
-// use __lain_fmt.FmtI64;  use __lain_fmt.FmtU64;  use __lain_fmt.FmtBool;  use __lain_fmt.FmtStr;
-// 导入给出模块绑定，use __lain_fmt 让 Formattable 在调用点可见（跨源泛型模板按
-// 调用点的裸名解析签名），四个 use 把基础类型的见证放进当前作用域。
 let pre_import = func(k: Mut(st.State), b: Builder) -> Builder {
   let path: u64 = word(0, "\"std::fmt\"", 10);
   let args0: Builder = new_builder(k, 2);
   let args1: Builder = bpush(args0, path);
-  let args: u64 = bgroup(args1, ax.dl_paren());
+  let args: u64 = bgroup(args1, ax.Delim.Paren as u64);
   let t0: u64 = word(s.k_let(), "let", 3);
   let t1: u64 = word(fmt_alias(), "__lain_fmt", 10);
   let t2: u64 = word(s.p_eq(), "=", 1);
@@ -557,9 +492,6 @@ let prelude = func(k: Mut(st.State), cap: u64) -> Builder {
   return pre_use(k, b5, s.intern("FmtStr", 6), "FmtStr", 6);
 };
 
-// --- 遍次入口 -----------------------------------------------------------
-// 没有模板也没有语法宏时原样交回，一个节点也不分配，也不开事务。
-// 只有出现 f"..." 才需要补上 std::fmt 的预置声明。
 pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
   if root == 0 { return 0; }
   if ax.is_group_node(root) == 0 { return root; }
@@ -570,7 +502,7 @@ pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
   if cnt > 16384 {
     let m: Ref(u8) = "f-string source root has too many children";
     let d: u64 = ir.diag(k, 0, 1, m, 42);
-    st.st_fail(k, ax.e_ast());
+    st.st_fail(k, ax.FailKind.Ast as u64);
     return root;
   }
   let tid: u64 = ax.tx_begin();
@@ -589,10 +521,6 @@ pub let expand_root = func(k: Mut(st.State), root: u64) -> u64 {
   return out;
 };
 
-// --- 展开结果打印 -------------------------------------------------------
-// --dump-expand：把展开遍次交出的 RawAst 按源代码形状打到标准输出。
-// 括号与方括号里的孩子单行平铺、以空格相隔；花括号组按分号与逗号断行，
-// 根组按分号断行，每层嵌套缩进两格。词结点直接打印原文。
 let dump_indent = func(n: u64) -> u64 {
   if n == 0 { return 0; }
   let w: u64 = io.print("  ");
@@ -613,29 +541,26 @@ let dump_text = func(h: u64) -> u64 {
 };
 
 let dump_open = func(d: u64) -> u64 {
-  if d == ax.dl_paren() { return io.print("("); }
-  if d == ax.dl_bracket() { return io.print("["); }
-  if d == ax.dl_brace() { return io.print("{"); }
+  if d == ax.Delim.Paren as u64 { return io.print("("); }
+  if d == ax.Delim.Bracket as u64 { return io.print("["); }
+  if d == ax.Delim.Brace as u64 { return io.print("{"); }
   return 0;
 };
 
 let dump_close = func(d: u64) -> u64 {
-  if d == ax.dl_paren() { return io.print(")"); }
-  if d == ax.dl_bracket() { return io.print("]"); }
-  if d == ax.dl_brace() { return io.print("}"); }
+  if d == ax.Delim.Paren as u64 { return io.print(")"); }
+  if d == ax.Delim.Bracket as u64 { return io.print("]"); }
+  if d == ax.Delim.Brace as u64 { return io.print("}"); }
   return 0;
 };
 
-// 前一个孩子是分号就换行缩进；花括号组里逗号后也换行；其余孩子之间隔一个空格。
 let dump_gap = func(g: u64, depth: u64, i: u64) -> u64 {
   if i == 0 { return 0; }
   if ax.is_semi(g, i - 1) == 1 { return dump_line(depth); }
-  if (ax.delim(g) == ax.dl_brace()) and (ax.is_comma(g, i - 1) == 1) { return dump_line(depth); }
+  if (ax.delim(g) == ax.Delim.Brace as u64) and (ax.is_comma(g, i - 1) == 1) { return dump_line(depth); }
   return io.print(" ");
 };
 
-// 打印组 g 从第 i 个孩子起的全部内容；嵌套的组在这里就地展开，
-// 花括号组自成缩进块，其余组在行内平铺。
 let dump_seq = func(g: u64, depth: u64, i: u64) -> u64 {
   if i >= ax.n_count(g) { return 0; }
   let gap: u64 = dump_gap(g, depth, i);
@@ -648,9 +573,9 @@ let dump_seq = func(g: u64, depth: u64, i: u64) -> u64 {
   let inner: u64 = depth + 1;
   let cnt: u64 = ax.n_count(h);
   let o: u64 = dump_open(d);
-  let head: u64 = if (cnt > 0) and (d == ax.dl_brace()) { dump_line(inner) } else { 0 };
+  let head: u64 = if (cnt > 0) and (d == ax.Delim.Brace as u64) { dump_line(inner) } else { 0 };
   let body: u64 = dump_seq(h, inner, 0);
-  let tail: u64 = if (cnt > 0) and (d == ax.dl_brace()) { dump_line(depth) } else { 0 };
+  let tail: u64 = if (cnt > 0) and (d == ax.Delim.Brace as u64) { dump_line(depth) } else { 0 };
   let c: u64 = dump_close(d);
   return dump_seq(g, depth, i + 1);
 };
@@ -660,5 +585,3 @@ pub let dump_ast = func(root: u64) -> u64 {
   let body: u64 = dump_seq(root, 0, 0);
   return io.newline();
 };
-
-

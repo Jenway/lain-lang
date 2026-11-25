@@ -1,24 +1,9 @@
-// src/ir/emit_text.lain —— 把内存里的 LAINIR 模块确定性地写成可重新解析的 .l1 文本。
-//
-// 文本形状跟 seed/kernel/src/text/print.c 一致：顶层只有 data 与 #proc，
-// 过程体按区域缩进，算子名取自 seed/kernel/src/text/opname.c 的表。
-// 输出放在调用方给的 MutSlice(u8) 里；写满时 writer 标记失败，后续写入不再推进。
-//
-// 表示层缺失的字段在这里按下面的约定补：
-//   1. Lain 侧的 IrOperand 没有 is_global，值操作数一律写成 `%name`；
-//   2. IrRegion 不保存循环形参的初值，`#loop` 的初值写 0（C99 后端同样按零初始化）；
-//   3. IrInst 不保存 [tail] / volatile / 内存序，这三项不写；
-//   4. 浮点字面量按原始位模式写成十进制整数：解析器只核对宽度的声明，
-//      执行期读到的是同一份位模式。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let checks = import("src::ir::verify::checks");
 let tab = import("src::host::symtab");
 let mem = import("std::mem");
 
-// 违例出口：先借符号表上登记的钩子打一行说明，再就地终止。钩子在 host_rt
-// 的 rt_init 里登记，所以发射期的违例与宿主原语一样打出 [host_trap] 行，
-// 不会只剩一句算术陷阱。
 let trap_u64 = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> u64 {
   let seen: u64 = tab.trap_report(syms, msg, detail);
   return mem.halt_now(detail);
@@ -29,9 +14,6 @@ let trap_text = func(syms: Mut(tab.HostSymTab), msg: Slice(u8), detail: u64) -> 
   return "";
 };
 
-// --- 字符常量 -------------------------------------------------------------
-// 文本只在少数几处需要单个 ASCII 字节，给每个字节一个名字，发射函数里就
-// 不会出现裸的编号。
 let CH_NEWLINE = func() -> u8 { return 10; };
 let CH_SPACE = func() -> u8 { return 32; };
 let CH_HASH = func() -> u8 { return 35; };
@@ -42,7 +24,6 @@ let CH_DIGIT_ZERO = func() -> u8 { return 48; };
 let CH_RBRACK = func() -> u8 { return 93; };
 let CH_RANGLE = func() -> u8 { return 62; };
 
-// --- writer ---------------------------------------------------------------
 pub let TextWriter = struct {
   buf: MutSlice(u8),
   len: u64,
@@ -86,7 +67,6 @@ pub let put_u64_dec = func(w: Mut(TextWriter), v: u64) -> u64 {
   return put_byte(w, d);
 };
 
-// 符号句柄的原文逐字节写出。句柄来自 HostSymTab，文本已经是合法的符号拼写。
 pub let put_symbol = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), h: u64) -> u64 {
   let n: u64 = tab.sym_len(syms, h);
   let p: Ref(u8) = tab.sym_addr(syms, h);
@@ -98,10 +78,6 @@ pub let put_symbol = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), h: u64)
   return 1;
 };
 
-// --- 数据段 ---------------------------------------------------------------
-// 字段顺序与 src/host/ir_host.lain 的 DataRec 完全一致：调用方可以直接把
-// DataRec 数组按字节重解释成这个视图，不必引入 src::host::ir_host（那会让
-// 宿主与文本发射互相 import）。
 pub let IrDataView = struct {
   symbol: u64,
   bytes: Ref(u8),
@@ -109,7 +85,6 @@ pub let IrDataView = struct {
   is_writable: u64,
 };
 
-// --- 算子名 ---------------------------------------------------------------
 pub let opcode_name = func(syms: Mut(tab.HostSymTab), k: u64) -> Slice(u8) {
   if k == codes.InstKind.Add as u64 { return "add"; }
   if k == codes.InstKind.Sub as u64 { return "sub"; }
@@ -203,8 +178,6 @@ pub let opcode_name = func(syms: Mut(tab.HostSymTab), k: u64) -> Slice(u8) {
   return trap_text(syms, "emit_text: opcode kind out of range", k);
 };
 
-// --- 物理类型 -------------------------------------------------------------
-// 拼写与 print.c 一致：浮点写 `#f<N>`，布尔写 `#bits<1>`。
 pub let emit_type = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), t: vf.IrType) -> u64 {
   if t.kind == codes.TyKind.Addr as u64 {
     let n: u64 = put_str(w, "#ad");
@@ -229,9 +202,6 @@ pub let emit_type = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab), t: vf.Ir
   return trap_u64(syms, "emit_text: type kind out of range", t.kind);
 };
 
-// --- 发射上下文 -----------------------------------------------------------
-// 绑定表借用验证器静态区里的大表（见 vf.LARGE_BINDINGS），只记录名字到物理
-// 类型的映射：间接 #call 的签名参数与结果类型都要从这里取。
 pub let TextEmitter = struct {
   w: Mut(TextWriter),
   syms: Mut(tab.HostSymTab),
@@ -247,9 +217,6 @@ let word_slot = func(base: Mut(u64), i: u64) -> Mut(u64) {
   return ptr_cast(Mut(u64), ptr_cast(Mut(u8), base) + i * size_of(u64));
 };
 
-// 绑定表用的是验证器静态区里那张 LARGE_BINDINGS 槽的大表：真实模块的一个
-// 过程里同时可见的参数与指令结果远超模块 scratch 的 96 槽。验证与文本发射
-// 先后进行，双方都从第 0 槽开始写，不会互相覆盖。
 pub let emitter_new = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
                           m: Ref(vf.IrModule)) -> TextEmitter {
   let base: Mut(u64) = checks.large_bind_base();
@@ -296,7 +263,6 @@ let bind_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, 
   return bind_params(em, base, count, i + 1);
 };
 
-// --- 模块记录 -------------------------------------------------------------
 let region_of = func(em: Mut(TextEmitter), ri: u64) -> vf.IrRegion {
   if ri == vf.NO_REGION() {
     let dead: u64 = trap_u64(em.syms, "emit_text: region handle is NO_REGION", ri);
@@ -339,8 +305,6 @@ let find_proc = func(em: Mut(TextEmitter), name: u64) -> u64 {
   return scan_proc(em, name, 0);
 };
 
-// 与验证器 result_type 同一套规则：比较产出 1 位布尔，指针计算产出指针类型，
-// 区域指令的产出类型来自被发射区域的声明结果，直接调用来自被调过程。
 let result_type = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> vf.IrType {
   let k: u64 = it.kind;
   if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return vf.type_bool(); }
@@ -383,7 +347,6 @@ let define_results = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
   return define_results(em, it, i + 1);
 };
 
-// --- 缩进与操作数 ---------------------------------------------------------
 let emit_indent = func(em: Mut(TextEmitter), n: u64) -> u64 {
   let i: u64 = loop c(i: u64 = 0) while i < n {
     let rc: u64 = put_str(em.w, "  ");
@@ -400,8 +363,6 @@ let emit_operand = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
   return put_u64_dec(em.w, op.bits);
 };
 
-// 间接 #call 签名里的实参类型：值操作数取绑定表里的物理类型，字面量按
-// 地址宽度写；C 侧只核字面量的宽度声明与实参个数，执行期读的是位模式。
 let emit_operand_type = func(em: Mut(TextEmitter), op: vf.IrOperand) -> u64 {
   if op.kind != codes.OperandKind.Value as u64 { return put_str(em.w, "#bits<64>"); }
   let p: u64 = find_binding(em, op.name);
@@ -421,9 +382,6 @@ let emit_operands = func(em: Mut(TextEmitter), it: vf.IrInst, i: u64) -> u64 {
   return emit_operands(em, it, i + 1);
 };
 
-// 值级对齐作为具名实参写在实参列表末尾：`(%ptr, align=N)`。解析器只把
-// align 当作 #load / #store 的具名实参，其余算子写了会被当成操作数拒绝，
-// 所以只在访存指令上写出来。
 let accepts_align = func(k: u64) -> u64 {
   if k == codes.InstKind.Load as u64 { return 1; }
   if k == codes.InstKind.Store as u64 { return 1; }
@@ -449,7 +407,6 @@ let emit_type_arg = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   return put_byte(em.w, CH_RBRACK());
 };
 
-// 结果前缀：`%a, %b = `；没有结果就什么都不写。
 let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   if it.result_count == 0 { return 1; }
   let i: u64 = loop c(i: u64 = 0) while i < it.result_count {
@@ -461,7 +418,6 @@ let emit_results_prefix = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   return put_str(em.w, " = ");
 };
 
-// 区域声明的结果：` -> (T, T)`；没有就不写。
 let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
   if r.result_count == 0 { return 1; }
   put_str(em.w, " -> (");
@@ -473,7 +429,6 @@ let emit_region_results = func(em: Mut(TextEmitter), r: vf.IrRegion) -> u64 {
   return put_byte(em.w, CH_RPAREN());
 };
 
-// 过程签名的结果：单个不括号，多个括号。
 let emit_proc_results = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
   if p.result_count == 0 { return 1; }
   put_str(em.w, " -> ");
@@ -501,8 +456,6 @@ let emit_params = func(em: Mut(TextEmitter), base: Ref(vf.IrParam), count: u64, 
   return emit_params(em, base, count, i + 1);
 };
 
-// 循环形参带着初值：`%i: #bits<64> = 0`。初值在 Lain 的表示里没有对应字段，
-// 与 C99 后端一样按零初始化。
 let emit_loop_params = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
   if i >= r.param_count { return 1; }
   if i > 0 { put_str(em.w, ", "); }
@@ -520,7 +473,6 @@ let emit_opcode = func(em: Mut(TextEmitter), k: u64) -> u64 {
   return put_str(em.w, opcode_name(em.syms, k));
 };
 
-// --- 指令 -----------------------------------------------------------------
 let emit_insts = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
   if i >= r.inst_count { return 1; }
   let ii: u64 = region_inst(r, i);
@@ -528,7 +480,6 @@ let emit_insts = func(em: Mut(TextEmitter), r: vf.IrRegion, i: u64) -> u64 {
   return emit_insts(em, r, i + 1);
 };
 
-// 无自带形参的区域（#if / #switch 分支、过程体）。
 let emit_body = func(em: Mut(TextEmitter), ri: u64) -> u64 {
   let saved: u64 = em.count;
   let r: vf.IrRegion = region_of(em, ri);
@@ -537,7 +488,6 @@ let emit_body = func(em: Mut(TextEmitter), ri: u64) -> u64 {
   return e;
 };
 
-// 自带形参的区域（#loop 体）。
 let emit_block = func(em: Mut(TextEmitter), ri: u64) -> u64 {
   let saved: u64 = em.count;
   let r: vf.IrRegion = region_of(em, ri);
@@ -635,7 +585,6 @@ let emit_switch = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   return put_str(em.w, "}\n");
 };
 
-// #break / #continue：标签后面跟带括号的状态实参。
 let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   emit_opcode(em, it.kind);
   put_byte(em.w, CH_SPACE());
@@ -648,7 +597,6 @@ let emit_jump = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   return put_byte(em.w, CH_NEWLINE());
 };
 
-// #yield / #return / #unreachable：操作数不带括号，靠行尾界定。
 let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   emit_opcode(em, it.kind);
   let i: u64 = loop c(i: u64 = 0) while i < it.operand_count {
@@ -664,8 +612,6 @@ let emit_terminator = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   return put_byte(em.w, CH_NEWLINE());
 };
 
-// 间接调用：`#call [(T, T) -> R](%fn, %a, %b)`。被调方为寄存器值，
-// 签名就是这层文本做静态核对的唯一依据。
 let emit_call_signature = func(em: Mut(TextEmitter), it: vf.IrInst) -> u64 {
   put_str(em.w, " [(");
   let i: u64 = loop c(i: u64 = 1) while i < it.operand_count {
@@ -727,7 +673,6 @@ let emit_inst = func(em: Mut(TextEmitter), ii: u64) -> u64 {
   return define_results(em, it, 0);
 };
 
-// --- 数据与过程 -----------------------------------------------------------
 let data_slot = func(base: Ref(IrDataView), i: u64) -> Ref(IrDataView) {
   let raw: Ref(u8) = ptr_cast(Ref(u8), base);
   return ptr_cast(Ref(IrDataView), raw + i * size_of(IrDataView));
@@ -759,8 +704,6 @@ let emit_data_all = func(em: Mut(TextEmitter), base: Ref(IrDataView), count: u64
   return emit_data_all(em, base, count, i + 1);
 };
 
-// extern 过程的调用约定属性：`#extern(abi="1", lib="2", variadic)`，
-// 只写非零项，实参之间用逗号分隔。
 let emit_extern_attrs = func(em: Mut(TextEmitter), p: vf.IrProc) -> u64 {
   let first: u64 = 1;
   put_str(em.w, " #extern(");
@@ -823,9 +766,6 @@ let emit_procs = func(em: Mut(TextEmitter), i: u64) -> u64 {
   return emit_procs(em, i + 1);
 };
 
-// --- 入口 -----------------------------------------------------------------
-// 把整个模块写成 .l1 文本，返回写入的字节数；缓冲区不够时返回 0 并把
-// w.ok 置为 0。data_count 为 0 时整段数据区省略。
 pub let emit_module_text = func(w: Mut(TextWriter), syms: Mut(tab.HostSymTab),
                                m: Ref(vf.IrModule), data: Ref(IrDataView),
                                data_count: u64) -> u64 {

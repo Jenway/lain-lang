@@ -1,5 +1,3 @@
-// Phase 4 正例：函子（func(...) -> Module）。同实参实例全局记忆化，不同实参完全独立；
-// 顶层实例与过程内实例都要能直接按路径取成员。
 let RingBuf = func(T: Type, Cap: u64) -> Module {
   return module {
     let Buf = struct {
@@ -10,12 +8,10 @@ let RingBuf = func(T: Type, Cap: u64) -> Module {
 
     pub let Self = Buf;
 
-    // used 表示初始已占用的槽数：used = Cap 就是满环，used = 0 是空环。
     pub let make = func(values: Array(T, Cap), used: u64) -> Buf {
       return Buf { data: values, head: 0, len: used };
     };
 
-    // 环形写入：容量未满就追加，满了覆盖 head 并前移。
     pub let push = func(self: Mut(Buf), v: T) -> u64 {
       let idx: u64 = (deref(self).head + deref(self).len) % Cap;
       deref(self).data[idx] = v;
@@ -27,7 +23,6 @@ let RingBuf = func(T: Type, Cap: u64) -> Module {
       return deref(self).len;
     };
 
-    // 按逻辑顺序 head..head+len 求和。
     pub let sum_all = func(self: Ref(Buf)) -> i64 {
       let n: u64 = deref(self).len;
       let acc: i64 = loop s(i: u64 = 0, acc: i64 = 0) while i < n {
@@ -40,7 +35,6 @@ let RingBuf = func(T: Type, Cap: u64) -> Module {
   };
 };
 
-// 三个顶层实例：R4 与 R4Again 是同一份模块，R3 是另一份。
 let R4 = RingBuf(i64, 4);
 let R3 = RingBuf(i64, 3);
 let R4Again = RingBuf(i64, 4);
@@ -48,30 +42,27 @@ let R4Again = RingBuf(i64, 4);
 let main = func() -> i64 {
   let v4: Array(i64, 4) = [3, 1, 4, 1];
   let a: R4.Self = R4.make(v4, 4);
-  R4.push(mut_of(a), 9); // 满：覆盖 data[0]，head=1，逻辑顺序 1,4,1,9
-  let s4: i64 = R4.sum_all(ref_of(a)); // 15
+  R4.push(mut_of(a), 9);
+  let s4: i64 = R4.sum_all(ref_of(a));
 
-  // 记忆化：R4Again 与 R4 的 Self 是同一个类型，值可以直接互赋。
   let shared: R4Again.Self = a;
-  let ss: i64 = R4Again.sum_all(ref_of(shared)); // 15
+  let ss: i64 = R4Again.sum_all(ref_of(shared));
 
   let v3: Array(i64, 3) = [5, 2, 7];
   let b: R3.Self = R3.make(v3, 3);
-  R3.push(mut_of(b), 8); // 满：覆盖 data[0]，head=1，逻辑顺序 2,7,8
-  let s3: i64 = R3.sum_all(ref_of(b)); // 17
+  R3.push(mut_of(b), 8);
+  let s3: i64 = R3.sum_all(ref_of(b));
 
   let vf: Array(i64, 4) = [7, 7, 7, 7];
   let fresh: R4.Self = R4.make(vf, 0);
-  R4.push(mut_of(fresh), 1); // 未满：写 data[0]，len=1
-  let sf: i64 = R4.sum_all(ref_of(fresh)); // 1
+  R4.push(mut_of(fresh), 1);
+  let sf: i64 = R4.sum_all(ref_of(fresh));
 
-  // 过程内实例化：u64 的 Self 与 i64 的 Self 是两个独立类型。
   let LocalR = RingBuf(u64, 2);
   let vr: Array(u64, 2) = [4, 6];
   let lr: LocalR.Self = LocalR.make(vr, 2);
-  LocalR.push(mut_of(lr), 10 as u64); // 满：覆盖 data[0]，head=1，逻辑顺序 6,10
-  let sl: i64 = LocalR.sum_all(ref_of(lr)); // 16
+  LocalR.push(mut_of(lr), 10 as u64);
+  let sl: i64 = LocalR.sum_all(ref_of(lr));
 
-  // 15 + 15 + 17 + 1 + 16 = 64
   return s4 + ss + s3 + sf + sl;
 };

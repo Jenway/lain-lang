@@ -1,29 +1,3 @@
-// tools/ast_codemod —— 在 reader 形式树之上做语义安全改写的工具。
-//
-// 用法：
-//   ast_codemod --pass loop-to-while --write <file.lain>
-//   ast_codemod --pass loop-to-while --dry-run <file.lain>
-//
-// 所有改写都落成一小组不重叠的 Edit，按字节偏移倒序贴回原文，编辑之外的
-// 空白、注释与排版逐字节保持不变。任何一处重叠立即报错并放弃写入。
-//
-// loop-to-while 的三种形态：
-//   A 语句位置且带状态绑定：
-//     loop lbl(a: T = init, ...) while cond { body };
-//     -> let a: T = init; ... while cond { body };
-//   B 绑定表达式位置且带状态绑定：
-//     let res: R = loop lbl(a: T = init, ... last: T2 = init2) while cond { body };
-//     -> let a: T = init; ... while cond { body }; let res: R = last;
-//   C 语句位置且没有状态绑定：
-//     loop lbl() while cond { body };  /  loop lbl while cond { body };
-//     -> while cond { body };
-//
-// 语义保护：
-//   * 体里出现 break lbl / continue lbl 时整条循环保留并报告；
-//   * B 形态只要体里出现任何 break 就保留（无值 break 的结果与原循环不同）；
-//   * 状态名在循环之后仍被使用（会被提升后的绑定捕获）时保留；
-//   * 循环处在表达式位置（除 B 形态的 let 绑定）时保留；
-//   * 状态名超过 8 个、形态无法识别时保留。
 let io = import("std::io");
 let os = import("std::os");
 let fs = import("std::fs");
@@ -34,8 +8,6 @@ let OptSlice = option.Option(MutSlice(u8));
 
 let no_idx = func() -> u64 { return 4294967295; };
 
-// --- 数据 -----------------------------------------------------------------
-// head / tail 是源字节区间的左闭右开两端，rep 是替换文本。
 let Edit = struct {
   head: u64,
   tail: u64,
@@ -62,7 +34,6 @@ let Range = struct {
   to: u64,
 };
 
-// --- 可增长的字节缓冲 ------------------------------------------------------
 let Text = struct {
   buf: MutSlice(u8),
   len: u64,
@@ -145,7 +116,6 @@ let text_ptr_back = func(t: Mut(Text), p: Ref(u8), n: u64) {
   };
 };
 
-// --- 字节比较 -------------------------------------------------------------
 let slice_eq = func(a: Slice(u8), b: Slice(u8)) -> bool {
   if a.len != b.len { return false; }
   loop cp(i: u64 = 0) while i < a.len {
@@ -171,7 +141,6 @@ let span_from = func(s: Slice(u8), from: u64) -> Slice(u8) {
   return make_slice(Slice(u8), s.ptr + from, s.len - from);
 };
 
-// --- 节点访问 -------------------------------------------------------------
 let node_kind = func(ast: rd.RawAst, id: u64) -> u64 {
   let n: rd.RawNode = rd.node_get(ast.nodes, id);
   return n.kind;
@@ -199,18 +168,18 @@ let node_line = func(ast: rd.RawAst, id: u64) -> u64 {
 
 let is_group = func(ast: rd.RawAst, id: u64) -> bool {
   let k: u64 = node_kind(ast, id);
-  if (k == rd.RAW_GROUP_PAREN()) or (k == rd.RAW_GROUP_BRACKET()) or (k == rd.RAW_GROUP_BRACE()) {
+  if (k == rd.RawKind.GroupParen as u64) or (k == rd.RawKind.GroupBracket as u64) or (k == rd.RawKind.GroupBrace as u64) {
     return true;
   }
   return false;
 };
 
 let is_brace = func(ast: rd.RawAst, id: u64) -> bool {
-  return node_kind(ast, id) == rd.RAW_GROUP_BRACE();
+  return node_kind(ast, id) == rd.RawKind.GroupBrace as u64;
 };
 
 let is_ident = func(ast: rd.RawAst, id: u64) -> bool {
-  return node_kind(ast, id) == rd.RAW_TOKEN_IDENT();
+  return node_kind(ast, id) == rd.RawKind.TokenIdent as u64;
 };
 
 let ident_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, s: Slice(u8)) -> bool {
@@ -220,7 +189,7 @@ let ident_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, s: Slice(u8)) -> bo
 };
 
 let punct_is = func(src: Slice(u8), ast: rd.RawAst, id: u64, c: u8) -> bool {
-  if node_kind(ast, id) != rd.RAW_TOKEN_PUNCT() { return false; }
+  if node_kind(ast, id) != rd.RawKind.TokenPunct as u64 { return false; }
   let sp: rd.Span = rd.node_span(ast, id);
   if sp.len != 1 { return false; }
   return src[sp.offset] == c;
@@ -237,8 +206,6 @@ let ident_named = func(src: Slice(u8), ast: rd.RawAst, id: u64, off: u64, len: u
   return true;
 };
 
-// --- 递归扫描 -------------------------------------------------------------
-// 体内是否出现 break <name> / continue <name>。
 let scan_ref_label = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nlen: u64) -> bool {
   let n: u64 = group_len(ast, g);
   loop it(k: u64 = 0) while k < n {
@@ -256,7 +223,6 @@ let scan_ref_label = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nle
   return false;
 };
 
-// 体内任意位置是否出现 break（B 形态的结果值保护）。
 let scan_break = func(src: Slice(u8), ast: rd.RawAst, g: u64) -> bool {
   let n: u64 = group_len(ast, g);
   loop it(k: u64 = 0) while k < n {
@@ -271,7 +237,6 @@ let scan_break = func(src: Slice(u8), ast: rd.RawAst, g: u64) -> bool {
   return false;
 };
 
-// 子树里是否把某个名字当成标识符使用。
 let scan_name = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nlen: u64) -> bool {
   let n: u64 = group_len(ast, g);
   loop it(k: u64 = 0) while k < n {
@@ -286,7 +251,6 @@ let scan_name = func(src: Slice(u8), ast: rd.RawAst, g: u64, noff: u64, nlen: u6
   return false;
 };
 
-// --- 状态绑定 -------------------------------------------------------------
 let trim_range = func(src: Slice(u8), from0: u64, to0: u64) -> Range {
   let from: u64 = loop lf(k: u64 = from0) while (k < to0) and is_space(src[k]) {
     k = k + 1;
@@ -297,7 +261,6 @@ let trim_range = func(src: Slice(u8), from0: u64, to0: u64) -> Range {
   return Range { from: from, to: to };
 };
 
-// 在绑定区间 [start, stop) 里定位类型文本：冒号之后、等号之前。
 let binder_type = func(src: Slice(u8), ast: rd.RawAst, pg: u64, start: u64, stop: u64, b: Mut(Binder)) {
   let colon: u64 = no_idx();
   let eq: u64 = no_idx();
@@ -319,7 +282,6 @@ let binder_type = func(src: Slice(u8), ast: rd.RawAst, pg: u64, start: u64, stop
   b.type_len = tr.to - tr.from;
 };
 
-// 小括号组里按顶层逗号切成一组 Binder；超过容量回 1000 表示放弃。
 let parse_binders = func(src: Slice(u8), ast: rd.RawAst, pg: u64, out: Mut(Binder), cap: u64) -> u64 {
   let m: u64 = group_len(ast, pg);
   let count: u64 = 0;
@@ -364,7 +326,6 @@ let parse_binders = func(src: Slice(u8), ast: rd.RawAst, pg: u64, out: Mut(Binde
   return count;
 };
 
-// 行首缩进：loop 所在行从行首到第一个非水平空白字节。
 let line_indent = func(src: Slice(u8), off: u64) -> Range {
   let ls: u64 = loop lb(k: u64 = off) while (k > 0) and (src[k - 1] != 10) {
     k = k - 1;
@@ -378,7 +339,6 @@ let line_indent = func(src: Slice(u8), off: u64) -> Range {
   return Range { from: off, to: off };
 };
 
-// --- 编辑表 ---------------------------------------------------------------
 let State = struct {
   ast: rd.RawAst,
   src: Slice(u8),
@@ -430,7 +390,6 @@ let edit_add = func(st: Mut(State), head: u64, tail: u64, rep: Ref(u8), rep_len:
   st.edit_len = st.edit_len + 1;
 };
 
-// 提升语句：每个绑定一条 let，末行留给调用方接 while。
 let emit_hoist = func(t: Mut(Text), st: Mut(State), count: u64, indent: Range) {
   loop it(i: u64 = 0) while i < count {
     let b: Binder = deref(binder_at(st.binders, i));
@@ -474,28 +433,26 @@ let escapes_after = func(st: Mut(State), g: u64, from_index: u64, count: u64) ->
   return false;
 };
 
-// 从 eq 位置向前找同一个 let 语句的起始记号。
 let find_let = func(src: Slice(u8), ast: rd.RawAst, g: u64, from: u64) -> u64 {
   if from == 0 { return no_idx(); }
   let i: u64 = from - 1;
   let id: u64 = rd.child_id(ast, g, i);
   let k: u64 = node_kind(ast, id);
-  if ((k == rd.RAW_TOKEN_IDENT()) and ident_is(src, ast, id, "let")) { return i; }
-  if k == rd.RAW_TOKEN_PUNCT() {
+  if ((k == rd.RawKind.TokenIdent as u64) and ident_is(src, ast, id, "let")) { return i; }
+  if k == rd.RawKind.TokenPunct as u64 {
     let sp: rd.Span = rd.node_span(ast, id);
     if (sp.len == 1) and (src[sp.offset] == 59) { return no_idx(); }
   }
   return find_let(src, ast, g, i);
 };
 
-// --- 形态分析与改写 -------------------------------------------------------
 let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
   let ast: rd.RawAst = st.ast;
   let src: Slice(u8) = st.src;
   let loop_id: u64 = rd.child_id(ast, g, k);
   let line: u64 = node_line(ast, loop_id);
   let pk: u64 = node_kind(ast, g);
-  if (pk != rd.RAW_ROOT()) and (pk != rd.RAW_GROUP_BRACE()) {
+  if (pk != rd.RawKind.Root as u64) and (pk != rd.RawKind.GroupBrace as u64) {
     st.kept_position = st.kept_position + 1;
     report(st, line, "", "kept (not a statement group)");
     return;
@@ -513,24 +470,24 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
   }
   let id1: u64 = rd.child_id(ast, g, k + 1);
   let kind1: u64 = node_kind(ast, id1);
-  if kind1 == rd.RAW_GROUP_PAREN() {
+  if kind1 == rd.RawKind.GroupParen as u64 {
     pg = k + 1;
     after_pg = k + 2;
-  } else if kind1 == rd.RAW_TOKEN_IDENT() {
+  } else if kind1 == rd.RawKind.TokenIdent as u64 {
     let id2: u64 = 0;
     let kind2: u64 = 0;
     if (k + 2) < n {
       id2 = rd.child_id(ast, g, k + 2);
       kind2 = node_kind(ast, id2);
     }
-    if kind2 == rd.RAW_GROUP_PAREN() {
+    if kind2 == rd.RawKind.GroupParen as u64 {
       label = id1;
       pg = k + 2;
       after_pg = k + 3;
     } else if ident_is(src, ast, id1, "while") {
       while_idx = k + 1;
     } else if (k + 2) < n and ident_is(src, ast, id2, "while") {
-      // loop name while ...：名字后面没有小括号，构不成标签。
+
       while_idx = k + 2;
     } else {
       st.kept_shape = st.kept_shape + 1;
@@ -585,7 +542,6 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
   }
   let stmt_end: u64 = body_idx + 1 + has_semi;
 
-  // 标签引用检查对三种形态都成立。
   if label != no_idx() {
     let ls: rd.Span = rd.node_span(ast, label);
     if scan_ref_label(src, ast, body_id, ls.offset, ls.len) {
@@ -595,7 +551,6 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
     }
   }
 
-  // 位置判定。
   let statement: u64 = 0;
   let let_idx: u64 = no_idx();
   if k == 0 {
@@ -605,7 +560,7 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
     let prevk: u64 = node_kind(ast, prev);
     if punct_is(src, ast, prev, 59) {
       statement = 1;
-    } else if prevk == rd.RAW_GROUP_BRACE() {
+    } else if prevk == rd.RawKind.GroupBrace as u64 {
       statement = 1;
     } else if punct_is(src, ast, prev, 61) {
       let li: u64 = find_let(src, ast, g, k - 1);
@@ -651,7 +606,6 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
     return;
   }
 
-  // B 形态：let 名字 : 类型 = loop ...
   if count == 0 {
     st.kept_shape = st.kept_shape + 1;
     report(st, line, label_of(st, label), "kept (empty binder list cannot produce a result)");
@@ -687,7 +641,7 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
   let while_stop: u64 = node_stop(ast, rd.child_id(ast, g, while_idx));
   let let_stop: u64 = node_stop(ast, let_id);
   let eq_off: u64 = node_off(ast, eq_id);
-  // let 语句本来就在这一行的缩进位置，提升语句沿用同一份缩进。
+
   let bindent: Range = line_indent(src, node_off(ast, let_id));
 
   let t0: Text = text_new(96);
@@ -699,7 +653,7 @@ let analyze_loop = func(st: Mut(State), g: u64, k: u64, n: u64) {
 
   let decl_sp: Range = trim_range(src, let_stop, eq_off);
   let last: Binder = deref(binder_at(st.binders, count - 1));
-  // 结果类型必须与最后一个状态绑定的类型逐字节相同，否则赋值会引入隐式转换。
+
   let type_sp: Range = trim_range(src, node_stop(ast, colon_id), eq_off);
   let rt: Slice(u8) = make_slice(Slice(u8), src.ptr + type_sp.from, type_sp.to - type_sp.from);
   let lt: Slice(u8) = make_slice(Slice(u8), src.ptr + last.type_off, last.type_len);
@@ -742,7 +696,6 @@ let walk_group = func(st: Mut(State), g: u64) {
   };
 };
 
-// --- 排序、重叠检查与贴回 -------------------------------------------------
 let sort_edits = func(st: Mut(State)) {
   let n: u64 = st.edit_len;
   loop outer(i: u64 = 0) while i < n {
@@ -786,7 +739,7 @@ let apply_edits = func(st: Mut(State)) -> Text {
   };
   let o0: Text = text_new(total + 16);
   let o: Mut(Text) = mut_of(o0);
-  // 按字节偏移倒序贴回：每段倒着写入，最后把整块缓冲反转。
+
   let cursor: u64 = st.src.len;
   loop ap(i: u64 = st.edit_len) while i > 0 {
     let e: Edit = deref(edit_at(st.edits, i - 1));
@@ -808,7 +761,6 @@ let apply_edits = func(st: Mut(State)) -> Text {
   return o0;
 };
 
-// --- 命令行 ---------------------------------------------------------------
 let Cli = struct {
   pass_loop: u64,
   pending_pass: u64,
@@ -915,7 +867,7 @@ let main = func() -> i64 {
 
   let probe: MutSlice(u8) = make_slice(MutSlice(u8), null_ref(Mut(u8)), 0);
   let scan: rd.RawAst = rd.parse(src, probe);
-  if (scan.kind != rd.RD_ERR_CAPACITY()) and (scan.kind != rd.RD_OK()) {
+  if (scan.kind != rd.ReadStatus.ErrCapacity as u64) and (scan.kind != rd.ReadStatus.Ok as u64) {
     os.eprint(f"ast_codemod: {path}:{scan.err_line}:{scan.err_col}: reader error {scan.kind}\n");
     let dead: u64 = os.free_bytes(src_mut.ptr as u64);
     return 2;
@@ -924,7 +876,7 @@ let main = func() -> i64 {
   let arena_raw: u64 = os.alloc_bytes(need);
   let arena: MutSlice(u8) = make_slice(MutSlice(u8), ptr_cast(Mut(u8), arena_raw), need);
   let ast: rd.RawAst = rd.parse(src, arena);
-  if ast.kind != rd.RD_OK() {
+  if ast.kind != rd.ReadStatus.Ok as u64 {
     os.eprint(f"ast_codemod: {path}:{ast.err_line}:{ast.err_col}: reader error {ast.kind}\n");
     let dead: u64 = os.free_bytes(arena_raw);
     let dead2: u64 = os.free_bytes(src_mut.ptr as u64);

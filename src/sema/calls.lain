@@ -1,5 +1,3 @@
-// calls.lain —— 直接调用与间接调用的装配：实参求值、签名强制、sret 结果块、
-// 内建 icall 发射。表达式求值经外部链接回到 core，本模块不 import core。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ir = import("src::sema::ir_emit");
@@ -20,16 +18,15 @@ let val_idx = func(ab: Mut(ty.Val), idx: u64) -> Mut(ty.Val) {
   return ptr_cast(Mut(ty.Val), ptr_cast(Mut(u8), ab) + idx * 56);
 };
 
-// NAME ( 实参...)：按签名逐个求值，再按邮箱顺序推入。
 pub let call_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let callee: u64 = ax.n_sym(g, i);
   let argsg: u64 = ax.n_at(g, i + 1);
   let e: Mut(modules.SymEntry) = ctf.find_sym(k, callee);
-  if is_null(e) { ty.val_none(out); fail_name(k, callee, ax.e_unbound()); return i + 2; }
+  if is_null(e) { ty.val_none(out); fail_name(k, callee, ax.FailKind.Unbound as u64); return i + 2; }
   let kd: u64 = modules.sym_kind(e);
   if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() {
     ty.val_none(out);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 2;
   }
   let variadic: u64 = if kd == modules.sym_kind_extern() {
@@ -42,7 +39,7 @@ pub let call_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
   } else {
     call_sig(k, modules.sym_qual(e), modules.sym_sig(e), argsg, want, out)
   };
-  // call_args 的返回值是实参组内部位置，外层要跳到组之后。
+
   let ignored: u64 = j;
   return i + 2;
 };
@@ -57,7 +54,7 @@ pub let fail_name = func(k: Mut(st.State), sym: u64, code: u64) -> u64 {
 pub let emit_prepared = func(k: Mut(st.State), q: u64, ret: Mut(ty.Ty), np: u64, ab: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let rest: Mut(ty.Ty) = ax.new_ty(k);
   ty.ty_at(rest, ret);
-  // 值聚合返回：先在本帧开结果块，把它当第 0 个实参传进去。
+
   if agg.sret_ty(rest) == 1 {
     let dv: Mut(ty.Val) = ax.new_val(k);
     let ao: u64 = agg.new_obj(k, ty.tsh(rest), dv);
@@ -80,45 +77,41 @@ pub let emit_prepared = func(k: Mut(st.State), q: u64, ret: Mut(ty.Ty), np: u64,
   return 1;
 };
 
-// 签名记录：形参个数@0、返回类型@8、形参类型表@16（每项 32 字节）。
 pub let call_sig = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
-  // 签名里出现 Type 的过程只由编译期求值器解释，运行期调用必须明确报错。
+
   if tb.sig_types(sg) == 1 {
     let m: Ref(u8) = "type is compile-time only";
     let d: u64 = ir.diag(k, 0, 1, m, 25);
-    st.st_fail(k, ax.e_unsup());
+    st.st_fail(k, ax.FailKind.Unsup as u64);
     return 0;
   }
   let np: u64 = cx.sig_np(sg);
   let ret: Mut(ty.Ty) = cx.sig_ret(sg);
   let ps: Mut(ty.Ty) = cx.sig_params(sg);
   let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, np * 56 + 8));
-  // 先铺成空值：实参少于形参时剩下的槽必须能被确定地认出来。
+
   let zw: u64 = zero_vals(k, ab, 0, np);
   let j: u64 = call_args(k, argsg, 0, 0, np, ab, ps);
-  // 实参少于形参时 call_args 提前收手，ab 剩下的槽是空的；把这种情况报出来。
+
   let hole: u64 = scan_holes(k, ab, 0, np);
   if hole != np {
     let p: Ref(u8) = modules.sym_addr(q);
     let n: u64 = modules.sym_len(q);
     let d: u64 = ir.diag(k, hole, 1, p, n);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return j;
   }
   let ep: u64 = emit_prepared(k, q, ret, np, ab, want, out);
   return j;
 };
 
-// MAX_OPERANDS：一条指令最多带这么多操作数。
 let max_operands = func() -> u64 { return 16; };
 
-// 变参 extern：固定形参照常按签名强制，余下的位置实参按无类型提示求值。
-// 结果槽位数取位置实参个数与固定形参个数的较大者。
 pub let call_sig_var = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   if tb.sig_types(sg) == 1 {
     let m: Ref(u8) = "type is compile-time only";
     let d: u64 = ir.diag(k, 0, 1, m, 25);
-    st.st_fail(k, ax.e_unsup());
+    st.st_fail(k, ax.FailKind.Unsup as u64);
     return 0;
   }
   let np: u64 = cx.sig_np(sg);
@@ -130,19 +123,19 @@ pub let call_sig_var = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, w
     let m: Ref(u8) = "too many call args";
     let d: u64 = ir.diag(k, total_args, 1, m, 18);
     ty.val_none(out);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return argsg;
   }
   let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, total_args * 56 + 8));
   let zw: u64 = zero_vals(k, ab, 0, total_args);
   let j: u64 = call_args(k, argsg, 0, 0, np, ab, ps);
-  // 固定形参必须齐全，缺的位置报出来。
+
   let hole: u64 = scan_holes(k, ab, 0, np);
   if hole != np {
     let p: Ref(u8) = modules.sym_addr(q);
     let n: u64 = modules.sym_len(q);
     let d: u64 = ir.diag(k, hole, 1, p, n);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return j;
   }
   let next: u64 = if np == 0 { 0 } else { skip_comma(argsg, j) };
@@ -151,7 +144,6 @@ pub let call_sig_var = func(k: Mut(st.State), q: u64, sg: Mut(u8), argsg: u64, w
   return j2;
 };
 
-// 数实参组里的位置实参个数：顶层逗号是分隔符，不算实参。
 let positional_count = func(g: u64, i: u64, acc: u64) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { return acc; }
@@ -164,7 +156,6 @@ let skip_comma = func(g: u64, j: u64) -> u64 {
   return j;
 };
 
-// 变参部分：按无类型提示求值，字面量与字符串直接按自身类型放进槽位。
 let var_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64, ab: Mut(ty.Val)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { return i; }
@@ -198,12 +189,12 @@ let scan_holes = func(k: Mut(st.State), ab: Mut(ty.Val), idx: u64, arity: u64) -
 let fill_args = func(k: Mut(st.State), ab: Mut(ty.Val), idx: u64, arity: u64) -> u64 {
   if idx >= arity { return idx; }
   let v: Mut(ty.Val) = val_idx(ab, idx);
-  // 空槽说明实参个数少于形参个数：报出缺的位置，不要把它当句柄发出去。
+
   if ty.vlit(v) == 0 {
     if ty.vn(v) == 0 {
       let m: Ref(u8) = "empty-arg";
       let d: u64 = ir.diag(k, idx, 1, m, 9);
-      st.st_fail(k, ax.e_type());
+      st.st_fail(k, ax.FailKind.Type as u64);
       return idx;
     }
   }
@@ -211,7 +202,6 @@ let fill_args = func(k: Mut(st.State), ab: Mut(ty.Val), idx: u64, arity: u64) ->
   return fill_args(k, ab, idx + 1, arity);
 };
 
-// 实参组里用逗号分隔；逐个求值并按形参类型强制，结果写进 ab。
 pub let call_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64, ab: Mut(ty.Val), paramp: Mut(ty.Ty)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { return i; }
@@ -220,7 +210,7 @@ pub let call_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64,
   if ca != 0 and env.env_is_noncopy(k, ca) == 1 {
     let m: Ref(u8) = "implicit copy of !Copy";
     let d: u64 = ir.diag(k, 0, 1, m, 22);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i;
   }
   let pt: Mut(ty.Ty) = cx.ty_idx(paramp, idx);
@@ -233,8 +223,6 @@ pub let call_args = func(k: Mut(st.State), g: u64, i: u64, idx: u64, arity: u64,
   return j;
 };
 
-// 名字取值：局部槽 → 顶层过程引用（保留完整 Fn 类型）→ 顶层 let（零参过程）→
-// 编译期常量（只有整数可以在这里折成字面量）。
 pub let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let sym: u64 = ax.n_sym(g, i);
   let off: u64 = env.env_find(k, sym);
@@ -242,7 +230,7 @@ pub let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     if env.env_alive(k, off) == 0 {
       let m: Ref(u8) = "use after reloc";
       let d: u64 = ir.diag(k, 0, 1, m, 15);
-      st.st_fail(k, ax.e_type());
+      st.st_fail(k, ax.FailKind.Type as u64);
       ty.val_none(out);
       return i + 1;
     }
@@ -257,7 +245,7 @@ pub let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     if sk == modules.sym_kind_type_alias() {
       let m: Ref(u8) = "type is compile-time only";
       let d: u64 = ir.diag(k, 0, 1, m, 25);
-      st.st_fail(k, ax.e_unsup());
+      st.st_fail(k, ax.FailKind.Unsup as u64);
       return i + 1;
     }
     if sk == modules.sym_kind_func() or sk == modules.sym_kind_extern() {
@@ -294,14 +282,13 @@ pub let var_ref = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
     let m: Ref(u8) = "compile-time value used at runtime";
     let d: u64 = ir.diag(k, 0, 1, m, 34);
     ty.val_none(out);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 1;
   }
-  fail_name(k, sym, ax.e_unbound());
+  fail_name(k, sym, ax.FailKind.Unbound as u64);
   return i + 1;
 };
 
-// 间接调用：第一个实参是目标，其余按签名表逐个强制。
 pub let icall_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let sg: u64 = ax.n_at(g, i + 1);
   let argsg: u64 = ax.n_at(g, i + 2);
@@ -315,7 +302,7 @@ pub let icall_call = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), ou
     let m: Ref(u8) = "icall-args";
     let dg: u64 = ir.diag(k, need, 1, m, 10);
     ty.val_none(out);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return i + 3;
   }
   let fv: Mut(ty.Val) = ax.new_val(k);

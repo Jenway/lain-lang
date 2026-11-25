@@ -1,4 +1,3 @@
-// C99 指令与数值发射：把 LAINIR 的每条指令写成 C99 语句或可内联的表达式。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 let os = import("std::os");
@@ -6,7 +5,6 @@ let wr = import("src::backend::c99::writer");
 
 let C99Writer = wr.C99Writer;
 
-// --- 发射上下文 -----------------------------------------------------------
 pub let C99Emitter = struct {
   w: Mut(C99Writer),
   m: Ref(vf.IrModule),
@@ -18,9 +16,9 @@ pub let C99Emitter = struct {
   loop_ids: Array(u64, 32),
   loop_insts: Array(u64, 32),
   loop_regions: Array(u64, 32),
-  // 过程体内没有任何 INST_ALLOCA 时，_alloca_head 与清理调用都不发射。
+
   has_alloca: u64,
-  // 单次使用纯表达式内联的开关。
+
   inl_on: u64,
 };
 
@@ -53,14 +51,10 @@ pub let emitter_new = func(w: Mut(C99Writer), m: Ref(vf.IrModule)) -> C99Emitter
   };
 };
 
-// --- 单次使用纯表达式内联 -------------------------------------------------
-// 结果只被引用一次的纯标量指令不再单独占用临时量，直接在使用位置展开成表达式。
-// 只接受与使用点处在同一个区域、并且定义位置在前的指令，展开因此不会改变求值顺序。
 let INL_REJECT = func() -> u64 { return 18446744073709551615; };
 let INL_MAX_DEPTH = func() -> u64 { return 6; };
 let INL_MAX_INSTS = func() -> u64 { return 262144; };
-// 表内并列数组的含义：0 键 1 指令编号加一 2 定义区域 3 定义位置
-// 4 使用次数 5 使用区域 6 使用位置 7 内联深度；另有 8 表容量 9 已分配容量 10 累计内联条数。
+
 let g_inl_meta: Array(u64, 11) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 pub let inl_meta = func() -> MutSlice(u64) {
@@ -109,8 +103,6 @@ let inl_hash = func(name: u64, cap: u64) -> u64 {
   return h & (cap - 1);
 };
 
-// 结果只被引用一次的纯标量指令种类：加减乘、位运算、移位、整数比较、整数转换。
-// 除法与求余会触发陷阱，保持在原位置发射。
 let inline_cand_kind = func(k: u64) -> u64 {
   if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.Mul as u64) { return 1; }
   if (k >= codes.InstKind.And as u64) and (k <= codes.InstKind.Xor as u64) { return 1; }
@@ -184,7 +176,6 @@ let inl_note_use = func(name: u64, reg_id: u64, pos: u64) -> u64 {
   return rc;
 };
 
-// 名字对应的表内格子编号；不在表内时返回 INL_REJECT。
 let inl_slot_of = func(name: u64) -> u64 {
   let meta: MutSlice(u64) = inl_meta();
   let cap: u64 = meta[8];
@@ -211,8 +202,6 @@ let inl_lookup = func(name: u64) -> u64 {
   return vals[slot];
 };
 
-// 一条内联表达式的嵌套层数：1 加上其操作数中已接受内联语句的最大层数。
-// 保守地按全部未拒绝条目向上迭代，多算的层数只会让接受范围变窄，不会漏掉声明。
 let inl_depth_sweep = func(m: Ref(vf.IrModule)) -> u64 {
   let meta: MutSlice(u64) = inl_meta();
   let cap: u64 = meta[8];
@@ -361,7 +350,7 @@ let inl_finalize = func(m: Ref(vf.IrModule)) -> u64 {
     }
     s = s + 1;
   };
-  // 迭代 INL_MAX_DEPTH 次向上传播层数，足以看清深度超出上限的整条链。
+
   let sweeps: u64 = loop c(k: u64 = 0) while k < INL_MAX_DEPTH() + 1 {
     let swept: u64 = inl_depth_sweep(m);
     k = k + 1;
@@ -422,8 +411,6 @@ let next_temp = func(em: Mut(C99Emitter)) -> u64 {
   return v;
 };
 
-// OperandKind.Value 的句柄可能是局部值，也可能是模块级名字：过程符号按取函数地址发射，
-// 数据符号与局部值一样直接写 v<句柄>。
 let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
   if em.inl_on == 1 {
     let hit: u64 = inl_lookup(h);
@@ -444,7 +431,6 @@ let emit_value_ref = func(em: Mut(C99Emitter), h: u64) -> u64 {
   return wr.emit_value_name(em.w, h);
 };
 
-// --- 操作数 ---------------------------------------------------------------
 let emit_operand = func(em: Mut(C99Emitter), op: vf.IrOperand, want: vf.IrType) -> u64 {
   if op.kind == codes.OperandKind.Value as u64 {
     if want.kind == codes.TyKind.Addr as u64 {
@@ -485,7 +471,6 @@ let emit_operand_u64 = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
   return wr.put_u64_lit(em.w, op.bits);
 };
 
-// --- 声明辅助 -------------------------------------------------------------
 let emit_zero_value = func(w: Mut(C99Writer), t: vf.IrType) -> u64 {
   if t.kind == codes.TyKind.Addr as u64 { return wr.put_str(w, "(void *)0"); }
   if t.kind == codes.TyKind.Floats as u64 {
@@ -521,7 +506,6 @@ let emit_assign_cast = func(em: Mut(C99Emitter), name: u64, t: vf.IrType, op: vf
   return 1;
 };
 
-// --- 区域 -----------------------------------------------------------------
 let emit_region_insts = func(em: Mut(C99Emitter), r: vf.IrRegion, i: u64,
                              yield_inst: u64, yield_region: u64) -> u64 {
   let ok: u64 = loop c(at: u64 = i) while 1 {
@@ -549,7 +533,7 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
     }
   }
   let k: u64 = it.kind;
-  // 枚举顺序是加减乘、除法求余、位运算、移位四段，不能用一个连续区间判定。
+
   if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.Mul as u64) { return emit_int_arith(em, it, k); }
   if (k >= codes.InstKind.SDiv as u64) and (k <= codes.InstKind.URem as u64) { return emit_int_div_shift(em, it, k); }
   if (k >= codes.InstKind.And as u64) and (k <= codes.InstKind.Xor as u64) { return emit_int_arith(em, it, k); }
@@ -582,8 +566,6 @@ let emit_inst = func(em: Mut(C99Emitter), ii: u64, yield_inst: u64, yield_region
   return 0;
 };
 
-// --- 整数与浮点运算 -------------------------------------------------------
-// 算子码到枚举的映射同样只做一次，取文本的地方对枚举做穷尽 match。
 let IntArithOp = enum {
   Add
   Sub
@@ -613,7 +595,7 @@ let int_op_text = func(k: u64) -> Slice(u8) {
     And => "&",
     Or => "|",
     Xor => "^",
-    // 域外算子沿用原来的兜底文本。
+
     Unknown => "^",
   };
 };
@@ -672,7 +654,7 @@ let div_shift_name = func(k: u64) -> Slice(u8) {
     Shl => "lain_shl",
     Lshr => "lain_lshr",
     Ashr => "lain_ashr",
-    // 域外算子沿用原来的兜底名字。
+
     Unknown => "lain_ashr",
   };
 };
@@ -723,9 +705,9 @@ let float_op_text = func(k: u64) -> Slice(u8) {
     Fsub => "-",
     Fmul => "*",
     Fdiv => "/",
-    // FNEG 由 emit_float_arith 的取负路径单独处理，不走二元文本。
+
     Fneg => "/",
-    // 域外算子沿用原来的兜底文本。
+
     Unknown => "/",
   };
 };
@@ -782,7 +764,7 @@ let int_cmp_text = func(k: u64) -> Slice(u8) {
     Ule => "<=",
     Ugt => ">",
     Uge => ">=",
-    // 域外算子沿用原来的兜底文本。
+
     Unknown => ">=",
   };
 };
@@ -810,7 +792,7 @@ let signed_cmp_text = func(k: u64) -> Slice(u8) {
     Sle => "<=",
     Sgt => ">",
     Sge => ">=",
-    // 域外算子沿用原来的兜底文本。
+
     Unknown => ">=",
   };
 };
@@ -907,7 +889,7 @@ let float_cmp_text = func(k: u64) -> Slice(u8) {
     Uegt => ">",
     Oge => ">=",
     Uege => ">=",
-    // 域外算子沿用原来的兜底文本。
+
     Unknown => ">=",
   };
 };
@@ -980,8 +962,6 @@ let emit_int_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   return 1;
 };
 
-// --- 内联表达式的文本 -----------------------------------------------------
-// 这些函数只输出值与自身类型的完整表达式，供使用位置直接展开。
 let emit_expr_int_arith = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   let t: vf.IrType = wr.result_type(em.m, it, 0);
   let w: u64 = wr.type_width(wr.it_ty(it));
@@ -1163,7 +1143,6 @@ let emit_float_convert = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64
   return 1;
 };
 
-// --- 指针与内存 -----------------------------------------------------------
 let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   let a: u64 = emit_indent(em, em.depth);
   let b: u64 = wr.put_str(em.w, "void *");
@@ -1180,7 +1159,6 @@ let emit_lea = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return 1;
 };
 
-// 判断某个值是否在任何非 #alloca 指令的操作数或被调符号里出现。
 let ops_use_name = func(it: vf.IrInst, name: u64, i: u64) -> u64 {
   let hit: u64 = loop c(at: u64 = i) while 1 {
     if at >= it.operand_count { break c(0); }
@@ -1333,8 +1311,6 @@ let emit_store = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return 1;
 };
 
-// --- 原子操作 -------------------------------------------------------------
-// IR 的内存序取值按 ORDER_* 排序，C 内建函数用的是 __ATOMIC_* 常量。
 let c_memorder = func(order: u64) -> Slice(u8) {
   if order == 0 { return "__ATOMIC_RELAXED"; }
   if order == 1 { return "__ATOMIC_ACQUIRE"; }
@@ -1344,8 +1320,6 @@ let c_memorder = func(order: u64) -> Slice(u8) {
   return "__ATOMIC_SEQ_CST";
 };
 
-// 内存序操作数是常量时直接发射常量，是局部值时交给前导文本里的 lain_memorder
-// 在运行期换算，避免同一个表达式被求值多次。
 let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
   if op.kind == codes.OperandKind.Int as u64 {
     return wr.put_str(em.w, c_memorder(op.bits));
@@ -1356,7 +1330,6 @@ let emit_memorder = func(em: Mut(C99Emitter), op: vf.IrOperand) -> u64 {
   return 1;
 };
 
-// __atomic_* 只接受整数与指针类型，浮点按同宽的位模式参与。
 let atomic_c_type = func(t: vf.IrType) -> Slice(u8) {
   if t.kind == codes.TyKind.Floats as u64 {
     if t.width <= 32 { return "uint32_t"; }
@@ -1393,7 +1366,6 @@ let emit_atomic_value = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType
   return 1;
 };
 
-// 指针类型的读改写加数在 C 里必须写成整数。
 let emit_atomic_addend = func(em: Mut(C99Emitter), op: vf.IrOperand, t: vf.IrType) -> u64 {
   if t.kind == codes.TyKind.Addr as u64 {
     let a: u64 = wr.put_str(em.w, "(uint64_t)(");
@@ -1481,7 +1453,6 @@ let emit_atomic_xchg = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return 1;
 };
 
-// 比较交换把旧值留在临时量里，再按结果类型搬进结果变量。
 let emit_atomic_cmpxchg = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
   let t: vf.IrType = wr.it_ty(it);
   let tmp: u64 = next_temp(em);
@@ -1536,9 +1507,6 @@ let emit_atomic_rmw = func(em: Mut(C99Emitter), it: vf.IrInst, k: u64) -> u64 {
   return 1;
 };
 
-// --- 调用 -----------------------------------------------------------------
-// @extern 的回调形参在 IR 里是 TY_ADDR，调用点必须把它投到 C 原型要求的函数
-// 指针类型，否则 void * 与函数指针之间是不兼容的形参类型。
 let emit_call_args = func(em: Mut(C99Emitter), it: vf.IrInst,
                           p: vf.IrProc, i: u64) -> u64 {
   let id: u64 = if p.is_extern == 1 { wr.c_abi_id(wr.extern_link_of(p)) } else { 0 };
@@ -1689,7 +1657,6 @@ let emit_call = func(em: Mut(C99Emitter), it: vf.IrInst) -> u64 {
   return emit_indirect_call(em, it);
 };
 
-// --- 结构控制流 -----------------------------------------------------------
 let emit_if = func(em: Mut(C99Emitter), it: vf.IrInst, ii: u64) -> u64 {
   let a: u64 = emit_result_decls(em, it);
   let b: u64 = emit_indent(em, em.depth);

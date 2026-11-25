@@ -1,16 +1,3 @@
-// src/host_rt.lain —— 单例宿主运行时（HostRt）。
-//
-// 编译需要的全部宿主状态只存在一份：符号表、语法树输出 Arena、源码管理器、
-// IR 宿主、虚拟机与两块工作区。g_rt 只有一个 u64，存的是 HostRt 的堆地址；
-// 首次调用 rt_init 时才按需构造，之后的调用直接复用同一份状态。
-//
-// 过程之间传递的句柄、索引与地址都由下层的两个宿主模块定义：
-//   src::host::source_host 统一 AST 句柄与源码管理；
-//   src::host::ir_host     IR 模块、区域、指令与诊断。
-// 这一层只做三件事：把单例取出来、把参数翻译成下层结构的切片、把结果交回去。
-//
-// 容量与句柄上的任何违例都在发生位置就地终止，绝不返回半成品。
-
 let os = import("std::os");
 let tr = import("std::trace");
 let err = import("src::driver::err");
@@ -31,7 +18,6 @@ let trap_mut = func(cause: u64) -> Mut(u8) {
   return null_ref(Mut(u8));
 };
 
-// 就地终止之前先往标准错误写一句说明，用户就能看到完整原因。
 let die_u64 = func(msg: Slice(u8), cause: u64) -> u64 {
   os.eprint(msg);
   return mem.halt_now(cause);
@@ -42,28 +28,17 @@ let die_mut = func(msg: Slice(u8), cause: u64) -> Mut(u8) {
   return trap_mut(cause);
 };
 
-// 交回失败码 1 并附一句说明；用于可以正常返回、但结果不可用的情况。
 let note_fail = func(msg: Slice(u8)) -> u64 {
   os.eprint(msg);
   return 1;
 };
 
-// --- 容量 -------------------------------------------------------------------
-// 符号表的共享区段同时承载符号原文与每份源码的 Reader Arena，所以按整个编译
-// 单元的规模预留；mem_alloc 走另一块独立的递增区，编译器自己的状态表、类型
-// 与小对象都在那边，不会占用 Reader 的空间。两块区都按整个编译过程只增不减
-// 的气质给出余量：一份状态就要 85 MB 左右，递增区必须同时容得下多份状态。
 let sym_bytes = func() -> u64 { return 268435456; };
 let bump_bytes = func() -> u64 { return 536870912; };
-// IR 区要同时容纳模块、区域、过程、指令、数据与帧，指令按 size_of(IrInst) = 512
-// 字节计价；自编译 src/entry.lain 约产生 171704 条指令，仅指令就占 88 MB，而且
-// ir_host 扩容是整块重新分配（旧块留在原处），几何增长累计约两倍；单次扩容步长可达
-// 131072 -> 262144 条指令，即 128 MB，加上此前几何增长留下的 64+32+16 MB 等合计
-// 已超过 256 MB，所以按 512 MB 预留。
+
 let ir_bytes = func() -> u64 { return 536870912; };
 let vm_bytes = func() -> u64 { return 4194304; };
-// 输出缓冲区承载 emit_c99_file 生成的整份 C99 源码；大型模块（src/err.lain、
-// src/entry.lain）展开后的 C 文本会超出 16 MiB，所以按 64 MiB 预留。
+
 let out_bytes = func() -> u64 { return 67108864; };
 
 let ast_node_cap = func() -> u64 { return 262144; };
@@ -74,7 +49,6 @@ let ast_mark_cap = func() -> u64 { return 4096; };
 let source_cap = func() -> u64 { return 256; };
 let source_kids_cap = func() -> u64 { return 1048576; };
 
-// 导入的结构类型不能直接出现在 size_of 的实参里，用本地单元结构包一层。
 let SymTabCell = struct { v: symtab.HostSymTab };
 let AstOutCell = struct { v: ao.AstOut };
 let SourcesCell = struct { v: sh.HostSources };
@@ -84,14 +58,10 @@ let DataRecCell = struct { v: irh.DataRec };
 
 pub let NO_SOURCE = func() -> u64 { return 4294967295; };
 
-// --- 目标操作系统 -----------------------------------------------------------
-// `comptime if` 与 target_os() / is_windows() 等内建读的就是这里的编号，
-// 命令行 --target 在编译开始之前改写它。默认目标是 windows。
 pub let OS_WINDOWS = func() -> u64 { return 0; };
 pub let OS_LINUX = func() -> u64 { return 1; };
 pub let OS_MACOS = func() -> u64 { return 2; };
 
-// --- 单例状态 ---------------------------------------------------------------
 let HostRt = struct {
   syms: Mut(symtab.HostSymTab),
   ast_out: Mut(ao.AstOut),
@@ -115,7 +85,6 @@ let rt_slot = func() -> MutSlice(u64) {
   return make_slice(MutSlice(u64), mut_of(g_rt), 1);
 };
 
-// --- 字节搬运 ---------------------------------------------------------------
 let copy_bytes = func(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
   let i: u64 = loop c(i: u64 = 0) while i < n {
     let d: Mut(u8) = dst + i;
@@ -156,7 +125,6 @@ let put_dec = func(dst: Mut(u8), at: u64, v: u64) -> u64 {
   return at + 1;
 };
 
-// --- 递增区 -----------------------------------------------------------------
 let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
   let a: u64 = if align == 0 { 16 } else { align };
   if (a & (a - 1)) != 0 {
@@ -176,7 +144,6 @@ let bump_take = func(h: Mut(HostRt), bytes: u64, align: u64) -> Mut(u8) {
   return ptr_cast(Mut(u8), base + off);
 };
 
-// --- 构造 -------------------------------------------------------------------
 let host_new = func() -> u64 {
   let raw_ptr: u64 = os.alloc_bytes(size_of(HostRt));
   if raw_ptr == 0 {
@@ -254,7 +221,6 @@ let rt = func() -> Mut(HostRt) {
   return ptr_cast(Mut(HostRt), raw_ptr);
 };
 
-// 目标操作系统编号的读写。命令行与内建共同遵守 0 = windows、1 = linux、2 = macos。
 pub let set_target_os = func(os_id: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   h.target_os = os_id;
@@ -266,8 +232,6 @@ pub let get_target_os = func() -> u64 {
   return h.target_os;
 };
 
-// 快速发布模式的开关：命令行 --release-fast 在编译开始之前置位，
-// 编译器状态在构造时把这个值抄进 st.State。
 pub let set_release_fast = func(v: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   h.release_fast = v;
@@ -279,12 +243,10 @@ pub let release_fast = func() -> u64 {
   return h.release_fast;
 };
 
-// --- 工作区分配 -------------------------------------------------------------
 pub let mem_alloc = func(bytes: u64, align: u64) -> Mut(u8) {
   return bump_take(rt(), bytes, align);
 };
 
-// --- 符号 -------------------------------------------------------------------
 pub let sym_intern = func(p: Ref(u8), n: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   return symtab.sym_intern(h.syms, p, n);
@@ -310,8 +272,6 @@ pub let sym_len = func(s: u64) -> u64 {
   return symtab.sym_len(h.syms, s);
 };
 
-// --- 路径 -------------------------------------------------------------------
-// 路径分隔符统一成 '/'，模块名里的 "::" 也翻成 '/'。
 let put_norm = func(dst: Mut(u8), at: u64, src: Ref(u8), n: u64) -> u64 {
   return loop c(i: u64 = 0, o: u64 = at) while i < n {
     let b: u64 = deref(src + i) as u64;
@@ -366,14 +326,12 @@ let put_ext = func(dst: Mut(u8), at: u64) -> u64 {
   return at + 5;
 };
 
-// 前缀 + 归一化后的模块名 + 省略时补上的 .lain。
 let build_cand = func(dst: Mut(u8), pre: Slice(u8), modv: Slice(u8)) -> u64 {
   let a: u64 = copy_bytes(dst, pre.ptr, pre.len);
   let b: u64 = put_norm(dst, a, modv.ptr, modv.len);
   return put_ext(dst, b);
 };
 
-// 当前源码所在目录，含结尾的 '/'；没有目录时为空。
 let source_dir = func(hs: Mut(sh.HostSources), cur: u64) -> Slice(u8) {
   if cur >= hs.source_count { return ""; }
   let nm: u64 = sh.source_name(hs, cur);
@@ -388,7 +346,6 @@ let source_dir = func(hs: Mut(sh.HostSources), cur: u64) -> Slice(u8) {
   return make_slice(Slice(u8), p, cut);
 };
 
-// --- 源码 -------------------------------------------------------------------
 let find_named = func(hs: Mut(sh.HostSources), p: Ref(u8), n: u64) -> u64 {
   let idx: u64 = loop f(i: u64 = 0) while i < hs.source_count {
     let nm: u64 = sh.source_name(hs, i);
@@ -404,7 +361,6 @@ let find_named = func(hs: Mut(sh.HostSources), p: Ref(u8), n: u64) -> u64 {
   return idx;
 };
 
-// 读文件并把正文复制进递增区：调用方拿到的字节一直有效到进程结束。
 let read_keep = func(h: Mut(HostRt), p: Ref(u8), n: u64, out_len: Mut(u64)) -> Mut(u8) {
   let slots: Mut(u8) = bump_take(h, 16, 8);
   let op: Mut(u64) = ptr_cast(Mut(u64), slots);
@@ -426,21 +382,18 @@ let read_keep = func(h: Mut(HostRt), p: Ref(u8), n: u64, out_len: Mut(u64)) -> M
   return keep;
 };
 
-// 读不到文件时把归一化后的路径写给用户，交回 0。
 let report_missing = func(dst: Mut(u8), n: u64) -> u64 {
   os.eprint("[host_rt] cannot read source file: ");
   os.eprint(make_slice(Slice(u8), ptr_cast(Ref(u8), dst), n));
   return os.eprint("\n");
 };
 
-// 导入的模块在所有候选路径上都找不到时报告模块名。
 let report_missing_module = func(modv: Slice(u8)) -> u64 {
   os.eprint("[host_rt] cannot find imported module: ");
   os.eprint(modv);
   return os.eprint("\n");
 };
 
-// 以给定名字读入文件并登记成一份源码；读不到时交回 NO_SOURCE。
 let load_source = func(h: Mut(HostRt), p: Mut(u8), n: u64) -> u64 {
   let len: Mut(u64) = ptr_cast(Mut(u64), bump_take(h, 8, 8));
   deref(len) = 0;
@@ -466,7 +419,6 @@ pub let source_text = func(src: u64) -> Slice(u8) {
   return sh.source_text_slice(h.sources, src);
 };
 
-// 源码的路径；源码号越界或匿名源码回空切片。
 pub let source_path_slice = func(src: u64) -> Slice(u8) {
   let h: Mut(HostRt) = rt();
   if src >= sh.source_count(h.sources) { return ""; }
@@ -475,8 +427,6 @@ pub let source_path_slice = func(src: u64) -> Slice(u8) {
   return make_slice(Slice(u8), symtab.sym_addr(h.syms, nm), symtab.sym_len(h.syms, nm));
 };
 
-// 解析遍次记下的行列换算成字节偏移；解析成功时两者都是 0，交回 0 也就是
-// 文件起点，语义阶段的错误因此锚定在源文件开头。
 pub let source_err_offset = func(src: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   if src >= sh.source_count(h.sources) { return 0; }
@@ -491,14 +441,11 @@ pub let source_root = func(src: u64) -> u64 {
   return sh.source_root(h.sources, src);
 };
 
-// 展开遍次重建源根后，把新根记回源记录，之后按源号取根都落在新树上。
 pub let set_source_root = func(src: u64, root: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   return sh.set_source_root(h.sources, src, root);
 };
 
-// 以文件路径登记源码：路径分隔符归一化，重复登记直接交回已有的源码号。
-// 读不到时交回 NO_SOURCE 且不向 stderr 报告，供尝试候选路径的调用方使用。
 pub let source_add_file_quiet = func(path: Slice(u8)) -> u64 {
   let h: Mut(HostRt) = rt();
   let hs: Mut(sh.HostSources) = h.sources;
@@ -509,7 +456,6 @@ pub let source_add_file_quiet = func(path: Slice(u8)) -> u64 {
   return load_source(h, dst, n);
 };
 
-// 以文件路径登记源码：命令行显式给出的输入文件读不到时把路径报告给用户。
 pub let source_add_file = func(path: Slice(u8)) -> u64 {
   let h: Mut(HostRt) = rt();
   let hs: Mut(sh.HostSources) = h.sources;
@@ -522,10 +468,6 @@ pub let source_add_file = func(path: Slice(u8)) -> u64 {
   return got;
 };
 
-// 解析模块名：先按原样解析（"std::foo::bar" 归一化成 "std/foo/bar.lain"），
-// 再相对当前源码所在目录解析；两种写法都先在已登记的源码里查重。
-// 候选路径最长是「目录前缀 + 归一化模块名 + .lain」：归一化只会把 "::" 收缩成
-// 一个 '/'，所以模块名那部分按 mod_len 计就是上界，缓冲按两者之和切。
 pub let source_import = func(cur_src: u64, mod_ptr: Ref(u8), mod_len: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   let hs: Mut(sh.HostSources) = h.sources;
@@ -550,10 +492,6 @@ pub let ast_parse_snippet = func(p: Ref(u8), n: u64) -> u64 {
   return sh.ast_parse_snippet(h.sources, make_slice(Slice(u8), p, n));
 };
 
-// --- 统一 AST 查询 ----------------------------------------------------------
-// 符号在宿主里存的是统一句柄（SYM 类），但 AST 层的调用方一律按符号表原生
-// 编号使用：n_sym 的结果直接与 sym_intern 交回的编号比较。两个方向的翻译都在
-// 这里一次做完，ast_sym 交回原生编号，ast_mk_token 接受原生编号。
 let CLASS_SHIFT = func() -> u64 { return 28; };
 let INDEX_MASK = func() -> u64 { return 0x0FFFFFFF; };
 let SYM_CLASS = func() -> u64 { return 3; };
@@ -606,9 +544,6 @@ pub let ast_literal_len = func(hv: u64) -> u64 {
   return sh.ast_literal_len(h.sources, hv);
 };
 
-// --- AstOut 事务 ------------------------------------------------------------
-// 事务号不进单例：AstOut 自己的检查点里就记着当前事务，最上面那一层的 tx
-// 就是正在开着的那个。
 pub let ast_tx_begin = func() -> u64 {
   let h: Mut(HostRt) = rt();
   return sh.ast_tx_begin(h.sources);
@@ -633,8 +568,6 @@ pub let ast_tx_rollback = func() -> u64 {
   return sh.ast_tx_rollback(h.sources, current_tx(h));
 };
 
-// 造词与造组：sym 是符号表原生编号（0 表示没有符号），origin 是来源节点句柄
-// （0 表示凭空构造），kids 是紧排的 32 位统一句柄。
 pub let ast_mk_token = func(sym: u64, origin: u64, text: Ref(u8), len: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   return sh.ast_mk_token(h.sources, sym_handle_of(sym), origin,
@@ -646,7 +579,6 @@ pub let ast_mk_group = func(delim: u64, count: u64, kids: Ref(u32)) -> u64 {
   return sh.ast_mk_group(h.sources, delim, make_slice(Slice(u32), kids, count));
 };
 
-// --- IR ---------------------------------------------------------------------
 pub let ir_mod_new = func(name: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   return irh.ir_mod_new(h.ir, name);
@@ -814,7 +746,6 @@ pub let diag_emit = func(span: u64, level: u64, p: Ref(u8), n: u64) -> u64 {
   return irh.diag_emit(h.ir, span, level, p, n);
 };
 
-// --- 模块查找与发射 ---------------------------------------------------------
 let die_mod = func(msg: Slice(u8), cause: u64) -> Mut(irh.ModState) {
   os.eprint(msg);
   let dead: u64 = mem.halt_now(cause);
@@ -858,7 +789,6 @@ let emit_procs_all = func(w: Mut(c99.C99Writer), mv: Ref(vf.IrModule), count: u6
   return emit_procs_all(w, mv, count, i + 1);
 };
 
-// 把模块的 .l1 文本渲染进 buf，交回写出的字节数；写满时交回 0。
 let render_l1 = func(h: Mut(HostRt), m: Mut(irh.ModState), buf: Mut(u8), cap: u64) -> u64 {
   let modval: vf.IrModule = module_of(m);
   let mv: Ref(vf.IrModule) = ref_of(modval);
@@ -873,7 +803,6 @@ let render_l1 = func(h: Mut(HostRt), m: Mut(irh.ModState), buf: Mut(u8), cap: u6
   return emit_text.writer_len(w);
 };
 
-// 只渲染 .l1 文本并交回字节数，不碰文件系统；落盘交给 emit_l1_file。
 pub let ir_mod_emit_output = func(modv: u64) -> u64 {
   let h: Mut(HostRt) = rt();
   let m: Mut(irh.ModState) = mod_of(h.ir, modv);
@@ -955,12 +884,6 @@ pub let emit_c99_file = func(modv: u64, path: Slice(u8), entry: Slice(u8),
   return rc;
 };
 
-// --- 分片 C99 发射 ---------------------------------------------------------
-// 分片形态把整份 C 源码切成一组文件：共享头承载前导文本、数据外部声明与全部过程
-// 声明；数据定义单独成文件；过程体按索引区间分批；入口单独成文件；manifest 按行
-// 列出全部 .c 文件路径，供构建脚本逐一编译。
-
-// 前缀的最后一段：分片文件与共享头同目录，所以 #include 只用文件名字段。
 let split_base = func(prefix: Slice(u8)) -> Slice(u8) {
   let cut: u64 = loop c(i: u64 = 0, last: u64 = 0) while i < prefix.len {
     let b: u64 = prefix[i] as u64;
@@ -1070,7 +993,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
   let mark: MutSlice(u64) = c99.compute_reachable_procs(mv, pi);
   let guard: u64 = c99.fnv1a_hash(prefix);
 
-  // 共享头：前导文本 + 数据外部声明 + 全部过程声明。
   let w10: c99.C99Writer = split_writer(buf, cap);
   let w1: Mut(c99.C99Writer) = mut_of(w10);
   let w1s: u64 = c99.writer_set_split(w1, 1);
@@ -1092,7 +1014,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
     return rc_s;
   }
 
-  // 数据定义文件。
   let w20: c99.C99Writer = split_writer(buf, cap);
   let w2: Mut(c99.C99Writer) = mut_of(w20);
   let w2s: u64 = c99.writer_set_split(w2, 1);
@@ -1108,7 +1029,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
     return rc_d;
   }
 
-  // 过程体分片：每片最多 step 个过程索引。
   let parts_rc: u64 = loop c(lo: u64 = 0, part: u64 = 0) while 1 {
     if lo >= m.proc_count { break c(0); }
     let wp0: c99.C99Writer = split_writer(buf, cap);
@@ -1130,7 +1050,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
     return parts_rc;
   }
 
-  // 入口文件：os 全局量定义 + int main。
   let w30: c99.C99Writer = split_writer(buf, cap);
   let w3: Mut(c99.C99Writer) = mut_of(w30);
   let w3s: u64 = c99.writer_set_split(w3, 1);
@@ -1148,7 +1067,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
     return rc_m;
   }
 
-  // manifest：数据文件、入口文件、所有过程分片各占一行。
   let part_count: u64 = (m.proc_count + step - 1) / step;
   let mf_cap: u64 = (part_count + 4) * (prefix.len + 32);
   let mf: Mut(u8) = bump_take(h, mf_cap, 8);
@@ -1170,9 +1088,6 @@ pub let emit_c99_split = func(modv: u64, prefix: Slice(u8), entry: Slice(u8),
   return 0;
 };
 
-// --- 虚拟机 -----------------------------------------------------------------
-// 虚拟机的事件落在 Perfetto 的第二条泳道上：调用轨迹按条展开成 span，已用步数
-// 记成计数事件，整次调用再包一层 vm_apply 区间，区间附带轨迹条数。
 let trace_kind_cat = func(kind: u64) -> Slice(u8) {
   if kind == eng.TRACE_ENTER() { return "vm_enter"; }
   if kind == eng.TRACE_EXIT() { return "vm_exit"; }
@@ -1192,15 +1107,15 @@ let emit_vm_trace = func(h: Mut(HostRt), i: u64, n: u64) -> u64 {
   let ev: eng.VmTraceEvent = vmh.last_trace_at(h.vm, i);
   let ts: u64 = tr.span_begin_tid();
   tr.span_end_tid(sub_name(h, ev.sub_sym), trace_kind_cat(ev.kind), ts, ev.steps,
-                  tr.tid_vm());
+                  tr.Lane.Vm as u64);
   return emit_vm_trace(h, i + 1, n);
 };
 
 let trace_vm_result = func(h: Mut(HostRt), t0: u64, rc: u64) -> u64 {
   let count: u64 = vmh.last_trace_count(h.vm);
-  tr.counter_tid("vm.steps", vmh.host_last_steps(h.vm), tr.tid_vm());
+  tr.counter_tid("vm.steps", vmh.host_last_steps(h.vm), tr.Lane.Vm as u64);
   emit_vm_trace(h, 0, count);
-  tr.span_end_tid("vm_apply", "vm", t0, count, tr.tid_vm());
+  tr.span_end_tid("vm_apply", "vm", t0, count, tr.Lane.Vm as u64);
   return rc;
 };
 
@@ -1227,7 +1142,6 @@ pub let apply_module_bytes = func(modv: u64, entry: u64, out: Mut(u8),
   return trace_vm_result(h, t0, rc);
 };
 
-// --- 追踪 -------------------------------------------------------------------
 pub let trace_enabled = func() -> u64 {
   let h: Mut(HostRt) = rt();
   return h.trace_on;
@@ -1271,16 +1185,11 @@ pub let trace_flush = func(json_ptr: Ref(u8), json_len: u64) -> u64 {
   return rc;
 };
 
-// --- 诊断 -------------------------------------------------------------------
-// 每条诊断写成一行：级别、消息，有跨度时再附上跨度号。消息末尾不带换行的
-// 部分由这里补上，因此写入标准错误的内容逐条独立。
 let diag_head = func(level: u64) -> Slice(u8) {
   if level == 1 { return "error: "; }
   return "warning: ";
 };
 
-// 一条诊断最长是「前缀 + 消息 + 跨度括注 + 换行」，因此按消息长度逐条切缓冲，
-// 不预设固定上限。
 pub let print_diags = func() -> u64 {
   let h: Mut(HostRt) = rt();
   let ir: Mut(irh.HostIr) = h.ir;
@@ -1310,9 +1219,6 @@ pub let print_diags = func() -> u64 {
   return n;
 };
 
-// --- 错误报告 ---------------------------------------------------------------
-// 把一条诊断写成「路径:行:列 + 源码行 + 插入符」送给标准错误；缓冲按路径、
-// 正文与消息的长度算足，递增区耗尽时报告仍然能打出来。
 let report_at = func(path: Slice(u8), text: Slice(u8), span: u64,
                      msg: Slice(u8)) -> u64 {
   let cap: u64 = 512 + path.len + 2 * text.len + msg.len;
@@ -1327,13 +1233,11 @@ let report_at = func(path: Slice(u8), text: Slice(u8), span: u64,
   return rc;
 };
 
-// 编译失败的统一出口：有源码记录时走带定位的格式，没有源码记录时只写消息。
 pub let report_fail_at = func(src: u64, span: u64, msg: Slice(u8)) -> u64 {
   if src >= source_count() { return report_at("", "", 0, msg); }
   return report_at(source_path_slice(src), source_text(src), span, msg);
 };
 
-// 把一条 ErrInfo 交给人看。
 pub let report_err = func(info: err.ErrInfo) -> u64 {
   let msg: Slice(u8) = info.msg;
   let src: u64 = info.src;
@@ -1353,8 +1257,6 @@ pub let report_err = func(info: err.ErrInfo) -> u64 {
   return rc;
 };
 
-// 读源失败分两种：文件读不到由 source_add_file 自己报告；正文解析失败时用
-// 源码管理器记下的行列打印带插入符的诊断。交回 1 表示已经打印过了。
 pub let report_source_fail = func(path: Slice(u8)) -> u64 {
   let h: Mut(HostRt) = rt();
   let hs: Mut(sh.HostSources) = h.sources;
@@ -1371,7 +1273,6 @@ pub let report_source_fail = func(path: Slice(u8)) -> u64 {
   return 1;
 };
 
-// 宿主侧统一的失败出口：把类别、错误码、附加数值与说明交给 CompileErr。
 pub let fail_host = func(kind: err.ErrKind, code: u64, detail: u64,
     msg: Slice(u8)) -> u64 !{ err.CompileErr } {
   return err.fail_info(kind, code, 0, 0, detail, msg)!;

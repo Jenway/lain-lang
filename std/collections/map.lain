@@ -1,12 +1,3 @@
-// std::collections::map —— u64 键的开放寻址哈希表函子。
-//
-// 存储由隐式编译期参数 al 给出的分配器策略负责：al 满足 std::mem.Allocator，
-// 缺省为 mem.SystemAlloc，调用点可以用 ?{ al: mem.BudgetTracker } 换成别的策略。
-// 构造入口：with_alloc 给出任意策略的句柄，with_capacity 额外预领容量，
-// new 只在句柄能凭空造出时（宿主堆）存在。
-// 容量随载荷增长，装载因子超过七成时按两倍扩容并整表重排。
-// 容器类型自带固有 drop：离开作用域时先析构占用槽位里的值，再把三块存储
-// 归还给分配器，并把指针复位成空引用，所以重复调用 drop 不会二次释放。
 let mem = import("std::mem");
 let option = import("std::option");
 
@@ -18,7 +9,6 @@ pub let HashMapU64 = func(V: Type)
   return module {
     pub let Opt = opt.Opt;
 
-    // Self 直接声明成结构体，固有 drop 才能在 phase2 绑到形状上；Map 是它的别名。
     pub let Self = struct {
       keys: Mut(u64),
       used: Mut(bool),
@@ -30,7 +20,6 @@ pub let HashMapU64 = func(V: Type)
 
     pub let Map = Self;
 
-    // splitmix64 的一轮混合：把连续键打散成近似均匀的槽位。
     let mix = func(key: u64) -> u64 {
       let x: u64 = key ^ (key >> 30);
       return x * 0xbf58476d1ce4e5b9;
@@ -75,7 +64,6 @@ pub let HashMapU64 = func(V: Type)
       };
     };
 
-    // 命中回槽位，未命中回 cap。
     let find_used_in = func(keys: Mut(u64), used: Mut(bool), cap: u64, key: u64) -> u64 {
       let start: u64 = slot_of(key, cap);
       let slot: u64 = loop s(i: u64 = 0, out: u64 = cap) while i < cap {
@@ -94,7 +82,6 @@ pub let HashMapU64 = func(V: Type)
       return slot;
     };
 
-    // 探测链上的第一个空槽；表满回 cap。
     let find_free_in = func(used: Mut(bool), cap: u64, key: u64) -> u64 {
       let start: u64 = slot_of(key, cap);
       let slot: u64 = loop s(i: u64 = 0, out: u64 = cap) while i < cap {
@@ -109,7 +96,6 @@ pub let HashMapU64 = func(V: Type)
       return slot;
     };
 
-    // 分配器回 0 时没有可继续的路径，就地终止程序。
     let alloc_bytes = func(a: Mut(al.Self), bytes: u64) -> u64 {
       let raw: u64 = al.alloc(a, bytes);
       if raw == 0 {
@@ -144,7 +130,6 @@ pub let HashMapU64 = func(V: Type)
       return with_capacity(a, 16);
     };
 
-    // 两倍扩容：新开三块存储，把占用的键值重排进去，再归还旧的三块。
     let grow = func(m: Mut(Self)) {
       let old_cap: u64 = deref(m).cap;
       let new_cap: u64 = if old_cap == 0 { 16 } else { old_cap * 2 };
@@ -224,7 +209,6 @@ pub let HashMapU64 = func(V: Type)
       return deref(m).len == 0;
     };
 
-    // 新键插入回 true，已有键覆盖回 false。旧值先就地析构，再把新值移进槽位。
     pub let put = func(m: Mut(Self), key: u64, val: V) -> bool {
       let grow_now: bool = (deref(m).cap == 0) or (((deref(m).len + 1) * 10) > (deref(m).cap * 7));
       if grow_now {
@@ -278,7 +262,6 @@ pub let HashMapU64 = func(V: Type)
       return opt.none();
     };
 
-    // 清空保留容量：占用槽位里的值逐个析构，空槽标记复位，计数归零。
     pub let clear = func(m: Mut(Self)) {
       let cap0: u64 = deref(m).cap;
       let used: Mut(bool) = deref(m).used;
@@ -293,11 +276,6 @@ pub let HashMapU64 = func(V: Type)
       deref(m).len = 0;
     };
 
-    // 无参构造需要一个能凭空造出的分配器句柄。al.Self 只能出现在类型位置，
-    // 所以句柄单独包一个结构体，让 size_of 在编译期算出它的宽度：
-    // mem.SystemAlloc 的句柄是单个 8 字节字，其余策略的 Self 要由调用方
-    // 带着参数交出，走 with_alloc / with_capacity。条件为假时整个分支不编译，
-    // 因此别的分配器实例上不存在 new。
     let AllocCell = struct { handle: al.Self };
 
     comptime if size_of(AllocCell) == 8 {

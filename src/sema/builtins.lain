@@ -1,5 +1,3 @@
-// 内建：字符串字面量、静态表、内存读写与指针内建。参数由 core 求值成 Val 数组后送进来，
-// 这样这里不需要知道表达式怎么算，core 也不用知道内建怎么写。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let ir = import("src::sema::ir_emit");
@@ -20,8 +18,6 @@ let ty_at_idx = func(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), ps) + i * 32);
 };
 
-// --- 静态数据 -----------------------------------------------------------
-// 把值按 w 位、小端写进 p。
 let put_le = func(p: Mut(u8), v: u64, w: u64) -> u64 {
   let bytes: u64 = w / 8;
   let buf: MutSlice(u8) = make_slice(MutSlice(u8), p, bytes);
@@ -33,7 +29,6 @@ let put_le = func(p: Mut(u8), v: u64, w: u64) -> u64 {
   return 0;
 };
 
-// 一个转义字符的实际字节（不认识的就照原样，反斜杠后接其它字符取其本身）。
 let esc_at = func(text: Ref(u8), i: u64, len: u64) -> u8 {
   let b: u8 = deref(text + i);
   if b != 92 { return b; }
@@ -46,7 +41,6 @@ let esc_at = func(text: Ref(u8), i: u64, len: u64) -> u8 {
   return c;
 };
 
-// 转义序列吃两个字节，普通字符吃一个。
 let esc_step = func(text: Ref(u8), i: u64, len: u64) -> u64 {
   let b: u8 = deref(text + i);
   if b != 92 { return 1; }
@@ -54,7 +48,6 @@ let esc_step = func(text: Ref(u8), i: u64, len: u64) -> u64 {
   return 2;
 };
 
-// 把源码里的字面量字节反转义后铺进 buf，回实际长度。
 let unescape_into = func(buf: Mut(u8), text: Ref(u8), len: u64) -> u64 {
   let dst: MutSlice(u8) = make_slice(MutSlice(u8), buf, len);
   let r: u64 = loop c(i: u64 = 0, o: u64 = 0) while i < len {
@@ -67,7 +60,6 @@ let unescape_into = func(buf: Mut(u8), text: Ref(u8), len: u64) -> u64 {
   return r;
 };
 
-// 字符串字面量的字节反转义后落在暂存缓冲里，交给 data_add 变成 ro 静态数据。
 pub let string_data = func(s: Mut(st.State), dname: u64, text: Ref(u8), len: u64) -> u64 {
   let buf: Mut(u8) = st.st_databuf(s) + st.st_dataused(s);
   let outlen: u64 = unescape_into(buf, text, len);
@@ -76,7 +68,6 @@ pub let string_data = func(s: Mut(st.State), dname: u64, text: Ref(u8), len: u64
   return agg.array_new(s, agg.kind_string(), outlen, 0, 8, 0, 0);
 };
 
-// 定长表：[1, 2, 3] 这种字面量组按元素宽度铺进静态数据。逗号也占孩子位置，要跳过。
 pub let table_cnt = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
   let cnt: u64 = loop c(k: u64 = i, a: u64 = acc) while k < n {
     if ax.is_comma(g, k) == 0 { a = a + 1; }
@@ -115,7 +106,6 @@ pub let table_data = func(s: Mut(st.State), dname: u64, g: u64, elem: Mut(ty.Ty)
   return sh;
 };
 
-// 聚合的静态占位：先给一块零字节数据，字段由随后的过程写进去。
 pub let agg_data = func(s: Mut(st.State), dname: u64, sh: u64) -> u64 {
   let size: u64 = agg.shp_size(sh);
   let buf: Mut(u8) = st.st_databuf(s) + st.st_dataused(s);
@@ -129,8 +119,6 @@ pub let agg_data = func(s: Mut(st.State), dname: u64, sh: u64) -> u64 {
   return ir.data_add(s, dname, buf, size, 1);
 };
 
-// --- 间接调用 -----------------------------------------------------------
-// 组里顶层逗号分隔的项数；空组算零项。
 pub let arg_count = func(g: u64) -> u64 {
   let n: u64 = ax.n_count(g);
   if n == 0 { return 0; }
@@ -143,14 +131,13 @@ let comma_n = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
   return comma_n(g, i + 1, n, acc);
 };
 
-// 形参类型表压进两个 64 位字：每项 16 位，低 8 位类型码、高 8 位宽度。
 let pack_params_from = func(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutSlice(u64), base: u64) -> u64 {
   if i >= n { return i; }
   let tp: Mut(ty.Ty) = ty_at_idx(ps, i);
   let code: u64 = ir.kcode(tp);
-  if code == 0 { st.st_fail(k, ax.e_type()); return i; }
+  if code == 0 { st.st_fail(k, ax.FailKind.Type as u64); return i; }
   let w: u64 = ty.tw(tp);
-  if w > 255 { st.st_fail(k, ax.e_type()); return i; }
+  if w > 255 { st.st_fail(k, ax.FailKind.Type as u64); return i; }
   let item: u64 = code + w * 256;
   let idx: u64 = base + i;
   let wi: u64 = idx / 4;
@@ -170,14 +157,13 @@ let push_vals = func(k: Mut(st.State), ab: Mut(ty.Val), i: u64, n: u64) -> u64 {
   return push_vals(k, ab, i + 1, n);
 };
 
-// 间接调用：被调值必须是指针类型，实参已在 ab 里按形参类型强制过。
 pub let icall_emit = func(k: Mut(st.State), sk_raw: Ref(u8), fv: Mut(ty.Val), ab: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let vt: Mut(ty.Ty) = ty.vty(fv);
   if ty.tk(vt) != 3 {
-    // 目标不是指针：一次性调用错误，报明确消息再失败。
+
     let m: Ref(u8) = "icall-target";
     let dg: u64 = ir.diag(k, 0, 1, m, 12);
-    st.st_fail(k, ax.e_type());
+    st.st_fail(k, ax.FailKind.Type as u64);
     return 0;
   }
   let sk: Mut(SigRec) = ptr_cast(Mut(SigRec), sk_raw);
@@ -212,11 +198,9 @@ pub let icall_emit = func(k: Mut(st.State), sk_raw: Ref(u8), fv: Mut(ty.Val), ab
   return 0;
 };
 
-// 值聚合返回走隐藏出参：先 #alloca 结果块，把它当第 0 个实参传进去，
-// 指令本身没有返回值，调用方拿到的就是那块地址。
 let icall_sret = func(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u64, ps: Mut(ty.Ty), ret: Mut(ty.Ty), want: Mut(ty.Ty),
                 out: Mut(ty.Val), pk: MutSlice(u64)) -> u64 {
-  if np + 1 > 8 { st.st_fail(k, ax.e_type()); return 0; }
+  if np + 1 > 8 { st.st_fail(k, ax.FailKind.Type as u64); return 0; }
   let dv: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
   let ao: u64 = agg.new_obj(k, ty.tsh(ret), dv);
   pk[0] = 4;
@@ -239,14 +223,11 @@ let icall_sret = func(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u6
   return 0;
 };
 
-// --- 目标系统内建 -----------------------------------------------------------
-// 四个名字都是零实参调用，值在编译期就折算成常量，不产生任何指令。
 let b_target_os = func() -> u64 { return sym.intern("target_os", 9); };
 let b_is_windows = func() -> u64 { return sym.intern("is_windows", 10); };
 let b_is_linux = func() -> u64 { return sym.intern("is_linux", 8); };
 let b_is_macos = func() -> u64 { return sym.intern("is_macos", 8); };
 
-// target_os() 的结果是 u64 编号，is_*() 的结果是 bool。
 let os_id_lit = func(k: Mut(st.State), out: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let u: u64 = ty.ty_u64(t);
@@ -261,7 +242,6 @@ let os_is_lit = func(k: Mut(st.State), want: u64, out: Mut(ty.Val)) -> u64 {
   return ty.val_lit(out, v, t);
 };
 
-// --- 内建分派 -----------------------------------------------------------
 pub let is_builtin = func(name: u64) -> u64 {
   if name == b_target_os() { return 1; }
   if name == b_is_windows() { return 1; }
@@ -296,14 +276,11 @@ pub let is_builtin = func(name: u64) -> u64 {
   return 0;
 };
 
-// 读的内存宽度由上下文期望类型决定，没有期望时按机器字。
 let load_ty = func(k: Mut(st.State), want: Mut(ty.Ty)) -> Mut(ty.Ty) {
   if ty.ty_known(want) == 1 { return want; }
   return ir.tbits(k, 64);
 };
 
-// 位宽不足一字节的整数类型（bool 只有 1 位，排除 TY_ADDR）在内存里占 1 字节：
-// 读回来先截到 tp，写出去先零扩满 1 字节。
 let is_subbyte_bits = func(tp: Mut(ty.Ty)) -> u64 {
   if ty.tk(tp) != (codes.TyKind.Bits as u64) { return 0; }
   return if ty.ty_byte_ok(tp) == 0 { 1 } else { 0 };
@@ -344,8 +321,6 @@ let do_load = func(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut
   return ty.val_ref(out, res, t);
 };
 
-// store 的宽度取右值的类型；右值是裸字面量时按 64 位，字面量的类型已知
-// 且位宽不足一字节（bool）时按它的真实类型（写内存时零扩到 1 字节）。
 let store_ty = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Ty) {
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let vt: Mut(ty.Ty) = ty.vty(v);
@@ -373,7 +348,6 @@ let do_store = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val)) -> u64 {
   return ir.emit_mem(k, codes.InstKind.Store as u64, 0, t, 0);
 };
 
-// 原子指令的类型一律按 64 位字，内存序作整数操作数原地传入。
 let do_atomic_fence = func(k: Mut(st.State), v0: Mut(ty.Val)) -> u64 {
   let nt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let nn: u64 = ty.ty_none(nt);
@@ -495,7 +469,6 @@ pub let apply = func(k: Mut(st.State), name: u64, argv: Mut(u8), n: u64, want: M
   return 0;
 };
 
-// coerce 的本地副本：builtins 在 ctx 之前，不能反向依赖。
 let coerce_v = func(k: Mut(st.State), v: Mut(ty.Val), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let from: Mut(ty.Ty) = ty.vty(v);
   let cp: u64 = ty.val_at(out, v);
@@ -511,7 +484,6 @@ let coerce_v = func(k: Mut(st.State), v: Mut(ty.Val), to: Mut(ty.Ty), out: Mut(t
   return ty.val_ref(out, res, to);
 };
 
-// symbol_addr("name")：把字面量文本当作数据符号名，拼上本模块前缀。
 pub let symbol_addr = func(k: Mut(st.State), g: u64, out: Mut(ty.Val), src: u64) -> u64 {
   let h: u64 = if ax.n_count(g) > 0 { ax.n_at(g, 0) } else { 0 };
   if h == 0 { return 0; }

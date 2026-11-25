@@ -1,17 +1,3 @@
-// LAINIR 优化器：区域内常量折叠（整数运算、除法与取余、移位、整数转换）、
-// 代数恒等式化简、路径敏感事实传播、局部存放与重复读出的转发、条件分支
-// 删除与过程内无用户纯指令删除。
-//
-// 折叠只改写模块自身的记录：能被替换的操作数就地换成 OperandKind.Int，或把使用者
-// 改写成恒等式另一侧的值名。改写之后冗余指令自然失去使用者，由删除趟按
-// 使用情况去掉。模块级 insts 数组里被删掉的记录保持原样：验证器只按区域
-// 序列行走，不会读到它们。
-//
-// 事实表记录某个值名在当前路径上等于某个整数常量，或等于另一个值名。
-// 直行区域内的事实对后续指令与子区域生效；进入分支时压入条件事实，离开
-// 分支时把事实表截回入口长度，因此分支内学到的事实不会漏到分支之外。
-// #if 的条件一旦是已知常量，未走的分支整段清空；#if 没有结果值时它只是
-// 控制流，清空未走分支不会影响任何结果值。
 let codes = import("src::ir::ir_codes");
 let vf = import("src::ir::verify::model");
 
@@ -20,24 +6,18 @@ pub let OptStats = struct {
   dce_removed: u64,
 };
 
-// 导入的结构类型不能直接出现在 size_of 的实参里，用本地单元结构包一层，
-// 字段仍在偏移 0。
 let IrInstCell = struct { v: vf.IrInst };
 let IrRegionCell = struct { v: vf.IrRegion };
 let IrCaseCell = struct { v: vf.IrCase };
 
-// 折叠结果：ok 为 0 表示没有折叠；kind 为 1 表示 value 是整数常量，kind 为
-// 2 表示 value 是一个值名，指令结果与它相等。
 let Fold = struct {
   ok: u64,
   kind: u64,
   value: u64,
 };
 
-// 单条过程路径上已知的事实条数上限。事实只增不改，满了就停止记录新事实。
 let FACT_CAP = func() -> u64 { return 64; };
 
-// 事实表：names/values/kinds 按下标成对排列，count 之外的位置不作数。
 let Facts = struct {
   names: Array(u64, 64),
   values: Array(u64, 64),
@@ -45,8 +25,6 @@ let Facts = struct {
   count: u64,
 };
 
-// 存放记录：addrs 是目标槽的地址值名，keys 把类型种类与宽度压成一个整数，
-// vkinds/vals 是写进去的值，vkind 为 1 表示整数常量、为 2 表示值名。
 let MemFacts = struct {
   addrs: Array(u64, 32),
   keys: Array(u64, 32),
@@ -55,15 +33,11 @@ let MemFacts = struct {
   count: u64,
 };
 
-// 本过程里所有 #alloca 的结果名。槽名 _v<n> 只在一个过程内唯一，因此这套
-// 集合按过程重建，不能跨过程共用。
 let Slots = struct {
   names: Array(u64, 128),
   count: u64,
 };
 
-// 优化器在一组平坦记录上工作：指令、区域与分支都按下标引用。slots 指向
-// 当前过程全部的 #alloca 结果名，mem 指向当前这条直行路径上的存放记录。
 let Ctx = struct {
   insts: Mut(vf.IrInst),
   regions: Mut(vf.IrRegion),
@@ -122,7 +96,6 @@ let facts_new = func() -> Facts {
   };
 };
 
-// --- 记录访问 -------------------------------------------------------------
 let inst_slot = func(c: Mut(Ctx), i: u64) -> Mut(vf.IrInst) {
   let base: Mut(u8) = ptr_cast(Mut(u8), c.insts);
   return ptr_cast(Mut(vf.IrInst), base + i * size_of(IrInstCell));
@@ -147,7 +120,6 @@ let case_read = func(c: Mut(Ctx), i: u64) -> vf.IrCase {
   return deref(slot);
 };
 
-// 区域指令序列是模块里的一串 u64，每个元素是模块级指令下标。
 let region_index = func(r: vf.IrRegion, i: u64) -> u64 {
   let base: Mut(u8) = ptr_cast(Mut(u8), r.insts);
   let at: Ref(u64) = ptr_cast(Ref(u64), base + i * size_of(u64));
@@ -161,8 +133,6 @@ let region_set = func(r: Mut(vf.IrRegion), i: u64, value: u64) -> u64 {
   return 0;
 };
 
-// --- 事实表 ---------------------------------------------------------------
-// 从最新记录往旧记录找，同名以最近一次记录为准，返回下标加一。
 let facts_find = func(f: Mut(Facts), name: u64) -> u64 {
   let n: u64 = f.count;
   return loop lp(i: u64 = 0, at: u64 = 0) while (i < n) and (at == 0) {
@@ -180,7 +150,6 @@ let facts_lookup = func(f: Mut(Facts), name: u64) -> Fold {
   return alias_of(f.values[idx]);
 };
 
-// 只追加，不覆盖：分支退出时把 count 截回入口长度就恢复了外层事实。
 let facts_push = func(f: Mut(Facts), name: u64, kind: u64, value: u64) -> u64 {
   let n: u64 = f.count;
   if n >= FACT_CAP() { return 0; }
@@ -191,7 +160,6 @@ let facts_push = func(f: Mut(Facts), name: u64, kind: u64, value: u64) -> u64 {
   return 0;
 };
 
-// 顺着别名链找到最终的值名。
 let facts_resolve = func(f: Mut(Facts), name: u64, depth: u64) -> u64 {
   if depth >= 32 { return name; }
   let fd: Fold = facts_lookup(f, name);
@@ -200,7 +168,6 @@ let facts_resolve = func(f: Mut(Facts), name: u64, depth: u64) -> u64 {
   return name;
 };
 
-// 值名当前已知的整数常量。
 let facts_const = func(f: Mut(Facts), name: u64, depth: u64) -> Fold {
   let n: u64 = facts_resolve(f, name, depth);
   let fd: Fold = facts_lookup(f, n);
@@ -208,8 +175,6 @@ let facts_const = func(f: Mut(Facts), name: u64, depth: u64) -> Fold {
   return no_fold();
 };
 
-// --- 常数运算 -------------------------------------------------------------
-// #bits<N> 的运算结果只保留低 N 位。
 let mask_width = func(value: u64, width: u64) -> u64 {
   if width == 0 { return value; }
   if width >= 64 { return value; }
@@ -218,7 +183,6 @@ let mask_width = func(value: u64, width: u64) -> u64 {
   return value & mask;
 };
 
-// 有符号比较之前按操作数宽度做符号扩展。
 let sign_fill = func(value: u64, width: u64) -> i64 {
   if width == 0 { return value as i64; }
   if width >= 64 { return value as i64; }
@@ -229,18 +193,6 @@ let sign_fill = func(value: u64, width: u64) -> i64 {
   return top >> back;
 };
 
-// --- 局部存放转发 ---------------------------------------------------------
-// 存放记录只登记目标地址恰好是本过程 #alloca 结果的那些写入。两条 #alloca
-// 得到的是互不重叠的存储，所以精确地址匹配不会漏掉别名写入：任何透过其它
-// 指针（取自 #lea、取自别的槽里的指针、模块数据符号）的写入都先整表清空再
-// 处理，走到表外的写入因此不可能留下过期的记录。调用、原子操作与读写改能
-// 透过任意指针改动内存，也整表清空。
-//
-// 每条 #load 的结果也按同样的方式登记成“该地址、该宽度下当前的内容”：
-// 之后的写入会按地址与全部逃逸规则失效这些记录，因此从同一地址、同一宽度
-// 再次读出的结果可以别名到上一次读出的值名上。记录条数有上限，满了就不再
-// 登记新记录，查找不到只是不转发。记录只在一条直行区域序列内有效，进出的
-// 清空见 fold_region。
 let MEM_CAP = func() -> u64 { return 32; };
 let SLOT_CAP = func() -> u64 { return 128; };
 
@@ -282,8 +234,6 @@ let slots_new = func() -> Slots {
   };
 };
 
-// 键把类型种类与宽度压成一个整数：种类在高位，宽度在低位。宽度与种类都
-// 相同的 #load 与 #store 才视为同一次读写。
 let mem_key = func(it: vf.IrInst) -> u64 {
   return it.ty_kind * 256 + it.ty_width;
 };
@@ -293,8 +243,6 @@ let mem_clear = func(mf: Mut(MemFacts)) -> u64 {
   return 0;
 };
 
-// 同一地址上的旧记录必须先失效：宽度不同的部分覆盖同样改变了这条地址的
-// 内容，不能留下旧记录。
 let mem_drop = func(mf: Mut(MemFacts), addr: u64) -> u64 {
   let n: u64 = mf.count;
   let kept: u64 = loop lp(i: u64 = 0, w: u64 = 0) while i < n {
@@ -354,7 +302,6 @@ let slots_has = func(c: Mut(Ctx), name: u64) -> u64 {
   };
 };
 
-// 扫一遍本过程的全部区域，收集 #alloca 的结果名。
 let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
   if depth > vf.MAX_DEPTH() { return 0; }
   if ri >= c.region_count { return 0; }
@@ -387,7 +334,6 @@ let slots_scan = func(c: Mut(Ctx), ri: u64, depth: u64) -> u64 {
   return 0;
 };
 
-// 可能会透过任意指针改动内存的指令。
 let mem_escape = func(k: u64) -> u64 {
   if k == codes.InstKind.Call as u64 { return 1; }
   if (k >= codes.InstKind.Xchg as u64) and (k <= codes.InstKind.RmwXor as u64) { return 1; }
@@ -395,12 +341,6 @@ let mem_escape = func(k: u64) -> u64 {
   return 0;
 };
 
-// 一条指令对存放记录的作用：写入本过程已知的槽就登记，写入其它任何地址、
-// 可能穿透内存的指令都整表清空；读出时宽度与类型种类都对得上就按写入记录
-// 或上一次读出转发，把 #load 的结果名记成那个值，后续使用者因此绕过这条
-// #load，没有使用者的 #load 由删除趟去掉。没有旧记录的读出把自己的结果名
-// 登记成该地址当前的内容，同址同宽度的后续读出因此可以别名到它。
-// 子区域的界限由 fold_region 负责。
 let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let it: vf.IrInst = inst_read(c, ii);
   let mf: Mut(MemFacts) = c.mem;
@@ -437,8 +377,7 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
     let key: u64 = mem_key(it);
     let at: u64 = mem_find(mf, src.name, key);
     if at == 0 {
-      // 同一地址、同一宽度的重复读出：把这条读出的结果登记成该地址当前
-      // 内容的记录，后续再从同一地址读出的结果就直接别名到它。
+
       let rec: u64 = mem_set(mf, src.name, key, 2, it.r0);
       return 0;
     }
@@ -450,8 +389,6 @@ let mem_step = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
   return 0;
 };
 
-// 可折叠的整数运算：两个 OperandKind.Int 操作数、一条指令结果。除数为 0 与移位量
-// 达到 64 的情况不折叠，留给运行期。
 let fold_inst = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
@@ -500,9 +437,7 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
     if ua > ub { return fold_of(1); }
     return fold_of(0);
   }
-  // 除法与取余在除数为 0 时不折叠：那是一次运行期陷阱，常量折叠不能把它
-  // 提前成编译期的未定义行为。有符号除法与取余按操作数宽度做符号扩展，
-  // 除数为 -1 时单独处理，避免最小负数取反溢出。
+
   if k == codes.InstKind.UDiv as u64 {
     if b == 0 { return no_fold(); }
     return fold_of(mask_width(a / b, w));
@@ -527,8 +462,7 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
     let rest: i64 = num2 % den2;
     return fold_of(mask_width(rest as u64, w));
   }
-  // 移位量达到 64 时不折叠，同样交给运行期；左移与逻辑右移按操作数宽度
-  // 取值，算术右移先做符号扩展再移位。
+
   if (k == codes.InstKind.Shl as u64) or (k == codes.InstKind.LShr as u64) or (k == codes.InstKind.AShr as u64) {
     if b >= 64 { return no_fold(); }
     if k == codes.InstKind.Shl as u64 { return fold_of(mask_width(a << b, w)); }
@@ -541,8 +475,6 @@ let fold_inst = func(it: vf.IrInst) -> Fold {
   return no_fold();
 };
 
-// 整数转换的常量折叠：#zext 只是补零，#trunc 丢掉高位，#sext 需要知道
-// 源操作数宽度，而整数字面量不携带宽度，所以 #sext 不折叠。
 let fold_conv = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.ty_kind != codes.TyKind.Bits as u64 { return no_fold(); }
@@ -559,7 +491,6 @@ let fold_pick = func(a: Fold, b: Fold) -> Fold {
   return b;
 };
 
-// 操作数本身作为折叠结果：OperandKind.Int 是常量，OperandKind.Value 是别名。
 let operand_fold = func(op: vf.IrOperand) -> Fold {
   if op.kind == codes.OperandKind.Int as u64 { return fold_of(op.bits); }
   if op.kind == codes.OperandKind.Value as u64 {
@@ -569,7 +500,6 @@ let operand_fold = func(op: vf.IrOperand) -> Fold {
   return no_fold();
 };
 
-// 代数恒等式：零元与幺元把运算消掉，同名操作数的自比较与自异或直接定值。
 let fold_identity = func(it: vf.IrInst) -> Fold {
   if it.has_ty == 0 { return no_fold(); }
   if it.result_count != 1 { return no_fold(); }
@@ -629,9 +559,6 @@ let fold_identity = func(it: vf.IrInst) -> Fold {
   return no_fold();
 };
 
-// 这些指令的所有操作数位置都接受 OperandKind.Int 常量：整数运算、整数比较与整数
-// 转换。其余位置（#if 条件、#switch 选择子、#return 实参、地址操作数、
-// 调用目标）必须保持 OperandKind.Value。
 let subst_ok = func(k: u64) -> u64 {
   if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.AShr as u64) { return 1; }
   if (k >= codes.InstKind.Eq as u64) and (k <= codes.InstKind.UGe as u64) { return 1; }
@@ -660,7 +587,6 @@ let set_op_int = func(it: Mut(vf.IrInst), i: u64, value: u64) -> u64 {
   return 0;
 };
 
-// 把第 i 个操作数改成指向另一个值名，操作数种类保持 OperandKind.Value。
 let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
   if i == 0 { it.op0_name = name; return 0; }
   if i == 1 { it.op1_name = name; return 0; }
@@ -681,8 +607,6 @@ let set_op_name = func(it: Mut(vf.IrInst), i: u64, name: u64) -> u64 {
   return 0;
 };
 
-// 把一条指令里的操作数按事实表就地改写：已知常量落成 OperandKind.Int（只在接受
-// 整数字面量的位置），别名顺着链改写成最终值名。
 let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let copy: vf.IrInst = inst_read(c, ii);
   let n: u64 = copy.operand_count;
@@ -710,7 +634,6 @@ let apply_facts = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -
   return changed;
 };
 
-// 折叠当前指令并把结果记进事实表。指令本身留在原地，冗余性交给删除趟。
 let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u64 {
   let it: vf.IrInst = inst_read(c, ii);
   let direct: Fold = fold_inst(it);
@@ -722,9 +645,6 @@ let fold_own = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats)) -> u
   return 0;
 };
 
-// #if 的条件已知时：没有结果值的 #if 只承担控制流，未走的分支整段清空，
-// 只折叠走的那一支；有结果值的 #if 两支都要保留区域以维持验证器的产出
-// 约束，仍然按各自路径压入条件事实分别折叠。
 let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   if it.body == vf.NO_REGION() { return 0; }
   let cond: vf.IrOperand = vf.inst_op(it, 0);
@@ -777,8 +697,6 @@ let fold_if = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats),
   return 0;
 };
 
-// 子区域各自折叠。除 #if 之外的结构（循环体、#switch 分支等）在入口处
-// 记下事实表长度，退出时截回，区域内学到的事实不会漏到结构之外。
 let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   if it.kind == codes.InstKind.If as u64 { return fold_if(c, it, f, st, depth); }
   let saved: u64 = f.count;
@@ -800,8 +718,6 @@ let fold_children = func(c: Mut(Ctx), it: vf.IrInst, f: Mut(Facts), st: Mut(OptS
   return 0;
 };
 
-// 当前指令：先按事实表改写操作数，再尝试折叠，再更新存放记录（这里能把
-// 刚写入的值接到 #load 的结果名上），最后走进它的子区域。
 let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   let applied: u64 = apply_facts(c, ii, f, st);
   let folded: u64 = fold_own(c, ii, f, st);
@@ -810,8 +726,6 @@ let fold_at = func(c: Mut(Ctx), ii: u64, f: Mut(Facts), st: Mut(OptStats), depth
   return fold_children(c, it, f, st, depth);
 };
 
-// 区域的存放记录不跟进来也不漏出去：进入子区域先清空，#if 的两支与各兄弟
-// 区域之间因此互不影响，子区域里学到的东西也不会漏到外层。
 let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), depth: u64) -> u64 {
   if depth > vf.MAX_DEPTH() { return 0; }
   if ri >= c.region_count { return 0; }
@@ -833,7 +747,6 @@ let fold_region = func(c: Mut(Ctx), ri: u64, f: Mut(Facts), st: Mut(OptStats), d
   return 0;
 };
 
-// --- 删除趟：过程内无用户纯指令删除 ---------------------------------------
 let is_pure = func(k: u64) -> u64 {
   if k <= codes.InstKind.VCmpGt as u64 { return 1; }
   if k == codes.InstKind.Lea as u64 { return 1; }
@@ -868,8 +781,6 @@ let sub_regions_use = func(c: Mut(Ctx), it: vf.IrInst, name: u64) -> u64 {
   return hit;
 };
 
-// 名字是否在该区域及其子区域里作为 OperandKind.Value 操作数出现。判定按名字做，
-// 兄弟区域里同名的另一种定义也让它显示为活的：这是保守判定。
 let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
   if ri >= c.region_count { return 0; }
   let r: vf.IrRegion = region_read(c, ri);
@@ -889,8 +800,6 @@ let region_uses = func(c: Mut(Ctx), ri: u64, name: u64) -> u64 {
   return hit;
 };
 
-// 从本过程已知局部槽读出的 #load 不会碰到无效地址，结果没有使用者时
-// 可以整条去掉；读写其它地址的指令保留。
 let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> u64 {
   if it.kind != codes.InstKind.Load as u64 { return 0; }
   if it.operand_count != 1 { return 0; }
@@ -899,9 +808,6 @@ let dead_load_ok = func(c: Mut(Ctx), it: vf.IrInst) -> u64 {
   return slots_has(c, src.name);
 };
 
-// 把一个区域的指令序列就地压紧，返回本区域删掉的条数。删除判定按整个
-// 过程（proc_body 可达的全部区域）做，因此被删指令的操作数在别处没有
-// 使用者。
 let compact_region = func(c: Mut(Ctx), ri: u64, proc_body: u64) -> u64 {
   if ri >= c.region_count { return 0; }
   let r: Mut(vf.IrRegion) = region_slot(c, ri);
@@ -962,8 +868,6 @@ let dce_walk = func(c: Mut(Ctx), ri: u64, proc_body: u64, st: Mut(OptStats)) -> 
   return gone + inner;
 };
 
-// 删除趟反复执行：一条指令被删掉以后，只被它使用的纯指令就变成了死代码。
-// 折叠与删除交替最多两輪，第一轮的新增量为 0 时提前结束。
 let opt_proc = func(c: Mut(Ctx), body: u64, st: Mut(OptStats)) -> u64 {
   let rounds: u64 = loop lp(pass: u64 = 0, active: u64 = 1) while (pass < 2) and (active == 1) {
     let before: u64 = st.folded + st.dce_removed;

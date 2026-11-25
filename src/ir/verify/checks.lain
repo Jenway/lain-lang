@@ -1,33 +1,22 @@
-// LAINIR 静态验证器：CFG、SSA、类型、操作数与模块级检查。
-//
-// 记录结构与构造器在 src::ir::verify::model，这里只管校验。绑定表与循环标签
-// 表放在调用方提供的模块 scratch 区里；真实模块与文本发射器的绑定表放在本
-// 文件的静态区里（见 LARGE_BINDINGS）。
 let codes = import("src::ir::ir_codes");
 let model = import("src::ir::verify::model");
 
 open model;
 
-// --- 验证上下文 -----------------------------------------------------------
-// 绑定表与循环标签表都是调用方或本模块静态区提供的一块字表；上下文存这块
-// 字表的视图与槽数。bind_cap 决定用哪块表：小模块走模块 scratch（MAX_BINDINGS
-// 槽），真实模块走本文件的静态大表（LARGE_BINDINGS 槽）。
 pub let VfCtx = struct {
   m: Ref(IrModule),
-  // 模块级静态数据块的符号表（名字数组）；验证静态数据符号时用。
+
   data_words: Slice(u64),
   proc: u64,
   count: u64,
   bind_cap: u64,
   depth: u64,
   err: u64,
-  // 名字、类别、宽度三张绑定表各占 bind_cap 个槽，循环标签与循环区域
-  // 接在后面（槽位划分见 vf_build 的注释）。
+
   words: MutSlice(u64),
   loop_depth: u64,
 };
 
-// 字表大小：三张 bind_cap 槽的绑定表加上循环标签与循环区域。
 pub let VF_SCRATCH = func() -> u64 {
   return MAX_BINDINGS() * 3 + MAX_LOOPS() * 2;
 };
@@ -36,10 +25,6 @@ let bank_words = func(bind_cap: u64) -> u64 {
   return bind_cap * 3 + MAX_LOOPS() * 2;
 };
 
-// 大字表：名字、类别、宽度三张表连在一片静态区上，每张 LARGE_BINDINGS()
-// 个槽，循环标签与循环区域接在第三张表之后；按 512 个槽一块铺开，全零字面量
-// 只写一次。它不占模块 scratch，所以小 arena 的切割测试仍然只分配 96 槽那块
-// scratch。
 let bind_block: Array(u64, 512) = [
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -88,14 +73,10 @@ let large_store_ptr = func() -> Mut(u64) {
   return ptr_cast(Mut(u64), mut_of(large_store));
 };
 
-// 文本发射器按同样的槽数借用这张表：它把名字、类别、宽度三张表放在与验证
-// 器相同的起点上，两边都从第 0 槽开始写，验证完成之后再发射文本。
 pub let large_bind_base = func() -> Mut(u64) {
   return large_store_ptr();
 };
 
-// 字表按元素类型造成一个可变视图：名字、类别、宽度各占 bind_cap 个槽，
-// 循环标签与循环区域接在 3 * bind_cap 之后。
 let vf_build = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64,
                     bank: Mut(u64), bind_cap: u64) -> VfCtx {
   let words: MutSlice(u64) = make_slice(MutSlice(u64), bank, bank_words(bind_cap));
@@ -121,7 +102,6 @@ let vf_new_large = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64) 
   return vf_build(m, data_syms, data_count, large_store_ptr(), LARGE_BINDINGS());
 };
 
-// --- 基础判定 -------------------------------------------------------------
 let set_err = func(c: Mut(VfCtx), code: u64) -> u64 {
   if c.err == 0 { c.err = code; }
   return code;
@@ -155,9 +135,6 @@ let type_ok = func(t: IrType) -> u64 {
   return 0;
 };
 
-// 比较结果在绑定表里记作 IR_TYPE_BOOL（宽度 1），按 LAINIR 规范它就是 #bits<1>；
-// 所以宽度 1 的两类在类型比较中等价，否则 `#and` / `#store` / 调用传参这类
-// 消费比较结果的位置会把合法 IR 误判成类型不匹配。
 let is_one_bit_kind = func(k: u64) -> u64 {
   if k == IR_TYPE_BOOL { return 1; }
   if k == codes.TyKind.Bits as u64 { return 1; }
@@ -176,7 +153,6 @@ let kind_equivalent = func(a_kind: u64, a_width: u64, b_kind: u64, b_width: u64)
   return 0;
 };
 
-// 只看类型类别、不看宽度的检查（整数转换这类）同样认宽度 1 的等价。
 let kind_compatible = func(a_kind: u64, b_kind: u64) -> u64 {
   if a_kind == b_kind { return 1; }
   if (is_one_bit_kind(a_kind) == 1) and (is_one_bit_kind(b_kind) == 1) { return 1; }
@@ -207,7 +183,6 @@ let is_bool_type = func(t: IrType) -> u64 {
   return 0;
 };
 
-// --- 操作码分类 -----------------------------------------------------------
 let is_int_arith = func(k: u64) -> u64 {
   if (k >= codes.InstKind.Add as u64) and (k <= codes.InstKind.AShr as u64) { return 1; }
   return 0;
@@ -260,9 +235,6 @@ let is_terminator = func(k: u64) -> u64 {
   return 0;
 };
 
-// --- 绑定 -----------------------------------------------------------------
-// 线性扫描一律用循环：过程里的指令数、绑定数、分支数、过程数都随源程序
-// 增长，递归深度不能跟着它们走。
 let scan_name = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
   let hit: u64 = loop sc(k: u64 = i, found: u64 = 0) while (k < c.count) and (found == 0) {
     if c.words[k] == name { found = k + 1; }
@@ -302,9 +274,6 @@ let bind_params = func(c: Mut(VfCtx), base: Ref(IrParam), count: u64, i: u64) ->
   return err;
 };
 
-// 模块级名字：静态数据块的符号与有体的过程名都是模块级的 #addr 值（取址以及
-// 值形式的调用直接引用它们）。它们不进绑定表，要留给参数与指令结果；模块级
-// 名字直接按名字扫模块自身的数组解析。
 let scan_data_sym = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
   let hit: u64 = loop sc(k: u64 = i, found: u64 = 0) while (k < c.data_words.len) and (found == 0) {
     if c.data_words[k] == name { found = 1; }
@@ -322,14 +291,12 @@ let scan_proc_addr = func(c: Mut(VfCtx), name: u64, i: u64) -> u64 {
   return hit;
 };
 
-// extern 过程没有入口地址，不能作为值引用。
 let module_addr_name = func(c: Mut(VfCtx), name: u64) -> u64 {
   if name == 0 { return 0; }
   if scan_data_sym(c, name, 0) == 1 { return 1; }
   return scan_proc_addr(c, name, 0);
 };
 
-// 名字解析：先查局部绑定表（参数、区域参数、指令结果），再查模块级名字。
 let name_defined = func(c: Mut(VfCtx), name: u64) -> u64 {
   if binding_pos(c, name) != 0 { return 1; }
   return module_addr_name(c, name);
@@ -384,7 +351,6 @@ let match_value_type = func(c: Mut(VfCtx), op: IrOperand, want: IrType) -> u64 {
   return same_type(have, want);
 };
 
-// --- 操作数检查 -----------------------------------------------------------
 let check_operand_list = func(c: Mut(VfCtx), it: IrInst, i: u64) -> u64 {
   if i >= it.operand_count { return 0; }
   let op: IrOperand = inst_op(it, i);
@@ -422,7 +388,6 @@ let check_result_count = func(c: Mut(VfCtx), it: IrInst, want: u64) -> u64 {
   return 0;
 };
 
-// --- 记录读取 -------------------------------------------------------------
 let region_at = func(c: Mut(VfCtx), ri: u64) -> IrRegion {
   return region_at_ref(c.m.regions, ri);
 };
@@ -478,7 +443,6 @@ let find_loop = func(c: Mut(VfCtx), label: u64) -> u64 {
   return scan_loop(c, label, 0);
 };
 
-// --- 结构性终止判定 -------------------------------------------------------
 let cases_terminate = func(c: Mut(VfCtx), cases_at: u64, case_count: u64, i: u64, depth: u64) -> u64 {
   let ok: u64 = loop sc(k: u64 = i, alive: u64 = 1) while (k < case_count) and (alive == 1) {
     let cs: IrCase = case_at(c, cases_at + k);
@@ -600,7 +564,6 @@ let region_yields = func(c: Mut(VfCtx), ri: u64, want: u64, loop_label: u64, dep
   return 0;
 };
 
-// --- 指令类型检查 ---------------------------------------------------------
 let check_int_arith = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   let t: IrType = inst_ty(it);
   if it.has_ty == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
@@ -805,8 +768,7 @@ let check_call = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   let pi: u64 = find_proc(c, it.symbol);
   if pi == 0 { return set_err(c, ERR_BAD_OPCODE()); }
   let p: IrProc = proc_at(c, pi - 1);
-  // 变参 extern 只核前 param_count 个实参的类型，多出来的实参由被调方按
-  // 自己的约定读取；非变参过程仍然要求实参个数与形参个数完全一致。
+
   if (p.is_extern == 1) and (p.is_variadic == 1) {
     if it.operand_count < p.param_count { return set_err(c, ERR_TYPE_MISMATCH()); }
   } else {
@@ -924,8 +886,7 @@ let check_switch = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   if same_type(st, inst_ty(it)) == 0 { return set_err(c, ERR_TYPE_MISMATCH()); }
   if it.default_body == NO_REGION() { return set_err(c, ERR_BAD_SWITCH()); }
   if region_ok(c, it.default_body) == 0 { return set_err(c, ERR_BAD_SWITCH()); }
-  // 分支下标与分支数先落到标量：成员访问与算术混在一处时，dotted 会丢掉
-  // 上层优先级（见 member.lain 的 dotted），比较会按错的分组编译。
+
   let cases_at: u64 = it.cases_at;
   let case_count: u64 = it.case_count;
   let case_total: u64 = c.m.case_count;
@@ -1004,7 +965,6 @@ let check_unreachable = func(c: Mut(VfCtx), it: IrInst) -> u64 {
   return check_result_count(c, it, 0);
 };
 
-// --- 单条指令 -------------------------------------------------------------
 pub let verify_inst = func(c: Mut(VfCtx), ri: u64, ii: u64) -> u64 {
   if ii >= c.m.inst_count { return set_err(c, ERR_BAD_OPCODE()); }
   let it: IrInst = inst_at(c, ii);
@@ -1039,7 +999,6 @@ pub let verify_inst = func(c: Mut(VfCtx), ri: u64, ii: u64) -> u64 {
   return set_err(c, ERR_BAD_OPCODE());
 };
 
-// --- 结果类型 -------------------------------------------------------------
 let result_type = func(c: Mut(VfCtx), it: IrInst, i: u64) -> IrType {
   let k: u64 = it.kind;
   if is_int_compare(k) == 1 { return type_bool(); }
@@ -1084,7 +1043,6 @@ let define_results = func(c: Mut(VfCtx), it: IrInst, i: u64) -> u64 {
   return define_results(c, it, i + 1);
 };
 
-// --- 区域 -----------------------------------------------------------------
 let scan_region = func(c: Mut(VfCtx), ri: u64, r: IrRegion, i: u64) -> u64 {
   let err: u64 = loop sc(k: u64 = i, e: u64 = 0) while (k < r.inst_count) and (e == 0) {
     let ii: u64 = region_inst(r, k);
@@ -1125,7 +1083,6 @@ pub let verify_region = func(c: Mut(VfCtx), ri: u64) -> u64 {
   return e;
 };
 
-// --- 过程 -----------------------------------------------------------------
 pub let verify_proc = func(c: Mut(VfCtx), pi: u64) -> u64 {
   if pi >= c.m.proc_count { return set_err(c, ERR_BAD_OPCODE()); }
   let p: IrProc = proc_at(c, pi);
@@ -1152,7 +1109,6 @@ pub let verify_proc = func(c: Mut(VfCtx), pi: u64) -> u64 {
   return 0;
 };
 
-// --- 模块 -----------------------------------------------------------------
 let dup_prev = func(c: Mut(VfCtx), i: u64, j: u64) -> u64 {
   let err: u64 = loop sc(k: u64 = j, e: u64 = 0) while (k < i) and (e == 0) {
     let a: IrProc = proc_at(c, i);
@@ -1187,7 +1143,6 @@ let check_procs = func(c: Mut(VfCtx), i: u64) -> u64 {
   return err;
 };
 
-// 小 arena 的切割测试专用：绑定表与循环标签表都取模块 scratch 里的 96 槽。
 pub let verify_module = func(m: Ref(IrModule)) -> u64 {
   let c0: VfCtx = vf_new_with_data(m, null_ref(Ref(u64)), 0);
   let c: Mut(VfCtx) = mut_of(c0);
@@ -1196,8 +1151,6 @@ pub let verify_module = func(m: Ref(IrModule)) -> u64 {
   return check_procs(c, 0);
 };
 
-// 真实模块的校验入口：没有静态数据时也走本文件静态区里的大表。真实过程的
-// 参数与指令结果轻易超过 96 个，模块里有没有 data 与绑定表容量无关。
 pub let verify_module_large = func(m: Ref(IrModule)) -> u64 {
   let c0: VfCtx = vf_new_large(m, null_ref(Ref(u64)), 0);
   let c: Mut(VfCtx) = mut_of(c0);
@@ -1206,9 +1159,6 @@ pub let verify_module_large = func(m: Ref(IrModule)) -> u64 {
   return check_procs(c, 0);
 };
 
-// 带静态数据符号表验证：data_syms[0..data_count) 里的每个名字都当作模块级
-// #addr 值参与名字解析，OperandKind.Value 才能引用字符串字面量等数据符号。真实模块的
-// 参数与指令结果远超 96 个，所以这里用本文件静态区里的 LARGE_BINDINGS() 槽表。
 pub let verify_module_with_data = func(m: Ref(IrModule), data_syms: Ref(u64), data_count: u64) -> u64 {
   let c0: VfCtx = vf_new_large(m, data_syms, data_count);
   let c: Mut(VfCtx) = mut_of(c0);

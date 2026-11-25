@@ -1,4 +1,3 @@
-// decl.lain —— 过程与顶层 let 的编译：签名解析、栈槽铺底、过程体交给 core。
 let st = import("src::driver::state");
 let ty = import("src::sema::types");
 let env = import("src::sema::env");
@@ -26,7 +25,6 @@ let hr = import("src::driver::host_rt");
 
 extern decl_compile_vmod_p2(k: Mut(st.State), vmod: u64, src: u64, bodyg: u64, snap_buf: Mut(u8), snap_cnt: u64) -> u64 = lainc_compile_functor_mod_p2;
 
-// --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 let new_ty = func(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); };
 let new_val = func(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); };
 let box = func(k: Mut(st.State)) -> Mut(u64) { return ax.box(k); };
@@ -36,8 +34,8 @@ let n_sym = func(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); };
 let n_at = func(g: u64, i: u64) -> u64 { return ax.n_at(g, i); };
 let no_slot = func() -> u64 { return ax.no_slot(); };
 let skip_semi = func(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); };
-let e_type = func() -> u64 { return ax.e_type(); };
-let e_ast = func() -> u64 { return ax.e_ast(); };
+let e_type = func() -> u64 { return ax.FailKind.Type as u64; };
+let e_ast = func() -> u64 { return ax.FailKind.Ast as u64; };
 let tnone = func(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); };
 let expect_sym = func(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); };
 let parse_type = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); };
@@ -50,7 +48,6 @@ let push_val = func(k: Mut(st.State), v: Mut(ty.Val)) -> u64 { return cx.push_va
 let block_mode = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 { return sm.block_mode(k, g, i, term, slot, tp); };
 let expr = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return co.expr(k, g, i, minp, want, out); };
 
-// --- 过程 ---------------------------------------------------------------
 let emit_ret_guard = func(k: Mut(st.State), rt: Mut(ty.Ty), term: Mut(u64)) -> u64 {
   if box_get(term) == 1 { return 0; }
   if ty.ty_known(rt) == 0 {
@@ -61,7 +58,6 @@ let emit_ret_guard = func(k: Mut(st.State), rt: Mut(ty.Ty), term: Mut(u64)) -> u
   return ir.emit_jump(k, codes.InstKind.Unreachable as u64, 0);
 };
 
-// 过程与顶层值都按「模块前缀 + 名字」定名，跨源同名不撞。
 let proc_name = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   if i >= 2 and ax.is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() {
@@ -83,7 +79,6 @@ let begin_proc = func(k: Mut(st.State), q: u64, rt: Mut(ty.Ty)) -> u64 {
   return ir.proc_begin(k, q);
 };
 
-// 值聚合返回的隐藏首参：%_ret: 指针。后面 return 的整块拷贝就写它。
 let sret_param = func(k: Mut(st.State)) -> u64 {
   let vn: u64 = ir.fresh_t(k);
   let ap: Mut(ty.Ty) = ir.taddr(k);
@@ -96,12 +91,11 @@ let bind_gen_vals = func(k: Mut(st.State), nms: Mut(u64), vals: Mut(ctf.CtVal), 
   let nm: u64 = deref(cx.word_idx(nms, i));
   let v: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), vals) + i * 24);
   ctf.bind(k, nm, ctf.v_kind(v), ctf.v_a(v), ctf.v_b(v));
-  // 模块见证参数同步进记录区，嵌套泛型调用才能自动找到它。
+
   if ctf.v_kind(v) == 9 { gv.push_mod_implicit(k, ctf.v_a(v), ctf.v_b(v)); }
   return bind_gen_vals(k, nms, vals, i + 1, n);
 };
 
-// 处理已经弹出的泛型队列条目；调用方负责弹出，避免重复弹出丢条目。
 let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   let q: u64 = ge.mangled_q;
   let tpl_e: Mut(modules.SymEntry) = ge.tpl_e;
@@ -139,7 +133,6 @@ let flush_gen_rec = func(k: Mut(st.State), ge: Mut(gn.GenQRec)) -> u64 {
   return flush_queue(k);
 };
 
-// 函子 phase2 队列，条目 40 字节：[虚拟模块号, 源号, 体组, 绑定快照, 快照条数]。
 let FqRec = struct {
   vmod: u64,
   src: u64,
@@ -152,7 +145,6 @@ let fq_at = func(k: Mut(st.State), i: u64) -> Mut(FqRec) {
   return ptr_cast(Mut(FqRec), st.st_fqbase(k) + i * 40);
 };
 
-// 队列里还有待编条目（只看不弹；弹出会丢掉条目）。
 let queue_pending = func(k: Mut(st.State)) -> u64 {
   if st.st_qhead(k) < st.st_q_count(k) { return 1; }
   let gb: Mut(gn.GenQBlk) = gn.qblk(k);
@@ -160,8 +152,6 @@ let queue_pending = func(k: Mut(st.State)) -> u64 {
   return 0;
 };
 
-// 过程体内实例化的函子等到所有过程收尾后补编 phase2；内层重入时已处理的条目
-// 用 vmod = 0 标记，不会被重编。
 let flush_fq = func(k: Mut(st.State)) -> u64 {
   let total: u64 = st.st_fqused(k) / 40;
   let done: u64 = loop w(i: u64 = 0) while i < st.st_fqused(k) / 40 {
@@ -172,7 +162,7 @@ let flush_fq = func(k: Mut(st.State)) -> u64 {
       if st.st_ok(k) == 0 {
         let a: u64 = decl_compile_vmod_p2(k, vmod, r.src, r.bodyg, r.snap, r.cnt);
       }
-      // phase2 可能再排进匿名过程、泛型单态或新的函子实例，先把它们排空。
+
       let more: u64 = if queue_pending(k) == 1 or st.st_fqused(k) / 40 > total { 1 } else { 0 };
       if more == 1 { return flush_queue(k); }
     }
@@ -182,9 +172,6 @@ let flush_fq = func(k: Mut(st.State)) -> u64 {
   return done;
 };
 
-// 匿名过程、泛型单态化与函子 phase2 按批排空：每轮处理一条，再回到队头。
-// 排空的调用非常频繁（每个过程体收尾都调一次），所以只在最外层那一趟记事件：
-// 门有两个格子：[行进中的排空深度, 已处理条目数]，没真的处理条目就不记。
 let drain_gate: Array(u64, 2) = [0, 0];
 
 let gate_cells = func() -> MutSlice(u64) {
@@ -229,7 +216,7 @@ let drain_queue = func(k: Mut(st.State)) -> u64 {
     let b: u64 = compile_body(k, g, node, q, row0);
     let h0: u64 = handled();
     if st.st_ok(k) != 0 {
-      // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
+
       let m: Ref(u8) = "anonymous func cannot capture";
       let d: u64 = ir.diag(k, 0, 2, m, 29);
     }
@@ -290,7 +277,7 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   };
   let term: Mut(u64) = box(k);
   let after: u64 = block_mode(k, bodyg, 0, term, no_slot(), rt);
-  // 函数体的形参也是所有权值：正常走到末尾时按逆序 drop；显式 return 已处理。
+
   if box_get(term) == 0 { let dp: u64 = drop.drop_all(k); }
   let guard: u64 = emit_ret_guard(k, rt, term);
   ir.region_end(k);
@@ -300,7 +287,6 @@ let compile_body_with = func(k: Mut(st.State), pg: u64, rt: Mut(ty.Ty), bodyg: u
   return flush_queue(k);
 };
 
-// 过程体：i 指向形参组，返回体之后的位置。
 let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64, row: Mut(ef.EffRow)) -> u64 {
   let pg: u64 = n_at(g, i);
   let l: Mut(ef.FnLayout) = ef.fn_layout(k, g, i);
@@ -312,12 +298,11 @@ let compile_body = func(k: Mut(st.State), g: u64, i: u64, q: u64, row: Mut(ef.Ef
   return l.next_i;
 };
 
-// 跳到过程的体之后（花括号组结束），用于只由编译期求值器解释的过程。
 let skip_body = func(g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
   if ax.is_group(g, i) == 1 {
-    if ax.delim_of(g, i) == ax.dl_brace() { return i + 1; }
+    if ax.delim_of(g, i) == ax.Delim.Brace as u64 { return i + 1; }
   }
   return skip_body(g, i + 1);
 };
@@ -333,7 +318,6 @@ pub let compile_func = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return compile_body(k, g, i + 2, q, row);
 };
 
-// let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
 pub let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) -> u64 {
   let se: Mut(modules.SymEntry) = modules.find_here(k, name);
   let q: u64 = if is_null(se) { modules.qual(k, st.st_scope(k), name) } else { modules.sym_qual(se) };
@@ -345,7 +329,6 @@ pub let compile_func_expr = func(k: Mut(st.State), g: u64, i: u64, name: u64) ->
   return skip_semi(g, b);
 };
 
-// 顶层的普通值：零参过程，把值算出来直接返回。
 pub let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let j0: u64 = i + 2;
@@ -405,7 +388,6 @@ pub let compile_top_let = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   return skip_semi(g, nj);
 };
 
-// 静态数据的读数过程：表与字符串直接返回数据符号的地址。
 pub let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, t: Mut(ty.Ty)) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let ip0: u64 = st.st_in_proc(k);
@@ -421,7 +403,6 @@ pub let compile_data_ref = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname
   return skip_semi(g, nj);
 };
 
-// 顶层聚合构造：数据块先登记成零字节，再由这个过程把字段写进去。
 pub let compile_data_agg = func(k: Mut(st.State), g: u64, i: u64, nj: u64, dname: u64, sh: u64, fg: u64) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let t: Mut(ty.Ty) = new_ty(k);
