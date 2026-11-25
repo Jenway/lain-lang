@@ -1,0 +1,1055 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
+use import("std::option")::{ Option };
+use import("std::str")::{ eq, sub };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::ast::model")::{
+  AstModule, Decl, DeclId, IdRange, Expr, ExprId, LitKind, Stmt, StmtId,
+  LetDecl, FuncExpr, StructExpr, StructLitExpr, FieldDef, FieldInit, Param, BinOp
+};
+use import("frontend::sema::hir")::{
+  HirModule, TypeId, HirFnId, HirLocalId, HirExprId, HirStmtId, HirRange,
+  SemaErr, SemaFail, IntInfo, HirType, FieldInfo, StructInfo, HirParam, HirLocal,
+  HirUnary, HirBinary, HirCall, HirIf, HirBlock, HirField, HirFieldInit,
+  HirStructLit, HirCast, HirExprKind, HirExpr, HirLet, HirAssign, HirWhile,
+  HirStmt, HirFn
+};
+use import("frontend::sema::resolve")::{ Scope, SymKind, SymEntry };
+use import("frontend::sema::effects")::{ EffRow };
+use import("frontend::sema::comptime")::{ parse_int_literal, eval_bool_const };
+
+pub {
+  let FlatDecl = struct {
+    id: u32,
+    is_pub: bool
+  };
+
+  let Ctx = struct {
+    hir: HirModule,
+    globals: Scope,
+    locals: Scope,
+    struct_tys: Vec(TypeId),
+    decls: Vec(FlatDecl),
+    void_tid: TypeId,
+    bool_tid: TypeId,
+    i64_tid: TypeId,
+    cur_ret: TypeId
+  };
+};
+
+let blank = func() -> Slice(u8) {
+  return make_slice(Slice(u8), null_ref(Ref(u8)), 0);
+};
+
+let word_at = func(text: Slice(u8), sp: Span) -> Slice(u8) {
+  return sub(text, sp.start as u64, sp.end as u64);
+};
+
+let align_up = func(v: u32, a: u32) -> u32 {
+  if a <= 1 {
+    return v;
+  }
+  let rem: u32 = v % a;
+  if rem == 0 {
+    return v;
+  }
+  return v + (a - rem);
+};
+
+let type_tag = func(t: HirType) -> u32 {
+  return match t {
+    Void => 0,
+    Bool => 1,
+    Int(_) => 2,
+    Float(_) => 3,
+    Ref(_) => 4,
+    Mut(_) => 5,
+    Struct(_) => 6,
+    Enum(_) => 7,
+    Fn(_) => 8,
+    HirNever => 9,
+  };
+};
+
+let type_bits = func(t: HirType) -> u32 {
+  return match t {
+    Int(ii) => ii.bits as u32,
+    Float(w) => w as u32,
+    _ => 0,
+  };
+};
+
+let type_signed = func(t: HirType) -> bool {
+  return match t {
+    Int(ii) => ii.signed,
+    _ => false,
+  };
+};
+
+let type_inner = func(t: HirType) -> TypeId {
+  return match t {
+    Ref(inner) => inner,
+    Mut(inner) => inner,
+    _ => TypeId { idx: 0 },
+  };
+};
+
+let type_index = func(t: HirType) -> u32 {
+  return match t {
+    Struct(idx) => idx,
+    Enum(idx) => idx,
+    Fn(idx) => idx,
+    _ => 0,
+  };
+};
+
+let same_hir_type = func(a: HirType, b: HirType) -> bool {
+  let tag: u32 = type_tag(a);
+  if tag != type_tag(b) {
+    return false;
+  }
+  if tag == 2 {
+    return (type_bits(a) == type_bits(b)) and (type_signed(a) == type_signed(b));
+  }
+  if tag == 3 {
+    return type_bits(a) == type_bits(b);
+  }
+  if (tag == 4) or (tag == 5) {
+    return type_inner(a).idx == type_inner(b).idx;
+  }
+  if (tag == 6) or (tag == 7) or (tag == 8) {
+    return type_index(a) == type_index(b);
+  }
+  return true;
+};
+
+let is_comparison = func(op: BinOp) -> bool {
+  return match op {
+    Eq => true,
+    Ne => true,
+    Lt => true,
+    Le => true,
+    Gt => true,
+    Ge => true,
+    And => true,
+    Or => true,
+    _ => false,
+  };
+};
+
+let new_ctx = func() -> Ctx {
+  return Ctx {
+    hir: HirModule::new(),
+    globals: Scope::new(),
+    locals: Scope::new(),
+    struct_tys: Vec(TypeId)::new(),
+    decls: Vec(FlatDecl)::new(),
+    void_tid: TypeId { idx: 0 },
+    bool_tid: TypeId { idx: 0 },
+    i64_tid: TypeId { idx: 0 },
+    cur_ret: TypeId { idx: 0 }
+  };
+};
+
+let fail_at = func(err: SemaErr) !{ SemaFail } -> HirExprId {
+  perform SemaFail::fail(err);
+  return HirExprId { idx: 0 };
+};
+
+let fail_type = func(err: SemaErr) !{ SemaFail } -> TypeId {
+  perform SemaFail::fail(err);
+  return TypeId { idx: 0 };
+};
+
+let span_at = func(ast: Ref(AstModule() ?{ al: A }), r: IdRange) ?{ A: Allocator = SystemAlloc } -> Span {
+  return ast.path_segs.get((r.start as u64) + (r.len as u64) - 1);
+};
+
+let add_named = func(c: Mut(Ctx), name: Slice(u8), t: HirType, sp: Span) !{ OomErr, SemaFail } -> TypeId {
+  let tid: TypeId = HirModule::add_type(mut_of(c.hir), t);
+  let kind: SymKind = SymKind::BuiltinTy { tid };
+  Scope::define(mut_of(c.globals), name, kind, sp);
+  return tid;
+};
+
+let seed_builtins = func(c: Mut(Ctx), sp: Span) !{ OomErr, SemaFail } {
+  c.void_tid = add_named(c, "()", HirType::Void, sp);
+  c.bool_tid = add_named(c, "bool", HirType::Bool, sp);
+  add_named(c, "u8", HirType::Int { IntInfo { bits: 8, signed: false } }, sp);
+  add_named(c, "u16", HirType::Int { IntInfo { bits: 16, signed: false } }, sp);
+  add_named(c, "u32", HirType::Int { IntInfo { bits: 32, signed: false } }, sp);
+  add_named(c, "u64", HirType::Int { IntInfo { bits: 64, signed: false } }, sp);
+  add_named(c, "i8", HirType::Int { IntInfo { bits: 8, signed: true } }, sp);
+  add_named(c, "i16", HirType::Int { IntInfo { bits: 16, signed: true } }, sp);
+  add_named(c, "i32", HirType::Int { IntInfo { bits: 32, signed: true } }, sp);
+  c.i64_tid = add_named(c, "i64", HirType::Int { IntInfo { bits: 64, signed: true } }, sp);
+  add_named(c, "f32", HirType::Float { 32 }, sp);
+  add_named(c, "f64", HirType::Float { 64 }, sp);
+  add_named(c, "Never", HirType::HirNever, sp);
+};
+
+let flatten_decls = func(ast: Ref(AstModule() ?{ al: A }), c: Mut(Ctx))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let top: IdRange = ast.top_decls;
+  let i: u64 = 0;
+  while i < (top.len as u64) {
+    let did: DeclId = ast.decl_lists.get((top.start as u64) + i);
+    c.decls.push(FlatDecl { id: did.idx, is_pub: false });
+    i = i + 1;
+  };
+  let cursor: u64 = 0;
+  while cursor < c.decls.len() {
+    let fd: FlatDecl = c.decls.get(cursor);
+    let d: Decl = ast.decls.get(fd.id as u64);
+    match d {
+      PubBlock(r) => {
+        let j: u64 = 0;
+        while j < (r.len as u64) {
+          let cid: DeclId = ast.decl_lists.get((r.start as u64) + j);
+          c.decls.push(FlatDecl { id: cid.idx, is_pub: true });
+          j = j + 1;
+        };
+      },
+      _ => {},
+    };
+    cursor = cursor + 1;
+  };
+};
+
+let intern = func(c: Mut(Ctx), t: HirType) !{ OomErr } -> TypeId {
+  let n: u64 = c.hir.types.len();
+  let i: u64 = 0;
+  let hit: bool = false;
+  let at: u32 = 0;
+  while (i < n) and (hit == false) {
+    let cur: HirType = c.hir.types.get(i);
+    if same_hir_type(cur, t) {
+      hit = true;
+      at = i as u32;
+    }
+    i = i + 1;
+  };
+  if hit {
+    return TypeId { idx: at };
+  }
+  return HirModule::add_type(mut_of(c.hir), t);
+};
+
+let struct_tid = func(c: Mut(Ctx), idx: u32) -> TypeId {
+  return c.struct_tys.get(idx as u64);
+};
+
+let struct_size = func(c: Mut(Ctx), idx: u32) -> u32 {
+  let st: StructInfo = HirModule::struct_at(ref_of(c.hir), idx);
+  return st.size;
+};
+
+let struct_align = func(c: Mut(Ctx), idx: u32) -> u32 {
+  let st: StructInfo = HirModule::struct_at(ref_of(c.hir), idx);
+  return st.align;
+};
+
+let type_size = func(c: Mut(Ctx), t: TypeId) -> u32 {
+  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  return match ht {
+    Void => 0,
+    Bool => 1,
+    Int(ii) => (ii.bits as u32) / 8,
+    Float(w) => (w as u32) / 8,
+    Ref(_) => 8,
+    Mut(_) => 8,
+    Struct(idx) => struct_size(c, idx),
+    Enum(_) => 8,
+    Fn(_) => 8,
+    HirNever => 0,
+  };
+};
+
+let type_align = func(c: Mut(Ctx), t: TypeId) -> u32 {
+  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  return match ht {
+    Void => 1,
+    Bool => 1,
+    Int(ii) => (ii.bits as u32) / 8,
+    Float(w) => (w as u32) / 8,
+    Ref(_) => 8,
+    Mut(_) => 8,
+    Struct(idx) => struct_align(c, idx),
+    Enum(_) => 8,
+    Fn(_) => 8,
+    HirNever => 1,
+  };
+};
+
+let strip_refs = func(c: Mut(Ctx), t: TypeId) -> TypeId {
+  let cur: TypeId = t;
+  let done: bool = false;
+  while done == false {
+    let ht: HirType = HirModule::type_at(ref_of(c.hir), cur);
+    match ht {
+      Ref(inner) => {
+        cur = inner;
+      },
+      Mut(inner) => {
+        cur = inner;
+      },
+      _ => {
+        done = true;
+      },
+    };
+  };
+  return cur;
+};
+
+let struct_index = func(c: Mut(Ctx), t: TypeId) -> Option(u32) {
+  let core: TypeId = strip_refs(c, t);
+  let ht: HirType = HirModule::type_at(ref_of(c.hir), core);
+  return match ht {
+    Struct(idx) => Option(u32)::some(idx),
+    _ => Option(u32)::none(),
+  };
+};
+
+let fn_index = func(c: Mut(Ctx), t: TypeId) -> Option(u32) {
+  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  return match ht {
+    Fn(idx) => Option(u32)::some(idx),
+    _ => Option(u32)::none(),
+  };
+};
+
+let same_type = func(c: Mut(Ctx), a: TypeId, b: TypeId) -> bool {
+  if a.idx == b.idx {
+    return true;
+  }
+  let ta: HirType = HirModule::type_at(ref_of(c.hir), a);
+  let tb: HirType = HirModule::type_at(ref_of(c.hir), b);
+  return same_hir_type(ta, tb);
+};
+
+let expr_ty = func(c: Mut(Ctx), id: HirExprId) -> TypeId {
+  let e: HirExpr = HirModule::expr_at(ref_of(c.hir), id);
+  return e.ty;
+};
+
+let mk = func(c: Mut(Ctx), kind: HirExprKind, ty: TypeId, sp: Span) !{ OomErr } -> HirExprId {
+  let e: HirExpr = HirExpr { kind: kind, ty: ty, span: sp };
+  return HirModule::add_expr(mut_of(c.hir), e);
+};
+
+let void_expr = func(c: Mut(Ctx), sp: Span) !{ OomErr } -> HirExprId {
+  let blk: HirBlock = HirBlock { stmts: HirRange { start: 0, len: 0 }, tail: Option(HirExprId)::none() };
+  return mk(c, HirExprKind::Block { blk }, c.void_tid, sp);
+};
+
+let named_tid = func(c: Mut(Ctx), e: SymEntry, sp: Span) !{ OomErr, SemaFail } -> TypeId {
+  let tid: TypeId = match e.kind {
+    BuiltinTy(t) => t,
+    StructDef(idx) => struct_tid(c, idx),
+    _ => fail_type(SemaErr::TypeMismatch(sp)),
+  };
+  return tid;
+};
+
+let type_from_name = func(c: Mut(Ctx), name: Slice(u8), sp: Span) !{ OomErr, SemaFail } -> TypeId {
+  let found: Option(SymEntry) = Scope::lookup(ref_of(c.globals), name);
+  let tid: TypeId = match found {
+    Some(e) => named_tid(c, e, sp),
+    None => fail_type(SemaErr::UnknownIdent(sp)),
+  };
+  return tid;
+};
+
+let path_tid = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), r: IdRange, sp: Span)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
+{
+  let tid: TypeId = if r.len == 0 {
+    fail_type(SemaErr::Unsupported(sp))
+  } else {
+    type_from_name(c, word_at(text, span_at(ast, r)), sp)
+  };
+  return tid;
+};
+
+let unit_type = func(c: Mut(Ctx), se: StructExpr, sp: Span) !{ OomErr, SemaFail } -> TypeId {
+  let tid: TypeId = if se.fields.len == 0 {
+    c.void_tid
+  } else {
+    fail_type(SemaErr::Unsupported(sp))
+  };
+  return tid;
+};
+
+let wrap_tag = func(name: Slice(u8)) -> u8 {
+  if eq(name, "Ref") {
+    return 1;
+  }
+  if eq(name, "Mut") {
+    return 2;
+  }
+  if eq(name, "Slice") {
+    return 3;
+  }
+  if eq(name, "MutSlice") {
+    return 4;
+  }
+  return 0;
+};
+
+let wrap_type = func(tag: u8, inner: TypeId) -> HirType {
+  if tag == 1 {
+    return HirType::Ref { inner };
+  }
+  if tag == 2 {
+    return HirType::Mut { inner };
+  }
+  if tag == 3 {
+    return HirType::Ref { inner };
+  }
+  return HirType::Mut { inner };
+};
+
+let resolve_type = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), e: ExprId, sp: Span)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
+{
+  let wrappers: Vec(u8) = Vec(u8)::new();
+  let cur: ExprId = e;
+  let tid: TypeId = TypeId { idx: 0 };
+  let done: bool = false;
+  let steps: u32 = 0;
+  while (done == false) and (steps < 64) {
+    steps = steps + 1;
+    let ex: Expr = ast.exprs.get(cur.idx as u64);
+    match ex {
+      Ident(nsp) => {
+        tid = type_from_name(c, word_at(text, nsp), sp);
+        done = true;
+      },
+      Path(r) => {
+        tid = path_tid(ast, text, c, r, sp);
+        done = true;
+      },
+      Struct(se) => {
+        tid = unit_type(c, se, sp);
+        done = true;
+      },
+      Call(call) => {
+        let callee: Expr = ast.exprs.get(call.callee.idx as u64);
+        let cname: Slice(u8) = match callee {
+          Ident(nsp) => word_at(text, nsp),
+          _ => blank(),
+        };
+        let tag: u8 = wrap_tag(cname);
+        if (tag == 0) or (call.args.len != 1) {
+          tid = fail_type(SemaErr::Unsupported(sp));
+          done = true;
+        } else {
+          wrappers.push(tag);
+          cur = ast.expr_lists.get(call.args.start as u64);
+        }
+      },
+      _ => {
+        tid = fail_type(SemaErr::Unsupported(sp));
+        done = true;
+      },
+    };
+  };
+  if (done == false) or (steps >= 64) {
+    return fail_type(SemaErr::Unsupported(sp));
+  }
+  while wrappers.len() > 0 {
+    let n: u64 = wrappers.len();
+    let tag: u8 = wrappers.get(n - 1);
+    wrappers.pop();
+    tid = intern(c, wrap_type(tag, tid));
+  };
+  return tid;
+};
+
+let layout_struct = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), idx: u32, se: StructExpr)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let start: u32 = c.hir.fields.len() as u32;
+  let off: u32 = 0;
+  let max_align: u32 = 1;
+  let i: u64 = 0;
+  while i < (se.fields.len as u64) {
+    let fdef: FieldDef = ast.fields.get((se.fields.start as u64) + i);
+    let tid: TypeId = resolve_type(ast, text, c, fdef.ty, fdef.span);
+    let fa: u32 = type_align(c, tid);
+    let fsz: u32 = type_size(c, tid);
+    if fa > max_align {
+      max_align = fa;
+    }
+    off = align_up(off, fa);
+    let fname: Slice(u8) = word_at(text, fdef.name);
+    HirModule::add_field(mut_of(c.hir), FieldInfo { name: fname, ty: tid, offset: off });
+    off = off + fsz;
+    i = i + 1;
+  };
+  let total: u32 = align_up(off, max_align);
+  let used: u32 = (c.hir.fields.len() as u32) - start;
+  HirModule::set_struct_layout(mut_of(c.hir), idx, HirRange { start: start, len: used }, total, max_align);
+};
+
+let declare_structs = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let i: u64 = 0;
+  while i < c.decls.len() {
+    let fd: FlatDecl = c.decls.get(i);
+    let d: Decl = ast.decls.get(fd.id as u64);
+    match d {
+      Let(ld) => {
+        let init: Expr = ast.exprs.get(ld.init.idx as u64);
+        match init {
+          Struct(_) => {
+            let name: Slice(u8) = word_at(text, ld.name);
+            let sp: Span = ast.decl_spans.get(fd.id as u64);
+            let st: StructInfo = StructInfo { name: name, fields: HirRange { start: 0, len: 0 }, size: 0, align: 1 };
+            let idx: u32 = HirModule::add_struct(mut_of(c.hir), st);
+            let tid: TypeId = HirModule::add_type(mut_of(c.hir), HirType::Struct { idx });
+            c.struct_tys.push(tid);
+            let kind: SymKind = SymKind::StructDef { idx };
+            Scope::define(mut_of(c.globals), name, kind, sp);
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    i = i + 1;
+  };
+  let idx: u32 = 0;
+  let k: u64 = 0;
+  while k < c.decls.len() {
+    let fd2: FlatDecl = c.decls.get(k);
+    let d2: Decl = ast.decls.get(fd2.id as u64);
+    match d2 {
+      Let(ld2) => {
+        let init2: Expr = ast.exprs.get(ld2.init.idx as u64);
+        match init2 {
+          Struct(se) => {
+            layout_struct(ast, text, c, idx, se);
+            idx = idx + 1;
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    k = k + 1;
+  };
+};
+
+let declare_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let name: Slice(u8) = word_at(text, ld.name);
+  let sp: Span = ast.decl_spans.get(fd.id as u64);
+  let ret: TypeId = c.void_tid;
+  match fe.ret_ty {
+    Some(re) => {
+      ret = resolve_type(ast, text, c, re, sp);
+    },
+    None => {},
+  };
+  let fn_idx: u32 = c.hir.fns.len() as u32;
+  HirModule::add_type(mut_of(c.hir), HirType::Fn { fn_idx });
+  let pstart: u32 = c.hir.params.len() as u32;
+  let pi: u64 = 0;
+  while pi < (fe.params.len as u64) {
+    let p: Param = ast.params.get((fe.params.start as u64) + pi);
+    let ptid: TypeId = resolve_type(ast, text, c, p.ty, p.span);
+    let pname: Slice(u8) = word_at(text, p.name);
+    let item: HirParam = HirParam { name: pname, ty: ptid, local: HirLocalId { idx: 0 } };
+    HirModule::add_param(mut_of(c.hir), item);
+    pi = pi + 1;
+  };
+  let used: u32 = (c.hir.params.len() as u32) - pstart;
+  let f: HirFn = HirFn {
+    name: name,
+    is_pub: fd.is_pub or ld.is_pub,
+    params: HirRange { start: pstart, len: used },
+    locals: HirRange { start: 0, len: 0 },
+    ret_ty: ret,
+    body: HirExprId { idx: 0 },
+    span: sp
+  };
+  let fid: HirFnId = HirModule::add_fn(mut_of(c.hir), f);
+  let kind: SymKind = SymKind::Func { fid };
+  Scope::define(mut_of(c.globals), name, kind, sp);
+};
+
+let declare_fns = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let i: u64 = 0;
+  while i < c.decls.len() {
+    let fd: FlatDecl = c.decls.get(i);
+    let d: Decl = ast.decls.get(fd.id as u64);
+    match d {
+      Let(ld) => {
+        let init: Expr = ast.exprs.get(ld.init.idx as u64);
+        match init {
+          Func(fe) => {
+            declare_fn(ast, text, c, fd, ld, fe);
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    i = i + 1;
+  };
+};
+
+let collect_effects = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), r: IdRange, sp: Span)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let row: EffRow = EffRow::new();
+  let rm: Mut(EffRow) = mut_of(row);
+  let i: u64 = 0;
+  while i < (r.len as u64) {
+    let eid: ExprId = ast.expr_lists.get((r.start as u64) + i);
+    let ex: Expr = ast.exprs.get(eid.idx as u64);
+    let name: Slice(u8) = match ex {
+      Ident(nsp) => word_at(text, nsp),
+      Path(p) => {
+        if p.len == 0 {
+          blank()
+        } else {
+          word_at(text, span_at(ast, p))
+        }
+      },
+      _ => blank(),
+    };
+    if name.len == 0 {
+      perform SemaFail::fail(SemaErr::Unsupported(sp));
+      return;
+    }
+    if EffRow::add(rm, name) == false {
+      perform SemaFail::fail(SemaErr::DuplicateSym(sp));
+      return;
+    }
+    i = i + 1;
+  };
+};
+
+let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), e: ExprId, want: Option(TypeId))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirExprId
+{
+  let ex: Expr = ast.exprs.get(e.idx as u64);
+  let sp: Span = ast.expr_spans.get(e.idx as u64);
+  let hid: HirExprId = HirExprId { idx: 0 };
+  match ex {
+    Lit(lk) => {
+      let tid: TypeId = match want {
+        Some(w) => w,
+        None => c.i64_tid,
+      };
+      match lk {
+        Int => {
+          let parsed: Option(i64) = parse_int_literal(text, sp);
+          match parsed {
+            Some(v) => {
+              hid = mk(c, HirExprKind::IntConst { v }, tid, sp);
+            },
+            None => {
+              hid = fail_at(SemaErr::TypeMismatch(sp));
+            },
+          };
+        },
+        Bool(b) => {
+          hid = mk(c, HirExprKind::BoolConst { b }, c.bool_tid, sp);
+        },
+        _ => {
+          hid = fail_at(SemaErr::Unsupported(sp));
+        },
+      };
+    },
+    Ident(nsp) => {
+      let name: Slice(u8) = word_at(text, nsp);
+      let found: Option(SymEntry) = Scope::lookup(ref_of(c.locals), name);
+      match found {
+        Some(ent) => {
+          match ent.kind {
+            Local(lid) => {
+              let lt: HirLocal = HirModule::local_at(ref_of(c.hir), lid);
+              hid = mk(c, HirExprKind::Local { lid }, lt.ty, sp);
+            },
+            Func(fid) => {
+              let ftid: TypeId = intern(c, HirType::Fn { fid.idx });
+              hid = mk(c, HirExprKind::Fn { fid }, ftid, sp);
+            },
+            _ => {
+              hid = fail_at(SemaErr::TypeMismatch(sp));
+            },
+          };
+        },
+        None => {
+          hid = fail_at(SemaErr::UnknownIdent(sp));
+        },
+      };
+    },
+    Path(r) => {
+      if r.len == 0 {
+        hid = fail_at(SemaErr::Unsupported(sp));
+      } else {
+        let name: Slice(u8) = word_at(text, span_at(ast, r));
+        let found: Option(SymEntry) = Scope::lookup(ref_of(c.locals), name);
+        match found {
+          Some(ent) => {
+            match ent.kind {
+              Local(lid) => {
+                let lt: HirLocal = HirModule::local_at(ref_of(c.hir), lid);
+                hid = mk(c, HirExprKind::Local { lid }, lt.ty, sp);
+              },
+              Func(fid) => {
+                let ftid: TypeId = intern(c, HirType::Fn { fid.idx });
+                hid = mk(c, HirExprKind::Fn { fid }, ftid, sp);
+              },
+              _ => {
+                hid = fail_at(SemaErr::TypeMismatch(sp));
+              },
+            };
+          },
+          None => {
+            hid = fail_at(SemaErr::UnknownIdent(sp));
+          },
+        };
+      }
+    },
+    Unary(u) => {
+      let inner: HirExprId = check_expr_as(ast, text, c, u.operand, Option(TypeId)::none());
+      let it: TypeId = expr_ty(c, inner);
+      let k: HirExprKind = HirExprKind::Unary { HirUnary { op: u.op, operand: inner } };
+      match u.op {
+        Not => {
+          if same_type(c, it, c.bool_tid) {
+            hid = mk(c, k, c.bool_tid, sp);
+          } else {
+            hid = fail_at(SemaErr::TypeMismatch(sp));
+          }
+        },
+        _ => {
+          hid = mk(c, k, it, sp);
+        },
+      };
+    },
+    Binary(b) => {
+      let lhs: HirExprId = check_expr_as(ast, text, c, b.lhs, Option(TypeId)::none());
+      let lt: TypeId = expr_ty(c, lhs);
+      let rhs: HirExprId = check_expr_as(ast, text, c, b.rhs, Option(TypeId)::some(lt));
+      let rt: TypeId = expr_ty(c, rhs);
+      let k: HirExprKind = HirExprKind::Binary { HirBinary { op: b.op, lhs: lhs, rhs: rhs } };
+      if is_comparison(b.op) {
+        hid = mk(c, k, c.bool_tid, sp);
+      } else if same_type(c, lt, rt) {
+        hid = mk(c, k, lt, sp);
+      } else {
+        hid = fail_at(SemaErr::TypeMismatch(sp));
+      }
+    },
+    Field(f) => {
+      let base: HirExprId = check_expr_as(ast, text, c, f.base, Option(TypeId)::none());
+      let bt: TypeId = expr_ty(c, base);
+      let si: Option(u32) = struct_index(c, bt);
+      let idx: u32 = match si {
+        Some(v) => v,
+        None => {
+          return fail_at(SemaErr::TypeMismatch(sp));
+        },
+      };
+      let fname: Slice(u8) = word_at(text, f.field);
+      let found: Option(u32) = HirModule::find_field(ref_of(c.hir), idx, fname);
+      let abs: u32 = match found {
+        Some(v) => v,
+        None => {
+          return fail_at(SemaErr::UnknownField(sp));
+        },
+      };
+      let info: FieldInfo = HirModule::field_at(ref_of(c.hir), abs);
+      let k: HirExprKind = HirExprKind::Field { HirField { base: base, struct_idx: idx, field: abs } };
+      hid = mk(c, k, info.ty, sp);
+    },
+    Call(call) => {
+      let cal: HirExprId = check_expr_as(ast, text, c, call.callee, Option(TypeId)::none());
+      let ct: TypeId = expr_ty(c, cal);
+      let fi: Option(u32) = fn_index(c, ct);
+      let fidx: u32 = match fi {
+        Some(v) => v,
+        None => {
+          return fail_at(SemaErr::Unsupported(sp));
+        },
+      };
+      let fnid: HirFnId = HirFnId { idx: fidx };
+      let f: HirFn = HirModule::fn_at(ref_of(c.hir), fnid);
+      if (call.args.len as u64) != (f.params.len as u64) {
+        return fail_at(SemaErr::ArityMismatch(sp));
+      }
+      let astart: u32 = c.hir.expr_lists.len() as u32;
+      let ai: u64 = 0;
+      while ai < (call.args.len as u64) {
+        let aid: ExprId = ast.expr_lists.get((call.args.start as u64) + ai);
+        let p: HirParam = HirModule::param_at(ref_of(c.hir), f.params.start + (ai as u32));
+        let ah: HirExprId = check_expr_as(ast, text, c, aid, Option(TypeId)::some(p.ty));
+        HirModule::add_expr_id(mut_of(c.hir), ah);
+        ai = ai + 1;
+      };
+      let used: u32 = (c.hir.expr_lists.len() as u32) - astart;
+      let k: HirExprKind = HirExprKind::Call { HirCall { callee: cal, args: HirRange { start: astart, len: used } } };
+      hid = mk(c, k, f.ret_ty, sp);
+    },
+    Cast(cs) => {
+      let inner: HirExprId = check_expr_as(ast, text, c, cs.expr, Option(TypeId)::none());
+      let target: TypeId = resolve_type(ast, text, c, cs.ty, sp);
+      let k: HirExprKind = HirExprKind::Cast { HirCast { expr: inner, to: target } };
+      hid = mk(c, k, target, sp);
+    },
+    Reloc(inner) => {
+      let h: HirExprId = check_expr_as(ast, text, c, inner, Option(TypeId)::none());
+      let it: TypeId = expr_ty(c, h);
+      hid = mk(c, HirExprKind::Reloc { h }, it, sp);
+    },
+    If(ifx) => {
+      let cond: HirExprId = check_expr_as(ast, text, c, ifx.cond, Option(TypeId)::some(c.bool_tid));
+      let then_id: HirExprId = check_expr_as(ast, text, c, ifx.then_block, Option(TypeId)::none());
+      let tt: TypeId = expr_ty(c, then_id);
+      let alt: Option(HirExprId) = Option(HirExprId)::none();
+      let rty: TypeId = c.void_tid;
+      match ifx.else_expr {
+        Some(ee) => {
+          let eh: HirExprId = check_expr_as(ast, text, c, ee, Option(TypeId)::some(tt));
+          let et: TypeId = expr_ty(c, eh);
+          if same_type(c, tt, et) == false {
+            return fail_at(SemaErr::TypeMismatch(sp));
+          }
+          alt = Option(HirExprId)::some(eh);
+          rty = tt;
+        },
+        None => {
+          if same_type(c, tt, c.void_tid) == false {
+            return fail_at(SemaErr::TypeMismatch(sp));
+          }
+        },
+      };
+      let k: HirExprKind = HirExprKind::If { HirIf { cond: cond, then_block: then_id, else_expr: alt } };
+      hid = mk(c, k, rty, sp);
+    },
+    ComptimeIf(ifx) => {
+      let folded: Option(bool) = eval_bool_const(ast, text, ifx.cond);
+      match folded {
+        Some(v) => {
+          if v {
+            hid = check_expr_as(ast, text, c, ifx.then_block, want);
+          } else {
+            match ifx.else_expr {
+              Some(ee) => {
+                hid = check_expr_as(ast, text, c, ee, want);
+              },
+              None => {
+                hid = void_expr(c, sp);
+              },
+            };
+          }
+        },
+        None => {
+          hid = fail_at(SemaErr::TypeMismatch(sp));
+        },
+      };
+    },
+    Block(bl) => {
+      Scope::push_scope(mut_of(c.locals));
+      let sstart: u32 = c.hir.stmt_lists.len() as u32;
+      let si: u64 = 0;
+      while si < (bl.stmts.len as u64) {
+        let sid: StmtId = ast.stmt_lists.get((bl.stmts.start as u64) + si);
+        let st: Stmt = ast.stmts.get(sid.idx as u64);
+        let ssp: Span = ast.stmt_spans.get(sid.idx as u64);
+        let hs: HirStmtId = HirStmtId { idx: 0 };
+        match st {
+          Let(ls) => {
+            let swant: Option(TypeId) = Option(TypeId)::none();
+            match ls.ty {
+              Some(te) => {
+                swant = Option(TypeId)::some(resolve_type(ast, text, c, te, ssp));
+              },
+              None => {},
+            };
+            let init: HirExprId = check_expr_as(ast, text, c, ls.init, swant);
+            let ity: TypeId = expr_ty(c, init);
+            let lname: Slice(u8) = word_at(text, ls.name);
+            let lid: HirLocalId = HirModule::add_local(mut_of(c.hir), HirLocal { name: lname, ty: ity });
+            let kind: SymKind = SymKind::Local { lid };
+            Scope::define(mut_of(c.locals), lname, kind, ssp);
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Let { HirLet { local: lid, init: init } });
+          },
+          Assign(asg) => {
+            let target: HirExprId = check_expr_as(ast, text, c, asg.target, Option(TypeId)::none());
+            let tt: TypeId = expr_ty(c, target);
+            let val: HirExprId = check_expr_as(ast, text, c, asg.val, Option(TypeId)::some(tt));
+            let vt: TypeId = expr_ty(c, val);
+            if same_type(c, tt, vt) == false {
+              return fail_at(SemaErr::TypeMismatch(ssp));
+            }
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Assign { HirAssign { target: target, val: val } });
+          },
+          Expr(ee) => {
+            let eh: HirExprId = check_expr_as(ast, text, c, ee, Option(TypeId)::none());
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Expr { eh });
+          },
+          Return(oe) => {
+            let ores: Option(HirExprId) = Option(HirExprId)::none();
+            match oe {
+              Some(ee) => {
+                let eh: HirExprId = check_expr_as(ast, text, c, ee, Option(TypeId)::some(c.cur_ret));
+                ores = Option(HirExprId)::some(eh);
+              },
+              None => {},
+            };
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Return { ores });
+          },
+          While(w) => {
+            let cond: HirExprId = check_expr_as(ast, text, c, w.cond, Option(TypeId)::some(c.bool_tid));
+            let body: HirExprId = check_expr_as(ast, text, c, w.body, Option(TypeId)::none());
+            let item: HirWhile = HirWhile { cond: cond, body: body };
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::While { item });
+          },
+          Break => {
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Break);
+          },
+          Continue => {
+            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Continue);
+          },
+        };
+        HirModule::add_stmt_id(mut_of(c.hir), hs);
+        si = si + 1;
+      };
+      let tail: Option(HirExprId) = Option(HirExprId)::none();
+      let rty: TypeId = c.void_tid;
+      match bl.tail {
+        Some(te) => {
+          let th: HirExprId = check_expr_as(ast, text, c, te, want);
+          tail = Option(HirExprId)::some(th);
+          rty = expr_ty(c, th);
+        },
+        None => {},
+      };
+      Scope::pop_scope(mut_of(c.locals));
+      let used: u32 = (c.hir.stmt_lists.len() as u32) - sstart;
+      let k: HirExprKind = HirExprKind::Block { HirBlock { stmts: HirRange { start: sstart, len: used }, tail: tail } };
+      hid = mk(c, k, rty, sp);
+    },
+    StructLit(sl) => {
+      let tid: TypeId = resolve_type(ast, text, c, sl.ty, sp);
+      let si: Option(u32) = struct_index(c, tid);
+      let idx: u32 = match si {
+        Some(v) => v,
+        None => {
+          return fail_at(SemaErr::TypeMismatch(sp));
+        },
+      };
+      let istart: u32 = c.hir.inits.len() as u32;
+      let ii: u64 = 0;
+      while ii < (sl.inits.len as u64) {
+        let fi: FieldInit = ast.inits.get((sl.inits.start as u64) + ii);
+        let fname: Slice(u8) = word_at(text, fi.name);
+        let found: Option(u32) = HirModule::find_field(ref_of(c.hir), idx, fname);
+        let abs: u32 = match found {
+          Some(v) => v,
+          None => {
+            return fail_at(SemaErr::UnknownField(fi.span));
+          },
+        };
+        let info: FieldInfo = HirModule::field_at(ref_of(c.hir), abs);
+        let vh: HirExprId = check_expr_as(ast, text, c, fi.val, Option(TypeId)::some(info.ty));
+        HirModule::add_init(mut_of(c.hir), HirFieldInit { index: abs, val: vh });
+        ii = ii + 1;
+      };
+      let used: u32 = (c.hir.inits.len() as u32) - istart;
+      let k: HirExprKind = HirExprKind::StructLit { HirStructLit { struct_idx: idx, inits: HirRange { start: istart, len: used } } };
+      hid = mk(c, k, tid, sp);
+    },
+    _ => {
+      hid = fail_at(SemaErr::Unsupported(sp));
+    },
+  };
+  return hid;
+};
+
+let check_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let name: Slice(u8) = word_at(text, ld.name);
+  let sp: Span = ast.decl_spans.get(fd.id as u64);
+  let found: Option(HirFnId) = HirModule::find_fn(ref_of(c.hir), name);
+  let fid: HirFnId = match found {
+    Some(v) => v,
+    None => HirFnId { idx: 0 },
+  };
+  let f: HirFn = HirModule::fn_at(ref_of(c.hir), fid);
+  Scope::reset(mut_of(c.locals));
+  Scope::push_scope(mut_of(c.locals));
+  let lstart: u32 = c.hir.locals.len() as u32;
+  let pcount: u64 = f.params.len as u64;
+  let pi: u64 = 0;
+  while pi < pcount {
+    let pidx: u32 = f.params.start + (pi as u32);
+    let p: HirParam = HirModule::param_at(ref_of(c.hir), pidx);
+    let lid: HirLocalId = HirModule::add_local(mut_of(c.hir), HirLocal { name: p.name, ty: p.ty });
+    HirModule::set_param_local(mut_of(c.hir), pidx, lid);
+    let kind: SymKind = SymKind::Local { lid };
+    Scope::define(mut_of(c.locals), p.name, kind, sp);
+    pi = pi + 1;
+  };
+  c.cur_ret = f.ret_ty;
+  collect_effects(ast, text, fe.effects, sp);
+  let body: HirExprId = check_expr_as(ast, text, c, fe.body, Option(TypeId)::none());
+  Scope::pop_scope(mut_of(c.locals));
+  let used: u32 = (c.hir.locals.len() as u32) - lstart;
+  HirModule::set_fn_body(mut_of(c.hir), fid, body, HirRange { start: lstart, len: used });
+};
+
+let check_bodies = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let i: u64 = 0;
+  while i < c.decls.len() {
+    let fd: FlatDecl = c.decls.get(i);
+    let d: Decl = ast.decls.get(fd.id as u64);
+    match d {
+      Let(ld) => {
+        let init: Expr = ast.exprs.get(ld.init.idx as u64);
+        match init {
+          Func(fe) => {
+            check_fn(ast, text, c, fd, ld, fe);
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    i = i + 1;
+  };
+};
+
+let run = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  seed_builtins(c, Span::empty(ast.src, 0));
+  flatten_decls(ast, c);
+  declare_structs(ast, text, c);
+  declare_fns(ast, text, c);
+  check_bodies(ast, text, c);
+};
+
+pub let check_module = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8))
+  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirModule
+{
+  let c0: Ctx = new_ctx();
+  let c: Mut(Ctx) = mut_of(c0);
+  run(ast, text, c);
+  return HirModule::take(mut_of(c.hir));
+};

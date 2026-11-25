@@ -1,0 +1,108 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("std::str")::{ eq };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::sema::hir")::{ SemaErr, SemaFail };
+
+pub {
+  let EffName = struct {
+    name: Slice(u8)
+  };
+};
+
+pub let EffRow = module {
+  let NameVec = Vec(Slice(u8));
+
+  pub {
+    let Self = struct {
+      names: NameVec
+    };
+
+    let new = func() -> Self {
+      return Self { names: NameVec::new() };
+    };
+
+    let count = func(r: Ref(Self)) -> u64 {
+      return r.names.len();
+    };
+
+    let at = func(r: Ref(Self), i: u64) -> EffName {
+      return EffName { name: r.names.get(i) };
+    };
+
+    let contains = func(r: Ref(Self), name: Slice(u8)) -> bool {
+      let n: u64 = r.names.len();
+      let i: u64 = 0;
+      while i < n {
+        let cur: Slice(u8) = r.names.get(i);
+        if eq(cur, name) {
+          return true;
+        }
+        i = i + 1;
+      };
+      return false;
+    };
+
+    let add = func(r: Mut(Self), name: Slice(u8)) !{ OomErr } -> bool {
+      let n: u64 = r.names.len();
+      let i: u64 = 0;
+      while i < n {
+        let cur: Slice(u8) = r.names.get(i);
+        if eq(cur, name) {
+          return false;
+        }
+        i = i + 1;
+      };
+      r.names.push(name);
+      return true;
+    };
+
+    let merge = func(dst: Mut(Self), src: Ref(Self)) !{ OomErr } {
+      let n: u64 = src.names.len();
+      let i: u64 = 0;
+      while i < n {
+        let cur: Slice(u8) = src.names.get(i);
+        let dn: u64 = dst.names.len();
+        let j: u64 = 0;
+        let seen: bool = false;
+        while j < dn {
+          let d: Slice(u8) = dst.names.get(j);
+          if eq(d, cur) {
+            seen = true;
+          }
+          j = j + 1;
+        };
+        if seen == false {
+          dst.names.push(cur);
+        }
+        i = i + 1;
+      };
+    };
+
+    let is_pure = func(r: Ref(Self)) -> bool {
+      return r.names.len() == 0;
+    };
+
+    let check_subset = func(sub_row: Ref(Self), sup_row: Ref(Self), span: Span) !{ SemaFail } {
+      let n: u64 = sub_row.names.len();
+      let i: u64 = 0;
+      while i < n {
+        let cur: Slice(u8) = sub_row.names.get(i);
+        let j: u64 = sup_row.names.len();
+        let hit: bool = false;
+        while j > 0 {
+          j = j - 1;
+          let s: Slice(u8) = sup_row.names.get(j);
+          if eq(s, cur) {
+            hit = true;
+          }
+        };
+        if hit == false {
+          perform SemaFail::fail(SemaErr::UnhandledEffect(span));
+          return;
+        }
+        i = i + 1;
+      };
+    };
+  };
+};

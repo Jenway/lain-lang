@@ -1,0 +1,458 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("std::option")::{ Option };
+use import("std::err")::{ Fail };
+use import("std::str")::{ eq };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::ast::model")::{ UnOp, BinOp };
+
+pub {
+  let TypeId = struct {
+    idx: u32
+  };
+
+  let SymId = struct {
+    idx: u32
+  };
+
+  let HirFnId = struct {
+    idx: u32
+  };
+
+  let HirLocalId = struct {
+    idx: u32
+  };
+
+  let HirExprId = struct {
+    idx: u32
+  };
+
+  let HirStmtId = struct {
+    idx: u32
+  };
+
+  let HirRange = struct {
+    start: u32,
+    len: u32
+  };
+
+  let SemaErr = enum {
+    UnknownIdent(Span)
+    TypeMismatch(Span)
+    ArityMismatch(Span)
+    UnknownField(Span)
+    UnhandledEffect(Span)
+    DuplicateSym(Span)
+    Unsupported(Span)
+  };
+
+  let SemaFail = Fail(SemaErr);
+
+  let IntInfo = struct {
+    bits: u8,
+    signed: bool
+  };
+
+  let HirType = enum {
+    Void
+    Bool
+    Int(IntInfo)
+    Float(u8)
+    Ref(TypeId)
+    Mut(TypeId)
+    Struct(u32)
+    Enum(u32)
+    Fn(u32)
+    HirNever
+  };
+
+  let FieldInfo = struct {
+    name: Slice(u8),
+    ty: TypeId,
+    offset: u32
+  };
+
+  let StructInfo = struct {
+    name: Slice(u8),
+    fields: HirRange,
+    size: u32,
+    align: u32
+  };
+
+  let HirParam = struct {
+    name: Slice(u8),
+    ty: TypeId,
+    local: HirLocalId
+  };
+
+  let HirLocal = struct {
+    name: Slice(u8),
+    ty: TypeId
+  };
+
+  let HirUnary = struct {
+    op: UnOp,
+    operand: HirExprId
+  };
+
+  let HirBinary = struct {
+    op: BinOp,
+    lhs: HirExprId,
+    rhs: HirExprId
+  };
+
+  let HirCall = struct {
+    callee: HirExprId,
+    args: HirRange
+  };
+
+  let HirIf = struct {
+    cond: HirExprId,
+    then_block: HirExprId,
+    else_expr: Option(HirExprId)
+  };
+
+  let HirBlock = struct {
+    stmts: HirRange,
+    tail: Option(HirExprId)
+  };
+
+  let HirField = struct {
+    base: HirExprId,
+    struct_idx: u32,
+    field: u32
+  };
+
+  let HirFieldInit = struct {
+    index: u32,
+    val: HirExprId
+  };
+
+  let HirStructLit = struct {
+    struct_idx: u32,
+    inits: HirRange
+  };
+
+  let HirCast = struct {
+    expr: HirExprId,
+    to: TypeId
+  };
+
+  let HirExprKind = enum {
+    IntConst(i64)
+    BoolConst(bool)
+    Local(HirLocalId)
+    Fn(HirFnId)
+    Unary(HirUnary)
+    Binary(HirBinary)
+    Call(HirCall)
+    If(HirIf)
+    Block(HirBlock)
+    Field(HirField)
+    StructLit(HirStructLit)
+    Cast(HirCast)
+    Reloc(HirExprId)
+  };
+
+  let HirExpr = struct {
+    kind: HirExprKind,
+    ty: TypeId,
+    span: Span
+  };
+
+  let HirLet = struct {
+    local: HirLocalId,
+    init: HirExprId
+  };
+
+  let HirAssign = struct {
+    target: HirExprId,
+    val: HirExprId
+  };
+
+  let HirWhile = struct {
+    cond: HirExprId,
+    body: HirExprId
+  };
+
+  let HirStmt = enum {
+    Let(HirLet)
+    Assign(HirAssign)
+    Expr(HirExprId)
+    Return(Option(HirExprId))
+    While(HirWhile)
+    Break
+    Continue
+  };
+
+  let HirFn = struct {
+    name: Slice(u8),
+    is_pub: bool,
+    params: HirRange,
+    locals: HirRange,
+    ret_ty: TypeId,
+    body: HirExprId,
+    span: Span
+  };
+};
+
+pub let HirModule = module {
+  let TypeVec = Vec(HirType);
+  let StructVec = Vec(StructInfo);
+  let FieldVec = Vec(FieldInfo);
+  let FnVec = Vec(HirFn);
+  let ParamVec = Vec(HirParam);
+  let LocalVec = Vec(HirLocal);
+  let ExprVec = Vec(HirExpr);
+  let StmtVec = Vec(HirStmt);
+  let ExprIdVec = Vec(HirExprId);
+  let StmtIdVec = Vec(HirStmtId);
+  let InitVec = Vec(HirFieldInit);
+
+  pub {
+    let Self = struct {
+      types: TypeVec,
+      structs: StructVec,
+      fields: FieldVec,
+      fns: FnVec,
+      params: ParamVec,
+      locals: LocalVec,
+      exprs: ExprVec,
+      stmts: StmtVec,
+      expr_lists: ExprIdVec,
+      stmt_lists: StmtIdVec,
+      inits: InitVec
+    };
+
+    let new = func() -> Self {
+      return Self {
+        types: TypeVec::new(),
+        structs: StructVec::new(),
+        fields: FieldVec::new(),
+        fns: FnVec::new(),
+        params: ParamVec::new(),
+        locals: LocalVec::new(),
+        exprs: ExprVec::new(),
+        stmts: StmtVec::new(),
+        expr_lists: ExprIdVec::new(),
+        stmt_lists: StmtIdVec::new(),
+        inits: InitVec::new()
+      };
+    };
+
+    let type_count = func(h: Ref(Self)) -> u32 {
+      return h.types.len() as u32;
+    };
+
+    let struct_count = func(h: Ref(Self)) -> u32 {
+      return h.structs.len() as u32;
+    };
+
+    let fn_count = func(h: Ref(Self)) -> u32 {
+      return h.fns.len() as u32;
+    };
+
+    let local_count = func(h: Ref(Self)) -> u32 {
+      return h.locals.len() as u32;
+    };
+
+    let expr_count = func(h: Ref(Self)) -> u32 {
+      return h.exprs.len() as u32;
+    };
+
+    let stmt_count = func(h: Ref(Self)) -> u32 {
+      return h.stmts.len() as u32;
+    };
+
+    let add_type = func(h: Mut(Self), t: HirType) !{ OomErr } -> TypeId {
+      let id: TypeId = TypeId { idx: h.types.len() as u32 };
+      h.types.push(t);
+      return id;
+    };
+
+    let add_struct = func(h: Mut(Self), s: StructInfo) !{ OomErr } -> u32 {
+      let idx: u32 = h.structs.len() as u32;
+      h.structs.push(s);
+      return idx;
+    };
+
+    let add_field = func(h: Mut(Self), f: FieldInfo) !{ OomErr } -> u32 {
+      let idx: u32 = h.fields.len() as u32;
+      h.fields.push(f);
+      return idx;
+    };
+
+    let add_fn = func(h: Mut(Self), f: HirFn) !{ OomErr } -> HirFnId {
+      let id: HirFnId = HirFnId { idx: h.fns.len() as u32 };
+      h.fns.push(f);
+      return id;
+    };
+
+    let add_param = func(h: Mut(Self), p: HirParam) !{ OomErr } -> u32 {
+      let idx: u32 = h.params.len() as u32;
+      h.params.push(p);
+      return idx;
+    };
+
+    let add_local = func(h: Mut(Self), l: HirLocal) !{ OomErr } -> HirLocalId {
+      let id: HirLocalId = HirLocalId { idx: h.locals.len() as u32 };
+      h.locals.push(l);
+      return id;
+    };
+
+    let add_expr = func(h: Mut(Self), e: HirExpr) !{ OomErr } -> HirExprId {
+      let id: HirExprId = HirExprId { idx: h.exprs.len() as u32 };
+      h.exprs.push(e);
+      return id;
+    };
+
+    let add_stmt = func(h: Mut(Self), s: HirStmt) !{ OomErr } -> HirStmtId {
+      let id: HirStmtId = HirStmtId { idx: h.stmts.len() as u32 };
+      h.stmts.push(s);
+      return id;
+    };
+
+    let add_expr_id = func(h: Mut(Self), e: HirExprId) !{ OomErr } {
+      h.expr_lists.push(e);
+    };
+
+    let add_stmt_id = func(h: Mut(Self), s: HirStmtId) !{ OomErr } {
+      h.stmt_lists.push(s);
+    };
+
+    let add_init = func(h: Mut(Self), i: HirFieldInit) !{ OomErr } -> u32 {
+      let idx: u32 = h.inits.len() as u32;
+      h.inits.push(i);
+      return idx;
+    };
+
+    let range_from = func(start: u32, end: u32) -> HirRange {
+      if end <= start {
+        return HirRange { start: start, len: 0 };
+      }
+      return HirRange { start: start, len: end - start };
+    };
+
+    let set_struct_layout = func(h: Mut(Self), idx: u32, fields: HirRange, size: u32, align: u32) {
+      let slot: Mut(StructInfo) = h.structs.get_mut(idx as u64);
+      slot.fields = fields;
+      slot.size = size;
+      slot.align = align;
+    };
+
+    let set_fn_body = func(h: Mut(Self), id: HirFnId, body: HirExprId, locals: HirRange) {
+      let slot: Mut(HirFn) = h.fns.get_mut(id.idx as u64);
+      slot.body = body;
+      slot.locals = locals;
+    };
+
+    let set_param_local = func(h: Mut(Self), param_idx: u32, local: HirLocalId) {
+      let slot: Mut(HirParam) = h.params.get_mut(param_idx as u64);
+      slot.local = local;
+    };
+
+    let set_expr_ty = func(h: Mut(Self), id: HirExprId, ty: TypeId) {
+      let slot: Mut(HirExpr) = h.exprs.get_mut(id.idx as u64);
+      slot.ty = ty;
+    };
+
+    let type_at = func(h: Ref(Self), id: TypeId) -> HirType {
+      return h.types.get(id.idx as u64);
+    };
+
+    let struct_at = func(h: Ref(Self), idx: u32) -> StructInfo {
+      return h.structs.get(idx as u64);
+    };
+
+    let field_at = func(h: Ref(Self), idx: u32) -> FieldInfo {
+      return h.fields.get(idx as u64);
+    };
+
+    let fn_at = func(h: Ref(Self), id: HirFnId) -> HirFn {
+      return h.fns.get(id.idx as u64);
+    };
+
+    let param_at = func(h: Ref(Self), idx: u32) -> HirParam {
+      return h.params.get(idx as u64);
+    };
+
+    let local_at = func(h: Ref(Self), id: HirLocalId) -> HirLocal {
+      return h.locals.get(id.idx as u64);
+    };
+
+    let expr_at = func(h: Ref(Self), id: HirExprId) -> HirExpr {
+      return h.exprs.get(id.idx as u64);
+    };
+
+    let stmt_at = func(h: Ref(Self), id: HirStmtId) -> HirStmt {
+      return h.stmts.get(id.idx as u64);
+    };
+
+    let init_at = func(h: Ref(Self), idx: u32) -> HirFieldInit {
+      return h.inits.get(idx as u64);
+    };
+
+    let expr_in = func(h: Ref(Self), r: HirRange, i: u32) -> HirExprId {
+      return h.expr_lists.get((r.start + i) as u64);
+    };
+
+    let stmt_in = func(h: Ref(Self), r: HirRange, i: u32) -> HirStmtId {
+      return h.stmt_lists.get((r.start + i) as u64);
+    };
+
+    let find_fn = func(h: Ref(Self), name: Slice(u8)) -> Option(HirFnId) {
+      let n: u64 = h.fns.len();
+      let i: u64 = 0;
+      while i < n {
+        let f: HirFn = h.fns.get(i);
+        if eq(f.name, name) {
+          return Option(HirFnId)::some(HirFnId { idx: i as u32 });
+        }
+        i = i + 1;
+      };
+      return Option(HirFnId)::none();
+    };
+
+    let find_field = func(h: Ref(Self), struct_idx: u32, name: Slice(u8)) -> Option(u32) {
+      let st: StructInfo = h.structs.get(struct_idx as u64);
+      let n: u64 = st.fields.len as u64;
+      let i: u64 = 0;
+      while i < n {
+        let f: FieldInfo = h.fields.get(st.fields.start as u64 + i);
+        if eq(f.name, name) {
+          return Option(u32)::some((st.fields.start as u64 + i) as u32);
+        }
+        i = i + 1;
+      };
+      return Option(u32)::none();
+    };
+
+    let take = func(h: Mut(Self)) -> Self {
+      let out0: Self = new();
+      let out: Mut(Self) = mut_of(out0);
+      out.types = deref(h).types;
+      deref(h).types = TypeVec::new();
+      out.structs = deref(h).structs;
+      deref(h).structs = StructVec::new();
+      out.fields = deref(h).fields;
+      deref(h).fields = FieldVec::new();
+      out.fns = deref(h).fns;
+      deref(h).fns = FnVec::new();
+      out.params = deref(h).params;
+      deref(h).params = ParamVec::new();
+      out.locals = deref(h).locals;
+      deref(h).locals = LocalVec::new();
+      out.exprs = deref(h).exprs;
+      deref(h).exprs = ExprVec::new();
+      out.stmts = deref(h).stmts;
+      deref(h).stmts = StmtVec::new();
+      out.expr_lists = deref(h).expr_lists;
+      deref(h).expr_lists = ExprIdVec::new();
+      out.stmt_lists = deref(h).stmt_lists;
+      deref(h).stmt_lists = StmtIdVec::new();
+      out.inits = deref(h).inits;
+      deref(h).inits = InitVec::new();
+      return reloc(out0);
+    };
+  };
+};

@@ -1,0 +1,111 @@
+use import("std::err")::{ Fail };
+use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
+use import("std::option")::{ Option };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::syntax::raw_ast")::{ NodeId, GroupRange, RawNode, RawAst };
+use import("frontend::expand::env")::{ SyntaxEnv, MacroRule };
+use import("frontend::expand::sugar")::{ desugar, ExpandErr, ExpandFail };
+
+let macro_rule = func(env: Ref(SyntaxEnv), ast: Ref(RawAst() ?{ al: al }), text: Slice(u8), id: NodeId)
+  ?{ al: Allocator = SystemAlloc }
+  -> Option(u64)
+{
+  let node: RawNode = ast.node(id);
+  let is_ident: bool = match node {
+    Ident => true,
+    _ => false
+  };
+  if is_ident == false {
+    return Option(u64)::none();
+  }
+  let name: Slice(u8) = ast.text_of(text, id);
+  if SyntaxEnv::is_core_form(name) {
+    return Option(u64)::none();
+  }
+  return SyntaxEnv::lookup(env, name);
+};
+
+let scan_node = func(ast: Ref(RawAst() ?{ al: al }), text: Slice(u8), env: Ref(SyntaxEnv), id: NodeId, depth: u64)
+  ?{ al: Allocator = SystemAlloc }
+  !{ ExpandFail } -> u64
+{
+  let node: RawNode = ast.node(id);
+  return match node {
+    Group(grp) => { scan_group(ast, text, env, grp, depth) },
+    _ => { depth }
+  };
+};
+
+let scan_group = func(ast: Ref(RawAst() ?{ al: al }), text: Slice(u8), env: Ref(SyntaxEnv), grp: GroupRange, depth: u64)
+  ?{ al: Allocator = SystemAlloc }
+  !{ ExpandFail } -> u64
+{
+  let n: u64 = grp.len as u64;
+  let i: u64 = 0;
+  let deepest: u64 = depth;
+  while i < n {
+    let id: NodeId = ast.child_at(grp, i as u32);
+    let found: Option(u64) = macro_rule(env, ast, text, id);
+    let is_macro: bool = match found {
+      Some(_) => true,
+      _ => false
+    };
+    if is_macro {
+      let sp_m: Span = ast.span(id);
+      let d: u64 = depth + 1;
+      if d > 64 {
+        perform ExpandFail::fail(ExpandErr::DepthLimit(sp_m));
+      }
+      let idx: u64 = match found {
+        Some(k) => k,
+        _ => 0
+      };
+      let rule: MacroRule = SyntaxEnv::rule_at(env, idx);
+      if rule.proc_name.len == 0 {
+        perform ExpandFail::fail(ExpandErr::MacroFailed(sp_m));
+      }
+      let j: u64 = i + 1;
+      let has_body: bool = false;
+      if j < n {
+        let bid: NodeId = ast.child_at(grp, j as u32);
+        let bnode: RawNode = ast.node(bid);
+        let is_group: bool = match bnode {
+          Group(_) => true,
+          _ => false
+        };
+        let sp_b: Span = ast.span(bid);
+        has_body = is_group and Span::touches(sp_m, sp_b);
+      }
+      if has_body {
+        let bid: NodeId = ast.child_at(grp, j as u32);
+        let inner: u64 = scan_node(ast, text, env, bid, d);
+        if inner > deepest {
+          deepest = inner;
+        }
+        i = i + 2;
+      } else {
+        if d > deepest {
+          deepest = d;
+        }
+        i = i + 1;
+      }
+    } else {
+      let below: u64 = scan_node(ast, text, env, id, depth);
+      if below > deepest {
+        deepest = below;
+      }
+      i = i + 1;
+    }
+  };
+  return deepest;
+};
+
+pub let expand = func(raw: Ref(RawAst() ?{ al: al }), text: Slice(u8), env: Ref(SyntaxEnv), alloc: al::Self)
+  ?{ al: Allocator = SystemAlloc }
+  !{ OomErr, ExpandFail } -> RawAst() ?{ al: al }
+{
+  let sugared: RawAst() ?{ al: al } = desugar(raw, text, alloc);
+  let root: NodeId = sugared.root;
+  let _depth: u64 = scan_node(sugared, text, env, root, 0);
+  return sugared;
+};

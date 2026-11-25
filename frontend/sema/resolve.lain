@@ -1,0 +1,101 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("std::option")::{ Option };
+use import("std::str")::{ eq };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::sema::hir")::{ TypeId, SymId, HirFnId, HirLocalId, SemaErr, SemaFail };
+
+pub {
+  let SymKind = enum {
+    Local(HirLocalId)
+    Func(HirFnId)
+    StructDef(u32)
+    BuiltinTy(TypeId)
+  };
+
+  let SymEntry = struct {
+    name: Slice(u8),
+    kind: SymKind,
+    depth: u32
+  };
+};
+
+pub let Scope = module {
+  let SymVec = Vec(SymEntry);
+
+  pub {
+    let Self = struct {
+      syms: SymVec,
+      depth: u32
+    };
+
+    let new = func() -> Self {
+      return Self { syms: SymVec::new(), depth: 0 };
+    };
+
+    let depth_of = func(s: Ref(Self)) -> u32 {
+      return s.depth;
+    };
+
+    let count = func(s: Ref(Self)) -> u32 {
+      return s.syms.len() as u32;
+    };
+
+    let push_scope = func(s: Mut(Self)) {
+      s.depth = s.depth + 1;
+    };
+
+    let pop_scope = func(s: Mut(Self)) {
+      while s.syms.len() > 0 {
+        let n: u64 = s.syms.len();
+        let top: SymEntry = s.syms.get(n - 1);
+        if top.depth < s.depth {
+          break;
+        }
+        s.syms.pop();
+      };
+      if s.depth > 0 {
+        s.depth = s.depth - 1;
+      }
+    };
+
+    let reset = func(s: Mut(Self)) {
+      s.syms.truncate(0);
+      s.depth = 0;
+    };
+
+    let define = func(s: Mut(Self), name: Slice(u8), kind: SymKind, span: Span) !{ OomErr, SemaFail } -> SymId {
+      let i: u64 = s.syms.len();
+      while i > 0 {
+        i = i - 1;
+        let e: SymEntry = s.syms.get(i);
+        if e.depth < s.depth {
+          break;
+        }
+        if eq(e.name, name) {
+          perform SemaFail::fail(SemaErr::DuplicateSym(span));
+          return SymId { idx: 0 };
+        }
+      };
+      let id: SymId = SymId { idx: s.syms.len() as u32 };
+      s.syms.push(SymEntry { name: name, kind: kind, depth: s.depth });
+      return id;
+    };
+
+    let lookup = func(s: Ref(Self), name: Slice(u8)) -> Option(SymEntry) {
+      let i: u64 = s.syms.len();
+      while i > 0 {
+        i = i - 1;
+        let e: SymEntry = s.syms.get(i);
+        if eq(e.name, name) {
+          return Option(SymEntry)::some(e);
+        }
+      };
+      return Option(SymEntry)::none();
+    };
+
+    let entry_at = func(s: Ref(Self), idx: u32) -> SymEntry {
+      return s.syms.get(idx as u64);
+    };
+  };
+};
