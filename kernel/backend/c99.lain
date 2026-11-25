@@ -1,0 +1,326 @@
+use import("std::option")::{ Option };
+use import("kernel::ir::model")::{ Ty, Op, Inst, DataSeg, Proc, IrModule, MemAxiom };
+let io = import("std::io");
+let str = import("std::str");
+
+let emit_u64 = func(v: u64) ?{ out: io::Sink } {
+  if v == 0 {
+    out::write("0");
+    return;
+  }
+  let buf: Array(u8, 32) = [0; 32];
+  let n: u64 = 0;
+  let cur: u64 = v;
+  while cur > 0 {
+    buf[n] = (48 + (cur % 10)) as u8;
+    n = n + 1;
+    cur = cur / 10;
+  };
+  let rev: Array(u8, 32) = [0; 32];
+  let i: u64 = 0;
+  while i < n {
+    rev[i] = buf[n - 1 - i];
+    i = i + 1;
+  };
+  out::write(make_slice(Slice(u8), ptr_cast(Ref(u8), ptr_of(rev)), n));
+};
+
+let emit_val = func(id: u64) ?{ out: io::Sink } {
+  out::write("v");
+  emit_u64(id) ?{ out: out };
+};
+
+let emit_c_ty = func(t: Ty) ?{ out: io::Sink } {
+  match t {
+    Void => out::write("void"),
+    Bits(_) => out::write("uint64_t"),
+    Float(n) => if n == 32 { out::write("float"); } else { out::write("double"); },
+    Vec(_) => out::write("uint64_t"),
+    Addr => out::write("uint64_t"),
+  };
+};
+
+let emit_preamble = func() ?{ out: io::Sink } {
+  out::write("#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
+  out::write("static inline uint64_t lain_udiv(uint64_t a, uint64_t b) { if (!b) abort(); return a / b; }\n");
+  out::write("static inline uint64_t lain_urem(uint64_t a, uint64_t b) { if (!b) abort(); return a % b; }\n");
+  out::write("static inline uint64_t lain_shl(uint64_t a, uint64_t b, uint64_t w) { if (b >= w) abort(); return a << b; }\n");
+  out::write("static inline uint64_t lain_lshr(uint64_t a, uint64_t b, uint64_t w) { if (b >= w) abort(); return a >> b; }\n");
+  out::write("static inline uint64_t lain_load(uint64_t addr, size_t n) { uint64_t v = 0; memcpy(&v, (const void*)(uintptr_t)addr, n); return v; }\n");
+  out::write("static inline void lain_store(uint64_t addr, uint64_t v, size_t n) { memcpy((void*)(uintptr_t)addr, &v, n); }\n\n");
+};
+
+let emit_data = func(m: Ref(IrModule)) ?{ out: io::Sink } {
+  let i: u64 = 0;
+  let n: u64 = m.datas.len();
+  while i < n {
+    let seg: Ref(DataSeg) = m.datas.get_ref(i);
+    if seg.mutable {
+      out::write("static uint8_t d_");
+    } else {
+      out::write("static const uint8_t d_");
+    }
+    emit_u64(i) ?{ out: out };
+    out::write("[] = { ");
+    let j: u64 = 0;
+    let blen: u64 = seg.bytes.len();
+    if blen == 0 {
+      out::write("0");
+    } else {
+      while j < blen {
+        if j > 0 { out::write(", "); }
+        emit_u64(seg.bytes.get(j) as u64) ?{ out: out };
+        j = j + 1;
+      };
+    }
+    out::write(" };\n");
+    i = i + 1;
+  };
+  if n > 0 { out::write("\n"); }
+};
+
+let emit_proc_sig = func(p: Ref(Proc), id: u64) ?{ out: io::Sink } {
+  if p.is_extern {
+    out::write("extern ");
+    emit_c_ty(p.ret_ty) ?{ out: out };
+    out::write(" ");
+    out::write(p.link_name);
+  } else {
+    out::write("static ");
+    emit_c_ty(p.ret_ty) ?{ out: out };
+    out::write(" p_");
+    emit_u64(id) ?{ out: out };
+  }
+  out::write("(");
+  let np: u64 = p.params.len();
+  if np == 0 {
+    out::write("void");
+  } else {
+    let i: u64 = 0;
+    while i < np {
+      if i > 0 { out::write(", "); }
+      emit_c_ty(p.params.get(i)) ?{ out: out };
+      out::write(" a");
+      emit_u64(i) ?{ out: out };
+      i = i + 1;
+    };
+  }
+  out::write(")");
+};
+
+let emit_bin_sym = func(op: Op) ?{ out: io::Sink } {
+  if op == Op::Add { out::write(" + "); }
+  else if op == Op::Sub { out::write(" - "); }
+  else if op == Op::Mul { out::write(" * "); }
+  else if op == Op::And { out::write(" & "); }
+  else if op == Op::Or { out::write(" | "); }
+  else if op == Op::Xor { out::write(" ^ "); }
+  else if op == Op::Eq { out::write(" == "); }
+  else if op == Op::Ne { out::write(" != "); }
+  else if op == Op::Ult { out::write(" < "); }
+  else if op == Op::Ule { out::write(" <= "); }
+  else if op == Op::Ugt { out::write(" > "); }
+  else { out::write(" >= "); }
+};
+
+let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink } {
+  let ins: Ref(Inst) = p.insts.get_ref(pc);
+  let op: Op = ins.op;
+  let k: u64 = op as u64;
+  out::write("  ");
+  if op == Op::Const {
+    if ins.dst != 0 {
+      emit_val(ins.dst) ?{ out: out };
+      out::write(" = ");
+      emit_u64(ins.imm) ?{ out: out };
+      out::write("ULL;\n");
+    }
+  } else if op == Op::SymAddr {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = (uint64_t)(uintptr_t)");
+    if ins.aux == 0 {
+      out::write("d_");
+      emit_u64(ins.a) ?{ out: out };
+    } else {
+      out::write("p_");
+      emit_u64(ins.a) ?{ out: out };
+    }
+    out::write(";\n");
+  } else if (op == Op::Udiv) or (op == Op::Urem) {
+    emit_val(ins.dst) ?{ out: out };
+    if op == Op::Udiv { out::write(" = lain_udiv("); } else { out::write(" = lain_urem("); }
+    emit_val(ins.a) ?{ out: out };
+    out::write(", ");
+    emit_val(ins.b) ?{ out: out };
+    out::write(");\n");
+  } else if (op == Op::Shl) or (op == Op::Lshr) {
+    emit_val(ins.dst) ?{ out: out };
+    if op == Op::Shl { out::write(" = lain_shl("); } else { out::write(" = lain_lshr("); }
+    emit_val(ins.a) ?{ out: out };
+    out::write(", ");
+    emit_val(ins.b) ?{ out: out };
+    out::write(", 64);\n");
+  } else if ((k >= (Op::Add as u64)) and (k <= (Op::Xor as u64))) or ((k >= (Op::Eq as u64)) and (k <= (Op::Uge as u64))) {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = (uint64_t)(");
+    emit_val(ins.a) ?{ out: out };
+    emit_bin_sym(op) ?{ out: out };
+    emit_val(ins.b) ?{ out: out };
+    out::write(");\n");
+  } else if (op == Op::Bitcast) or (op == Op::Zext) or (op == Op::Sext) or (op == Op::Trunc) {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = ");
+    emit_val(ins.a) ?{ out: out };
+    out::write(";\n");
+  } else if op == Op::Alloca {
+    let bytes: u64 = ins.imm * ins.ty.bytes();
+    out::write("uint8_t stk_");
+    emit_u64(pc) ?{ out: out };
+    out::write("[");
+    emit_u64(if bytes == 0 { 1 } else { bytes }) ?{ out: out };
+    out::write("]; ");
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = (uint64_t)(uintptr_t)stk_");
+    emit_u64(pc) ?{ out: out };
+    out::write(";\n");
+  } else if op == Op::Lea {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = ");
+    emit_val(ins.a) ?{ out: out };
+    out::write(" + ");
+    emit_val(ins.b) ?{ out: out };
+    out::write(" * ");
+    emit_u64(ins.c) ?{ out: out };
+    out::write("ULL + ");
+    emit_u64(ins.imm) ?{ out: out };
+    out::write("ULL;\n");
+  } else if op == Op::Load {
+    emit_val(ins.dst) ?{ out: out };
+    out::write(" = lain_load(");
+    emit_val(ins.a) ?{ out: out };
+    out::write(", ");
+    emit_u64(ins.ty.bytes()) ?{ out: out };
+    out::write(");\n");
+  } else if op == Op::Store {
+    out::write("lain_store(");
+    emit_val(ins.b) ?{ out: out };
+    out::write(", ");
+    emit_val(ins.a) ?{ out: out };
+    out::write(", ");
+    emit_u64(ins.ty.bytes()) ?{ out: out };
+    out::write(");\n");
+  } else if op == Op::Call {
+    let callee: Ref(Proc) = m.procs.get_ref(ins.a);
+    if ins.dst != 0 {
+      emit_val(ins.dst) ?{ out: out };
+      out::write(" = ");
+    }
+    if callee.is_extern {
+      out::write(callee.link_name);
+    } else {
+      out::write("p_");
+      emit_u64(ins.a) ?{ out: out };
+    }
+    out::write("(");
+    let ai: u64 = 0;
+    while ai < ins.c {
+      if ai > 0 { out::write(", "); }
+      emit_val(p.call_args.get(ins.b + ai)) ?{ out: out };
+      ai = ai + 1;
+    };
+    out::write(");\n");
+  } else if op == Op::If {
+    out::write("if (");
+    emit_val(ins.a) ?{ out: out };
+    out::write(") {\n");
+  } else if op == Op::Else {
+    out::write("} else {\n");
+  } else if op == Op::EndIf {
+    out::write("}\n");
+  } else if op == Op::Loop {
+    out::write("while (1) {\n");
+  } else if op == Op::EndLoop {
+    out::write("break; }\n");
+  } else if op == Op::Return {
+    if ins.a != 0 {
+      out::write("return ");
+      emit_val(ins.a) ?{ out: out };
+      out::write(";\n");
+    } else {
+      out::write("return;\n");
+    }
+  } else if op == Op::Assume {
+    out::write("if (!");
+    emit_val(ins.a) ?{ out: out };
+    out::write(") { abort(); }\n");
+  } else if op == Op::Unreachable {
+    out::write("abort();\n");
+  }
+};
+
+let emit_proc = func(m: Ref(IrModule), id: u64) ?{ out: io::Sink } {
+  let p: Ref(Proc) = m.procs.get_ref(id);
+  if p.is_extern {
+    return;
+  }
+  emit_proc_sig(p, id) ?{ out: out };
+  out::write(" {\n");
+  let vi: u64 = 1;
+  while vi <= p.val_count {
+    out::write("  uint64_t ");
+    emit_val(vi) ?{ out: out };
+    out::write(" = 0;\n");
+    vi = vi + 1;
+  };
+  let pi: u64 = 0;
+  while pi < p.params.len() {
+    out::write("  ");
+    emit_val(pi + 1) ?{ out: out };
+    out::write(" = a");
+    emit_u64(pi) ?{ out: out };
+    out::write(";\n");
+    pi = pi + 1;
+  };
+  let pc: u64 = 0;
+  let n: u64 = p.insts.len();
+  while pc < n {
+    emit_inst(m, p, pc) ?{ out: out };
+    pc = pc + 1;
+  };
+  out::write("}\n\n");
+};
+
+pub {
+  let emit_module = func(m: Ref(IrModule), entry: Slice(u8)) ?{ out: io::Sink } -> bool {
+    emit_preamble() ?{ out: out };
+    emit_data(m) ?{ out: out };
+    let i: u64 = 0;
+    let n: u64 = m.procs.len();
+    while i < n {
+      emit_proc_sig(m.procs.get_ref(i), i) ?{ out: out };
+      out::write(";\n");
+      i = i + 1;
+    };
+    out::write("\n");
+    let j: u64 = 0;
+    while j < n {
+      emit_proc(m, j) ?{ out: out };
+      j = j + 1;
+    };
+    if entry.len > 0 {
+      let ei: u64 = 0;
+      while ei < n {
+        let ep: Ref(Proc) = m.procs.get_ref(ei);
+        if str::eq(ep.name, entry) {
+          out::write("int main(void) { return (int)p_");
+          emit_u64(ei) ?{ out: out };
+          out::write("(); }\n");
+          return true;
+        }
+        ei = ei + 1;
+      };
+      return false;
+    }
+    return true;
+  };
+};

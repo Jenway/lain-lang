@@ -1,0 +1,59 @@
+use import("std::option")::{ Option };
+use import("kernel::vm::addr")::{ TcbId };
+
+pub {
+  let EpState = enum {
+    Empty
+    WaitingSend(TcbId)
+    WaitingRecv(TcbId)
+  };
+
+  let Rendezvous = struct {
+    peer: TcbId,
+    msg: u64
+  };
+
+  let Endpoint = module {
+    pub {
+      let Self = struct {
+        state: EpState,
+        payload: u64
+      };
+
+      let new = func() -> Self {
+        return Self {
+          state: EpState::Empty,
+          payload: 0
+        };
+      };
+
+      let try_send = func(ep: Mut(Self), sender: TcbId, msg: u64) -> Option(TcbId) {
+        return match ep.state {
+          WaitingRecv(peer) => {
+            ep.state = EpState::Empty;
+            ep.payload = msg;
+            Option(TcbId)::some(peer)
+          },
+          _ => {
+            ep.state = EpState::WaitingSend { sender };
+            ep.payload = msg;
+            Option(TcbId)::none()
+          },
+        };
+      };
+
+      let try_recv = func(ep: Mut(Self), receiver: TcbId) -> Option(Rendezvous) {
+        return match ep.state {
+          WaitingSend(peer) => {
+            ep.state = EpState::Empty;
+            Option(Rendezvous)::some(Rendezvous { peer: peer, msg: ep.payload })
+          },
+          _ => {
+            ep.state = EpState::WaitingRecv { receiver };
+            Option(Rendezvous)::none()
+          },
+        };
+      };
+    };
+  };
+};

@@ -1,6 +1,8 @@
 let mem = import("std::mem");
 let option = import("std::option");
 
+use mem.{ OomErr };
+
 pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) } -> Module {
   return module {
     let opt = option.Option(T);
@@ -36,7 +38,13 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       return deref(v).len == 0;
     };
 
-    pub let reserve = func(v: Mut(Self), need: u64) -> bool {
+    pub let reserve = func(v: Mut(Self), need: u64) !{ OomErr } {
+      if try_reserve(v, need) == false {
+        perform OomErr.oom(need * (size_of(T) as u64));
+      }
+    };
+
+    pub let try_reserve = func(v: Mut(Self), need: u64) -> bool {
       let cur: u64 = deref(v).buf.len;
       if cur >= need {
         return true;
@@ -63,6 +71,18 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       }
       deref(v).buf = block;
       return true;
+    };
+
+    pub let try_push = func(v: Mut(Self), item: T) -> bool {
+      let n: u64 = deref(v).len;
+      let ok: bool = try_reserve(v, n + 1);
+      if ok {
+        let base: u64 = deref(v).buf.ptr as u64;
+        let slot: Mut(T) = elem_at(base, n);
+        deref(slot) = item;
+        deref(v).len = n + 1;
+      }
+      return ok;
     };
 
     pub let with_alloc = func(a: al.Self) -> Self {
@@ -96,16 +116,13 @@ pub let Vec = func(T: Type) ?{ al: mem.TypedAllocator = mem.SystemTypedAlloc(T) 
       deref(v).len = 0;
     };
 
-    pub let push = func(v: Mut(Self), item: T) -> bool {
+    pub let push = func(v: Mut(Self), item: T) !{ OomErr } {
       let n: u64 = deref(v).len;
-      let ok: bool = reserve(v, n + 1);
-      if ok {
-        let base: u64 = deref(v).buf.ptr as u64;
-        let slot: Mut(T) = elem_at(base, n);
-        deref(slot) = item;
-        deref(v).len = n + 1;
-      }
-      return ok;
+      reserve(v, n + 1)!;
+      let base: u64 = deref(v).buf.ptr as u64;
+      let slot: Mut(T) = elem_at(base, n);
+      deref(slot) = item;
+      deref(v).len = n + 1;
     };
 
     pub let pop = func(v: Mut(Self)) -> opt.Opt {

@@ -30,6 +30,16 @@ let frame_type_scan = func(k: Mut(st.State), used: u64) -> u64 {
   let back: u64 = used - 32;
   let b: Mut(CtStackSlot) = ptr_cast(Mut(CtStackSlot), st.st_ctbase(k) + back);
   if b.kind == 1 { return b.a; }
+  if b.kind == 9 {
+    let se: Mut(modules.SymEntry) = modules.sym_find(k, b.a, s.b_self_type());
+    if is_null(se) == 0 and modules.sym_pub(se) == 1 {
+      let sk: u64 = modules.sym_kind(se);
+      if sk == modules.sym_kind_struct() or sk == modules.sym_kind_enum() {
+        return ctf.tid_of_shape(k, modules.sym_shape(se));
+      }
+      if sk == modules.sym_kind_type_alias() { return modules.sym_qual(se); }
+    }
+  }
   return frame_type_scan(k, back);
 };
 
@@ -151,7 +161,7 @@ let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
     ctf.v_set(out, 11, ax.n_at(g, i + 1), ptid);
     return i + 2;
   }
-  if ctf.has_tok(g, i + 1, s.p_dot()) == 1 and i + 2 < n and ax.is_name(g, i + 2) == 1 {
+  if (ctf.has_tok(g, i + 1, s.p_dot()) == 1 or ctf.has_tok(g, i + 1, s.p_dcolon()) == 1) and i + 2 < n and ax.is_name(g, i + 2) == 1 {
     let m: u64 = modules.mod_lookup(k, name);
     if m != 0 {
       let mem: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m - 1, 0, ax.n_sym(g, i + 2), modules.cur(k));
@@ -193,10 +203,10 @@ let ct_prefix = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u
     ctf.v_set(out, ctf.v_kind(bv), ctf.v_a(bv), ctf.v_b(bv));
     return i + 1;
   }
-  let tid: u64 = ct_meta_tid(k, name);
-  if tid != 0 { ctf.v_set(out, 1, tid, 0); return i + 1; }
   let m0: u64 = modules.mod_lookup(k, name);
   if m0 != 0 { ctf.v_set(out, 9, m0 - 1, 0); return i + 1; }
+  let tid: u64 = ct_meta_tid(k, name);
+  if tid != 0 { ctf.v_set(out, 1, tid, 0); return i + 1; }
   ctf.fail_msg(k, "unknown comptime name", 21, ax.FailKind.Unbound as u64);
   return i + 1;
 };
@@ -286,11 +296,11 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, qag: u
   if ctf.has_tok(root, pi + 1, s.p_qmark()) == 1 and ctf.has_delim(root, pi + 2, ax.Delim.Brace as u64) == 1 {
     let qab: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 192));
     let qnms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
-    let nq: u64 = resolve_q_bridge(k, modules.sym_src(e), modules.sym_mod(e), ax.n_at(root, pi + 2), qag, nargs, nms, ab, qnms, qab);
+    let nq: u64 = resolve_q_bridge(k, modules.sym_src(e), modules.sym_home(e), ax.n_at(root, pi + 2), qag, nargs, nms, ab, qnms, qab);
     if st.st_ok(k) != 0 { return 0; }
     total_args = copy_ct_tail(nms, ab, nargs, qnms, qab, 0, nq);
   }
-  let hit: Mut(tb.FactoryCacheEntry) = tb.cache_find(k, ptr_cast(Mut(u8), e), total_args, ptr_cast(Mut(u8), ab));
+  let hit: Mut(tb.FactoryCacheEntry) = tb.cache_find(k, modules.sym_qual(e), total_args, ptr_cast(Mut(u8), ab));
   if is_null(hit) == 0 {
     ctf.v_set(out, hit.rk, hit.ra, hit.rb);
     return 1;
@@ -301,7 +311,7 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, qag: u
   let mark: u64 = ctf.mark(k);
   st.st_set_ctdone(k, 0);
   st.st_set_src(k, modules.sym_src(e));
-  st.st_set_vmod(k, modules.sym_mod(e));
+  st.st_set_vmod(k, modules.sym_home(e));
   bind_arr(k, nms, ab, 0, total_args);
   if st.st_ok(k) == 0 { run(k, ax.n_at(root, body)); }
   ctf.release(k, mark);
@@ -311,7 +321,7 @@ let call_user = func(k: Mut(st.State), e: Mut(modules.SymEntry), ag: u64, qag: u
   if st.st_ok(k) != 0 { return 0; }
   let ret: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_ctret(k));
   let rk: u64 = ctf.v_kind(ret); let ra: u64 = ctf.v_a(ret); let rb: u64 = ctf.v_b(ret);
-  tb.cache_put(k, ptr_cast(Mut(u8), e), total_args, ptr_cast(Mut(u8), ab), rk, ra, rb);
+  tb.cache_put(k, modules.sym_qual(e), total_args, ptr_cast(Mut(u8), ab), rk, ra, rb);
   ctf.v_set(out, rk, ra, rb);
   return 1;
 };
@@ -439,7 +449,7 @@ let factory_call_user = func(k: Mut(st.State), fn: Mut(modules.SymEntry), ag: u6
 
 let path_call_at = func(k: Mut(st.State), g: u64, i: u64, owner: u64, seal: u64, out: Mut(ctf.CtVal)) -> u64 {
   let n: u64 = ax.n_count(g);
-  if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return 0; }
+  if (ctf.has_tok(g, i + 1, s.p_dot()) == 0) and (ctf.has_tok(g, i + 1, s.p_dcolon()) == 0) { return 0; }
   if i + 2 >= n { return 0; }
   if ax.is_name(g, i + 2) == 0 { return 0; }
   let nm: u64 = ax.n_sym(g, i + 2);
@@ -450,7 +460,7 @@ let path_call_at = func(k: Mut(st.State), g: u64, i: u64, owner: u64, seal: u64,
     if factory_call_user(k, fn, ax.n_at(g, i + 3), qag, out) == 1 { return if has_q == 1 { i + 6 } else { i + 4 }; }
     return 0;
   }
-  if ctf.has_tok(g, i + 3, s.p_dot()) == 0 { return 0; }
+  if (ctf.has_tok(g, i + 3, s.p_dot()) == 0) and (ctf.has_tok(g, i + 3, s.p_dcolon()) == 0) { return 0; }
   let seal2: Mut(u64) = ax.box(k);
   let m: u64 = modules.resolve_child_mod(k, owner, seal, nm, modules.cur(k), seal2);
   if m == 0 { return 0; }

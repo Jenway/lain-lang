@@ -1,0 +1,146 @@
+use import("std::collections")::{ Vec };
+use import("std::err")::{ Fail };
+use import("std::mem")::{ OomErr, is_pow2 };
+use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, IrModule };
+
+let is_valid_ty = func(t: Ty) -> bool {
+  return match t {
+    Void => true,
+    Bits(n) => (n == 1) or (n == 8) or (n == 16) or (n == 32) or (n == 64),
+    Float(n) => (n == 32) or (n == 64),
+    Vec(n) => (n == 128) or (n == 256) or (n == 512),
+    Addr => true,
+  };
+};
+
+let is_term = func(op: Op) -> bool {
+  let k: u64 = op as u64;
+  return (k >= (Op::Yield as u64)) and (k <= (Op::Unreachable as u64));
+};
+
+let is_block_boundary = func(op: Op) -> bool {
+  return (op == Op::Else)
+    or (op == Op::EndIf)
+    or (op == Op::EndLoop)
+    or (op == Op::Case)
+    or (op == Op::Default)
+    or (op == Op::EndSwitch);
+};
+
+pub {
+  let VerifyError = enum {
+    BadType
+    TypeMismatch
+    BadAlign(u64)
+    BadControlFlow
+    TailNotBeforeReturn
+    DeadCodeAfterTerm
+    BadCallTarget(u64)
+    BadCallArity(u64)
+    UndefinedValue(u64)
+  };
+
+  let VerifyFault = struct {
+    err: VerifyError,
+    proc_id: u64,
+    pc: u64
+  };
+
+  let VerifyErr = Fail(VerifyFault);
+
+  let verify_proc = func(m: Ref(IrModule), proc_id: u64) !{ VerifyErr, OomErr } {
+    let p: Ref(Proc) = m.procs.get_ref(proc_id);
+    if is_valid_ty(p.ret_ty) == false {
+      perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: 0 });
+    }
+    if p.is_extern {
+      return;
+    }
+    let val_tys: Vec(Ty) = Vec(Ty)::new();
+    let vi: u64 = 0;
+    while vi <= p.val_count {
+      val_tys.push(Ty::Void);
+      vi = vi + 1;
+    };
+    let pi: u64 = 0;
+    while pi < p.params.len() {
+      let pt: Ty = p.params.get(pi);
+      if is_valid_ty(pt) == false {
+        perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: 0 });
+      }
+      if (pi + 1) <= p.val_count {
+        val_tys.set(pi + 1, pt);
+      }
+      pi = pi + 1;
+    };
+
+    let depth: u64 = 0;
+    let dead: bool = false;
+    let pc: u64 = 0;
+    let n: u64 = p.insts.len();
+    while pc < n {
+      let ins: Ref(Inst) = p.insts.get_ref(pc);
+      if is_block_boundary(ins.op) {
+        dead = false;
+      } else {
+        if dead {
+          perform VerifyErr::fail(VerifyFault { err: VerifyError::DeadCodeAfterTerm, proc_id: proc_id, pc: pc });
+        }
+      }
+      if is_valid_ty(ins.ty) == false {
+        perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: pc });
+      }
+      if (ins.op == Op::Load) or (ins.op == Op::Store) {
+        if is_pow2(ins.imm) == false {
+          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadAlign { ins.imm }, proc_id: proc_id, pc: pc });
+        }
+      }
+      if ins.op == Op::Call {
+        if ins.a >= m.procs.len() {
+          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadCallTarget { ins.a }, proc_id: proc_id, pc: pc });
+        }
+        let callee: Ref(Proc) = m.procs.get_ref(ins.a);
+        if ins.c != callee.params.len() {
+          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadCallArity { ins.c }, proc_id: proc_id, pc: pc });
+        }
+        if ins.aux == 1 {
+          if (pc + 1) >= n {
+            perform VerifyErr::fail(VerifyFault { err: VerifyError::TailNotBeforeReturn, proc_id: proc_id, pc: pc });
+          }
+          let nxt: Ref(Inst) = p.insts.get_ref(pc + 1);
+          if nxt.op != Op::Return {
+            perform VerifyErr::fail(VerifyFault { err: VerifyError::TailNotBeforeReturn, proc_id: proc_id, pc: pc });
+          }
+        }
+      }
+      if (ins.op == Op::If) or (ins.op == Op::Loop) or (ins.op == Op::Switch) {
+        depth = depth + 1;
+      }
+      if (ins.op == Op::EndIf) or (ins.op == Op::EndLoop) or (ins.op == Op::EndSwitch) {
+        if depth == 0 {
+          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadControlFlow, proc_id: proc_id, pc: pc });
+        }
+        depth = depth - 1;
+      }
+      if (ins.dst > 0) and (ins.dst <= p.val_count) {
+        val_tys.set(ins.dst, ins.ty);
+      }
+      if is_term(ins.op) {
+        dead = true;
+      }
+      pc = pc + 1;
+    };
+    if depth != 0 {
+      perform VerifyErr::fail(VerifyFault { err: VerifyError::BadControlFlow, proc_id: proc_id, pc: n });
+    }
+  };
+
+  let verify_module = func(m: Ref(IrModule)) !{ VerifyErr, OomErr } {
+    let i: u64 = 0;
+    let n: u64 = m.procs.len();
+    while i < n {
+      verify_proc(m, i);
+      i = i + 1;
+    };
+  };
+};

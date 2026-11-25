@@ -28,6 +28,176 @@ let efrow = import("src::sema::effects::row");
 let efinf = import("src::sema::effects::infer");
 let eflow = import("src::sema::effects::lower");
 
+let EqCtx = struct {
+  lobj: u64,
+  robj: u64,
+  tbool: Mut(ty.Ty),
+  tag_eq: Mut(ty.Val)
+};
+
+let eq_scalar_kind = func(tp: Mut(ty.Ty)) -> u64 {
+  let kd: u64 = ty.tk(tp);
+  if kd == (codes.TyKind.Bits as u64) { return 1; }
+  if kd == (codes.TyKind.Floats as u64) { return 3; }
+  if kd == (codes.TyKind.Addr as u64) {
+    if ty.tsh(tp) == 0 { return 2; }
+    return 0;
+  }
+  return 0;
+};
+
+let eq_bitcast = func(k: Mut(st.State), v: Mut(ty.Val), t64: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  ir.args_reset(k);
+  ir.op_val(k, v);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, codes.InstKind.Bitcast as u64, res, t64);
+  return ty.val_ref(out, res, t64);
+};
+
+let eq_pair = func(k: Mut(st.State), lv: Mut(ty.Val), rvv: Mut(ty.Val), tp: Mut(ty.Ty),
+                tbool: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let sk: u64 = eq_scalar_kind(tp);
+  let ot: Mut(ty.Ty) = ax.new_ty(k);
+  ty.ty_at(ot, tp);
+  let lref: Mut(ty.Val) = ax.new_val(k);
+  let rref: Mut(ty.Val) = ax.new_val(k);
+  ty.val_at(lref, lv);
+  ty.val_at(rref, rvv);
+  if sk == 2 {
+    let t64: Mut(ty.Ty) = cx.t64(k);
+    let lp: Mut(ty.Val) = ax.new_val(k);
+    let rp: Mut(ty.Val) = ax.new_val(k);
+    eq_bitcast(k, lref, t64, lp);
+    eq_bitcast(k, rref, t64, rp);
+    ty.ty_at(ot, t64);
+    ty.val_at(lref, lp);
+    ty.val_at(rref, rp);
+  }
+  let inst: u64 = codes.InstKind.Eq as u64;
+  if sk == 3 { inst = codes.InstKind.FOEq as u64; }
+  ir.args_reset(k);
+  ir.op_val(k, lref);
+  ir.op_val(k, rref);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, inst, res, ot);
+  return ty.val_ref(out, res, tbool);
+};
+
+let eq_and = func(k: Mut(st.State), lv: Mut(ty.Val), rvv: Mut(ty.Val), tbool: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  ir.args_reset(k);
+  ir.op_val(k, lv);
+  ir.op_val(k, rvv);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, codes.InstKind.And as u64, res, tbool);
+  return ty.val_ref(out, res, tbool);
+};
+
+let eq_not = func(k: Mut(st.State), v: Mut(ty.Val), tbool: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  ir.args_reset(k);
+  ir.op_val(k, v);
+  ir.arg_int(k, 1);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, codes.InstKind.Xor as u64, res, tbool);
+  return ty.val_ref(out, res, tbool);
+};
+
+let enum_eq_mem_ok = func(k: Mut(st.State), sh: u64, cnt: u64, i: u64, depth: u64) -> u64 {
+  if i >= cnt { return 1; }
+  let m: Mut(agg.Member) = agg.mem_at(sh, i);
+  if agg.mem_has(m) == 0 { return enum_eq_mem_ok(k, sh, cnt, i + 1, depth); }
+  let mt: Mut(ty.Ty) = ax.new_ty(k);
+  agg.mem_ty(k, m, mt);
+  if eq_scalar_kind(mt) == 0 {
+    if enum_eq_ok(k, ty.tsh(mt), depth) == 0 { return 0; }
+  }
+  return enum_eq_mem_ok(k, sh, cnt, i + 1, depth);
+};
+
+let enum_eq_ok = func(k: Mut(st.State), sh: u64, depth: u64) -> u64 {
+  if sh == 0 { return 0; }
+  if depth >= 8 { return 0; }
+  if agg.shp_kind(sh) != (agg.ShapeKind.Enum as u64) { return 0; }
+  let cnt: u64 = agg.shp_count(sh);
+  return enum_eq_mem_ok(k, sh, cnt, 0, depth + 1);
+};
+
+let enum_eq_default = func(k: Mut(st.State), tbool: Mut(ty.Ty)) -> u64 {
+  let r: u64 = ir.region_begin(k);
+  ir.region_result(k, tbool);
+  ir.args_reset(k);
+  ir.arg_int(k, 0);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
+  return ir.region_end(k);
+};
+
+let enum_eq_field = func(k: Mut(st.State), m: Mut(agg.Member), c: Mut(EqCtx), out: Mut(ty.Val)) -> u64 {
+  let mt: Mut(ty.Ty) = ax.new_ty(k);
+  agg.mem_ty(k, m, mt);
+  let off: u64 = agg.mem_off(m);
+  let lv: Mut(ty.Val) = ax.new_val(k);
+  let rvv: Mut(ty.Val) = ax.new_val(k);
+  agg.load_at(k, c.lobj, off, mt, lv);
+  agg.load_at(k, c.robj, off, mt, rvv);
+  if eq_scalar_kind(mt) != 0 {
+    return eq_pair(k, lv, rvv, mt, c.tbool, out);
+  }
+  return enum_eq_emit(k, ty.tsh(mt), ty.vn(lv), ty.vn(rvv), c.tbool, out);
+};
+
+let enum_eq_case = func(k: Mut(st.State), sh: u64, cnt: u64, i: u64, c: Mut(EqCtx)) -> u64 {
+  if i >= cnt { return 0; }
+  let m: Mut(agg.Member) = agg.mem_at(sh, i);
+  ir.region_begin(k);
+  ir.region_result(k, c.tbool);
+  let yv: Mut(ty.Val) = ax.new_val(k);
+  if agg.mem_has(m) == 0 {
+    ty.val_at(yv, c.tag_eq);
+  } else {
+    let pf: Mut(ty.Val) = ax.new_val(k);
+    enum_eq_field(k, m, c, pf);
+    let both: Mut(ty.Val) = ax.new_val(k);
+    eq_and(k, c.tag_eq, pf, c.tbool, both);
+    ty.val_at(yv, both);
+  }
+  ir.args_reset(k);
+  ir.op_val(k, yv);
+  ir.emit_jump(k, codes.InstKind.Yield as u64, 0);
+  let h: u64 = ir.region_end(k);
+  ir.case_add(k, agg.mem_tag(m), h);
+  return enum_eq_case(k, sh, cnt, i + 1, c);
+};
+
+let enum_eq_emit = func(k: Mut(st.State), sh: u64, lobj: u64, robj: u64, tbool: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let t8: Mut(ty.Ty) = ir.tbits(k, 8);
+  let ltag: Mut(ty.Val) = ax.new_val(k);
+  let rtag: Mut(ty.Val) = ax.new_val(k);
+  agg.load_at(k, lobj, 0, t8, ltag);
+  agg.load_at(k, robj, 0, t8, rtag);
+  let tag_eq: Mut(ty.Val) = ax.new_val(k);
+  eq_pair(k, ltag, rtag, t8, tbool, tag_eq);
+  let dr: u64 = enum_eq_default(k, tbool);
+  let c: Mut(EqCtx) = ptr_cast(Mut(EqCtx), st.st_alloc(k, 32));
+  c.lobj = lobj;
+  c.robj = robj;
+  c.tbool = tbool;
+  c.tag_eq = tag_eq;
+  let cnt: u64 = agg.shp_count(sh);
+  enum_eq_case(k, sh, cnt, 0, c);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit_switch(k, res, ty.vn(ltag), t8, dr);
+  return ty.val_ref(out, res, tbool);
+};
+
+let enum_eq_compare = func(k: Mut(st.State), lsh: u64, lvn: u64, rvn: u64, op: u64, out: Mut(ty.Val)) -> u64 {
+  let tbool: Mut(ty.Ty) = cx.tbool(k);
+  let eqv: Mut(ty.Val) = ax.new_val(k);
+  enum_eq_emit(k, lsh, lvn, rvn, tbool, eqv);
+  if op == s.o_eq() { return ty.val_at(out, eqv); }
+  let nv: Mut(ty.Val) = ax.new_val(k);
+  eq_not(k, eqv, tbool, nv);
+  return ty.val_at(out, nv);
+};
+
 let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { return i; }
@@ -51,7 +221,7 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
     }
   }
   if ax.is_group(g, i) == 0 {
-    if ax.n_sym(g, i) == s.p_dot() {
+    if (ax.n_sym(g, i) == s.p_dot()) or (ax.n_sym(g, i) == s.p_dcolon()) {
       if i + 1 < n {
         let plain: u64 = ax.is_name(g, i + 1);
         let interp: u64 = ctf.interp_at(g, i + 1);
@@ -104,6 +274,16 @@ let expr_tail = func(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.T
         ty.ty_at(at2, ty.vty(rv_val));
         ty.val_ref(out, res2, at2);
         return expr_tail(k, g, rj, minp, want, out);
+      }
+    }
+    let lsh: u64 = ty.tsh(lt);
+    let rsh: u64 = ty.tsh(rt);
+    if ((op == s.o_eq()) or (op == s.o_ne())) and (lsh != 0) and (lsh == rsh) {
+      if agg.shp_kind(lsh) == (agg.ShapeKind.Enum as u64) {
+        if (ty.vn(out) != 0) and (ty.vn(rv_val) != 0) and (enum_eq_ok(k, lsh, 0) == 1) {
+          enum_eq_compare(k, lsh, ty.vn(out), ty.vn(rv_val), op, out);
+          return expr_tail(k, g, rj, minp, want, out);
+        }
       }
     }
     let dzs: u64 = ir.diag(k, st.st_src(k), 34, "binsrc", 6);
@@ -280,8 +460,8 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   }
   if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
 
-  if i + 2 < n and ax.is_group(g, i + 1) == 0 and ax.is_name(g, i) == 1 {
-    if ax.n_sym(g, i + 1) == s.p_dot() and ax.is_name(g, i + 2) == 1 {
+  if (i + 2 < n) and (ax.is_group(g, i + 1) == 0) and (ax.is_name(g, i) == 1) {
+    if ((ax.n_sym(g, i + 1) == s.p_dot()) or (ax.n_sym(g, i + 1) == s.p_dcolon())) and (ax.is_name(g, i + 2) == 1) {
       if env.env_find(k, sym) == 0 {
         let wf: Mut(gv.WField) = gv.witness_field_at(k, g, i);
         if st.st_ok(k) != 0 { return i + 3; }
@@ -318,7 +498,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
   }
 
   if i + 3 < n and ax.is_name(g, i) == 1 and ax.is_group(g, i + 1) == 1 {
-    if ax.delim_of(g, i + 1) == ax.Delim.Paren as u64 and ax.is_group(g, i + 2) == 0 and ax.n_sym(g, i + 2) == s.p_dot() and ax.is_name(g, i + 3) == 1 {
+    if (ax.delim_of(g, i + 1) == ax.Delim.Paren as u64) and (ax.is_group(g, i + 2) == 0) and ((ax.n_sym(g, i + 2) == s.p_dot()) or (ax.n_sym(g, i + 2) == s.p_dcolon())) and (ax.is_name(g, i + 3) == 1) {
       let mv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
       let mj: u64 = ctfn.eval_factory_call(k, g, i, mv);
       if mj != 0 {
@@ -423,6 +603,7 @@ let expr_prefix = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: 
       let cj: u64 = cl.call_expr(k, g, i, want, out);
       let se2: Mut(modules.SymEntry) = ctf.find_sym(k, sym);
       let cg: u64 = efinf.call_guard(k, se2, g, i + 2);
+      if cg == 2 { let pr: u64 = eflow.propagate(k); }
       return cj;
     }
     if ax.delim_of(g, i + 1) == ax.Delim.Bracket as u64 and sym == s.b_icall() {

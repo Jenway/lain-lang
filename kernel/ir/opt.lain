@@ -1,0 +1,278 @@
+use import("std::collections")::{ Vec };
+use import("std::option")::{ Option };
+use import("std::mem")::{ OomErr };
+use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, IrModule };
+
+let ConstFact = struct {
+  val_id: u64,
+  imm: u64
+};
+
+let BoolFact = struct {
+  val_id: u64,
+  truth: bool
+};
+
+let Fact = enum {
+  ConstVal(ConstFact)
+  KnownBool(BoolFact)
+};
+
+let FactSet = module {
+  pub {
+    let Self = struct {
+      items: Vec(Fact)
+    };
+
+    let new = func() -> Self {
+      return Self { items: Vec(Fact)::new() };
+    };
+
+    let mark = func(fs: Ref(Self)) -> u64 {
+      return fs.items.len();
+    };
+
+    let rollback = func(fs: Mut(Self), m: u64) {
+      while fs.items.len() > m {
+        fs.items.pop();
+      };
+    };
+
+    let push_const = func(fs: Mut(Self), val_id: u64, imm: u64) !{ OomErr } {
+      if val_id != 0 {
+        fs.items.push(Fact::ConstVal { ConstFact { val_id: val_id, imm: imm } });
+      }
+    };
+
+    let push_bool = func(fs: Mut(Self), val_id: u64, truth: bool) !{ OomErr } {
+      if val_id != 0 {
+        fs.items.push(Fact::KnownBool { BoolFact { val_id: val_id, truth: truth } });
+      }
+    };
+
+    let get_const = func(fs: Ref(Self), val_id: u64) -> Option(u64) {
+      let i: u64 = fs.items.len();
+      while i > 0 {
+        i = i - 1;
+        match fs.items.get(i) {
+          ConstVal(cf) => {
+            if cf.val_id == val_id {
+              return Option(u64)::some(cf.imm);
+            }
+          },
+          _ => {},
+        };
+      };
+      return Option(u64)::none();
+    };
+
+    let get_bool = func(fs: Ref(Self), val_id: u64) -> Option(bool) {
+      let i: u64 = fs.items.len();
+      while i > 0 {
+        i = i - 1;
+        match fs.items.get(i) {
+          KnownBool(bf) => {
+            if bf.val_id == val_id {
+              return Option(bool)::some(bf.truth);
+            }
+          },
+          ConstVal(cf) => {
+            if cf.val_id == val_id {
+              return Option(bool)::some(cf.imm != 0);
+            }
+          },
+        };
+      };
+      return Option(bool)::none();
+    };
+  };
+};
+
+let mask_bits = func(v: u64, t: Ty) -> u64 {
+  let bits: u64 = match t {
+    Bits(n) => n as u64,
+    _ => 64,
+  };
+  if bits >= 64 { return v; }
+  return v & (((1 as u64) << bits) - 1);
+};
+
+let is_foldable_binop = func(op: Op) -> bool {
+  return (op == Op::Add)
+    or (op == Op::Sub)
+    or (op == Op::Mul)
+    or (op == Op::And)
+    or (op == Op::Or)
+    or (op == Op::Xor)
+    or (op == Op::Eq)
+    or (op == Op::Ne)
+    or (op == Op::Ult)
+    or (op == Op::Ule)
+    or (op == Op::Ugt)
+    or (op == Op::Uge);
+};
+
+let eval_const_binop = func(op: Op, t: Ty, lv: u64, rv: u64) -> u64 {
+  let a: u64 = mask_bits(lv, t);
+  let b: u64 = mask_bits(rv, t);
+  if op == Op::Add { return mask_bits(a + b, t); }
+  if op == Op::Sub { return mask_bits(a - b, t); }
+  if op == Op::Mul { return mask_bits(a * b, t); }
+  if op == Op::And { return mask_bits(a & b, t); }
+  if op == Op::Or { return mask_bits(a | b, t); }
+  if op == Op::Xor { return mask_bits(a ^ b, t); }
+  let hit: bool = if op == Op::Eq { a == b }
+    else if op == Op::Ne { a != b }
+    else if op == Op::Ult { a < b }
+    else if op == Op::Ule { a <= b }
+    else if op == Op::Ugt { a > b }
+    else { a >= b };
+  return if hit { 1 } else { 0 };
+};
+
+let is_pure_inst = func(op: Op) -> bool {
+  let k: u64 = op as u64;
+  if (op == Op::Const) or (op == Op::SymAddr) or (op == Op::Lea) {
+    return true;
+  }
+  if (k >= (Op::Add as u64)) and (k <= (Op::Trunc as u64)) {
+    return true;
+  }
+  return false;
+};
+
+let propagate_proc = func(p: Mut(Proc)) !{ OomErr } -> u64 {
+  let facts: FactSet = FactSet::new();
+  let marks: Vec(u64) = Vec(u64)::new();
+  let changed: u64 = 0;
+  let pc: u64 = 0;
+  let n: u64 = p.insts.len();
+  while pc < n {
+    let ins: Mut(Inst) = p.insts.get_mut(pc);
+    let op: Op = ins.op;
+    if op == Op::Const {
+      facts.push_const(ins.dst, ins.imm);
+    } else if op == Op::Assume {
+      facts.push_bool(ins.a, true);
+    } else if op == Op::If {
+      marks.push(facts.mark());
+      facts.push_bool(ins.a, true);
+    } else if op == Op::Else {
+      if marks.len() > 0 {
+        let m: u64 = marks.get(marks.len() - 1);
+        facts.rollback(m);
+      }
+      let if_cond: u64 = p.insts.get_ref(ins.a).a;
+      facts.push_bool(if_cond, false);
+    } else if op == Op::EndIf {
+      match marks.pop() {
+        Some(m) => facts.rollback(m),
+        None => {},
+      };
+    } else if is_foldable_binop(op) {
+      if (op == Op::Xor) and (ins.a == ins.b) {
+        ins.op = Op::Const;
+        ins.imm = 0;
+        ins.a = 0;
+        ins.b = 0;
+        facts.push_const(ins.dst, 0);
+        changed = changed + 1;
+      } else {
+        match facts.get_const(ins.a) {
+          Some(lv) => match facts.get_const(ins.b) {
+            Some(rv) => {
+              let folded: u64 = eval_const_binop(op, ins.ty, lv, rv);
+              ins.op = Op::Const;
+              ins.imm = folded;
+              ins.a = 0;
+              ins.b = 0;
+              facts.push_const(ins.dst, folded);
+              changed = changed + 1;
+            },
+            None => {},
+          },
+          None => {},
+        };
+      }
+    }
+    pc = pc + 1;
+  };
+  return changed;
+};
+
+let dce_proc = func(p: Mut(Proc)) !{ OomErr } -> u64 {
+  let uses: Vec(u64) = Vec(u64)::new();
+  let ui: u64 = 0;
+  while ui <= p.val_count {
+    uses.push(0);
+    ui = ui + 1;
+  };
+  let i: u64 = 0;
+  let n: u64 = p.insts.len();
+  while i < n {
+    let ins: Ref(Inst) = p.insts.get_ref(i);
+    if (ins.a > 0) and (ins.a <= p.val_count) and (ins.op != Op::Call) and (ins.op != Op::SymAddr) and (ins.op != Op::Else) and (ins.op != Op::EndLoop) {
+      uses.set(ins.a, uses.get(ins.a) + 1);
+    }
+    if (ins.b > 0) and (ins.b <= p.val_count) and (ins.op != Op::Call) and (ins.op != Op::If) and (ins.op != Op::Loop) {
+      uses.set(ins.b, uses.get(ins.b) + 1);
+    }
+    if ins.op == Op::Call {
+      let ai: u64 = 0;
+      while ai < ins.c {
+        let av: u64 = p.call_args.get(ins.b + ai);
+        if (av > 0) and (av <= p.val_count) {
+          uses.set(av, uses.get(av) + 1);
+        }
+        ai = ai + 1;
+      };
+    }
+    i = i + 1;
+  };
+
+  let removed: u64 = 0;
+  let j: u64 = 0;
+  while j < n {
+    let ins: Mut(Inst) = p.insts.get_mut(j);
+    if is_pure_inst(ins.op) and (ins.dst > 0) and (ins.dst <= p.val_count) {
+      if uses.get(ins.dst) == 0 {
+        if ins.op != Op::Const {
+          ins.op = Op::Const;
+          ins.dst = 0;
+          ins.a = 0;
+          ins.b = 0;
+          ins.imm = 0;
+          removed = removed + 1;
+        }
+      }
+    }
+    j = j + 1;
+  };
+  return removed;
+};
+
+pub {
+  let optimize_proc = func(p: Mut(Proc)) !{ OomErr } {
+    if p.is_extern {
+      return;
+    }
+    let round: u64 = 0;
+    while round < 4 {
+      let c1: u64 = propagate_proc(p);
+      let c2: u64 = dce_proc(p);
+      if (c1 + c2) == 0 {
+        return;
+      }
+      round = round + 1;
+    };
+  };
+
+  let optimize_module = func(m: Mut(IrModule)) !{ OomErr } {
+    let i: u64 = 0;
+    let n: u64 = m.procs.len();
+    while i < n {
+      optimize_proc(m.procs.get_mut(i));
+      i = i + 1;
+    };
+  };
+};

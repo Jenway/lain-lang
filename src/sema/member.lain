@@ -79,7 +79,7 @@ let factory_value = func(k: Mut(st.State), g: u64, j: u64, v: Mut(ctf.CtVal), wa
   let n: u64 = ax.n_count(g);
   let fk: u64 = ctf.v_kind(v);
   if fk == 9 {
-    if j + 1 < n and ax.is_group(g, j) == 0 and ax.n_sym(g, j) == s.p_dot() and ax.is_name(g, j + 1) == 1 {
+    if j + 1 < n and ax.is_group(g, j) == 0 and cx.is_path_sep(ax.n_sym(g, j)) and ax.is_name(g, j + 1) == 1 {
       let sn: Mut(u64) = ax.box(k);
       deref(sn) = ctf.v_b(v);
       return member_step(k, g, j + 1, ctf.v_a(v), sn, want, out);
@@ -107,7 +107,7 @@ let factory_value = func(k: Mut(st.State), g: u64, j: u64, v: Mut(ctf.CtVal), wa
 let member_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = ax.n_count(g);
   let name: u64 = ax.n_sym(g, pos);
-  let more: u64 = if pos + 2 < n and ax.is_name(g, pos + 2) == 1 and ax.n_sym(g, pos + 1) == s.p_dot() { 1 } else { 0 };
+  let more: u64 = if pos + 2 < n and ax.is_name(g, pos + 2) == 1 and cx.is_path_sep(ax.n_sym(g, pos + 1)) { 1 } else { 0 };
   if more == 1 {
     let nb: Mut(u64) = ax.box(k);
     let nx: u64 = modules.resolve_child_mod(k, m, deref(sn), name, modules.cur(k), nb);
@@ -118,6 +118,13 @@ let member_step = func(k: Mut(st.State), g: u64, pos: u64, m: u64, sn: Mut(u64),
   }
   let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), name, modules.cur(k));
   if is_null(e) {
+    let selfe: Mut(modules.SymEntry) = modules.sym_lookup_in(k, m, deref(sn), s.b_self_type(), modules.cur(k));
+    if is_null(selfe) == 0 {
+      let esh: u64 = enum_shape_of(k, selfe);
+      if esh != 0 {
+        if is_null(agg.mem_find(esh, name)) == 0 { return variant_at(k, g, esh, pos, want, out); }
+      }
+    }
     let pv: Mut(modules.SymEntry) = modules.sym_find(k, m, name);
     if is_null(pv) == 0 {
       let pm: Ref(u8) = "private symbol";
@@ -142,7 +149,7 @@ let path_member = func(k: Mut(st.State), g: u64, last: u64, e: Mut(modules.SymEn
   let n: u64 = ax.n_count(g);
   let esh: u64 = enum_shape_of(k, e);
   if esh != 0 and nx + 1 < n and ax.is_group(g, nx) == 0 {
-    if ax.n_sym(g, nx) == s.p_dot() and ax.is_name(g, nx + 1) == 1 {
+    if cx.is_path_sep(ax.n_sym(g, nx)) and ax.is_name(g, nx + 1) == 1 {
       return variant_at(k, g, esh, nx + 1, want, out);
     }
   }
@@ -249,7 +256,14 @@ let ufcs_dispatch = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out
     esh = sh;
   }
   if esh != 0 {
-    if is_null(agg.mem_find(esh, name)) == 0 { return 0; }
+    let fm: Mut(agg.Member) = agg.mem_find(esh, name);
+    if is_null(fm) == 0 {
+      let ft: Mut(ty.Ty) = ax.new_ty(k);
+      let fj: u64 = agg.mem_ty(k, fm, ft);
+      let fsh: u64 = ty.tsh(ft);
+      let fk: u64 = if fsh == 0 { 0 } else { agg.shp_kind(fsh) };
+      if fk == agg.ShapeKind.Fn as u64 { return 0; }
+    }
   }
   let self_tid: u64 = if is_ref_or_mut == 1 { ct.elem_tid(k, sh) } else { ireg.tid_of(k, vt) };
   let hit: Mut(gv.UfcsHit) = ptr_cast(Mut(gv.UfcsHit), st.st_alloc(k, 16));

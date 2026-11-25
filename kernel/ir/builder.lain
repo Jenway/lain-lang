@@ -1,0 +1,253 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("kernel::ir::model")::{ Ty, Op, Inst, DataSeg, Proc, IrModule, MemAxiom };
+
+pub {
+  let ValId = struct { id: u64 };
+  let ProcId = struct { id: u64 };
+  let DataId = struct { id: u64 };
+
+  let IfToken = struct {
+    if_pc: u64,
+    else_pc: u64,
+    res: ValId
+  };
+
+  let LoopToken = struct {
+    label: u64,
+    loop_pc: u64,
+    res: ValId
+  };
+
+  let ProcBuilder = module {
+    pub {
+      let Self = struct {
+        proc: Proc,
+        next_val: u64,
+        next_label: u64
+      };
+
+      let new = func(name: Slice(u8), params: Vec(Ty), ret_ty: Ty) -> Self {
+        let nparams: u64 = params.len();
+        return Self {
+          proc: Proc {
+            name: name,
+            link_name: name,
+            is_extern: false,
+            is_pure: false,
+            ret_ty: ret_ty,
+            params: reloc(params),
+            insts: Vec(Inst)::new(),
+            call_args: Vec(u64)::new(),
+            axioms: Vec(MemAxiom)::new(),
+            val_count: nparams
+          },
+          next_val: nparams + 1,
+          next_label: 1
+        };
+      };
+
+      let param = func(b: Ref(Self), idx: u64) -> ValId {
+        return ValId { id: idx + 1 };
+      };
+
+      let fresh_val = func(b: Mut(Self)) -> ValId {
+        let id: u64 = b.next_val;
+        b.next_val = id + 1;
+        b.proc.val_count = id;
+        return ValId { id: id };
+      };
+
+      let const_bits = func(b: Mut(Self), ty: Ty, val: u64) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: Op::Const, ty: ty, dst: dst.id, a: 0, b: 0, c: 0, imm: val, aux: 0 });
+        return dst;
+      };
+
+      let sym_data = func(b: Mut(Self), did: DataId) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: Op::SymAddr, ty: Ty::Addr, dst: dst.id, a: did.id, b: 0, c: 0, imm: 0, aux: 0 });
+        return dst;
+      };
+
+      let binop = func(b: Mut(Self), op: Op, ty: Ty, lhs: ValId, rhs: ValId) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: op, ty: ty, dst: dst.id, a: lhs.id, b: rhs.id, c: 0, imm: 0, aux: 0 });
+        return dst;
+      };
+
+      let cast = func(b: Mut(Self), op: Op, to_ty: Ty, src: ValId) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: op, ty: to_ty, dst: dst.id, a: src.id, b: 0, c: 0, imm: 0, aux: 0 });
+        return dst;
+      };
+
+      let alloca = func(b: Mut(Self), elem_ty: Ty, count: u64) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: Op::Alloca, ty: elem_ty, dst: dst.id, a: 0, b: 0, c: 0, imm: count, aux: 0 });
+        return dst;
+      };
+
+      let lea = func(b: Mut(Self), base: ValId, idx: ValId, scale: u64, offset: u64) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: Op::Lea, ty: Ty::Addr, dst: dst.id, a: base.id, b: idx.id, c: scale, imm: offset, aux: 0 });
+        return dst;
+      };
+
+      let load = func(b: Mut(Self), ty: Ty, ptr: ValId, align: u64) !{ OomErr } -> ValId {
+        let dst: ValId = fresh_val(b);
+        b.proc.insts.push(Inst { op: Op::Load, ty: ty, dst: dst.id, a: ptr.id, b: 0, c: 0, imm: align, aux: 0 });
+        return dst;
+      };
+
+      let store = func(b: Mut(Self), ty: Ty, val: ValId, ptr: ValId, align: u64) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Store, ty: ty, dst: 0, a: val.id, b: ptr.id, c: 0, imm: align, aux: 0 });
+      };
+
+      let call = func(b: Mut(Self), callee: ProcId, args: Slice(ValId), ret_ty: Ty, is_tail: bool) !{ OomErr } -> ValId {
+        let start: u64 = b.proc.call_args.len();
+        let i: u64 = 0;
+        while i < args.len {
+          let av: ValId = args[i];
+          b.proc.call_args.push(av.id);
+          i = i + 1;
+        };
+        let dst: ValId = if (ret_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
+        let tail_flag: u64 = if is_tail { 1 } else { 0 };
+        b.proc.insts.push(Inst { op: Op::Call, ty: ret_ty, dst: dst.id, a: callee.id, b: start, c: args.len, imm: 0, aux: tail_flag });
+        return dst;
+      };
+
+      let begin_if = func(b: Mut(Self), cond: ValId, res_ty: Ty) !{ OomErr } -> IfToken {
+        let dst: ValId = if (res_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
+        let pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::If, ty: res_ty, dst: dst.id, a: cond.id, b: 0, c: 0, imm: 0, aux: 0 });
+        return IfToken { if_pc: pc, else_pc: 0, res: dst };
+      };
+
+      let begin_else = func(b: Mut(Self), tok: Mut(IfToken)) !{ OomErr } {
+        let epc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::Else, ty: Ty::Void, dst: 0, a: tok.if_pc, b: 0, c: 0, imm: 0, aux: 0 });
+        let if_ins: Mut(Inst) = b.proc.insts.get_mut(tok.if_pc);
+        if_ins.b = epc + 1;
+        tok.else_pc = epc;
+      };
+
+      let end_if = func(b: Mut(Self), tok: IfToken) !{ OomErr } -> ValId {
+        let end_pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::EndIf, ty: Ty::Void, dst: 0, a: 0, b: 0, c: 0, imm: 0, aux: 0 });
+        let if_ins: Mut(Inst) = b.proc.insts.get_mut(tok.if_pc);
+        if_ins.c = end_pc;
+        if tok.else_pc == 0 {
+          if_ins.b = end_pc + 1;
+        } else {
+          let el_ins: Mut(Inst) = b.proc.insts.get_mut(tok.else_pc);
+          el_ins.c = end_pc;
+        }
+        return tok.res;
+      };
+
+      let begin_loop = func(b: Mut(Self), res_ty: Ty) !{ OomErr } -> LoopToken {
+        let dst: ValId = if (res_ty == Ty::Void) { ValId { id: 0 } } else { fresh_val(b) };
+        let lbl: u64 = b.next_label;
+        b.next_label = lbl + 1;
+        let pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::Loop, ty: res_ty, dst: dst.id, a: lbl, b: 0, c: 0, imm: 0, aux: 0 });
+        return LoopToken { label: lbl, loop_pc: pc, res: dst };
+      };
+
+      let end_loop = func(b: Mut(Self), tok: LoopToken) !{ OomErr } -> ValId {
+        let end_pc: u64 = b.proc.insts.len();
+        b.proc.insts.push(Inst { op: Op::EndLoop, ty: Ty::Void, dst: 0, a: tok.loop_pc, b: 0, c: 0, imm: 0, aux: 0 });
+        let lp_ins: Mut(Inst) = b.proc.insts.get_mut(tok.loop_pc);
+        lp_ins.b = end_pc;
+        return tok.res;
+      };
+
+      let emit_yield = func(b: Mut(Self), val: ValId) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Yield, ty: Ty::Void, dst: 0, a: val.id, b: 0, c: 0, imm: 0, aux: 0 });
+      };
+
+      let emit_break = func(b: Mut(Self), tok: LoopToken, val: ValId) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Break, ty: Ty::Void, dst: 0, a: tok.label, b: val.id, c: 0, imm: 0, aux: 0 });
+      };
+
+      let emit_continue = func(b: Mut(Self), tok: LoopToken) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Continue, ty: Ty::Void, dst: 0, a: tok.label, b: 0, c: 0, imm: 0, aux: 0 });
+      };
+
+      let emit_ret = func(b: Mut(Self), val: ValId) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Return, ty: Ty::Void, dst: 0, a: val.id, b: 0, c: 0, imm: 0, aux: 0 });
+      };
+
+      let emit_unreachable = func(b: Mut(Self)) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Unreachable, ty: Ty::Void, dst: 0, a: 0, b: 0, c: 0, imm: 0, aux: 0 });
+      };
+
+      let assume = func(b: Mut(Self), cond: ValId) !{ OomErr } {
+        b.proc.insts.push(Inst { op: Op::Assume, ty: Ty::Bits { 1 }, dst: 0, a: cond.id, b: 0, c: 0, imm: 0, aux: 0 });
+      };
+
+      let mark_pure = func(b: Mut(Self)) {
+        b.proc.is_pure = true;
+      };
+
+      let add_axiom = func(b: Mut(Self), ax: MemAxiom) !{ OomErr } {
+        b.proc.axioms.push(ax);
+      };
+
+      let as_ref = func(b: Ref(Self)) -> Ref(Proc) {
+        return ref_of(deref(b).proc);
+      };
+    };
+  };
+
+  let IrBuilder = module {
+    pub {
+      let Self = struct {
+        ir: IrModule
+      };
+
+      let new = func() -> Self {
+        return Self { ir: IrModule::new() };
+      };
+
+      let add_data = func(b: Mut(Self), name: Slice(u8), mutable: bool, align: u64, bytes: Vec(u8)) !{ OomErr } -> DataId {
+        let id: u64 = b.ir.datas.len();
+        b.ir.datas.push(DataSeg { name: name, mutable: mutable, align: align, bytes: reloc(bytes) });
+        return DataId { id: id };
+      };
+
+      let declare_extern = func(b: Mut(Self), name: Slice(u8), link_name: Slice(u8), params: Vec(Ty), ret_ty: Ty) !{ OomErr } -> ProcId {
+        let id: u64 = b.ir.procs.len();
+        b.ir.procs.push(Proc {
+          name: name,
+          link_name: link_name,
+          is_extern: true,
+          is_pure: false,
+          ret_ty: ret_ty,
+          params: reloc(params),
+          insts: Vec(Inst)::new(),
+          call_args: Vec(u64)::new(),
+          axioms: Vec(MemAxiom)::new(),
+          val_count: 0
+        });
+        return ProcId { id: id };
+      };
+
+      let add_proc = func(b: Mut(Self), p: Proc) !{ OomErr } -> ProcId {
+        let id: u64 = b.ir.procs.len();
+        b.ir.procs.push(reloc(p));
+        return ProcId { id: id };
+      };
+
+      let as_ref = func(b: Ref(Self)) -> Ref(IrModule) {
+        return ref_of(deref(b).ir);
+      };
+
+      let as_mut = func(b: Mut(Self)) -> Mut(IrModule) {
+        return mut_of(deref(b).ir);
+      };
+    };
+  };
+};

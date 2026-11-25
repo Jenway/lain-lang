@@ -1,0 +1,52 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr, align_up };
+use import("kernel::ir::model")::{ DataSeg, IrModule };
+use import("kernel::vm::addr")::{ VmAddr, SegId };
+use import("kernel::vm::trap")::{ VmTrap };
+use import("kernel::vm::vspace")::{ VSpace };
+
+pub {
+  let Image = module {
+    pub {
+      let Self = struct {
+        ir: Ref(IrModule),
+        data_vaddrs: Vec(VmAddr)
+      };
+
+      let load = func(m: Ref(IrModule)) !{ OomErr } -> Self {
+        let addrs: Vec(VmAddr) = Vec(VmAddr)::new();
+        let cursor: u64 = 65536;
+        let i: u64 = 0;
+        let n: u64 = m.datas.len();
+        while i < n {
+          let seg: Ref(DataSeg) = m.datas.get_ref(i);
+          let vaddr: u64 = align_up(cursor, 4096);
+          let sz: u64 = if seg.bytes.len() == 0 { 1 } else { seg.bytes.len() };
+          addrs.push(VmAddr { raw: vaddr });
+          cursor = align_up(vaddr + sz, 4096) + 4096;
+          i = i + 1;
+        };
+        return Self {
+          ir: m,
+          data_vaddrs: addrs
+        };
+      };
+
+      let mount = func(img: Ref(Self), vs: Mut(VSpace)) !{ VmTrap, OomErr } {
+        let i: u64 = 0;
+        let n: u64 = img.ir.datas.len();
+        while i < n {
+          let seg: Ref(DataSeg) = img.ir.datas.get_ref(i);
+          let sz: u64 = if seg.bytes.len() == 0 { 1 } else { seg.bytes.len() };
+          let sid: SegId = vs.alloc_seg(sz, seg.mutable);
+          vs.write_init(sid, seg.bytes.as_slice());
+          i = i + 1;
+        };
+      };
+
+      let data_vaddr = func(img: Ref(Self), data_id: u64) -> VmAddr {
+        return img.data_vaddrs.get(data_id);
+      };
+    };
+  };
+};

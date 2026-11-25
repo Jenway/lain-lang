@@ -75,6 +75,15 @@ let skip_to_body = func(g: u64, i: u64, n: u64) -> u64 {
   return skip_to_body(g, i + 1, n);
 };
 
+let p_dcolon = func() -> u64 { return s.intern("::", 2); };
+
+let path_sep = func(g: u64, i: u64) -> u64 {
+  let t: u64 = ax.n_sym(g, i);
+  if t == s.p_dot() { return 1; }
+  if t == p_dcolon() { return 1; }
+  return 0;
+};
+
 let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(u64), n: u64) -> u64 {
   if i >= n { return i; }
   if ax.is_name(g, i) == 0 { return i; }
@@ -83,8 +92,10 @@ let path_take = func(k: Mut(st.State), g: u64, i: u64, segs: Mut(u64), cnt: Mut(
   let wp: Mut(u64) = cx.word_idx(segs, c);
   deref(wp) = ax.n_sym(g, i);
   ax.box_put(cnt, c + 1);
-  if i + 2 < n and ax.n_sym(g, i + 1) == s.p_dot() and ax.is_name(g, i + 2) == 1 {
-    return path_take(k, g, i + 2, segs, cnt, n);
+  if i + 2 < n {
+    if path_sep(g, i + 1) == 1 {
+      if ax.is_name(g, i + 2) == 1 { return path_take(k, g, i + 2, segs, cnt, n); }
+    }
   }
   return i + 1;
 };
@@ -151,31 +162,129 @@ let mark_pub = func(k: Mut(st.State), name: u64, is_pub: u64) -> u64 {
   return modules.sym_set_pub(e, is_pub);
 };
 
-let p1_open = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+let import_src = func(k: Mut(st.State), g: u64, i: u64) -> u64 {
+  let cur: u64 = st.st_src(k);
+  let h: u64 = if i + 1 < ax.n_count(g) and ax.is_group(g, i + 1) == 1 { ax.n_at(g, i + 1) } else { 0 };
+  if h == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
+  let tok: u64 = if ax.n_count(h) > 0 { ax.n_at(h, 0) } else { 0 };
+  if tok == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
+  let path_len: u64 = ax.lit_len(tok);
+  if path_len < 2 { st.st_fail(k, ax.FailKind.Ast as u64); return 0; }
+  let path_ptr: Ref(u8) = ax.lit_addr(tok) + 1;
+  let src2: u64 = hr.source_import(cur, path_ptr, path_len - 2);
+  if src2 >= 4000000000 {
+    st.st_fail(k, ax.FailKind.Type as u64);
+    return 0;
+  }
+  let r: u64 = compile_source(k, src2);
+  st.st_set_src(k, cur);
+  if st.st_ok(k) != 0 { return 0; }
+  return src2;
+};
+
+let mod_target = func(k: Mut(st.State), g: u64, i: u64, oe: Mut(u64), os: Mut(u64)) -> u64 {
   let n: u64 = ax.n_count(g);
-  let is_use: u64 = if ax.n_sym(g, i) == s.k_use() { 1 } else { 0 };
+  if i + 2 < n {
+    if ax.n_sym(g, i + 1) == s.k_import() {
+      if ax.is_group(g, i + 2) == 1 {
+        if ax.delim_of(g, i + 2) == ax.Delim.Paren as u64 {
+          deref(oe) = i + 3;
+          return import_src(k, g, i + 1);
+        }
+      }
+    }
+  }
   let segs: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 64));
   let cnt: Mut(u64) = ax.box(k);
   let end: u64 = path_take(k, g, i + 1, segs, cnt, n);
+  deref(oe) = end;
   let c: u64 = ax.box_get(cnt);
   if c == 0 {
     let m0: Ref(u8) = "expected module path";
     let d0: u64 = ir.diag(k, 0, 1, m0, 19);
     st.st_fail(k, ax.FailKind.Ast as u64);
-    return end;
+    return 0;
   }
-  let seal: Mut(u64) = ax.box(k);
-  let target: u64 = path_resolve(k, segs, c, seal);
-  if target == 0 {
-    let m: Ref(u8) = "unknown module";
-    let d: u64 = ir.diag(k, 0, 1, m, 14);
+  return path_resolve(k, segs, c, os);
+};
+
+let is_select = func(g: u64, i: u64, n: u64) -> u64 {
+  if i + 1 >= n { return 0; }
+  if path_sep(g, i) == 0 { return 0; }
+  if ax.is_group(g, i + 1) == 0 { return 0; }
+  if ax.delim_of(g, i + 1) != ax.Delim.Brace as u64 { return 0; }
+  return 1;
+};
+
+let imp_alias = func(k: Mut(st.State), target: u64, seal: u64, item: u64, is_pub: u64) -> u64 {
+  let e: Mut(modules.SymEntry) = modules.sym_lookup_in(k, target, seal, item, modules.cur(k));
+  if is_null(e) {
+    let m: Ref(u8) = "unknown imported symbol";
+    let d: u64 = ir.diag(k, 0, 1, m, 23);
     st.st_fail(k, ax.FailKind.Type as u64);
+    return 0;
+  }
+  let kd: u64 = modules.sym_kind(e);
+  let q: u64 = modules.sym_qual(e);
+  let sg: Mut(u8) = modules.sym_sig(e);
+  let sh: u64 = modules.sym_shape(e);
+  let fl: u64 = modules.sym_flag(e);
+  let dc: u64 = modules.sym_decl(e);
+  let sr: u64 = modules.sym_src(e);
+  let ro: u64 = modules.sym_ro(e);
+  let fi: u64 = modules.sym_fnid(e);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, kd, modules.cur(k), item, q, sg, sh);
+  let sf: u64 = modules.sym_set_flag(se, fl);
+  let sd: u64 = modules.sym_set_decl(se, dc);
+  let ss: u64 = modules.sym_set_src(se, sr);
+  let sro: u64 = modules.sym_set_ro(se, ro);
+  let sfn: u64 = modules.sym_set_fnid(se, fi);
+  let shm: u64 = modules.sym_set_home(se, modules.sym_home(e));
+  let sp: u64 = modules.sym_set_pub(se, is_pub);
+  if kd == modules.sym_kind_mod() {
+    let mi: u64 = modules.mod_add_in(k, modules.cur(k), item, q, modules.mod_kind_import(), dc, 0);
+  }
+  return 1;
+};
+
+let imp_items = func(k: Mut(st.State), g: u64, target: u64, seal: u64, is_pub: u64, i: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if i >= n { return i; }
+  if st.st_ok(k) != 0 { return i; }
+  if ax.is_comma(g, i) == 1 or ax.is_semi(g, i) == 1 { return imp_items(k, g, target, seal, is_pub, i + 1); }
+  if ax.is_name(g, i) == 0 {
+    st.st_fail(k, ax.FailKind.Ast as u64);
+    return i + 1;
+  }
+  let r: u64 = imp_alias(k, target, seal, ax.n_sym(g, i), is_pub);
+  return imp_items(k, g, target, seal, is_pub, i + 1);
+};
+
+let p1_open = func(k: Mut(st.State), g: u64, i: u64, is_pub: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  let is_use: u64 = if ax.n_sym(g, i) == s.k_use() { 1 } else { 0 };
+  let oe: Mut(u64) = ax.box(k);
+  let os: Mut(u64) = ax.box(k);
+  let target: u64 = mod_target(k, g, i, oe, os);
+  let end: u64 = ax.box_get(oe);
+  if target == 0 {
+    if st.st_ok(k) == 0 {
+      let m: Ref(u8) = "unknown module";
+      let d: u64 = ir.diag(k, 0, 1, m, 14);
+      st.st_fail(k, ax.FailKind.Type as u64);
+    }
     return ax.skip_semi(g, end);
   }
-  let opened: u64 = modules.mod_add_open(k, modules.cur(k), target, deref(seal));
+  let seal: u64 = deref(os);
+  if is_select(g, end, n) == 1 {
+    let items: u64 = ax.n_at(g, end + 1);
+    let r: u64 = imp_items(k, items, target, seal, is_pub, 0);
+    return ax.skip_semi(g, end + 2);
+  }
+  let opened: u64 = modules.mod_add_open(k, modules.cur(k), target, seal);
   if is_use == 1 {
-    let pu: u64 = ctf.push_use(k, target, deref(seal));
-    let pi: u64 = gv.push_mod_implicit(k, target, deref(seal));
+    let pu: u64 = ctf.push_use(k, target, seal);
+    let pi: u64 = gv.push_mod_implicit(k, target, seal);
   }
   return ax.skip_semi(g, end);
 };
@@ -477,22 +586,8 @@ let p1_extern_attr = func(k: Mut(st.State), g: u64, ag: u64, i: u64) -> u64 {
 };
 
 let p1_import = func(k: Mut(st.State), g: u64, i: u64, alias: u64, is_pub: u64) -> u64 {
-  let cur: u64 = st.st_src(k);
-  let h: u64 = if i + 1 < ax.n_count(g) and ax.is_group(g, i + 1) == 1 { ax.n_at(g, i + 1) } else { 0 };
-  if h == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
-  let tok: u64 = if ax.n_count(h) > 0 { ax.n_at(h, 0) } else { 0 };
-  if tok == 0 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
-  let path_len: u64 = ax.lit_len(tok);
-  if path_len < 2 { st.st_fail(k, ax.FailKind.Ast as u64); return i + 1; }
-  let path_ptr: Ref(u8) = ax.lit_addr(tok) + 1;
-  let src2: u64 = hr.source_import(cur, path_ptr, path_len - 2);
-  if src2 >= 4000000000 {
-    st.st_fail(k, ax.FailKind.Type as u64);
-    return i + 1;
-  }
-  let r: u64 = compile_source(k, src2);
-  st.st_set_src(k, cur);
-  if st.st_ok(k) != 0 { return i + 1; }
+  let src2: u64 = import_src(k, g, i);
+  if src2 == 0 { return i + 1; }
   let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_mod(), modules.cur(k), alias, src2, null_ref(Mut(u8)), 0);
   let sp: u64 = modules.sym_set_pub(se, is_pub);
   let m: u64 = modules.mod_add(k, alias, src2, agg.ShapeKind.Struct as u64);
@@ -905,10 +1000,16 @@ let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 
   let sym: u64 = ax.n_sym(g, i);
   let pub_syn: u64 = if sym == s.k_pub() { 1 } else { 0 };
 
-  if pub_syn == 1 and i + 1 < n and ax.is_group(g, i + 1) == 1 and ax.delim_of(g, i + 1) == ax.Delim.Brace as u64 {
-    let body: u64 = ax.n_at(g, i + 1);
-    let a: u64 = phase1v(k, body, 0, ax.n_count(body), 1);
-    return phase1v(k, g, ax.skip_semi(g, i + 2), n, force);
+  if pub_syn == 1 {
+    if i + 1 < n {
+      if ax.is_group(g, i + 1) == 1 {
+        if ax.delim_of(g, i + 1) == ax.Delim.Brace as u64 {
+          let body: u64 = ax.n_at(g, i + 1);
+          let a: u64 = phase1v(k, body, 0, ax.n_count(body), 1);
+          return phase1v(k, g, ax.skip_semi(g, i + 2), n, force);
+        }
+      }
+    }
   }
   let is_pub: u64 = if force == 1 { 1 } else { pub_syn };
   let h: u64 = if pub_syn == 1 { i + 1 } else { i };
@@ -928,7 +1029,7 @@ let phase1v = func(k: Mut(st.State), g: u64, i: u64, n: u64, force: u64) -> u64 
   }
   if hs == s.k_let() { let a: u64 = p1_let(k, g, h, n, is_pub); return phase1v(k, g, a, n, force); }
   if is_legacy_witness(hs) == 1 { let a: u64 = deny_legacy_witness(k); return i + 1; }
-  if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h); return phase1v(k, g, a, n, force); }
+  if hs == s.k_open() or hs == s.k_use() { let a: u64 = p1_open(k, g, h, is_pub); return phase1v(k, g, a, n, force); }
 
   if hs == s.k_comptime() and i + 1 < n and ax.n_sym(g, i + 1) == s.k_if() {
     let d: Mut(sm.CtIf) = sm.ctif_open(k, g, h);
@@ -1025,10 +1126,16 @@ let phase2 = func(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let sym: u64 = ax.n_sym(g, i);
   let is_pub: u64 = if sym == s.k_pub() { 1 } else { 0 };
 
-  if is_pub == 1 and i + 1 < n and ax.is_group(g, i + 1) == 1 and ax.delim_of(g, i + 1) == ax.Delim.Brace as u64 {
-    let body: u64 = ax.n_at(g, i + 1);
-    let a: u64 = phase2(k, body, 0, ax.n_count(body));
-    return phase2(k, g, ax.skip_semi(g, i + 2), n);
+  if is_pub == 1 {
+    if i + 1 < n {
+      if ax.is_group(g, i + 1) == 1 {
+        if ax.delim_of(g, i + 1) == ax.Delim.Brace as u64 {
+          let body: u64 = ax.n_at(g, i + 1);
+          let a: u64 = phase2(k, body, 0, ax.n_count(body));
+          return phase2(k, g, ax.skip_semi(g, i + 2), n);
+        }
+      }
+    }
   }
   let h: u64 = if is_pub == 1 { i + 1 } else { i };
   if h >= n { return i + 1; }

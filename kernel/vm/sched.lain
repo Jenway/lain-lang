@@ -1,0 +1,164 @@
+use import("std::collections")::{ Vec };
+use import("std::option")::{ Option };
+use import("std::mem")::{ OomErr };
+use import("kernel::ir::model")::{ Proc, IrModule };
+use import("kernel::vm::addr")::{ SegId, TcbId, EpId };
+use import("kernel::vm::trap")::{ Trap, VmTrap };
+use import("kernel::vm::vspace")::{ VSpace };
+use import("kernel::vm::cspace")::{ CSpace };
+use import("kernel::vm::endpoint")::{ Endpoint, Rendezvous };
+use import("kernel::vm::image")::{ Image };
+use import("kernel::vm::tcb")::{ Tcb, VmStatus };
+use import("kernel::vm::engine")::{ Engine, SliceOutcome };
+let str = import("std::str");
+
+let find_entry = func(m: Ref(IrModule), name: Slice(u8)) -> Option(u64) {
+  let i: u64 = 0;
+  let n: u64 = m.procs.len();
+  while i < n {
+    let p: Ref(Proc) = m.procs.get_ref(i);
+    if str::eq(p.name, name) {
+      return Option(u64)::some(i);
+    }
+    i = i + 1;
+  };
+  return Option(u64)::none();
+};
+
+pub {
+  let Limits = struct {
+    fuel_slice: u64,
+    max_call_depth: u64,
+    stack_cap: u64,
+    heap_cap: u64
+  };
+
+  let Sched = module {
+    pub {
+      let Self = struct {
+        tcbs: Vec(Tcb),
+        ready: Vec(TcbId),
+        ready_head: u64,
+        endpoints: Vec(Endpoint),
+        fuel_slice: u64
+      };
+
+      let new = func(fuel_slice: u64) -> Self {
+        return Self {
+          tcbs: Vec(Tcb)::new(),
+          ready: Vec(TcbId)::new(),
+          ready_head: 0,
+          endpoints: Vec(Endpoint)::new(),
+          fuel_slice: fuel_slice
+        };
+      };
+
+      let add_endpoint = func(s: Mut(Self)) !{ OomErr } -> EpId {
+        let id: u64 = s.endpoints.len();
+        s.endpoints.push(Endpoint::new());
+        return EpId { id: id };
+      };
+
+      let spawn = func(
+        s: Mut(Self),
+        vs: Mut(VSpace),
+        proc_id: u64,
+        slot_count: u64,
+        args: Slice(u64),
+        stack_cap: u64,
+        max_depth: u64
+      ) !{ VmTrap, OomErr } -> TcbId {
+        let sid: SegId = vs.alloc_stack(stack_cap);
+        vs.borrow(sid);
+        let tid: TcbId = TcbId { id: s.tcbs.len() };
+        let t: Tcb = Tcb::new(tid, sid, max_depth);
+        t.push_frame(proc_id, 0, slot_count, 0, 0, false);
+        let i: u64 = 0;
+        while i < args.len {
+          t.slots.set(i + 1, args[i]);
+          i = i + 1;
+        };
+        s.tcbs.push(reloc(t));
+        s.ready.push(tid);
+        return tid;
+      };
+
+      let ep_send = func(s: Mut(Self), ep_id: EpId, sender: TcbId, msg: u64) !{ OomErr } -> bool {
+        let ep: Mut(Endpoint) = s.endpoints.get_mut(ep_id.id);
+        return match ep.try_send(sender, msg) {
+          Some(peer) => {
+            let pt: Mut(Tcb) = s.tcbs.get_mut(peer.id);
+            pt.status = VmStatus::Ready;
+            s.ready.push(peer);
+            true
+          },
+          None => false,
+        };
+      };
+
+      let ep_recv = func(s: Mut(Self), ep_id: EpId, receiver: TcbId) !{ OomErr } -> Option(u64) {
+        let ep: Mut(Endpoint) = s.endpoints.get_mut(ep_id.id);
+        return match ep.try_recv(receiver) {
+          Some(rv) => {
+            let pt: Mut(Tcb) = s.tcbs.get_mut(rv.peer.id);
+            pt.status = VmStatus::Ready;
+            s.ready.push(rv.peer);
+            Option(u64)::some(rv.msg)
+          },
+          None => Option(u64)::none(),
+        };
+      };
+
+      let run_all = func(s: Mut(Self), img: Ref(Image), vs: Mut(VSpace), cs: Ref(CSpace)) !{ OomErr } -> SliceOutcome {
+        while s.ready_head < s.ready.len() {
+          let tid: TcbId = s.ready.get(s.ready_head);
+          s.ready_head = s.ready_head + 1;
+          let tcb: Mut(Tcb) = s.tcbs.get_mut(tid.id);
+          tcb.status = VmStatus::Running;
+          let out: SliceOutcome = Engine::run_slice(img, vs, cs, tcb, s.fuel_slice);
+          match out {
+            FuelSlice => {
+              tcb.status = VmStatus::Ready;
+              s.ready.push(tid);
+            },
+            Blocked(_) => {
+              tcb.status = VmStatus::Blocked;
+            },
+            Done(val) => {
+              tcb.status = VmStatus::Done;
+              tcb.result = val;
+              vs.set_accessible(tcb.stack_seg, 0);
+              vs.end_borrow(tcb.stack_seg);
+            },
+            Trapped(tr) => {
+              vs.set_accessible(tcb.stack_seg, 0);
+              vs.end_borrow(tcb.stack_seg);
+              return SliceOutcome::Trapped { tr };
+            },
+          };
+        };
+        if s.tcbs.len() == 0 {
+          return SliceOutcome::Done { 0 };
+        }
+        let r0: Ref(Tcb) = s.tcbs.get_ref(0);
+        return SliceOutcome::Done { r0.result };
+      };
+
+      let apply = func(m: Ref(IrModule), entry: Slice(u8), args: Slice(u64), limits: Limits) !{ VmTrap, OomErr } -> SliceOutcome {
+        let entry_id: u64 = match find_entry(m, entry) {
+          Some(id) => id,
+          None => perform VmTrap::fail(Trap { reason: Trap::Reason::Unreachable, proc_id: 0, pc: 0 }),
+        };
+        let img: Image = Image::load(m);
+        let vs: VSpace = VSpace::new(limits.heap_cap);
+        img.mount(mut_of(vs));
+        let cs: CSpace = CSpace::new();
+        cs.freeze();
+        let sched: Self = new(limits.fuel_slice);
+        let p: Ref(Proc) = m.procs.get_ref(entry_id);
+        sched.spawn(mut_of(vs), entry_id, p.val_count + 1, args, limits.stack_cap, limits.max_call_depth);
+        return sched.run_all(ref_of(img), mut_of(vs), ref_of(cs));
+      };
+    };
+  };
+};

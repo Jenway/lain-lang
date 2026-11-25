@@ -8,6 +8,7 @@ let ax = import("src::sema::ast");
 let cx = import("src::sema::ctx");
 let agg = import("src::sema::agg");
 let eflow = import("src::sema::effects::lower");
+let efrow = import("src::sema::effects::row");
 
 extern flow_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 extern flow_block(k: Mut(st.State), g: u64, i: u64, term: Mut(u64), slot: u64, tp: Mut(ty.Ty)) -> u64 = lainc_stmt_block;
@@ -378,10 +379,15 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
   } else {
     let av: Mut(ty.Val) = ax.new_val(k);
     ej = flow_expr(k, c.ag, a.body, 0, c.want, av);
-    if (st.st_ok(k) == 0) and (cx.val_is_never(k, av) == 1) {
+    let aborted: u64 = if st.st_ok(k) == 0 { efrow.take_aborts(k) } else { 0 };
+    if (st.st_ok(k) == 0) and (aborted == 1) {
+      ax.box_put(bt, 1);
+    } else if (st.st_ok(k) == 0) and (cx.val_is_never(k, av) == 1) {
       let dr: u64 = eflow.emit_default_return(k);
       ax.box_put(bt, 1);
-    } else if c.yields == 1 {
+    } else if (st.st_ok(k) == 0) and (c.yields == 1) and (ty.val_known(av) == 0) {
+      ax.box_put(bt, 1);
+    } else if (c.yields == 1) and (st.st_ok(k) == 0) {
       let yv: Mut(ty.Val) = ax.new_val(k);
       cx.coerce(k, av, ty.vty(av), c.want, yv);
       ir.args_reset(k);
@@ -394,7 +400,6 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
     }
   }
   env.env_release(k, mark);
-  if st.st_ok(k) != 0 { return 0; }
   let h: u64 = ir.region_end(k);
   o.region = h;
   o.term = ax.box_get(bt);

@@ -1,0 +1,95 @@
+use import("std::collections")::{ Vec };
+use import("std::option")::{ Option };
+use import("std::mem")::{ OomErr };
+use import("kernel::vm::addr")::{ SegId, TcbId };
+use import("kernel::vm::trap")::{ Trap, VmTrap };
+
+pub {
+  let VmStatus = enum {
+    Ready
+    Running
+    Blocked
+    Done
+    Trapped
+  };
+
+  let Frame = struct {
+    proc_id: u64,
+    pc: u64,
+    slot_base: u64,
+    slot_count: u64,
+    stack_mark: u64,
+    ret_dst: u64,
+    has_ret_dst: bool
+  };
+
+  let Tcb = module {
+    pub {
+      let Self = struct {
+        id: TcbId,
+        status: VmStatus,
+        stack_seg: SegId,
+        max_depth: u64,
+        frames: Vec(Frame),
+        slots: Vec(u64),
+        fuel_used: u64,
+        result: u64
+      };
+
+      let new = func(id: TcbId, stack_seg: SegId, max_depth: u64) -> Self {
+        return Self {
+          id: id,
+          status: VmStatus::Ready,
+          stack_seg: stack_seg,
+          max_depth: max_depth,
+          frames: Vec(Frame)::new(),
+          slots: Vec(u64)::new(),
+          fuel_used: 0,
+          result: 0
+        };
+      };
+
+      let push_frame = func(t: Mut(Self), proc_id: u64, pc: u64, slot_count: u64, stack_mark: u64, ret_dst: u64, has_ret_dst: bool) !{ VmTrap, OomErr } {
+        if t.frames.len() >= t.max_depth {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::CallDepth { t.max_depth },
+            proc_id: proc_id,
+            pc: pc
+          });
+        }
+        let slot_base: u64 = t.slots.len();
+        let i: u64 = 0;
+        while i < slot_count {
+          t.slots.push(0);
+          i = i + 1;
+        };
+        t.frames.push(Frame {
+          proc_id: proc_id,
+          pc: pc,
+          slot_base: slot_base,
+          slot_count: slot_count,
+          stack_mark: stack_mark,
+          ret_dst: ret_dst,
+          has_ret_dst: has_ret_dst
+        });
+      };
+
+      let pop_frame = func(t: Mut(Self)) -> Option(Frame) {
+        let popped: Option(Frame) = t.frames.pop();
+        match popped {
+          Some(fr) => {
+            while t.slots.len() > fr.slot_base {
+              t.slots.pop();
+            };
+          },
+          None => {},
+        };
+        return popped;
+      };
+
+      let top_frame = func(t: Mut(Self)) -> Mut(Frame) {
+        return t.frames.get_mut(t.frames.len() - 1);
+      };
+    };
+  };
+};

@@ -1,0 +1,251 @@
+use import("std::collections")::{ Vec };
+use import("std::option")::{ Option };
+use import("std::mem")::{ OomErr, align_up, is_pow2 };
+use import("kernel::vm::addr")::{ VmAddr, SegId };
+use import("kernel::vm::trap")::{ Trap, VmTrap };
+
+pub {
+  let SegKind = enum {
+    Owned(u64)
+    External(MutSlice(u8))
+  };
+
+  let Segment = struct {
+    active: bool,
+    kind: SegKind,
+    writable: bool,
+    base: VmAddr,
+    accessible: u64,
+    capacity: u64,
+    borrows: u64
+  };
+
+  let VSpace = module {
+    pub {
+      let Self = struct {
+        pool: Vec(u8),
+        pool_used: u64,
+        segs: Vec(Segment),
+        next_vaddr: u64
+      };
+
+      let new = func(capacity: u64) !{ OomErr } -> Self {
+        let cap: u64 = if capacity < 4096 { 4096 } else { capacity };
+        let pool: Vec(u8) = Vec(u8)::new();
+        pool.reserve(cap);
+        let i: u64 = 0;
+        while i < cap {
+          pool.push(0);
+          i = i + 1;
+        };
+        return Self {
+          pool: pool,
+          pool_used: 0,
+          segs: Vec(Segment)::new(),
+          next_vaddr: 65536
+        };
+      };
+
+      let alloc_seg = func(vs: Mut(Self), size: u64, writable: bool) !{ VmTrap, OomErr } -> SegId {
+        let off: u64 = align_up(vs.pool_used, 8);
+        if (off + size) > vs.pool.len() {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::CapacityExceeded { size },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        let vaddr: u64 = align_up(vs.next_vaddr, 4096);
+        let id: u64 = vs.segs.len();
+        vs.segs.push(Segment {
+          active: true,
+          kind: SegKind::Owned { off },
+          writable: writable,
+          base: VmAddr { raw: vaddr },
+          accessible: size,
+          capacity: size,
+          borrows: 0
+        });
+        vs.pool_used = off + size;
+        vs.next_vaddr = align_up(vaddr + size, 4096) + 4096;
+        return SegId { id: id };
+      };
+
+      let alloc_stack = func(vs: Mut(Self), capacity: u64) !{ VmTrap, OomErr } -> SegId {
+        let sid: SegId = alloc_seg(vs, capacity, true);
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        seg.accessible = 0;
+        return sid;
+      };
+
+      let map_external = func(vs: Mut(Self), buf: MutSlice(u8), writable: bool) !{ OomErr } -> SegId {
+        let vaddr: u64 = align_up(vs.next_vaddr, 4096);
+        let id: u64 = vs.segs.len();
+        vs.segs.push(Segment {
+          active: true,
+          kind: SegKind::External { buf },
+          writable: writable,
+          base: VmAddr { raw: vaddr },
+          accessible: buf.len,
+          capacity: buf.len,
+          borrows: 0
+        });
+        vs.next_vaddr = align_up(vaddr + buf.len, 4096) + 4096;
+        return SegId { id: id };
+      };
+
+      let unmap_external = func(vs: Mut(Self), sid: SegId) !{ VmTrap } {
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        if seg.borrows > 0 {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::BorrowActive { sid },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        seg.active = false;
+      };
+
+      let borrow = func(vs: Mut(Self), sid: SegId) {
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        seg.borrows = seg.borrows + 1;
+      };
+
+      let end_borrow = func(vs: Mut(Self), sid: SegId) {
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        if seg.borrows > 0 {
+          seg.borrows = seg.borrows - 1;
+        }
+      };
+
+      let grow_accessible = func(vs: Mut(Self), sid: SegId, delta: u64) !{ VmTrap } -> VmAddr {
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        let old: u64 = align_up(seg.accessible, 8);
+        let next: u64 = old + delta;
+        if next > seg.capacity {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::StackOverflow { next },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        seg.accessible = next;
+        return VmAddr { raw: seg.base.raw + old };
+      };
+
+      let set_accessible = func(vs: Mut(Self), sid: SegId, new_acc: u64) {
+        let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
+        seg.accessible = new_acc;
+      };
+
+      let write_init = func(vs: Mut(Self), sid: SegId, src: Slice(u8)) {
+        let seg: Ref(Segment) = vs.segs.get_ref(sid.id);
+        match seg.kind {
+          Owned(off) => {
+            let i: u64 = 0;
+            while i < src.len {
+              let dst: Mut(u8) = vs.pool.get_mut(off + i);
+              deref(dst) = src[i];
+              i = i + 1;
+            };
+          },
+          External(buf) => {
+            let i: u64 = 0;
+            while i < src.len {
+              buf[i] = src[i];
+              i = i + 1;
+            };
+          },
+        };
+      };
+
+      let find_seg = func(vs: Ref(Self), vaddr: VmAddr, bytes: u64) -> Option(SegId) {
+        let i: u64 = 0;
+        let n: u64 = vs.segs.len();
+        while i < n {
+          let seg: Ref(Segment) = vs.segs.get_ref(i);
+          if seg.active and (vaddr.raw >= seg.base.raw) {
+            let off: u64 = vaddr.raw - seg.base.raw;
+            if (bytes <= seg.accessible) and (off <= (seg.accessible - bytes)) {
+              return Option(SegId)::some(SegId { id: i });
+            }
+          }
+          i = i + 1;
+        };
+        return Option(SegId)::none();
+      };
+
+      let load = func(vs: Ref(Self), vaddr: VmAddr, bytes: u64, align: u64) !{ VmTrap } -> u64 {
+        if (is_pow2(align) == false) or ((vaddr.raw % align) != 0) {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::Alignment { vaddr },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        let sid: SegId = match find_seg(vs, vaddr, bytes) {
+          Some(id) => id,
+          None => perform VmTrap::fail(Trap {
+            reason: Trap::Reason::MemoryOob { vaddr },
+            proc_id: 0,
+            pc: 0
+          }),
+        };
+        let seg: Ref(Segment) = vs.segs.get_ref(sid.id);
+        let rel: u64 = vaddr.raw - seg.base.raw;
+        let acc: u64 = 0;
+        let i: u64 = 0;
+        while i < bytes {
+          let b: u8 = match seg.kind {
+            Owned(off) => vs.pool.get(off + rel + i),
+            External(buf) => buf[rel + i],
+          };
+          acc = acc | ((b as u64) << (i * 8));
+          i = i + 1;
+        };
+        return acc;
+      };
+
+      let store = func(vs: Mut(Self), vaddr: VmAddr, val: u64, bytes: u64, align: u64) !{ VmTrap } {
+        if (is_pow2(align) == false) or ((vaddr.raw % align) != 0) {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::Alignment { vaddr },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        let sid: SegId = match find_seg(ref_of(deref(vs)), vaddr, bytes) {
+          Some(id) => id,
+          None => perform VmTrap::fail(Trap {
+            reason: Trap::Reason::MemoryOob { vaddr },
+            proc_id: 0,
+            pc: 0
+          }),
+        };
+        let seg: Ref(Segment) = vs.segs.get_ref(sid.id);
+        if seg.writable == false {
+          perform VmTrap::fail(Trap {
+            reason: Trap::Reason::PermViolation { vaddr },
+            proc_id: 0,
+            pc: 0
+          });
+        }
+        let rel: u64 = vaddr.raw - seg.base.raw;
+        let i: u64 = 0;
+        while i < bytes {
+          let b: u8 = ((val >> (i * 8)) & 255) as u8;
+          match seg.kind {
+            Owned(off) => {
+              let dst: Mut(u8) = vs.pool.get_mut(off + rel + i);
+              deref(dst) = b;
+            },
+            External(buf) => {
+              buf[rel + i] = b;
+            },
+          };
+          i = i + 1;
+        };
+      };
+    };
+  };
+};
