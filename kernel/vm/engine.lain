@@ -1,7 +1,7 @@
 use import("std::collections")::{ Vec };
 use import("std::option")::{ Option };
 use import("std::mem")::{ OomErr };
-use import("kernel::ir::model")::{ Ty, Op, Inst, Proc };
+use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, IrModule };
 use import("kernel::vm::addr")::{ VmAddr, EpId };
 use import("kernel::vm::trap")::{ Trap, VmTrap };
 use import("kernel::vm::vspace")::{ VSpace, Segment };
@@ -124,7 +124,8 @@ let step_loop = func(
     let pid: u64 = fr.proc_id;
     let pc: u64 = fr.pc;
     let base: u64 = fr.slot_base;
-    let p: Ref(Proc) = img.ir.procs.get_ref(pid);
+    let ir_m: Ref(IrModule) = deref(img).ir;
+    let p: Ref(Proc) = deref(ir_m).procs.get_ref(pid);
     if pc >= p.insts.len() {
       let popped: Option(Frame) = tcb.pop_frame();
       match popped {
@@ -173,27 +174,30 @@ let step_loop = func(
       slot_set(tcb, base, ins.dst, mask_bits(sext_bits(v, bits) as u64, bits));
       fr.pc = pc + 1;
     } else if op == Op::Alloca {
-      let bytes: u64 = ins.imm * ins.ty.bytes();
-      let ptr: VmAddr = vs.grow_accessible(tcb.stack_seg, bytes);
+      let ity: Ty = deref(ins).ty;
+      let bytes: u64 = ins.imm * ity.bytes();
+      let ptr: VmAddr = vs.grow_accessible(deref(tcb).stack_seg, bytes);
       slot_set(tcb, base, ins.dst, ptr.raw);
       fr.pc = pc + 1;
     } else if op == Op::Lea {
       let baddr: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       let idx: u64 = slot_get(ref_of(deref(tcb)), base, ins.b);
-      slot_set(tcb, base, ins.dst, baddr + idx * ins.c + ins.imm);
+      slot_set(tcb, base, ins.dst, (baddr + (idx * ins.c)) + ins.imm);
       fr.pc = pc + 1;
     } else if op == Op::Load {
+      let ity: Ty = deref(ins).ty;
       let addr: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
-      let v: u64 = vs.load(VmAddr { raw: addr }, ins.ty.bytes(), ins.imm);
+      let v: u64 = vs.load(VmAddr { raw: addr }, ity.bytes(), ins.imm);
       slot_set(tcb, base, ins.dst, mask_bits(v, bits));
       fr.pc = pc + 1;
     } else if op == Op::Store {
+      let ity: Ty = deref(ins).ty;
       let val: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       let addr: u64 = slot_get(ref_of(deref(tcb)), base, ins.b);
-      vs.store(VmAddr { raw: addr }, val, ins.ty.bytes(), ins.imm);
+      vs.store(VmAddr { raw: addr }, val, ity.bytes(), ins.imm);
       fr.pc = pc + 1;
     } else if op == Op::Call {
-      let callee: Ref(Proc) = img.ir.procs.get_ref(ins.a);
+      let callee: Ref(Proc) = deref(ir_m).procs.get_ref(ins.a);
       let call_vals: Vec(u64) = Vec(u64)::new();
       let ai: u64 = 0;
       while ai < ins.c {
@@ -229,11 +233,11 @@ let step_loop = func(
       }
     } else if op == Op::CallIndirect {
       let fp: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
-      if (fp == 0) or ((fp - 1) >= img.ir.procs.len()) {
+      if (fp == 0) or ((fp - 1) >= deref(ir_m).procs.len()) {
         perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { fp }, proc_id: pid, pc: pc });
       }
       let callee_id: u64 = fp - 1;
-      let callee: Ref(Proc) = img.ir.procs.get_ref(callee_id);
+      let callee: Ref(Proc) = deref(ir_m).procs.get_ref(callee_id);
       let call_vals: Vec(u64) = Vec(u64)::new();
       let ai: u64 = 0;
       while ai < ins.c {

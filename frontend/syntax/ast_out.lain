@@ -1,8 +1,7 @@
 use import("std::collections")::{ Vec };
-use import("std::err")::{ Fail };
 use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
 use import("frontend::syntax::span")::{ SourceId, Span };
-use import("frontend::syntax::raw_ast")::{ NodeId, Delim, GroupRange, RawNode, RawAst };
+use import("frontend::syntax::raw_ast")::{ SyntaxErr, SyntaxFail, NodeId, Delim, GroupRange, RawNode, RawAst };
 
 pub {
   let Mark = struct {
@@ -17,23 +16,15 @@ pub {
     start: u32,
     pending_start: u32
   };
-
-  let AstOutErr = enum {
-    UnmatchedClose(Span)
-    UnclosedGroup(Span)
-    EmptyFinish
-  };
-
-  let AstOutFail = Fail(AstOutErr);
 };
 
 pub let AstOut = func() ?{ al: Allocator = SystemAlloc } -> Module {
   return module {
-    let NodeVec = Vec(RawNode) ?{ al: al };
-    let SpanVec = Vec(Span) ?{ al: al };
-    let ChildVec = Vec(NodeId) ?{ al: al };
-    let FrameVec = Vec(GroupFrame) ?{ al: al };
-    let OutAst = RawAst() ?{ al: al };
+    let NodeVec = Vec(RawNode);
+    let SpanVec = Vec(Span);
+    let ChildVec = Vec(NodeId);
+    let FrameVec = Vec(GroupFrame);
+    let OutAst = RawAst();
 
     pub {
       let Self = struct {
@@ -103,14 +94,15 @@ pub let AstOut = func() ?{ al: Allocator = SystemAlloc } -> Module {
         deref(out).frames.push(frame);
       };
 
-      let end_group = func(out: Mut(Self), delim: Delim, end_pos: u32) !{ OomErr, AstOutFail } -> NodeId {
+      let end_group = func(out: Mut(Self), delim: Delim, end_pos: u32) !{ OomErr, SyntaxFail } -> NodeId {
         let flen: u64 = deref(out).frames.len();
         if flen <= 1 {
-          perform AstOutFail::fail(AstOutErr::UnmatchedClose(Span::empty(deref(out).src, end_pos)));
+          perform SyntaxFail::fail(SyntaxErr::UnmatchedClose { Span::empty(deref(out).src, end_pos) });
         }
         let top: GroupFrame = deref(out).frames.get(flen - 1);
-        if (top.delim == delim) == false {
-          perform AstOutFail::fail(AstOutErr::UnmatchedClose(Span::make(deref(out).src, top.start, end_pos)));
+        let same_delim: bool = top.delim == delim;
+        if same_delim == false {
+          perform SyntaxFail::fail(SyntaxErr::UnmatchedClose { Span::make(deref(out).src, top.start, end_pos) });
         }
         deref(out).frames.truncate(flen - 1);
         let child_start: u32 = deref(out).children.len() as u32;
@@ -130,17 +122,17 @@ pub let AstOut = func() ?{ al: Allocator = SystemAlloc } -> Module {
           len: count
         };
         let sp: Span = Span::make(deref(out).src, top.start, end_pos);
-        return emit(out, RawNode::Group(grp), sp);
+        return emit(out, RawNode::Group { grp }, sp);
       };
 
-      let finish = func(out: Mut(Self), total_len: u32) !{ OomErr, AstOutFail } -> OutAst {
+      let finish = func(out: Mut(Self), total_len: u32) !{ OomErr, SyntaxFail } -> OutAst {
         let flen: u64 = deref(out).frames.len();
         if flen == 0 {
-          perform AstOutFail::fail(AstOutErr::EmptyFinish);
+          perform SyntaxFail::fail(SyntaxErr::EmptyFinish);
         }
         if flen > 1 {
           let top: GroupFrame = deref(out).frames.get(flen - 1);
-          perform AstOutFail::fail(AstOutErr::UnclosedGroup(Span::empty(deref(out).src, top.start)));
+          perform SyntaxFail::fail(SyntaxErr::UnclosedGroup { Span::empty(deref(out).src, top.start) });
         }
         let child_start: u32 = deref(out).children.len() as u32;
         let plen: u64 = deref(out).pending.len();
@@ -159,22 +151,16 @@ pub let AstOut = func() ?{ al: Allocator = SystemAlloc } -> Module {
           len: plen as u32
         };
         let sp: Span = Span::make(deref(out).src, 0, total_len);
-        deref(out).nodes.push(RawNode::Group(grp));
+        deref(out).nodes.push(RawNode::Group { grp });
         deref(out).spans.push(sp);
-        let a: al::Self = deref(out).alloc;
-        let nodes: NodeVec = deref(out).nodes;
-        deref(out).nodes = NodeVec::with_alloc(a);
-        let spans: SpanVec = deref(out).spans;
-        deref(out).spans = SpanVec::with_alloc(a);
-        let children: ChildVec = deref(out).children;
-        deref(out).children = ChildVec::with_alloc(a);
-        return OutAst {
+        let res0: OutAst = OutAst {
           src: deref(out).src,
-          nodes: reloc(nodes),
-          spans: reloc(spans),
-          children: reloc(children),
+          nodes: deref(out).nodes.take(),
+          spans: deref(out).spans.take(),
+          children: deref(out).children.take(),
           root: root_id
         };
+        return reloc(res0);
       };
     };
   };

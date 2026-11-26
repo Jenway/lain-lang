@@ -1,0 +1,60 @@
+let io = import("std::io");
+use import("driver::pipeline")::{ RunResult, run_vm, emit_c99_stdout };
+
+let check_case = func(label: Slice(u8), src: Slice(u8), expected: u64) -> u64 {
+  let r: RunResult = run_vm(src, "main");
+  if r.ok and (r.value == expected) {
+    io::print("[PASS] ");
+    io::print(label);
+    io::print(" => ");
+    io::println_u64(r.value);
+    return 0;
+  }
+  io::print("[FAIL] ");
+  io::print(label);
+  io::print(" ok=");
+  io::print_u64(if r.ok { 1 } else { 0 });
+  io::print(" stage=");
+  io::print_u64(r.stage);
+  io::print(" got=");
+  io::print_u64(r.value);
+  io::print(" expected=");
+  io::println_u64(expected);
+  return 1;
+};
+
+let main = func() -> i64 {
+  io::println("=== Lain v2 Driver (frontend + kernel) ===");
+  let fails: u64 = 0;
+
+  let src_arith: Slice(u8) = "pub let main = func() -> u64 { return 2 + 3 * 4 + (10 - 4) / 2; };";
+  fails = fails + check_case("arith_prec", src_arith, 17);
+
+  let src_loop: Slice(u8) = "pub let main = func() -> u64 { let s: u64 = 0; let i: u64 = 1; while i <= 10 { s = s + i; i = i + 1; }; return s; };";
+  fails = fails + check_case("while_sum_1_to_10", src_loop, 55);
+
+  let src_call: Slice(u8) = "let add = func(a: u64, b: u64) -> u64 { return a + b; }; pub let main = func() -> u64 { return add(20, 22); };";
+  fails = fails + check_case("fn_call", src_call, 42);
+
+  let src_short: Slice(u8) = "pub let main = func() -> u64 { let x: u64 = 0; if (x != 0) and ((10 / x) == 1) { return 99; } return 7; };";
+  fails = fails + check_case("short_circuit_and", src_short, 7);
+
+  let src_comptime: Slice(u8) = "pub let main = func() -> u64 { comptime if 1 + 1 == 2 { return 123; } else { return 456; } };";
+  fails = fails + check_case("comptime_if", src_comptime, 123);
+
+  let src_struct: Slice(u8) = "let Pt = struct { x: u64, y: u64 }; pub let main = func() -> u64 { let p: Pt = Pt { x: 11, y: 31 }; return p.x + p.y; };";
+  fails = fails + check_case("struct_fields", src_struct, 42);
+
+  io::println("=== C99 Backend Output (fn_call) ===");
+  let emitted: bool = emit_c99_stdout(src_call, "main");
+  if emitted == false {
+    io::println("[FAIL] c99 emit failed");
+    fails = fails + 1;
+  }
+
+  if fails == 0 {
+    io::println("=== ALL V2 DRIVER CHECKS PASSED ===");
+    return 0;
+  }
+  return 1;
+};

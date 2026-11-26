@@ -1,9 +1,10 @@
+use import("std::collections")::{ Vec };
 use import("std::err")::{ Fail };
 use import("std::io")::{ SliceCursor };
 use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
 use import("std::str")::{ sub };
 use import("frontend::syntax::span")::{ SourceId, Span };
-use import("frontend::syntax::raw_ast")::{ NodeId, Delim, GroupRange, RawNode, RawAst };
+use import("frontend::syntax::raw_ast")::{ SyntaxFail, NodeId, Delim, GroupRange, RawNode, RawAst };
 use import("frontend::syntax::ast_out")::{ AstOut };
 use import("frontend::syntax::reader")::{ read };
 
@@ -15,6 +16,13 @@ pub {
   };
 
   let ExpandFail = Fail(ExpandErr);
+};
+
+let CopyFrame = struct {
+  grp: GroupRange,
+  idx: u64,
+  end_pos: u32,
+  close_group: bool
 };
 
 let shift_span = func(sp: Span, delta: u32) -> Span {
@@ -59,199 +67,200 @@ let slot_close = func(text: Slice(u8), from: u64, limit: u64, sp: Span) !{ Expan
       i = i + 1;
     }
   };
-  perform ExpandFail::fail(ExpandErr::BadSugar(sp));
+  perform ExpandFail::fail(ExpandErr::BadSugar { sp });
   return limit;
 };
 
-let read_slot = func(src: SourceId, text: Slice(u8), lo: u64, hi: u64, alloc: al::Self)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail } -> RawAst()
-{
-  let slot_text: Slice(u8) = sub(text, lo, hi);
-  let cur: SliceCursor::Self = SliceCursor::new(slot_text);
-  let slot_ast: RawAst() = handle read(src, mut_of(cur), alloc) with {
-    return(v) => v,
-    fail(err) => {
-      match err {
-        UnterminatedStr(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnterminatedChar(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnterminatedComment(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnmatchedClose(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnclosedGroup(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); }
-      }
-    }
-  };
-  return slot_ast;
-};
+let DesugarPass = func() ?{ al: Allocator = SystemAlloc } -> Module {
+  let Raw = RawAst();
+  let Out = AstOut();
 
-let emit_slot = func(text: Slice(u8), out: Mut(AstOut() ?{ al: al }), alloc: al::Self, src: SourceId, lo: u64, hi: u64)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail, AstOutFail } -> NodeId
-{
-  let slot_sp: Span = Span::make(src, lo as u32, hi as u32);
-  let slot_ast: RawAst() = read_slot(src, text, lo, hi, alloc);
-  let root: NodeId = slot_ast.root;
-  let node: RawNode = slot_ast.node(root);
-  let is_group: bool = match node {
-    Group(_) => true,
-    _ => false
-  };
-  if is_group == false {
-    perform ExpandFail::fail(ExpandErr::BadSugar(slot_sp));
-  }
-  let grp: GroupRange = match node {
-    Group(g) => g,
-    _ => GroupRange { delim: Delim::Root, start: 0, len: 0 }
-  };
-  out.begin_group(Delim::Paren, lo as u32);
-  let n: u64 = grp.len as u64;
-  let i: u64 = 0;
-  while i < n {
-    let cid: NodeId = slot_ast.child_at(grp, i as u32);
-    let _c = copy_node(slot_ast, text, lo as u32, out, alloc, cid);
-    i = i + 1;
-  };
-  return out.end_group(Delim::Paren, hi as u32);
-};
-
-let emit_fstring = func(text: Slice(u8), out: Mut(AstOut() ?{ al: al }), alloc: al::Self, f_sp: Span, lit_sp: Span)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail, AstOutFail } -> NodeId
-{
-  let src: SourceId = lit_sp.src;
-  let lo: u64 = (lit_sp.start as u64) + 1;
-  let hi: u64 = (lit_sp.end as u64) - 1;
-  let piece: u64 = lo;
-  let open: u64 = 0;
-  let result: NodeId = NodeId { idx: 0 };
-  let i: u64 = lo;
-  while i < hi {
-    let c: u8 = text[i];
-    if c == 92 {
-      i = i + 2;
-    } else if c == 123 {
-      let close: u64 = slot_close(text, i + 1, hi, lit_sp);
-      let _callee = out.emit(RawNode::Ident, f_sp);
-      out.begin_group(Delim::Paren, f_sp.start);
-      open = open + 1;
-      let _head = out.emit(RawNode::StrLit, Span::make(src, piece as u32, i as u32));
-      let _sep0 = out.emit(RawNode::Punct(44), f_sp);
-      let _slot = emit_slot(text, out, alloc, src, i + 1, close);
-      let _sep1 = out.emit(RawNode::Punct(44), f_sp);
-      i = close + 1;
-      piece = i;
-    } else {
-      i = i + 1;
-    }
-  };
-  let _tail = out.emit(RawNode::StrLit, Span::make(src, piece as u32, hi as u32));
-  while open > 0 {
-    result = out.end_group(Delim::Paren, lit_sp.end);
-    open = open - 1;
-  };
-  return result;
-};
-
-let copy_children = func(src: Ref(RawAst() ?{ al: al }), text: Slice(u8), delta: u32, out: Mut(AstOut() ?{ al: al }), alloc: al::Self, grp: GroupRange)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail, AstOutFail } -> u64
-{
-  let n: u64 = grp.len as u64;
-  let i: u64 = 0;
-  while i < n {
-    let id: NodeId = src.child_at(grp, i as u32);
-    let used: bool = false;
-    if (i + 1 < n) and (delta == 0) {
-      let nid: NodeId = src.child_at(grp, (i + 1) as u32);
-      let head: RawNode = src.node(id);
-      let tail: RawNode = src.node(nid);
-      let is_ident: bool = match head {
-        Ident => true,
-        _ => false
-      };
-      let is_lit: bool = match tail {
-        StrLit => true,
-        _ => false
-      };
-      let sp_f: Span = src.span(id);
-      let sp_s: Span = src.span(nid);
-      if is_ident and (is_lit and (src.text_eq(text, id, "f") and Span::touches(sp_f, sp_s))) {
-        if has_slot(text, sp_s) {
-          let _call = emit_fstring(text, out, alloc, sp_f, sp_s);
+  return module {
+    let copy_subtree_plain = func(src: Ref(Raw), delta: u32, out: Mut(Out), root_grp: GroupRange) !{ OomErr, SyntaxFail } -> u64 {
+      let stack: Vec(CopyFrame) = Vec(CopyFrame)::new();
+      stack.push(CopyFrame { grp: root_grp, idx: 0, end_pos: 0, close_group: false });
+      while stack.len() > 0 {
+        let top_i: u64 = stack.len() - 1;
+        let fr: Mut(CopyFrame) = stack.get_mut(top_i);
+        let n: u64 = deref(fr).grp.len as u64;
+        if deref(fr).idx >= n {
+          let close_g: bool = deref(fr).close_group;
+          let delim: Delim = deref(fr).grp.delim;
+          let end_pos: u32 = deref(fr).end_pos;
+          stack.truncate(top_i);
+          if close_g {
+            let _closed: NodeId = out.end_group(delim, end_pos);
+          }
         } else {
-          let _lit = out.emit(RawNode::StrLit, sp_s);
+          let ci: u32 = deref(fr).idx as u32;
+          let cur_grp: GroupRange = deref(fr).grp;
+          deref(fr).idx = deref(fr).idx + 1;
+          let id: NodeId = src.child_at(cur_grp, ci);
+          let node: RawNode = src.node(id);
+          let sp: Span = shift_span(src.span(id), delta);
+          let _step: u64 = match node {
+            Group(cg) => {
+              out.begin_group(cg.delim, sp.start);
+              stack.push(CopyFrame { grp: cg, idx: 0, end_pos: sp.end, close_group: true });
+              0
+            },
+            _ => {
+              let _e: NodeId = out.emit(node, sp);
+              0
+            }
+          };
         }
-        used = true;
-        i = i + 2;
+      };
+      return 0;
+    };
+
+    let emit_slot = func(text: Slice(u8), out: Mut(Out), alloc: al::Self, src: SourceId, lo: u64, hi: u64) !{ OomErr, ExpandFail, SyntaxFail } -> NodeId {
+      let slot_sp: Span = Span::make(src, lo as u32, hi as u32);
+      let slot_text: Slice(u8) = sub(text, lo, hi);
+      let cur: SliceCursor::Self = SliceCursor::new(slot_text);
+      let slot_ast: Raw = read(src, mut_of(cur), alloc);
+      let root: NodeId = slot_ast.root;
+      let node: RawNode = slot_ast.node(root);
+      let is_group: bool = match node {
+        Group(_) => true,
+        _ => false
+      };
+      if is_group == false {
+        perform ExpandFail::fail(ExpandErr::BadSugar { slot_sp });
       }
-    }
-    if used == false {
-      let _node = copy_node(src, text, delta, out, alloc, id);
-      i = i + 1;
-    }
+      let grp: GroupRange = match node {
+        Group(g) => g,
+        _ => GroupRange { delim: Delim::Root, start: 0, len: 0 }
+      };
+      out.begin_group(Delim::Paren, lo as u32);
+      let _copied: u64 = copy_subtree_plain(ref_of(slot_ast), lo as u32, out, grp);
+      return out.end_group(Delim::Paren, hi as u32);
+    };
+
+    let emit_fstring = func(text: Slice(u8), out: Mut(Out), alloc: al::Self, f_sp: Span, lit_sp: Span) !{ OomErr, ExpandFail, SyntaxFail } -> NodeId {
+      let src: SourceId = lit_sp.src;
+      let lo: u64 = (lit_sp.start as u64) + 1;
+      let hi: u64 = (lit_sp.end as u64) - 1;
+      let piece: u64 = lo;
+      let open_cnt: u64 = 0;
+      let result: NodeId = NodeId { idx: 0 };
+      let i: u64 = lo;
+      while i < hi {
+        let c: u8 = text[i];
+        if c == 92 {
+          i = i + 2;
+        } else if c == 123 {
+          let close: u64 = slot_close(text, i + 1, hi, lit_sp);
+          let _callee: NodeId = out.emit(RawNode::Ident, f_sp);
+          out.begin_group(Delim::Paren, f_sp.start);
+          open_cnt = open_cnt + 1;
+          let _head: NodeId = out.emit(RawNode::StrLit, Span::make(src, piece as u32, i as u32));
+          let _sep0: NodeId = out.emit(RawNode::Punct(44 as u8), f_sp);
+          let _slot: NodeId = emit_slot(text, out, alloc, src, i + 1, close);
+          let _sep1: NodeId = out.emit(RawNode::Punct(44 as u8), f_sp);
+          i = close + 1;
+          piece = i;
+        } else {
+          i = i + 1;
+        }
+      };
+      let _tail: NodeId = out.emit(RawNode::StrLit, Span::make(src, piece as u32, hi as u32));
+      while open_cnt > 0 {
+        result = out.end_group(Delim::Paren, lit_sp.end);
+        open_cnt = open_cnt - 1;
+      };
+      return result;
+    };
+
+    pub {
+      let run = func(raw: Ref(Raw), text: Slice(u8), alloc: al::Self) !{ OomErr, SyntaxFail, ExpandFail } -> Raw {
+        let root_sp: Span = raw.span(raw.root);
+        let root_node: RawNode = raw.node(raw.root);
+        let is_group: bool = match root_node {
+          Group(_) => true,
+          _ => false
+        };
+        if is_group == false {
+          perform ExpandFail::fail(ExpandErr::BadSugar { root_sp });
+        }
+        let root_grp: GroupRange = match root_node {
+          Group(g) => g,
+          _ => GroupRange { delim: Delim::Root, start: 0, len: 0 }
+        };
+        let out: Out = Out::with_alloc(root_sp.src, alloc);
+        let stack: Vec(CopyFrame) = Vec(CopyFrame)::new();
+        stack.push(CopyFrame { grp: root_grp, idx: 0, end_pos: root_sp.end, close_group: false });
+        while stack.len() > 0 {
+          let top_i: u64 = stack.len() - 1;
+          let fr: Mut(CopyFrame) = stack.get_mut(top_i);
+          let n: u64 = deref(fr).grp.len as u64;
+          if deref(fr).idx >= n {
+            let close_g: bool = deref(fr).close_group;
+            let delim: Delim = deref(fr).grp.delim;
+            let end_pos: u32 = deref(fr).end_pos;
+            stack.truncate(top_i);
+            if close_g {
+              let _closed: NodeId = out.end_group(delim, end_pos);
+            }
+          } else {
+            let i: u64 = deref(fr).idx;
+            let cur_grp: GroupRange = deref(fr).grp;
+            let id: NodeId = raw.child_at(cur_grp, i as u32);
+            let used: bool = false;
+            if i + 1 < n {
+              let nid: NodeId = raw.child_at(cur_grp, (i + 1) as u32);
+              let head: RawNode = raw.node(id);
+              let tail: RawNode = raw.node(nid);
+              let is_ident: bool = match head {
+                Ident => true,
+                _ => false
+              };
+              let is_lit: bool = match tail {
+                StrLit => true,
+                _ => false
+              };
+              let sp_f: Span = raw.span(id);
+              let sp_s: Span = raw.span(nid);
+              if is_ident and (is_lit and (raw.text_eq(text, id, "f") and Span::touches(sp_f, sp_s))) {
+                deref(fr).idx = i + 2;
+                if has_slot(text, sp_s) {
+                  let _call: NodeId = emit_fstring(text, mut_of(out), alloc, sp_f, sp_s);
+                } else {
+                  let _lit: NodeId = out.emit(RawNode::StrLit, sp_s);
+                }
+                used = true;
+              }
+            }
+            if used == false {
+              deref(fr).idx = i + 1;
+              let node: RawNode = raw.node(id);
+              let sp: Span = raw.span(id);
+              let _step: u64 = match node {
+                Group(cg) => {
+                  out.begin_group(cg.delim, sp.start);
+                  stack.push(CopyFrame { grp: cg, idx: 0, end_pos: sp.end, close_group: true });
+                  0
+                },
+                _ => {
+                  let _e: NodeId = out.emit(node, sp);
+                  0
+                }
+              };
+            }
+          }
+        };
+        let ast: Raw = out.finish(root_sp.end);
+        return reloc(ast);
+      };
+    };
   };
-  return n;
 };
 
-let copy_node = func(src: Ref(RawAst() ?{ al: al }), text: Slice(u8), delta: u32, out: Mut(AstOut() ?{ al: al }), alloc: al::Self, id: NodeId)
+pub let desugar = func(raw: Ref(RawAst()), text: Slice(u8), alloc: al::Self)
   ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail, AstOutFail } -> NodeId
+  !{ OomErr, SyntaxFail, ExpandFail } -> RawAst()
 {
-  let node: RawNode = src.node(id);
-  let sp: Span = src.span(id);
-  return match node {
-    Group(grp) => { copy_group(src, text, delta, out, alloc, grp, shift_span(sp, delta)) },
-    _ => { out.emit(node, shift_span(sp, delta)) }
-  };
-};
-
-let copy_group = func(src: Ref(RawAst() ?{ al: al }), text: Slice(u8), delta: u32, out: Mut(AstOut() ?{ al: al }), alloc: al::Self, grp: GroupRange, sp: Span)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail, AstOutFail } -> NodeId
-{
-  out.begin_group(grp.delim, sp.start);
-  let _n: u64 = copy_children(src, text, delta, out, alloc, grp);
-  return out.end_group(grp.delim, sp.end);
-};
-
-pub let desugar = func(raw: Ref(RawAst() ?{ al: al }), text: Slice(u8), alloc: al::Self)
-  ?{ al: Allocator = SystemAlloc }
-  !{ OomErr, ExpandFail } -> RawAst() ?{ al: al }
-{
-  let root_sp: Span = raw.span(raw.root);
-  let root_node: RawNode = raw.node(raw.root);
-  let is_group: bool = match root_node {
-    Group(_) => true,
-    _ => false
-  };
-  if is_group == false {
-    perform ExpandFail::fail(ExpandErr::BadSugar(root_sp));
-  }
-  let root_grp: GroupRange = match root_node {
-    Group(g) => g,
-    _ => GroupRange { delim: Delim::Root, start: 0, len: 0 }
-  };
-  let Out = AstOut() ?{ al: al };
-  let out: Out = Out::with_alloc(root_sp.src, alloc);
-  let _n: u64 = handle copy_children(raw, text, 0, mut_of(out), alloc, root_grp) with {
-    return(v) => v,
-    fail(err) => {
-      match err {
-        UnmatchedClose(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnclosedGroup(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        EmptyFinish => { perform ExpandFail::fail(ExpandErr::BadSugar(root_sp)); }
-      }
-    }
-  };
-  let ast: RawAst() ?{ al: al } = handle out.finish(root_sp.end) with {
-    return(v) => v,
-    fail(err) => {
-      match err {
-        UnmatchedClose(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        UnclosedGroup(sp) => { perform ExpandFail::fail(ExpandErr::BadSugar(sp)); },
-        EmptyFinish => { perform ExpandFail::fail(ExpandErr::BadSugar(root_sp)); }
-      }
-    }
-  };
-  return ast;
+  let P = DesugarPass();
+  let res: RawAst() = P::run(raw, text, alloc);
+  return reloc(res);
 };

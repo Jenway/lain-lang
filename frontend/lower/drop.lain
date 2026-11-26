@@ -1,0 +1,85 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("frontend::sema::hir")::{ HirLocalId };
+
+pub {
+  let DropEntry = struct {
+    local_id: HirLocalId,
+    depth: u32,
+    moved: bool
+  };
+};
+
+pub let DropTracker = module {
+  let EntryVec = Vec(DropEntry);
+
+  pub {
+    let Self = struct {
+      entries: EntryVec,
+      depth: u32
+    };
+
+    let new = func() -> Self {
+      return Self { entries: EntryVec::new(), depth: 0 };
+    };
+
+    let enter_scope = func(t: Mut(Self)) {
+      t.depth = t.depth + 1;
+    };
+
+    let leave_scope = func(t: Mut(Self)) {
+      let d: u32 = t.depth;
+      if d == 0 {
+        return;
+      }
+      let k: u64 = t.entries.len();
+      let done: bool = false;
+      while done == false {
+        if k == 0 {
+          done = true;
+        } else {
+          let e: DropEntry = t.entries.get(k - 1);
+          if e.depth >= d {
+            k = k - 1;
+          } else {
+            done = true;
+          }
+        }
+      };
+      t.entries.truncate(k);
+      t.depth = d - 1;
+    };
+
+    let track = func(t: Mut(Self), local_id: HirLocalId) !{ OomErr } {
+      let d: u32 = t.depth;
+      t.entries.push(DropEntry { local_id: local_id, depth: d, moved: false });
+    };
+
+    let mark_moved = func(t: Mut(Self), local_id: HirLocalId) {
+      let n: u64 = t.entries.len();
+      let i: u64 = 0;
+      while i < n {
+        let e: DropEntry = t.entries.get(i);
+        if e.local_id.idx == local_id.idx {
+          let slot: Mut(DropEntry) = t.entries.get_mut(i);
+          slot.moved = true;
+          return;
+        }
+        i = i + 1;
+      };
+    };
+
+    let is_moved = func(t: Ref(Self), local_id: HirLocalId) -> bool {
+      let n: u64 = t.entries.len();
+      let i: u64 = n;
+      while i > 0 {
+        i = i - 1;
+        let e: DropEntry = t.entries.get(i);
+        if e.local_id.idx == local_id.idx {
+          return e.moved;
+        }
+      };
+      return false;
+    };
+  };
+};

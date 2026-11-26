@@ -18,6 +18,9 @@ use import("frontend::sema::resolve")::{ Scope, SymKind, SymEntry };
 use import("frontend::sema::effects")::{ EffRow };
 use import("frontend::sema::comptime")::{ parse_int_literal, eval_bool_const };
 
+let ArgVec = Vec(HirExprId);
+let StmtVec = Vec(HirStmtId);
+
 pub {
   let FlatDecl = struct {
     id: u32,
@@ -30,6 +33,8 @@ pub {
     locals: Scope,
     struct_tys: Vec(TypeId),
     decls: Vec(FlatDecl),
+    arg_buf: ArgVec,
+    stmt_buf: StmtVec,
     void_tid: TypeId,
     bool_tid: TypeId,
     i64_tid: TypeId,
@@ -144,6 +149,8 @@ let new_ctx = func() -> Ctx {
     locals: Scope::new(),
     struct_tys: Vec(TypeId)::new(),
     decls: Vec(FlatDecl)::new(),
+    arg_buf: ArgVec::new(),
+    stmt_buf: StmtVec::new(),
     void_tid: TypeId { idx: 0 },
     bool_tid: TypeId { idx: 0 },
     i64_tid: TypeId { idx: 0 },
@@ -161,14 +168,14 @@ let fail_type = func(err: SemaErr) !{ SemaFail } -> TypeId {
   return TypeId { idx: 0 };
 };
 
-let span_at = func(ast: Ref(AstModule() ?{ al: A }), r: IdRange) ?{ A: Allocator = SystemAlloc } -> Span {
+let span_at = func(ast: Ref(AstModule()), r: IdRange) ?{ al: Allocator = SystemAlloc } -> Span {
   return ast.path_segs.get((r.start as u64) + (r.len as u64) - 1);
 };
 
 let add_named = func(c: Mut(Ctx), name: Slice(u8), t: HirType, sp: Span) !{ OomErr, SemaFail } -> TypeId {
-  let tid: TypeId = HirModule::add_type(mut_of(c.hir), t);
+  let tid: TypeId = HirModule::add_type(mut_of(deref(c).hir), t);
   let kind: SymKind = SymKind::BuiltinTy { tid };
-  Scope::define(mut_of(c.globals), name, kind, sp);
+  Scope::define(mut_of(deref(c).globals), name, kind, sp);
   return tid;
 };
 
@@ -188,8 +195,8 @@ let seed_builtins = func(c: Mut(Ctx), sp: Span) !{ OomErr, SemaFail } {
   add_named(c, "Never", HirType::HirNever, sp);
 };
 
-let flatten_decls = func(ast: Ref(AstModule() ?{ al: A }), c: Mut(Ctx))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let flatten_decls = func(ast: Ref(AstModule()), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let top: IdRange = ast.top_decls;
   let i: u64 = 0;
@@ -233,7 +240,7 @@ let intern = func(c: Mut(Ctx), t: HirType) !{ OomErr } -> TypeId {
   if hit {
     return TypeId { idx: at };
   }
-  return HirModule::add_type(mut_of(c.hir), t);
+  return HirModule::add_type(mut_of(deref(c).hir), t);
 };
 
 let struct_tid = func(c: Mut(Ctx), idx: u32) -> TypeId {
@@ -241,17 +248,17 @@ let struct_tid = func(c: Mut(Ctx), idx: u32) -> TypeId {
 };
 
 let struct_size = func(c: Mut(Ctx), idx: u32) -> u32 {
-  let st: StructInfo = HirModule::struct_at(ref_of(c.hir), idx);
+  let st: StructInfo = HirModule::struct_at(ref_of(deref(c).hir), idx);
   return st.size;
 };
 
 let struct_align = func(c: Mut(Ctx), idx: u32) -> u32 {
-  let st: StructInfo = HirModule::struct_at(ref_of(c.hir), idx);
+  let st: StructInfo = HirModule::struct_at(ref_of(deref(c).hir), idx);
   return st.align;
 };
 
 let type_size = func(c: Mut(Ctx), t: TypeId) -> u32 {
-  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), t);
   return match ht {
     Void => 0,
     Bool => 1,
@@ -267,7 +274,7 @@ let type_size = func(c: Mut(Ctx), t: TypeId) -> u32 {
 };
 
 let type_align = func(c: Mut(Ctx), t: TypeId) -> u32 {
-  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), t);
   return match ht {
     Void => 1,
     Bool => 1,
@@ -286,7 +293,7 @@ let strip_refs = func(c: Mut(Ctx), t: TypeId) -> TypeId {
   let cur: TypeId = t;
   let done: bool = false;
   while done == false {
-    let ht: HirType = HirModule::type_at(ref_of(c.hir), cur);
+    let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), cur);
     match ht {
       Ref(inner) => {
         cur = inner;
@@ -304,7 +311,7 @@ let strip_refs = func(c: Mut(Ctx), t: TypeId) -> TypeId {
 
 let struct_index = func(c: Mut(Ctx), t: TypeId) -> Option(u32) {
   let core: TypeId = strip_refs(c, t);
-  let ht: HirType = HirModule::type_at(ref_of(c.hir), core);
+  let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), core);
   return match ht {
     Struct(idx) => Option(u32)::some(idx),
     _ => Option(u32)::none(),
@@ -312,7 +319,7 @@ let struct_index = func(c: Mut(Ctx), t: TypeId) -> Option(u32) {
 };
 
 let fn_index = func(c: Mut(Ctx), t: TypeId) -> Option(u32) {
-  let ht: HirType = HirModule::type_at(ref_of(c.hir), t);
+  let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), t);
   return match ht {
     Fn(idx) => Option(u32)::some(idx),
     _ => Option(u32)::none(),
@@ -323,19 +330,19 @@ let same_type = func(c: Mut(Ctx), a: TypeId, b: TypeId) -> bool {
   if a.idx == b.idx {
     return true;
   }
-  let ta: HirType = HirModule::type_at(ref_of(c.hir), a);
-  let tb: HirType = HirModule::type_at(ref_of(c.hir), b);
+  let ta: HirType = HirModule::type_at(ref_of(deref(c).hir), a);
+  let tb: HirType = HirModule::type_at(ref_of(deref(c).hir), b);
   return same_hir_type(ta, tb);
 };
 
 let expr_ty = func(c: Mut(Ctx), id: HirExprId) -> TypeId {
-  let e: HirExpr = HirModule::expr_at(ref_of(c.hir), id);
+  let e: HirExpr = HirModule::expr_at(ref_of(deref(c).hir), id);
   return e.ty;
 };
 
 let mk = func(c: Mut(Ctx), kind: HirExprKind, ty: TypeId, sp: Span) !{ OomErr } -> HirExprId {
   let e: HirExpr = HirExpr { kind: kind, ty: ty, span: sp };
-  return HirModule::add_expr(mut_of(c.hir), e);
+  return HirModule::add_expr(mut_of(deref(c).hir), e);
 };
 
 let void_expr = func(c: Mut(Ctx), sp: Span) !{ OomErr } -> HirExprId {
@@ -353,7 +360,7 @@ let named_tid = func(c: Mut(Ctx), e: SymEntry, sp: Span) !{ OomErr, SemaFail } -
 };
 
 let type_from_name = func(c: Mut(Ctx), name: Slice(u8), sp: Span) !{ OomErr, SemaFail } -> TypeId {
-  let found: Option(SymEntry) = Scope::lookup(ref_of(c.globals), name);
+  let found: Option(SymEntry) = Scope::lookup(ref_of(deref(c).globals), name);
   let tid: TypeId = match found {
     Some(e) => named_tid(c, e, sp),
     None => fail_type(SemaErr::UnknownIdent(sp)),
@@ -361,8 +368,8 @@ let type_from_name = func(c: Mut(Ctx), name: Slice(u8), sp: Span) !{ OomErr, Sem
   return tid;
 };
 
-let path_tid = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), r: IdRange, sp: Span)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
+let path_tid = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), r: IdRange, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
 {
   let tid: TypeId = if r.len == 0 {
     fail_type(SemaErr::Unsupported(sp))
@@ -410,8 +417,15 @@ let wrap_type = func(tag: u8, inner: TypeId) -> HirType {
   return HirType::Mut { inner };
 };
 
-let resolve_type = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), e: ExprId, sp: Span)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
+let ident_name = func(ex: Expr, text: Slice(u8)) -> Slice(u8) {
+  return match ex {
+    Ident(nsp) => word_at(text, nsp),
+    _ => blank(),
+  };
+};
+
+let resolve_type = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e: ExprId, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> TypeId
 {
   let wrappers: Vec(u8) = Vec(u8)::new();
   let cur: ExprId = e;
@@ -436,10 +450,7 @@ let resolve_type = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mu
       },
       Call(call) => {
         let callee: Expr = ast.exprs.get(call.callee.idx as u64);
-        let cname: Slice(u8) = match callee {
-          Ident(nsp) => word_at(text, nsp),
-          _ => blank(),
-        };
+        let cname: Slice(u8) = ident_name(callee, text);
         let tag: u8 = wrap_tag(cname);
         if (tag == 0) or (call.args.len != 1) {
           tid = fail_type(SemaErr::Unsupported(sp));
@@ -456,19 +467,20 @@ let resolve_type = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mu
     };
   };
   if (done == false) or (steps >= 64) {
-    return fail_type(SemaErr::Unsupported(sp));
+    tid = fail_type(SemaErr::Unsupported(sp));
+  } else {
+    while wrappers.len() > 0 {
+      let n: u64 = wrappers.len();
+      let tag: u8 = wrappers.get(n - 1);
+      wrappers.truncate(n - 1);
+      tid = intern(c, wrap_type(tag, tid));
+    };
   }
-  while wrappers.len() > 0 {
-    let n: u64 = wrappers.len();
-    let tag: u8 = wrappers.get(n - 1);
-    wrappers.pop();
-    tid = intern(c, wrap_type(tag, tid));
-  };
   return tid;
 };
 
-let layout_struct = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), idx: u32, se: StructExpr)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let layout_struct = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), idx: u32, se: StructExpr)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let start: u32 = c.hir.fields.len() as u32;
   let off: u32 = 0;
@@ -484,17 +496,17 @@ let layout_struct = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
     }
     off = align_up(off, fa);
     let fname: Slice(u8) = word_at(text, fdef.name);
-    HirModule::add_field(mut_of(c.hir), FieldInfo { name: fname, ty: tid, offset: off });
+    HirModule::add_field(mut_of(deref(c).hir), FieldInfo { name: fname, ty: tid, offset: off });
     off = off + fsz;
     i = i + 1;
   };
   let total: u32 = align_up(off, max_align);
   let used: u32 = (c.hir.fields.len() as u32) - start;
-  HirModule::set_struct_layout(mut_of(c.hir), idx, HirRange { start: start, len: used }, total, max_align);
+  HirModule::set_struct_layout(mut_of(deref(c).hir), idx, HirRange { start: start, len: used }, total, max_align);
 };
 
-let declare_structs = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let declare_structs = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let i: u64 = 0;
   while i < c.decls.len() {
@@ -508,11 +520,11 @@ let declare_structs = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c:
             let name: Slice(u8) = word_at(text, ld.name);
             let sp: Span = ast.decl_spans.get(fd.id as u64);
             let st: StructInfo = StructInfo { name: name, fields: HirRange { start: 0, len: 0 }, size: 0, align: 1 };
-            let idx: u32 = HirModule::add_struct(mut_of(c.hir), st);
-            let tid: TypeId = HirModule::add_type(mut_of(c.hir), HirType::Struct { idx });
+            let idx: u32 = HirModule::add_struct(mut_of(deref(c).hir), st);
+            let tid: TypeId = HirModule::add_type(mut_of(deref(c).hir), HirType::Struct { idx });
             c.struct_tys.push(tid);
             let kind: SymKind = SymKind::StructDef { idx };
-            Scope::define(mut_of(c.globals), name, kind, sp);
+            Scope::define(mut_of(deref(c).globals), name, kind, sp);
           },
           _ => {},
         };
@@ -543,8 +555,8 @@ let declare_structs = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c:
   };
 };
 
-let declare_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let declare_fn = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let name: Slice(u8) = word_at(text, ld.name);
   let sp: Span = ast.decl_spans.get(fd.id as u64);
@@ -556,7 +568,7 @@ let declare_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(
     None => {},
   };
   let fn_idx: u32 = c.hir.fns.len() as u32;
-  HirModule::add_type(mut_of(c.hir), HirType::Fn { fn_idx });
+  HirModule::add_type(mut_of(deref(c).hir), HirType::Fn { fn_idx });
   let pstart: u32 = c.hir.params.len() as u32;
   let pi: u64 = 0;
   while pi < (fe.params.len as u64) {
@@ -564,7 +576,7 @@ let declare_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(
     let ptid: TypeId = resolve_type(ast, text, c, p.ty, p.span);
     let pname: Slice(u8) = word_at(text, p.name);
     let item: HirParam = HirParam { name: pname, ty: ptid, local: HirLocalId { idx: 0 } };
-    HirModule::add_param(mut_of(c.hir), item);
+    HirModule::add_param(mut_of(deref(c).hir), item);
     pi = pi + 1;
   };
   let used: u32 = (c.hir.params.len() as u32) - pstart;
@@ -577,13 +589,13 @@ let declare_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(
     body: HirExprId { idx: 0 },
     span: sp
   };
-  let fid: HirFnId = HirModule::add_fn(mut_of(c.hir), f);
+  let fid: HirFnId = HirModule::add_fn(mut_of(deref(c).hir), f);
   let kind: SymKind = SymKind::Func { fid };
-  Scope::define(mut_of(c.globals), name, kind, sp);
+  Scope::define(mut_of(deref(c).globals), name, kind, sp);
 };
 
-let declare_fns = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let declare_fns = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let i: u64 = 0;
   while i < c.decls.len() {
@@ -605,8 +617,8 @@ let declare_fns = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut
   };
 };
 
-let collect_effects = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), r: IdRange, sp: Span)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let collect_effects = func(ast: Ref(AstModule()), text: Slice(u8), r: IdRange, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let row: EffRow = EffRow::new();
   let rm: Mut(EffRow) = mut_of(row);
@@ -626,19 +638,19 @@ let collect_effects = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), r:
       _ => blank(),
     };
     if name.len == 0 {
-      perform SemaFail::fail(SemaErr::Unsupported(sp));
+      perform SemaFail::fail(SemaErr::Unsupported { sp });
       return;
     }
     if EffRow::add(rm, name) == false {
-      perform SemaFail::fail(SemaErr::DuplicateSym(sp));
+      perform SemaFail::fail(SemaErr::DuplicateSym { sp });
       return;
     }
     i = i + 1;
   };
 };
 
-let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), e: ExprId, want: Option(TypeId))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirExprId
+let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e: ExprId, want: Option(TypeId))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirExprId
 {
   let ex: Expr = ast.exprs.get(e.idx as u64);
   let sp: Span = ast.expr_spans.get(e.idx as u64);
@@ -671,12 +683,16 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
     },
     Ident(nsp) => {
       let name: Slice(u8) = word_at(text, nsp);
-      let found: Option(SymEntry) = Scope::lookup(ref_of(c.locals), name);
+      let found0: Option(SymEntry) = Scope::lookup(ref_of(deref(c).locals), name);
+      let found: Option(SymEntry) = match found0 {
+        Some(e0) => Option(SymEntry)::some(e0),
+        None => Scope::lookup(ref_of(deref(c).globals), name),
+      };
       match found {
         Some(ent) => {
           match ent.kind {
             Local(lid) => {
-              let lt: HirLocal = HirModule::local_at(ref_of(c.hir), lid);
+              let lt: HirLocal = HirModule::local_at(ref_of(deref(c).hir), lid);
               hid = mk(c, HirExprKind::Local { lid }, lt.ty, sp);
             },
             Func(fid) => {
@@ -698,12 +714,16 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
         hid = fail_at(SemaErr::Unsupported(sp));
       } else {
         let name: Slice(u8) = word_at(text, span_at(ast, r));
-        let found: Option(SymEntry) = Scope::lookup(ref_of(c.locals), name);
+        let found0: Option(SymEntry) = Scope::lookup(ref_of(deref(c).locals), name);
+        let found: Option(SymEntry) = match found0 {
+          Some(e0) => Option(SymEntry)::some(e0),
+          None => Scope::lookup(ref_of(deref(c).globals), name),
+        };
         match found {
           Some(ent) => {
             match ent.kind {
               Local(lid) => {
-                let lt: HirLocal = HirModule::local_at(ref_of(c.hir), lid);
+                let lt: HirLocal = HirModule::local_at(ref_of(deref(c).hir), lid);
                 hid = mk(c, HirExprKind::Local { lid }, lt.ty, sp);
               },
               Func(fid) => {
@@ -739,12 +759,36 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
       };
     },
     Binary(b) => {
-      let lhs: HirExprId = check_expr_as(ast, text, c, b.lhs, Option(TypeId)::none());
-      let lt: TypeId = expr_ty(c, lhs);
-      let rhs: HirExprId = check_expr_as(ast, text, c, b.rhs, Option(TypeId)::some(lt));
-      let rt: TypeId = expr_ty(c, rhs);
+      let lhs_exp: Option(TypeId) = want;
+      let is_cmp: bool = is_comparison(b.op);
+      if is_cmp {
+        lhs_exp = Option(TypeId)::none();
+      }
+      let lhs_is_int: bool = match ast.exprs.get(b.lhs.idx as u64) {
+        Lit(lk) => match lk { Int => true, _ => false },
+        _ => false,
+      };
+      let lhs_has_exp: bool = match lhs_exp {
+        Some(_) => true,
+        None => false,
+      };
+      let lhs: HirExprId = HirExprId { idx: 0 };
+      let rhs: HirExprId = HirExprId { idx: 0 };
+      let lt: TypeId = TypeId { idx: 0 };
+      let rt: TypeId = TypeId { idx: 0 };
+      if lhs_is_int and (lhs_has_exp == false) {
+        rhs = check_expr_as(ast, text, c, b.rhs, Option(TypeId)::none());
+        rt = expr_ty(c, rhs);
+        lhs = check_expr_as(ast, text, c, b.lhs, Option(TypeId)::some(rt));
+        lt = expr_ty(c, lhs);
+      } else {
+        lhs = check_expr_as(ast, text, c, b.lhs, lhs_exp);
+        lt = expr_ty(c, lhs);
+        rhs = check_expr_as(ast, text, c, b.rhs, Option(TypeId)::some(lt));
+        rt = expr_ty(c, rhs);
+      }
       let k: HirExprKind = HirExprKind::Binary { HirBinary { op: b.op, lhs: lhs, rhs: rhs } };
-      if is_comparison(b.op) {
+      if is_cmp {
         hid = mk(c, k, c.bool_tid, sp);
       } else if same_type(c, lt, rt) {
         hid = mk(c, k, lt, sp);
@@ -763,14 +807,14 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
         },
       };
       let fname: Slice(u8) = word_at(text, f.field);
-      let found: Option(u32) = HirModule::find_field(ref_of(c.hir), idx, fname);
+      let found: Option(u32) = HirModule::find_field(ref_of(deref(c).hir), idx, fname);
       let abs: u32 = match found {
         Some(v) => v,
         None => {
           return fail_at(SemaErr::UnknownField(sp));
         },
       };
-      let info: FieldInfo = HirModule::field_at(ref_of(c.hir), abs);
+      let info: FieldInfo = HirModule::field_at(ref_of(deref(c).hir), abs);
       let k: HirExprKind = HirExprKind::Field { HirField { base: base, struct_idx: idx, field: abs } };
       hid = mk(c, k, info.ty, sp);
     },
@@ -785,20 +829,28 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
         },
       };
       let fnid: HirFnId = HirFnId { idx: fidx };
-      let f: HirFn = HirModule::fn_at(ref_of(c.hir), fnid);
+      let f: HirFn = HirModule::fn_at(ref_of(deref(c).hir), fnid);
       if (call.args.len as u64) != (f.params.len as u64) {
         return fail_at(SemaErr::ArityMismatch(sp));
       }
-      let astart: u32 = c.hir.expr_lists.len() as u32;
+      let abase: u64 = deref(c).arg_buf.len();
       let ai: u64 = 0;
       while ai < (call.args.len as u64) {
         let aid: ExprId = ast.expr_lists.get((call.args.start as u64) + ai);
-        let p: HirParam = HirModule::param_at(ref_of(c.hir), f.params.start + (ai as u32));
+        let p: HirParam = HirModule::param_at(ref_of(deref(c).hir), f.params.start + (ai as u32));
         let ah: HirExprId = check_expr_as(ast, text, c, aid, Option(TypeId)::some(p.ty));
-        HirModule::add_expr_id(mut_of(c.hir), ah);
+        deref(c).arg_buf.push(ah);
         ai = ai + 1;
       };
-      let used: u32 = (c.hir.expr_lists.len() as u32) - astart;
+      let astart: u32 = c.hir.expr_lists.len() as u32;
+      let aend: u64 = deref(c).arg_buf.len();
+      let aj: u64 = abase;
+      while aj < aend {
+        HirModule::add_expr_id(mut_of(deref(c).hir), deref(c).arg_buf.get(aj));
+        aj = aj + 1;
+      };
+      deref(c).arg_buf.truncate(abase);
+      let used: u32 = (aend - abase) as u32;
       let k: HirExprKind = HirExprKind::Call { HirCall { callee: cal, args: HirRange { start: astart, len: used } } };
       hid = mk(c, k, f.ret_ty, sp);
     },
@@ -861,8 +913,8 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
       };
     },
     Block(bl) => {
-      Scope::push_scope(mut_of(c.locals));
-      let sstart: u32 = c.hir.stmt_lists.len() as u32;
+      Scope::push_scope(mut_of(deref(c).locals));
+      let sbase: u64 = deref(c).stmt_buf.len();
       let si: u64 = 0;
       while si < (bl.stmts.len as u64) {
         let sid: StmtId = ast.stmt_lists.get((bl.stmts.start as u64) + si);
@@ -881,10 +933,10 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
             let init: HirExprId = check_expr_as(ast, text, c, ls.init, swant);
             let ity: TypeId = expr_ty(c, init);
             let lname: Slice(u8) = word_at(text, ls.name);
-            let lid: HirLocalId = HirModule::add_local(mut_of(c.hir), HirLocal { name: lname, ty: ity });
+            let lid: HirLocalId = HirModule::add_local(mut_of(deref(c).hir), HirLocal { name: lname, ty: ity });
             let kind: SymKind = SymKind::Local { lid };
-            Scope::define(mut_of(c.locals), lname, kind, ssp);
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Let { HirLet { local: lid, init: init } });
+            Scope::define(mut_of(deref(c).locals), lname, kind, ssp);
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Let { HirLet { local: lid, init: init } });
           },
           Assign(asg) => {
             let target: HirExprId = check_expr_as(ast, text, c, asg.target, Option(TypeId)::none());
@@ -894,11 +946,11 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
             if same_type(c, tt, vt) == false {
               return fail_at(SemaErr::TypeMismatch(ssp));
             }
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Assign { HirAssign { target: target, val: val } });
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Assign { HirAssign { target: target, val: val } });
           },
           Expr(ee) => {
             let eh: HirExprId = check_expr_as(ast, text, c, ee, Option(TypeId)::none());
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Expr { eh });
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Expr { eh });
           },
           Return(oe) => {
             let ores: Option(HirExprId) = Option(HirExprId)::none();
@@ -909,22 +961,22 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
               },
               None => {},
             };
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Return { ores });
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Return { ores });
           },
           While(w) => {
             let cond: HirExprId = check_expr_as(ast, text, c, w.cond, Option(TypeId)::some(c.bool_tid));
             let body: HirExprId = check_expr_as(ast, text, c, w.body, Option(TypeId)::none());
             let item: HirWhile = HirWhile { cond: cond, body: body };
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::While { item });
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::While { item });
           },
           Break => {
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Break);
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Break);
           },
           Continue => {
-            hs = HirModule::add_stmt(mut_of(c.hir), HirStmt::Continue);
+            hs = HirModule::add_stmt(mut_of(deref(c).hir), HirStmt::Continue);
           },
         };
-        HirModule::add_stmt_id(mut_of(c.hir), hs);
+        deref(c).stmt_buf.push(hs);
         si = si + 1;
       };
       let tail: Option(HirExprId) = Option(HirExprId)::none();
@@ -937,8 +989,16 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
         },
         None => {},
       };
-      Scope::pop_scope(mut_of(c.locals));
-      let used: u32 = (c.hir.stmt_lists.len() as u32) - sstart;
+      Scope::pop_scope(mut_of(deref(c).locals));
+      let sstart: u32 = c.hir.stmt_lists.len() as u32;
+      let send: u64 = deref(c).stmt_buf.len();
+      let sj: u64 = sbase;
+      while sj < send {
+        HirModule::add_stmt_id(mut_of(deref(c).hir), deref(c).stmt_buf.get(sj));
+        sj = sj + 1;
+      };
+      deref(c).stmt_buf.truncate(sbase);
+      let used: u32 = (send - sbase) as u32;
       let k: HirExprKind = HirExprKind::Block { HirBlock { stmts: HirRange { start: sstart, len: used }, tail: tail } };
       hid = mk(c, k, rty, sp);
     },
@@ -956,16 +1016,16 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
       while ii < (sl.inits.len as u64) {
         let fi: FieldInit = ast.inits.get((sl.inits.start as u64) + ii);
         let fname: Slice(u8) = word_at(text, fi.name);
-        let found: Option(u32) = HirModule::find_field(ref_of(c.hir), idx, fname);
+        let found: Option(u32) = HirModule::find_field(ref_of(deref(c).hir), idx, fname);
         let abs: u32 = match found {
           Some(v) => v,
           None => {
             return fail_at(SemaErr::UnknownField(fi.span));
           },
         };
-        let info: FieldInfo = HirModule::field_at(ref_of(c.hir), abs);
+        let info: FieldInfo = HirModule::field_at(ref_of(deref(c).hir), abs);
         let vh: HirExprId = check_expr_as(ast, text, c, fi.val, Option(TypeId)::some(info.ty));
-        HirModule::add_init(mut_of(c.hir), HirFieldInit { index: abs, val: vh });
+        HirModule::add_init(mut_of(deref(c).hir), HirFieldInit { index: abs, val: vh });
         ii = ii + 1;
       };
       let used: u32 = (c.hir.inits.len() as u32) - istart;
@@ -979,41 +1039,41 @@ let check_expr_as = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: M
   return hid;
 };
 
-let check_fn = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let check_fn = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let name: Slice(u8) = word_at(text, ld.name);
   let sp: Span = ast.decl_spans.get(fd.id as u64);
-  let found: Option(HirFnId) = HirModule::find_fn(ref_of(c.hir), name);
+  let found: Option(HirFnId) = HirModule::find_fn(ref_of(deref(c).hir), name);
   let fid: HirFnId = match found {
     Some(v) => v,
     None => HirFnId { idx: 0 },
   };
-  let f: HirFn = HirModule::fn_at(ref_of(c.hir), fid);
-  Scope::reset(mut_of(c.locals));
-  Scope::push_scope(mut_of(c.locals));
+  let f: HirFn = HirModule::fn_at(ref_of(deref(c).hir), fid);
+  Scope::reset(mut_of(deref(c).locals));
+  Scope::push_scope(mut_of(deref(c).locals));
   let lstart: u32 = c.hir.locals.len() as u32;
   let pcount: u64 = f.params.len as u64;
   let pi: u64 = 0;
   while pi < pcount {
     let pidx: u32 = f.params.start + (pi as u32);
-    let p: HirParam = HirModule::param_at(ref_of(c.hir), pidx);
-    let lid: HirLocalId = HirModule::add_local(mut_of(c.hir), HirLocal { name: p.name, ty: p.ty });
-    HirModule::set_param_local(mut_of(c.hir), pidx, lid);
+    let p: HirParam = HirModule::param_at(ref_of(deref(c).hir), pidx);
+    let lid: HirLocalId = HirModule::add_local(mut_of(deref(c).hir), HirLocal { name: p.name, ty: p.ty });
+    HirModule::set_param_local(mut_of(deref(c).hir), pidx, lid);
     let kind: SymKind = SymKind::Local { lid };
-    Scope::define(mut_of(c.locals), p.name, kind, sp);
+    Scope::define(mut_of(deref(c).locals), p.name, kind, sp);
     pi = pi + 1;
   };
   c.cur_ret = f.ret_ty;
   collect_effects(ast, text, fe.effects, sp);
   let body: HirExprId = check_expr_as(ast, text, c, fe.body, Option(TypeId)::none());
-  Scope::pop_scope(mut_of(c.locals));
+  Scope::pop_scope(mut_of(deref(c).locals));
   let used: u32 = (c.hir.locals.len() as u32) - lstart;
-  HirModule::set_fn_body(mut_of(c.hir), fid, body, HirRange { start: lstart, len: used });
+  HirModule::set_fn_body(mut_of(deref(c).hir), fid, body, HirRange { start: lstart, len: used });
 };
 
-let check_bodies = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let check_bodies = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   let i: u64 = 0;
   while i < c.decls.len() {
@@ -1035,8 +1095,8 @@ let check_bodies = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mu
   };
 };
 
-let run = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+let run = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
   seed_builtins(c, Span::empty(ast.src, 0));
   flatten_decls(ast, c);
@@ -1045,11 +1105,12 @@ let run = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), c: Mut(Ctx))
   check_bodies(ast, text, c);
 };
 
-pub let check_module = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8))
-  ?{ A: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirModule
+pub let check_module = func(ast: Ref(AstModule()), text: Slice(u8))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirModule
 {
   let c0: Ctx = new_ctx();
   let c: Mut(Ctx) = mut_of(c0);
-  run(ast, text, c);
-  return HirModule::take(mut_of(c.hir));
+  run(ast, text, c)!;
+  let res: HirModule = HirModule::take(mut_of(deref(c).hir));
+  return reloc(res);
 };

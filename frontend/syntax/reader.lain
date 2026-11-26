@@ -1,22 +1,9 @@
 use import("std::ascii")::{ is_space, is_digit, is_hex_digit, is_ident_start, is_ident_cont };
-use import("std::err")::{ Fail };
 use import("std::io")::{ ByteSource, SliceCursor };
 use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
 use import("frontend::syntax::span")::{ SourceId, Span };
-use import("frontend::syntax::raw_ast")::{ Delim, RawNode, RawAst };
-use import("frontend::syntax::ast_out")::{ AstOut, AstOutErr, AstOutFail };
-
-pub {
-  let ReadErr = enum {
-    UnterminatedStr(Span)
-    UnterminatedChar(Span)
-    UnterminatedComment(Span)
-    UnmatchedClose(Span)
-    UnclosedGroup(Span)
-  };
-
-  let ReadFail = Fail(ReadErr);
-};
+use import("frontend::syntax::raw_ast")::{ SyntaxErr, SyntaxFail, Delim, RawNode, RawAst };
+use import("frontend::syntax::ast_out")::{ AstOut };
 
 let peek_byte = func(input: Ref(S::Self), offset: u64) ?{ S: ByteSource } -> u8 {
   return match S::peek_at(input, offset) {
@@ -27,40 +14,29 @@ let peek_byte = func(input: Ref(S::Self), offset: u64) ?{ S: ByteSource } -> u8 
 
 pub let read = func(src: SourceId, input: Mut(S::Self), alloc: al::Self)
   ?{ S: ByteSource = SliceCursor, al: Allocator = SystemAlloc }
-  !{ OomErr, ReadFail } -> RawAst() ?{ al: al }
+  !{ OomErr, SyntaxFail } -> RawAst()
 {
-  let Out = AstOut() ?{ al: al };
+  let Out = AstOut();
   let out: Out = Out::with_alloc(src, alloc);
-  let total_len: u32 = S::len(input) as u32;
+  let total_u64: u64 = S::len(input);
+  let total_len: u32 = total_u64 as u32;
 
-  while true {
-    let c: u8 = match S::peek(input) {
-      Some(b) => b,
-      None => { break; }
-    };
+  while S::pos(input) < total_u64 {
+    let c: u8 = peek_byte(input, 0);
     let pos: u32 = S::pos(input) as u32;
 
     if is_space(c) {
       S::advance(input, 1);
-    } else if (c == 47) and (peek_byte(input, 1) ?{ S: S } == 47) {
+    } else if (c == 47) and (peek_byte(input, 1) == 47) {
       S::advance(input, 2);
-      while true {
-        let nc: u8 = match S::peek(input) {
-          Some(b) => b,
-          None => { break; }
-        };
-        if nc == 10 { break; }
+      while (S::pos(input) < total_u64) and (peek_byte(input, 0) != 10) {
         S::advance(input, 1);
       };
-    } else if (c == 47) and (peek_byte(input, 1) ?{ S: S } == 42) {
+    } else if (c == 47) and (peek_byte(input, 1) == 42) {
       S::advance(input, 2);
       let closed: bool = false;
-      while closed == false {
-        let nc: u8 = match S::peek(input) {
-          Some(b) => b,
-          None => { break; }
-        };
-        if (nc == 42) and (peek_byte(input, 1) ?{ S: S } == 47) {
+      while (S::pos(input) < total_u64) and (closed == false) {
+        if (peek_byte(input, 0) == 42) and (peek_byte(input, 1) == 47) {
           S::advance(input, 2);
           closed = true;
         } else {
@@ -68,67 +44,47 @@ pub let read = func(src: SourceId, input: Mut(S::Self), alloc: al::Self)
         }
       };
       if closed == false {
-        perform ReadFail::fail(ReadErr::UnterminatedComment(Span::make(src, pos, total_len)));
+        perform SyntaxFail::fail(SyntaxErr::UnterminatedComment { Span::make(src, pos, total_len) });
       }
     } else if is_ident_start(c) {
       S::advance(input, 1);
-      while true {
-        let nc: u8 = match S::peek(input) {
-          Some(b) => b,
-          None => { break; }
-        };
-        if is_ident_cont(nc) == false { break; }
+      while (S::pos(input) < total_u64) and is_ident_cont(peek_byte(input, 0)) {
         S::advance(input, 1);
       };
       let sp: Span = Span::make(src, pos, S::pos(input) as u32);
       let _id = out.emit(RawNode::Ident, sp);
     } else if is_digit(c) {
       let is_float: bool = false;
-      let next_b: u8 = peek_byte(input, 1) ?{ S: S };
+      let next_b: u8 = peek_byte(input, 1);
       if (c == 48) and ((next_b == 120) or (next_b == 88)) {
         S::advance(input, 2);
-        while true {
-          let nc: u8 = match S::peek(input) {
-            Some(b) => b,
-            None => { break; }
-          };
-          if (is_hex_digit(nc) == false) and (nc != 95) { break; }
+        while (S::pos(input) < total_u64) and (is_hex_digit(peek_byte(input, 0)) or (peek_byte(input, 0) == 95)) {
           S::advance(input, 1);
         };
       } else {
         S::advance(input, 1);
-        while true {
-          let nc: u8 = match S::peek(input) {
-            Some(b) => b,
-            None => { break; }
-          };
-          if (is_digit(nc) == false) and (nc != 95) { break; }
+        while (S::pos(input) < total_u64) and (is_digit(peek_byte(input, 0)) or (peek_byte(input, 0) == 95)) {
           S::advance(input, 1);
         };
-        if (peek_byte(input, 0) ?{ S: S } == 46) and is_digit(peek_byte(input, 1) ?{ S: S }) {
+        if (peek_byte(input, 0) == 46) and is_digit(peek_byte(input, 1)) {
           is_float = true;
           S::advance(input, 1);
-          while true {
-            let nc: u8 = match S::peek(input) {
-              Some(b) => b,
-              None => { break; }
-            };
-            if (is_digit(nc) == false) and (nc != 95) { break; }
+          while (S::pos(input) < total_u64) and (is_digit(peek_byte(input, 0)) or (peek_byte(input, 0) == 95)) {
             S::advance(input, 1);
           };
         }
       }
       let sp: Span = Span::make(src, pos, S::pos(input) as u32);
-      let node: RawNode = if is_float { RawNode::FloatLit } else { RawNode::IntLit };
-      let _id = out.emit(node, sp);
+      if is_float {
+        let _id = out.emit(RawNode::FloatLit, sp);
+      } else {
+        let _id = out.emit(RawNode::IntLit, sp);
+      }
     } else if c == 34 {
       S::advance(input, 1);
       let closed: bool = false;
-      while closed == false {
-        let nc: u8 = match S::peek(input) {
-          Some(b) => b,
-          None => { break; }
-        };
+      while (S::pos(input) < total_u64) and (closed == false) {
+        let nc: u8 = peek_byte(input, 0);
         if nc == 92 {
           S::advance(input, 2);
         } else if nc == 34 {
@@ -139,18 +95,15 @@ pub let read = func(src: SourceId, input: Mut(S::Self), alloc: al::Self)
         }
       };
       if closed == false {
-        perform ReadFail::fail(ReadErr::UnterminatedStr(Span::make(src, pos, total_len)));
+        perform SyntaxFail::fail(SyntaxErr::UnterminatedStr { Span::make(src, pos, total_len) });
       }
       let sp: Span = Span::make(src, pos, S::pos(input) as u32);
       let _id = out.emit(RawNode::StrLit, sp);
     } else if c == 39 {
       S::advance(input, 1);
       let closed: bool = false;
-      while closed == false {
-        let nc: u8 = match S::peek(input) {
-          Some(b) => b,
-          None => { break; }
-        };
+      while (S::pos(input) < total_u64) and (closed == false) {
+        let nc: u8 = peek_byte(input, 0);
         if nc == 92 {
           S::advance(input, 2);
         } else if nc == 39 {
@@ -161,7 +114,7 @@ pub let read = func(src: SourceId, input: Mut(S::Self), alloc: al::Self)
         }
       };
       if closed == false {
-        perform ReadFail::fail(ReadErr::UnterminatedChar(Span::make(src, pos, total_len)));
+        perform SyntaxFail::fail(SyntaxErr::UnterminatedChar { Span::make(src, pos, total_len) });
       }
       let sp: Span = Span::make(src, pos, S::pos(input) as u32);
       let _id = out.emit(RawNode::CharLit, sp);
@@ -174,42 +127,22 @@ pub let read = func(src: SourceId, input: Mut(S::Self), alloc: al::Self)
     } else if c == 123 {
       out.begin_group(Delim::Brace, pos);
       S::advance(input, 1);
-    } else if (c == 41) or (c == 93) or (c == 125) {
-      let delim: Delim = if c == 41 {
-        Delim::Paren
-      } else if c == 93 {
-        Delim::Bracket
-      } else {
-        Delim::Brace
-      };
-      let end_pos: u32 = pos + 1;
-      let _id = handle out.end_group(delim, end_pos) with {
-        return(v) => v,
-        fail(err) => {
-          match err {
-            UnmatchedClose(sp) => { perform ReadFail::fail(ReadErr::UnmatchedClose(sp)); },
-            UnclosedGroup(sp) => { perform ReadFail::fail(ReadErr::UnclosedGroup(sp)); },
-            EmptyFinish => { perform ReadFail::fail(ReadErr::UnmatchedClose(Span::empty(src, end_pos))); }
-          }
-        }
-      };
+    } else if c == 41 {
+      let _id = out.end_group(Delim::Paren, pos + 1);
+      S::advance(input, 1);
+    } else if c == 93 {
+      let _id = out.end_group(Delim::Bracket, pos + 1);
+      S::advance(input, 1);
+    } else if c == 125 {
+      let _id = out.end_group(Delim::Brace, pos + 1);
       S::advance(input, 1);
     } else {
       let sp: Span = Span::make(src, pos, pos + 1);
-      let _id = out.emit(RawNode::Punct(c), sp);
+      let _id = out.emit(RawNode::Punct { c }, sp);
       S::advance(input, 1);
     }
   };
 
-  let ast: RawAst() ?{ al: al } = handle out.finish(total_len) with {
-    return(v) => v,
-    fail(err) => {
-      match err {
-        UnmatchedClose(sp) => { perform ReadFail::fail(ReadErr::UnmatchedClose(sp)); },
-        UnclosedGroup(sp) => { perform ReadFail::fail(ReadErr::UnclosedGroup(sp)); },
-        EmptyFinish => { perform ReadFail::fail(ReadErr::UnclosedGroup(Span::empty(src, 0))); }
-      }
-    }
-  };
+  let ast: RawAst() = out.finish(total_len);
   return reloc(ast);
 };

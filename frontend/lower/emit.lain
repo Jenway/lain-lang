@@ -1,0 +1,706 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ OomErr };
+use import("std::option")::{ Option };
+use import("std::err")::{ Fail };
+use import("frontend::syntax::span")::{ Span };
+use import("frontend::ast::model")::{ UnOp, BinOp };
+use import("frontend::sema::hir")::{
+  HirModule, HirType, IntInfo, TypeId, HirFn, HirFnId, HirParam, HirLocal, HirLocalId,
+  HirExprId, HirStmtId, HirRange, HirExpr, HirExprKind, HirStmt, HirFieldInit,
+  HirBinary, HirCall, HirIf, HirWhile, FieldInfo, StructInfo
+};
+use import("frontend::lower::mono")::{ MonoTable };
+use import("frontend::lower::drop")::{ DropTracker };
+use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, DataSeg, IrModule, MemAxiom };
+use import("kernel::ir::builder")::{ ValId, ProcId, IfToken, LoopToken, ProcBuilder, IrBuilder };
+
+pub {
+  let LowerErr = enum {
+    UnsupportedExpr(Span)
+    UnsupportedStmt(Span)
+    UnknownFn(Span)
+    BadLoopBreak(Span)
+  };
+
+  let LowerFail = Fail(LowerErr);
+};
+
+let ValVec = Vec(ValId);
+let LoopVec = Vec(LoopToken);
+let TyVec = Vec(Ty);
+let InstVec = Vec(Inst);
+let U64Vec = Vec(u64);
+let AxiomVec = Vec(MemAxiom);
+
+let EmitOut = struct {
+  val: ValId,
+  diverged: bool
+};
+
+let Ctx = struct {
+  hir: Ref(HirModule),
+  mono: Ref(MonoTable),
+  span: Span,
+  pb: ProcBuilder,
+  slots: ValVec,
+  drops: DropTracker,
+  loops: LoopVec
+};
+
+let none_val = func() -> ValId {
+  return ValId { id: 0 };
+};
+
+let parse_val = func(v: ValId) -> EmitOut {
+  return EmitOut { val: v, diverged: false };
+};
+
+let diverge = func() -> EmitOut {
+  return EmitOut { val: none_val(), diverged: true };
+};
+
+let bits_of = func(t: Ty) -> u8 {
+  return match t {
+    Bits(n) => n,
+    _ => 0,
+  };
+};
+
+let is_bits = func(t: Ty) -> bool {
+  return match t {
+    Bits(_) => true,
+    _ => false,
+  };
+};
+
+let ones_of = func(width: u8) -> u64 {
+  let k: u64 = width as u64;
+  if k >= 64 {
+    k = 64;
+  }
+  let acc: u64 = 1;
+  let i: u64 = 1;
+  while i < k {
+    acc = (acc << 1) | 1;
+    i = i + 1;
+  };
+  return acc;
+};
+
+let slot_bytes = func(t: Ty) -> u64 {
+  let b: u64 = t.bytes();
+  if b < 8 {
+    return 8;
+  }
+  return b;
+};
+
+let int_ty = func(info: IntInfo) -> Ty {
+  let b: u8 = info.bits;
+  return Ty::Bits { b };
+};
+
+let ty_of = func(h: Ref(HirModule), t: TypeId) -> Ty {
+  let ht: HirType = h.type_at(t);
+  return match ht {
+    Void => Ty::Void,
+    Bool => Ty::Bits { 1 },
+    Int(info) => int_ty(info),
+    Float(n) => Ty::Float { n },
+    Ref(_) => Ty::Addr,
+    Mut(_) => Ty::Addr,
+    Struct(_) => Ty::Addr,
+    Fn(_) => Ty::Addr,
+    Enum(_) => Ty::Bits { 64 },
+    HirNever => Ty::Void,
+  };
+};
+
+let expr_ty = func(h: Ref(HirModule), eid: HirExprId) -> Ty {
+  let e: HirExpr = h.expr_at(eid);
+  return ty_of(h, e.ty);
+};
+
+let local_ty = func(h: Ref(HirModule), lid: HirLocalId) -> Ty {
+  let l: HirLocal = h.local_at(lid);
+  return ty_of(h, l.ty);
+};
+
+let is_signed_int = func(h: Ref(HirModule), eid: HirExprId) -> bool {
+  let e: HirExpr = h.expr_at(eid);
+  let ht: HirType = h.type_at(e.ty);
+  return match ht {
+    Int(info) => info.signed,
+    _ => false,
+  };
+};
+
+let pick_op = func(signed: bool, s_op: Op, u_op: Op) -> Op {
+  if signed {
+    return s_op;
+  }
+  return u_op;
+};
+
+let arith_op = func(op: BinOp, signed: bool) -> Op {
+  return match op {
+    Add => Op::Add,
+    Sub => Op::Sub,
+    Mul => Op::Mul,
+    Div => pick_op(signed, Op::Sdiv, Op::Udiv),
+    Rem => pick_op(signed, Op::Srem, Op::Urem),
+    BitAnd => Op::And,
+    BitOr => Op::Or,
+    BitXor => Op::Xor,
+    Shl => Op::Shl,
+    Shr => pick_op(signed, Op::Ashr, Op::Lshr),
+    Eq => Op::Eq,
+    Ne => Op::Ne,
+    Lt => pick_op(signed, Op::Slt, Op::Ult),
+    Le => pick_op(signed, Op::Sle, Op::Ule),
+    Gt => pick_op(signed, Op::Sgt, Op::Ugt),
+    Ge => pick_op(signed, Op::Sge, Op::Uge),
+    And => Op::And,
+    Or => Op::Or,
+  };
+};
+
+let param_tys = func(h: Ref(HirModule), f: HirFn) -> TyVec {
+  let out: TyVec = TyVec::new();
+  let i: u32 = 0;
+  while i < f.params.len {
+    let p: HirParam = h.param_at(f.params.start + i);
+    let t: Ty = ty_of(h, p.ty);
+    out.push(t);
+    i = i + 1;
+  };
+  return reloc(out);
+};
+
+let cast_value = func(ctx: Mut(Ctx), src: Ty, dst: Ty, signed: bool, v: ValId) !{ OomErr } -> ValId {
+  let same: bool = src == dst;
+  if same {
+    return v;
+  }
+  let non_bits: bool = (is_bits(src) == false) or (is_bits(dst) == false);
+  if non_bits {
+    return ctx.pb.cast(Op::Bitcast, dst, v);
+  }
+  let sw: u8 = bits_of(src);
+  let dw: u8 = bits_of(dst);
+  if dw > sw {
+    if signed {
+      return ctx.pb.cast(Op::Sext, dst, v);
+    }
+    return ctx.pb.cast(Op::Zext, dst, v);
+  }
+  if dw < sw {
+    return ctx.pb.cast(Op::Trunc, dst, v);
+  }
+  return ctx.pb.cast(Op::Bitcast, dst, v);
+};
+
+let lower_unary = func(ctx: Mut(Ctx), op: UnOp, oty: Ty, v: ValId) !{ OomErr } -> ValId {
+  let is_neg: bool = op == UnOp::Neg;
+  let is_not: bool = op == UnOp::Not;
+  if is_neg {
+    let zero: ValId = ctx.pb.const_bits(oty, 0);
+    return ctx.pb.binop(Op::Sub, oty, zero, v);
+  }
+  if is_not {
+    let nzero: ValId = ctx.pb.const_bits(oty, 0);
+    return ctx.pb.binop(Op::Eq, oty, v, nzero);
+  }
+  let width: u8 = bits_of(oty);
+  let all_ones: u64 = ones_of(width);
+  let ones: ValId = ctx.pb.const_bits(oty, all_ones);
+  return ctx.pb.binop(Op::Xor, oty, v, ones);
+};
+
+let lower_binary = func(ctx: Mut(Ctx), b: HirBinary, l: ValId, r: ValId) !{ OomErr } -> ValId {
+  let oty: Ty = expr_ty(ctx.hir, b.lhs);
+  let signed: bool = is_signed_int(ctx.hir, b.lhs);
+  let op: Op = arith_op(b.op, signed);
+  return ctx.pb.binop(op, oty, l, r);
+};
+
+let lower_logic = func(ctx: Mut(Ctx), b: HirBinary) !{ OomErr, LowerFail } -> EmitOut {
+  let lhs: EmitOut = lower_expr(ctx, b.lhs);
+  if lhs.diverged {
+    return diverge();
+  }
+  let is_and: bool = b.op == BinOp::And;
+  let shortcut: u64 = if is_and { 0 } else { 1 };
+  let cond_ty: Ty = Ty::Bits { 1 };
+  let tok0: IfToken = ctx.pb.begin_if(lhs.val, cond_ty);
+  let tok: Mut(IfToken) = mut_of(tok0);
+  let lit: ValId = ctx.pb.const_bits(cond_ty, shortcut);
+  let div: bool = false;
+  if is_and {
+    let rhs_t: EmitOut = lower_expr(ctx, b.rhs);
+    div = rhs_t.diverged;
+    if div == false {
+      ctx.pb.emit_yield(rhs_t.val);
+    }
+    ctx.pb.begin_else(tok);
+    ctx.pb.emit_yield(lit);
+  } else {
+    ctx.pb.emit_yield(lit);
+    ctx.pb.begin_else(tok);
+    let rhs_e: EmitOut = lower_expr(ctx, b.rhs);
+    div = rhs_e.diverged;
+    if div == false {
+      ctx.pb.emit_yield(rhs_e.val);
+    }
+  }
+  let done: IfToken = deref(tok);
+  let res: ValId = ctx.pb.end_if(done);
+  return EmitOut { val: res, diverged: div };
+};
+
+let lower_if = func(ctx: Mut(Ctx), i: HirIf, rty: Ty) !{ OomErr, LowerFail } -> EmitOut {
+  let cond: EmitOut = lower_expr(ctx, i.cond);
+  if cond.diverged {
+    return diverge();
+  }
+  let valued: bool = rty != Ty::Void;
+  let tok0: IfToken = ctx.pb.begin_if(cond.val, rty);
+  let tok: Mut(IfToken) = mut_of(tok0);
+  let then_out: EmitOut = lower_expr(ctx, i.then_block);
+  if (then_out.diverged == false) and valued {
+    ctx.pb.emit_yield(then_out.val);
+  }
+  let div: bool = then_out.diverged;
+  match i.else_expr {
+    Some(arm_id) => {
+      ctx.pb.begin_else(tok);
+      let else_out: EmitOut = lower_expr(ctx, arm_id);
+      if (else_out.diverged == false) and valued {
+        ctx.pb.emit_yield(else_out.val);
+      }
+      div = div and else_out.diverged;
+    },
+    None => {
+      ctx.pb.begin_else(tok);
+      div = false;
+    },
+  };
+  let done: IfToken = deref(tok);
+  let res: ValId = ctx.pb.end_if(done);
+  return EmitOut { val: res, diverged: div };
+};
+
+let lower_while = func(ctx: Mut(Ctx), w: HirWhile) !{ OomErr, LowerFail } -> EmitOut {
+  let tok: LoopToken = ctx.pb.begin_loop(Ty::Void);
+  ctx.loops.push(tok);
+  let cond: EmitOut = lower_expr(ctx, w.cond);
+  if cond.diverged == false {
+    let cond_ty: Ty = Ty::Bits { 1 };
+    let zero: ValId = ctx.pb.const_bits(cond_ty, 0);
+    let exit: ValId = ctx.pb.binop(Op::Eq, cond_ty, cond.val, zero);
+    let itok: IfToken = ctx.pb.begin_if(exit, Ty::Void);
+    ctx.pb.emit_break(tok, none_val());
+    ctx.pb.end_if(itok);
+    let body: EmitOut = lower_expr(ctx, w.body);
+    if body.diverged == false {
+      ctx.pb.emit_continue(tok);
+    }
+  }
+  let popped: Option(LoopToken) = ctx.loops.pop();
+  ctx.pb.end_loop(tok);
+  return parse_val(none_val());
+};
+
+let loop_exit = func(ctx: Mut(Ctx), is_continue: bool) !{ OomErr, LowerFail } -> EmitOut {
+  let n: u64 = ctx.loops.len();
+  if n == 0 {
+    perform LowerFail::fail(LowerErr::BadLoopBreak { ctx.span });
+    return diverge();
+  }
+  let tok: LoopToken = ctx.loops.get(n - 1);
+  if is_continue {
+    ctx.pb.emit_continue(tok);
+  } else {
+    ctx.pb.emit_break(tok, none_val());
+  }
+  return diverge();
+};
+
+let address_of = func(ctx: Mut(Ctx), eid: HirExprId) !{ OomErr, LowerFail } -> ValId {
+  let e: HirExpr = ctx.hir.expr_at(eid);
+  match e.kind {
+    Local(lid) => {
+      let slot: ValId = ctx.slots.get(lid.idx as u64);
+      let linfo: HirLocal = ctx.hir.local_at(lid);
+      let lt: HirType = ctx.hir.type_at(linfo.ty);
+      let is_indirect: bool = match lt {
+        Struct(_) => true,
+        Ref(_) => true,
+        Mut(_) => true,
+        _ => false,
+      };
+      if is_indirect {
+        return ctx.pb.load(Ty::Addr, slot, 8);
+      }
+      return slot;
+    },
+    Field(f) => {
+      let base: ValId = address_of(ctx, f.base);
+      let fi: FieldInfo = ctx.hir.field_at(f.field);
+      let off: u64 = fi.offset as u64;
+      return ctx.pb.lea(base, none_val(), 1, off);
+    },
+    _ => {
+      perform LowerFail::fail(LowerErr::UnsupportedExpr { e.span });
+      return none_val();
+    },
+  };
+};
+
+let lower_struct_lit = func(ctx: Mut(Ctx), sid: u32, inits: HirRange) !{ OomErr, LowerFail } -> EmitOut {
+  let st: StructInfo = ctx.hir.struct_at(sid);
+  let size: u64 = st.size as u64;
+  let count: u64 = if size == 0 { 1 } else { size };
+  let base: ValId = ctx.pb.alloca(Ty::Bits { 8 }, count);
+  let div: bool = false;
+  let i: u32 = 0;
+  while (i < inits.len) and (div == false) {
+    let fi: HirFieldInit = ctx.hir.init_at(inits.start + i);
+    let out: EmitOut = lower_expr(ctx, fi.val);
+    div = out.diverged;
+    if div == false {
+      let fd: FieldInfo = ctx.hir.field_at(fi.index);
+      let fty: Ty = ty_of(ctx.hir, fd.ty);
+      let off: u64 = fd.offset as u64;
+      let faddr: ValId = ctx.pb.lea(base, none_val(), 1, off);
+      ctx.pb.store(fty, out.val, faddr, 8);
+    }
+    i = i + 1;
+  };
+  if div {
+    return diverge();
+  }
+  return parse_val(base);
+};
+
+let lower_call = func(ctx: Mut(Ctx), c: HirCall, rty: Ty, span: Span) !{ OomErr, LowerFail } -> EmitOut {
+  let callee: HirExpr = ctx.hir.expr_at(c.callee);
+  match callee.kind {
+    Fn(fid) => {
+      let found: Option(ProcId) = ctx.mono.lookup(fid);
+      match found {
+        Some(pid) => {
+          let args: ValVec = ValVec::new();
+          let div: bool = false;
+          let i: u32 = 0;
+          while (i < c.args.len) and (div == false) {
+            let aid: HirExprId = ctx.hir.expr_in(c.args, i);
+            let out: EmitOut = lower_expr(ctx, aid);
+            div = out.diverged;
+            args.push(out.val);
+            i = i + 1;
+          };
+          let view: Slice(ValId) = args.as_slice();
+          let rv: ValId = none_val();
+          if div == false {
+            let got: ValId = ctx.pb.call(pid, view, rty, false);
+            rv = got;
+          }
+          if div {
+            return diverge();
+          }
+          return parse_val(rv);
+        },
+        None => {
+          perform LowerFail::fail(LowerErr::UnknownFn { span });
+          return diverge();
+        },
+      };
+    },
+    _ => {
+      perform LowerFail::fail(LowerErr::UnsupportedExpr { span });
+      return diverge();
+    },
+  };
+};
+
+let lower_expr = func(ctx: Mut(Ctx), eid: HirExprId) !{ OomErr, LowerFail } -> EmitOut {
+  let e: HirExpr = ctx.hir.expr_at(eid);
+  let rty: Ty = ty_of(ctx.hir, e.ty);
+  let sp: Span = e.span;
+  match e.kind {
+    IntConst(v) => {
+      let ival: ValId = ctx.pb.const_bits(rty, v as u64);
+      return parse_val(ival);
+    },
+    BoolConst(bb) => {
+      let flag: u64 = if bb { 1 } else { 0 };
+      let bl: ValId = ctx.pb.const_bits(Ty::Bits { 1 }, flag);
+      return parse_val(bl);
+    },
+    Local(lid) => {
+      let laddr: ValId = ctx.slots.get(lid.idx as u64);
+      let lval: ValId = ctx.pb.load(rty, laddr, 8);
+      return parse_val(lval);
+    },
+    Fn(_) => {
+      perform LowerFail::fail(LowerErr::UnsupportedExpr { sp });
+      return diverge();
+    },
+    Unary(u) => {
+      let uinner: EmitOut = lower_expr(ctx, u.operand);
+      if uinner.diverged {
+        return diverge();
+      }
+      let uoty: Ty = expr_ty(ctx.hir, u.operand);
+      let uval: ValId = lower_unary(ctx, u.op, uoty, uinner.val);
+      return parse_val(uval);
+    },
+    Binary(b) => {
+      let logic: bool = (b.op == BinOp::And) or (b.op == BinOp::Or);
+      if logic {
+        return lower_logic(ctx, b);
+      }
+      let blhs: EmitOut = lower_expr(ctx, b.lhs);
+      if blhs.diverged {
+        return diverge();
+      }
+      let brhs: EmitOut = lower_expr(ctx, b.rhs);
+      if brhs.diverged {
+        return diverge();
+      }
+      let abval: ValId = lower_binary(ctx, b, blhs.val, brhs.val);
+      return parse_val(abval);
+    },
+    Call(cl) => {
+      return lower_call(ctx, cl, rty, sp);
+    },
+    If(ie) => {
+      return lower_if(ctx, ie, rty);
+    },
+    Block(_) => {
+      return lower_block(ctx, eid);
+    },
+    Field(f) => {
+      let faddr: ValId = address_of(ctx, eid);
+      let fi: FieldInfo = ctx.hir.field_at(f.field);
+      let fty: Ty = ty_of(ctx.hir, fi.ty);
+      let fval: ValId = ctx.pb.load(fty, faddr, 8);
+      return parse_val(fval);
+    },
+    StructLit(sl) => {
+      return lower_struct_lit(ctx, sl.struct_idx, sl.inits);
+    },
+    Cast(cs) => {
+      let cinner: EmitOut = lower_expr(ctx, cs.expr);
+      if cinner.diverged {
+        return diverge();
+      }
+      let src: Ty = expr_ty(ctx.hir, cs.expr);
+      let dst: Ty = ty_of(ctx.hir, cs.to);
+      let signed: bool = is_signed_int(ctx.hir, cs.expr);
+      let cval: ValId = cast_value(ctx, src, dst, signed, cinner.val);
+      return parse_val(cval);
+    },
+    Reloc(inner_id) => {
+      let rout: EmitOut = lower_expr(ctx, inner_id);
+      if rout.diverged {
+        return diverge();
+      }
+      let target: HirExpr = ctx.hir.expr_at(inner_id);
+      match target.kind {
+        Local(rlid) => {
+          ctx.drops.mark_moved(rlid);
+        },
+        _ => {},
+      };
+      return parse_val(rout.val);
+    },
+  };
+};
+
+let lower_stmt = func(ctx: Mut(Ctx), sid: HirStmtId) !{ OomErr, LowerFail } -> EmitOut {
+  let s: HirStmt = ctx.hir.stmt_at(sid);
+  match s {
+    Let(l) => {
+      let lout: EmitOut = lower_expr(ctx, l.init);
+      if lout.diverged {
+        return diverge();
+      }
+      let lty: Ty = local_ty(ctx.hir, l.local);
+      let laddr: ValId = ctx.slots.get(l.local.idx as u64);
+      ctx.pb.store(lty, lout.val, laddr, 8);
+      ctx.drops.track(l.local);
+      return parse_val(none_val());
+    },
+    Assign(a) => {
+      let aaddr: ValId = address_of(ctx, a.target);
+      let aout: EmitOut = lower_expr(ctx, a.val);
+      if aout.diverged {
+        return diverge();
+      }
+      let aty: Ty = expr_ty(ctx.hir, a.target);
+      ctx.pb.store(aty, aout.val, aaddr, 8);
+      return parse_val(none_val());
+    },
+    Expr(xid) => {
+      return lower_expr(ctx, xid);
+    },
+    Return(o) => {
+      match o {
+        Some(rid) => {
+          let out: EmitOut = lower_expr(ctx, rid);
+          if out.diverged {
+            return diverge();
+          }
+          ctx.pb.emit_ret(out.val);
+        },
+        None => {
+          ctx.pb.emit_ret(none_val());
+        },
+      };
+      return diverge();
+    },
+    While(w) => {
+      return lower_while(ctx, w);
+    },
+    Break => {
+      return loop_exit(ctx, false);
+    },
+    Continue => {
+      return loop_exit(ctx, true);
+    },
+  };
+};
+
+let lower_block = func(ctx: Mut(Ctx), bid: HirExprId) !{ OomErr, LowerFail } -> EmitOut {
+  let bexpr: HirExpr = ctx.hir.expr_at(bid);
+  match bexpr.kind {
+    Block(b) => {
+      ctx.drops.enter_scope();
+      let div: bool = false;
+      let i: u32 = 0;
+      while (i < b.stmts.len) and (div == false) {
+        let sid: HirStmtId = ctx.hir.stmt_in(b.stmts, i);
+        let out: EmitOut = lower_stmt(ctx, sid);
+        div = out.diverged;
+        i = i + 1;
+      };
+      ctx.drops.leave_scope();
+      if div {
+        return diverge();
+      }
+      match b.tail {
+        Some(tid) => {
+          return lower_expr(ctx, tid);
+        },
+        None => {
+          return parse_val(none_val());
+        },
+      };
+    },
+    _ => {
+      perform LowerFail::fail(LowerErr::UnsupportedExpr { bexpr.span });
+      return diverge();
+    },
+  };
+};
+
+let alloc_slots = func(ctx: Mut(Ctx), f: HirFn) !{ OomErr } {
+  let total: u64 = ctx.hir.local_count() as u64;
+  let i: u64 = 0;
+  while i < total {
+    ctx.slots.push(none_val());
+    i = i + 1;
+  };
+  let k: u32 = 0;
+  while k < f.locals.len {
+    let lid: HirLocalId = HirLocalId { idx: f.locals.start + k };
+    let t: Ty = local_ty(ctx.hir, lid);
+    let bytes: u64 = slot_bytes(t);
+    let addr: ValId = ctx.pb.alloca(Ty::Bits { 8 }, bytes);
+    ctx.slots.set(lid.idx as u64, addr);
+    k = k + 1;
+  };
+};
+
+let bind_params = func(ctx: Mut(Ctx), f: HirFn) !{ OomErr } {
+  let k: u32 = 0;
+  while k < f.params.len {
+    let p: HirParam = ctx.hir.param_at(f.params.start + k);
+    let pty: Ty = ty_of(ctx.hir, p.ty);
+    let pv: ValId = ctx.pb.param(k as u64);
+    let paddr: ValId = ctx.slots.get(p.local.idx as u64);
+    ctx.pb.store(pty, pv, paddr, 8);
+    ctx.drops.track(p.local);
+    k = k + 1;
+  };
+};
+
+let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr, LowerFail } -> Proc {
+  let rt: Ty = ty_of(h, f.ret_ty);
+  let ptys: TyVec = param_tys(h, f);
+  let c0: Ctx = Ctx {
+    hir: h,
+    mono: mono,
+    span: f.span,
+    pb: ProcBuilder::new(f.name, reloc(ptys), rt),
+    slots: ValVec::new(),
+    drops: DropTracker::new(),
+    loops: LoopVec::new()
+  };
+  let ctx: Mut(Ctx) = mut_of(c0);
+  alloc_slots(ctx, f);
+  bind_params(ctx, f);
+  let body: EmitOut = lower_block(ctx, f.body);
+  let void_ret: bool = rt == Ty::Void;
+  if body.diverged == false {
+    if void_ret {
+      ctx.pb.emit_ret(none_val());
+    } else {
+      ctx.pb.emit_ret(body.val);
+    }
+  }
+  let out: Proc = Proc {
+    name: deref(ctx).pb.proc.name,
+    link_name: deref(ctx).pb.proc.link_name,
+    is_extern: deref(ctx).pb.proc.is_extern,
+    is_pure: deref(ctx).pb.proc.is_pure,
+    ret_ty: deref(ctx).pb.proc.ret_ty,
+    params: deref(ctx).pb.proc.params.take(),
+    insts: deref(ctx).pb.proc.insts.take(),
+    call_args: deref(ctx).pb.proc.call_args.take(),
+    axioms: deref(ctx).pb.proc.axioms.take(),
+    val_count: deref(ctx).pb.proc.val_count
+  };
+  return reloc(out);
+};
+
+pub let lower_module = func(hir: Ref(HirModule)) !{ OomErr, LowerFail } -> IrModule {
+  let ib0: IrBuilder = IrBuilder::new();
+  let ib: Mut(IrBuilder) = mut_of(ib0);
+  let mono0: MonoTable = MonoTable::new();
+  let mono: Mut(MonoTable) = mut_of(mono0);
+  let n: u32 = hir.fn_count();
+  let i: u32 = 0;
+  while i < n {
+    let fid: HirFnId = HirFnId { idx: i };
+    let pid: ProcId = ProcId { id: i as u64 };
+    mono.register(fid, pid);
+    i = i + 1;
+  };
+  let j: u32 = 0;
+  while j < n {
+    let fid2: HirFnId = HirFnId { idx: j };
+    let f: HirFn = hir.fn_at(fid2);
+    let proc_val: Proc = lower_fn(hir, mono, f);
+    let got: ProcId = ib.add_proc(reloc(proc_val));
+    mono.register(fid2, got);
+    j = j + 1;
+  };
+  let out: IrModule = IrModule::Self {
+    datas: deref(ib).ir.datas.take(),
+    procs: deref(ib).ir.procs.take()
+  };
+  return reloc(out);
+};

@@ -47,6 +47,8 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
     let PatOpt = Option(PatId);
     let SpanOpt = Option(Span);
     let FrameVec = Vec(Frame);
+    let ExprIdVec = Vec(ExprId);
+    let StmtIdVec = Vec(StmtId);
 
     pub {
       let Self = struct {
@@ -304,7 +306,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       };
 
       let cur_witness = func(c: Mut(Self)) -> bool {
-        if cur_punct(c, '?') == false {
+        if cur_punct(c, 63) == false {
           return false;
         }
         return cur_group(c, Delim::Brace);
@@ -322,7 +324,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let push_group = func(c: Mut(Self), id: NodeId) !{ OomErr, ParseFail } {
         let n: RawNode = node_at(c, id);
         if is_group_node(n) == false {
-          perform ParseFail::fail(ParseErr::UnexpectedToken(span_at(c, id)));
+          perform ParseFail::fail(ParseErr::UnexpectedToken { span_at(c, id) });
         }
         let g: GroupRange = group_range(n);
         let sp: Span = span_at(c, id);
@@ -335,19 +337,19 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       };
 
       let fail_tok = func(c: Mut(Self), sp: Span) !{ OomErr, ParseFail } -> Never {
-        perform ParseFail::fail(ParseErr::UnexpectedToken(sp));
+        perform ParseFail::fail(ParseErr::UnexpectedToken { sp });
       };
 
       let expect_ident = func(c: Mut(Self)) !{ OomErr, ParseFail } -> Span {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
         let sp: Span = span_at(c, id);
         if is_ident_node(n) == false {
-          perform ParseFail::fail(ParseErr::ExpectedIdent(sp));
+          perform ParseFail::fail(ParseErr::ExpectedIdent { sp });
         }
         bump(c);
         return sp;
@@ -356,18 +358,18 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let expect_punct = func(c: Mut(Self), b: u8) !{ OomErr, ParseFail } {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
         if is_punct_node(n, b) == false {
-          perform ParseFail::fail(ParseErr::ExpectedPunct(span_at(c, id)));
+          perform ParseFail::fail(ParseErr::ExpectedPunct { span_at(c, id) });
         }
         bump(c);
       };
 
       let expect_darrow = func(c: Mut(Self)) !{ OomErr, ParseFail } {
-        if two_punct(c, '=', '>') == false {
+        if two_punct(c, 61, 62) == false {
           fail_tok(c, cur_span(c))!;
         }
         bump(c);
@@ -377,7 +379,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let expect_group = func(c: Mut(Self), d: Delim) !{ OomErr, ParseFail } -> NodeId {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
@@ -387,11 +389,11 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
             return id;
           }
         }
-        perform ParseFail::fail(ParseErr::UnexpectedToken(span_at(c, id)));
+        perform ParseFail::fail(ParseErr::UnexpectedToken { span_at(c, id) });
       };
 
       let optional_semi = func(c: Mut(Self)) {
-        if cur_punct(c, ';') {
+        if cur_punct(c, 59) {
           bump(c);
         }
       };
@@ -410,10 +412,15 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         return id;
       };
 
-      let push_stmt = func(c: Mut(Self), s: Stmt, sp: Span) !{ OomErr } {
+      let add_stmt = func(c: Mut(Self), s: Stmt, sp: Span) !{ OomErr } -> StmtId {
         let id: StmtId = StmtId { idx: deref(deref(c).out).stmts.len() as u32 };
         deref(deref(c).out).stmts.push(s)!;
         deref(deref(c).out).stmt_spans.push(sp)!;
+        return id;
+      };
+
+      let push_stmt = func(c: Mut(Self), s: Stmt, sp: Span) !{ OomErr } {
+        let id: StmtId = add_stmt(c, s, sp)!;
         deref(deref(c).out).stmt_lists.push(id)!;
       };
 
@@ -480,52 +487,52 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           }
           return miss;
         }
-        if two_punct(c, '<', '<') {
+        if two_punct(c, 60, 60) {
           return OpHit { op: BinOp::Shl, prec: 7, width: 2 };
         }
-        if two_punct(c, '>', '>') {
+        if two_punct(c, 62, 62) {
           return OpHit { op: BinOp::Shr, prec: 7, width: 2 };
         }
-        if two_punct(c, '=', '=') {
+        if two_punct(c, 61, 61) {
           return OpHit { op: BinOp::Eq, prec: 3, width: 2 };
         }
-        if two_punct(c, '!', '=') {
+        if two_punct(c, 33, 61) {
           return OpHit { op: BinOp::Ne, prec: 3, width: 2 };
         }
-        if two_punct(c, '<', '=') {
+        if two_punct(c, 60, 61) {
           return OpHit { op: BinOp::Le, prec: 3, width: 2 };
         }
-        if two_punct(c, '>', '=') {
+        if two_punct(c, 62, 61) {
           return OpHit { op: BinOp::Ge, prec: 3, width: 2 };
         }
-        if is_punct_node(n, '<') {
+        if is_punct_node(n, 60) {
           return OpHit { op: BinOp::Lt, prec: 3, width: 1 };
         }
-        if is_punct_node(n, '>') {
+        if is_punct_node(n, 62) {
           return OpHit { op: BinOp::Gt, prec: 3, width: 1 };
         }
-        if is_punct_node(n, '|') {
+        if is_punct_node(n, 124) {
           return OpHit { op: BinOp::BitOr, prec: 4, width: 1 };
         }
-        if is_punct_node(n, '^') {
+        if is_punct_node(n, 94) {
           return OpHit { op: BinOp::BitXor, prec: 5, width: 1 };
         }
-        if is_punct_node(n, '&') {
+        if is_punct_node(n, 38) {
           return OpHit { op: BinOp::BitAnd, prec: 6, width: 1 };
         }
-        if is_punct_node(n, '+') {
+        if is_punct_node(n, 43) {
           return OpHit { op: BinOp::Add, prec: 8, width: 1 };
         }
-        if is_punct_node(n, '-') {
+        if is_punct_node(n, 45) {
           return OpHit { op: BinOp::Sub, prec: 8, width: 1 };
         }
-        if is_punct_node(n, '*') {
+        if is_punct_node(n, 42) {
           return OpHit { op: BinOp::Mul, prec: 9, width: 1 };
         }
-        if is_punct_node(n, '/') {
+        if is_punct_node(n, 47) {
           return OpHit { op: BinOp::Div, prec: 9, width: 1 };
         }
-        if is_punct_node(n, '%') {
+        if is_punct_node(n, 37) {
           return OpHit { op: BinOp::Rem, prec: 9, width: 1 };
         }
         return miss;
@@ -534,24 +541,24 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let parse_unary = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
         let sp: Span = span_at(c, id);
-        if is_punct_node(n, '-') {
+        if is_punct_node(n, 45) {
           bump(c);
           let operand: ExprId = parse_unary(c)!;
           let u: UnaryExpr = UnaryExpr { op: UnOp::Neg, operand: operand };
           return add_expr(c, Expr::Unary(u), Span::merge(sp, deref(c).last))!;
         }
-        if is_punct_node(n, '!') {
+        if is_punct_node(n, 33) {
           bump(c);
           let operand: ExprId = parse_unary(c)!;
           let u: UnaryExpr = UnaryExpr { op: UnOp::Not, operand: operand };
           return add_expr(c, Expr::Unary(u), Span::merge(sp, deref(c).last))!;
         }
-        if is_punct_node(n, '~') {
+        if is_punct_node(n, 126) {
           bump(c);
           let operand: ExprId = parse_unary(c)!;
           let u: UnaryExpr = UnaryExpr { op: UnOp::BitNot, operand: operand };
@@ -568,7 +575,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let parse_primary = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
@@ -624,10 +631,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         }
         if is_group_node(n) {
           let g: GroupRange = group_range(n);
-          if g.delim == Delim::Brace {
+          let is_brace: bool = match g.delim { Brace => true, _ => false };
+          if is_brace {
             return parse_block_node(c, id)!;
           }
-          if g.delim == Delim::Paren {
+          let is_paren: bool = match g.delim { Paren => true, _ => false };
+          if is_paren {
             let inner: ExprId = parse_paren_expr(c, id)!;
             return parse_postfix(c, inner)!;
           }
@@ -636,13 +645,13 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         if is_punct_node(n, 123) {
           fail_tok(c, sp)!;
         }
-        if two_punct(c, ':', ':') {
+        if two_punct(c, 58, 58) {
           bump(c);
           bump(c);
           let start: u32 = deref(deref(c).out).path_segs.len() as u32;
           let seg: Span = expect_ident(c)!;
           push_path_seg(c, seg)!;
-          while two_punct(c, ':', ':') {
+          while two_punct(c, 58, 58) {
             bump(c);
             bump(c);
             let more: Span = expect_ident(c)!;
@@ -663,12 +672,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
 
       let parse_path_or_ident = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
         let first: Span = expect_ident(c)!;
-        if two_punct(c, ':', ':') == false {
+        if two_punct(c, 58, 58) == false {
           return add_expr(c, Expr::Ident(first), first)!;
         }
         let start: u32 = deref(deref(c).out).path_segs.len() as u32;
         push_path_seg(c, first)!;
-        while two_punct(c, ':', ':') {
+        while two_punct(c, 58, 58) {
           bump(c);
           bump(c);
           let seg: Span = expect_ident(c)!;
@@ -683,7 +692,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let e: ExprId = e0;
         let go: bool = true;
         while go {
-          if cur_punct(c, '.') {
+          if cur_punct(c, 46) {
             bump(c);
             let fld: Span = expect_ident(c)!;
             let f: FieldExpr = FieldExpr { base: e, field: fld };
@@ -719,12 +728,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       };
 
       let parse_arg_list = func(c: Mut(Self), gid: NodeId) !{ OomErr, ParseFail } -> IdRange {
-        let start: u32 = deref(deref(c).out).expr_lists.len() as u32;
+        let items: ExprIdVec = ExprIdVec::with_alloc(deref(c).frames.alloc);
         push_group(c, gid)!;
         while peek_some(c) {
           let e: ExprId = parse_expr(c)!;
-          push_expr_id(c, e)!;
-          if cur_punct(c, ',') {
+          items.push(e)!;
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -732,8 +741,14 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         };
         pop_group(c);
         bump(c);
-        let len: u32 = (deref(deref(c).out).expr_lists.len() as u32) - start;
-        return IdRange { start: start, len: len };
+        let start: u32 = deref(deref(c).out).expr_lists.len() as u32;
+        let i: u64 = 0;
+        let n: u64 = items.len();
+        while i < n {
+          push_expr_id(c, items.get(i))!;
+          i = i + 1;
+        };
+        return IdRange { start: start, len: n as u32 };
       };
 
       let parse_init_list = func(c: Mut(Self), gid: NodeId) !{ OomErr, ParseFail } -> IdRange {
@@ -741,11 +756,11 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         push_group(c, gid)!;
         while peek_some(c) {
           let name: Span = expect_ident(c)!;
-          expect_punct(c, ':')!;
+          expect_punct(c, 58)!;
           let val: ExprId = parse_expr(c)!;
           let fi: FieldInit = FieldInit { name: name, val: val, span: Span::merge(name, deref(c).last) };
           deref(deref(c).out).inits.push(fi)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -769,7 +784,11 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       };
 
       let parse_type = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
-        return parse_unary(c)!;
+        let saved: bool = deref(c).no_struct;
+        deref(c).no_struct = true;
+        let id: ExprId = parse_unary(c)!;
+        deref(c).no_struct = saved;
+        return id;
       };
 
       let parse_block_node = func(c: Mut(Self), gid: NodeId) !{ OomErr, ParseFail } -> ExprId {
@@ -781,70 +800,97 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         return add_expr(c, Expr::Block(b), sp)!;
       };
 
+      let is_block_ended = func(c: Mut(Self), id: ExprId) -> bool {
+        let ex: Expr = deref(deref(c).out).exprs.get(id.idx as u64);
+        return match ex {
+          If(_) => true,
+          ComptimeIf(_) => true,
+          Match(_) => true,
+          Block(_) => true,
+          _ => false
+        };
+      };
+
       let parse_block_body = func(c: Mut(Self)) !{ OomErr, ParseFail } -> BlockExpr {
-        let start: u32 = deref(deref(c).out).stmt_lists.len() as u32;
+        let items: StmtIdVec = StmtIdVec::with_alloc(deref(c).frames.alloc);
         let tail: ExprOpt::Opt = ExprOpt::none();
         let stop: bool = false;
         while (peek_some(c)) and (stop == false) {
           let word: Slice(u8) = word_at(c);
           if eq(word, "let") {
-            parse_let_stmt(c)!;
+            let sid: StmtId = parse_let_stmt(c)!;
+            items.push(sid)!;
           } else if eq(word, "while") {
-            parse_while_stmt(c)!;
+            let sid2: StmtId = parse_while_stmt(c)!;
+            items.push(sid2)!;
           } else if eq(word, "break") {
             let sp: Span = cur_span(c);
             bump(c);
             optional_semi(c);
-            push_stmt(c, Stmt::Break, sp)!;
+            let sid3: StmtId = add_stmt(c, Stmt::Break, sp)!;
+            items.push(sid3)!;
           } else if eq(word, "continue") {
             let sp2: Span = cur_span(c);
             bump(c);
             optional_semi(c);
-            push_stmt(c, Stmt::Continue, sp2)!;
+            let sid4: StmtId = add_stmt(c, Stmt::Continue, sp2)!;
+            items.push(sid4)!;
           } else if eq(word, "return") {
-            parse_return_stmt(c)!;
+            let sid5: StmtId = parse_return_stmt(c)!;
+            items.push(sid5)!;
           } else {
             let e0: ExprId = parse_expr(c)!;
-            if cur_single(c, '=') {
+            if cur_single(c, 61) {
               bump(c);
               let v: ExprId = parse_expr(c)!;
               optional_semi(c);
               let a: AssignStmt = AssignStmt { target: e0, val: v };
-              push_stmt(c, Stmt::Assign(a), Span::merge(expr_span(c, e0), deref(c).last))!;
-            } else if cur_punct(c, ';') {
+              let sid6: StmtId = add_stmt(c, Stmt::Assign(a), Span::merge(expr_span(c, e0), deref(c).last))!;
+              items.push(sid6)!;
+            } else if cur_punct(c, 59) {
               bump(c);
-              push_stmt(c, Stmt::Expr(e0), expr_span(c, e0))!;
+              let sid7: StmtId = add_stmt(c, Stmt::Expr(e0), expr_span(c, e0))!;
+              items.push(sid7)!;
             } else if peek_some(c) == false {
               tail = ExprOpt::some(e0);
               stop = true;
+            } else if is_block_ended(c, e0) {
+              let sid8: StmtId = add_stmt(c, Stmt::Expr(e0), expr_span(c, e0))!;
+              items.push(sid8)!;
             } else {
               fail_tok(c, cur_span(c))!;
             }
           }
         };
-        let endn: u32 = deref(deref(c).out).stmt_lists.len() as u32;
-        let r: IdRange = IdRange { start: start, len: endn - start };
+        let start: u32 = deref(deref(c).out).stmt_lists.len() as u32;
+        let i: u64 = 0;
+        let n: u64 = items.len();
+        while i < n {
+          deref(deref(c).out).stmt_lists.push(items.get(i))!;
+          i = i + 1;
+        };
+        let r: IdRange = IdRange { start: start, len: n as u32 };
         return BlockExpr { stmts: r, tail: tail };
       };
 
-      let parse_let_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } {
+      let parse_let_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } -> StmtId {
         let sp: Span = cur_span(c);
         bump(c);
         let name: Span = expect_ident(c)!;
         let ty: ExprOpt::Opt = ExprOpt::none();
-        if cur_single(c, ':') {
+        if cur_single(c, 58) {
           bump(c);
           let t: ExprId = parse_type(c)!;
           ty = ExprOpt::some(t);
         }
-        expect_punct(c, '=')!;
+        expect_punct(c, 61)!;
         let init: ExprId = parse_expr(c)!;
         optional_semi(c);
         let ls: LetStmt = LetStmt { name: name, ty: ty, init: init };
-        push_stmt(c, Stmt::Let(ls), Span::merge(sp, deref(c).last))!;
+        return add_stmt(c, Stmt::Let(ls), Span::merge(sp, deref(c).last))!;
       };
 
-      let parse_while_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } {
+      let parse_while_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } -> StmtId {
         let sp: Span = cur_span(c);
         bump(c);
         let cond: ExprId = parse_cond(c)!;
@@ -852,21 +898,21 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let body: ExprId = parse_block_node(c, gid)!;
         optional_semi(c);
         let w: WhileStmt = WhileStmt { cond: cond, body: body };
-        push_stmt(c, Stmt::While(w), Span::merge(sp, deref(c).last))!;
+        return add_stmt(c, Stmt::While(w), Span::merge(sp, deref(c).last))!;
       };
 
-      let parse_return_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } {
+      let parse_return_stmt = func(c: Mut(Self)) !{ OomErr, ParseFail } -> StmtId {
         let sp: Span = cur_span(c);
         bump(c);
         let val: ExprOpt::Opt = ExprOpt::none();
-        if cur_punct(c, ';') == false {
+        if cur_punct(c, 59) == false {
           if peek_some(c) {
             let e: ExprId = parse_expr(c)!;
             val = ExprOpt::some(e);
           }
         }
         optional_semi(c);
-        push_stmt(c, Stmt::Return(val), Span::merge(sp, deref(c).last))!;
+        return add_stmt(c, Stmt::Return(val), Span::merge(sp, deref(c).last))!;
       };
 
       let parse_if_at = func(c: Mut(Self), comptime: bool) !{ OomErr, ParseFail } -> ExprId {
@@ -914,7 +960,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let p: PatId = parse_pattern(c)!;
         expect_darrow(c)!;
         let body: ExprId = parse_expr(c)!;
-        if cur_punct(c, ',') {
+        if cur_punct(c, 44) {
           bump(c);
         }
         let arm: MatchArm = MatchArm { pat: p, body: body, span: Span::merge(sp, deref(c).last) };
@@ -924,7 +970,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let parse_pattern = func(c: Mut(Self)) !{ OomErr, ParseFail } -> PatId {
         let o: NodeOpt::Opt = peek_opt(c, 0);
         if NodeOpt.is_none(o) {
-          perform ParseFail::fail(ParseErr::UnexpectedEof(Span::empty(deref(c).src, frame_of(c).end)));
+          perform ParseFail::fail(ParseErr::UnexpectedEof { Span::empty(deref(c).src, frame_of(c).end) });
         }
         let id: NodeId = NodeOpt.unwrap_or(o, NodeId { idx: 0 });
         let n: RawNode = node_at(c, id);
@@ -946,7 +992,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           let first: Span = expect_ident(c)!;
           let start: u32 = deref(deref(c).out).path_segs.len() as u32;
           push_path_seg(c, first)!;
-          while two_punct(c, ':', ':') {
+          while two_punct(c, 58, 58) {
             bump(c);
             bump(c);
             let seg: Span = expect_ident(c)!;
@@ -965,7 +1011,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           let vp: VariantPat = VariantPat { path: r, arg: arg };
           return add_pat(c, Pattern::Variant(vp), Span::merge(sp, deref(c).last))!;
         }
-        if is_punct_node(n, '&') {
+        if is_punct_node(n, 38) {
           bump(c);
           let base: PatId = parse_pattern(c)!;
           return base;
@@ -996,7 +1042,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         push_group(c, gid)!;
         while peek_some(c) {
           parse_param(c)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1011,12 +1057,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         }
         let wlen: u32 = (deref(deref(c).out).witnesses.len() as u32) - wstart;
         let estart: u32 = deref(deref(c).out).expr_lists.len() as u32;
-        if cur_punct(c, '!') {
+        if cur_punct(c, 33) {
           parse_effect_list(c)!;
         }
         let elen: u32 = (deref(deref(c).out).expr_lists.len() as u32) - estart;
         let ret: ExprOpt::Opt = ExprOpt::none();
-        if two_punct(c, '-', '>') {
+        if two_punct(c, 45, 62) {
           bump(c);
           bump(c);
           let t: ExprId = parse_type(c)!;
@@ -1037,7 +1083,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let parse_param = func(c: Mut(Self)) !{ OomErr, ParseFail } {
         let sp: Span = cur_span(c);
         let name: Span = expect_ident(c)!;
-        expect_punct(c, ':')!;
+        expect_punct(c, 58)!;
         let ty: ExprId = parse_type(c)!;
         let p: Param = Param { name: name, ty: ty, span: Span::merge(sp, deref(c).last) };
         deref(deref(c).out).params.push(p)!;
@@ -1051,20 +1097,20 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           let sp: Span = cur_span(c);
           let name: Span = expect_ident(c)!;
           let sig: ExprId = add_expr(c, Expr::Ident(name), name)!;
-          if cur_single(c, ':') {
+          if cur_single(c, 58) {
             bump(c);
             let t: ExprId = parse_type(c)!;
             sig = t;
           }
           let def: ExprOpt::Opt = ExprOpt::none();
-          if cur_single(c, '=') {
+          if cur_single(c, 61) {
             bump(c);
             let d: ExprId = parse_expr(c)!;
             def = ExprOpt::some(d);
           }
           let w: WitnessParam = WitnessParam { name: name, sig_expr: sig, default_expr: def, span: Span::merge(sp, deref(c).last) };
           deref(deref(c).out).witnesses.push(w)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1081,7 +1127,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         while peek_some(c) {
           let e: ExprId = parse_type(c)!;
           push_expr_id(c, e)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1103,11 +1149,11 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         push_group(c, gid)!;
         while peek_some(c) {
           let name: Span = expect_ident(c)!;
-          expect_punct(c, ':')!;
+          expect_punct(c, 58)!;
           let ty: ExprId = parse_type(c)!;
           let fd: FieldDef = FieldDef { name: name, ty: ty, span: Span::merge(name, deref(c).last) };
           deref(deref(c).out).fields.push(fd)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1134,7 +1180,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         push_group(c, gid)!;
         while peek_some(c) {
           parse_variant(c)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1157,7 +1203,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           payload = ExprOpt::some(t);
         }
         let disc: ExprOpt::Opt = ExprOpt::none();
-        if cur_single(c, '=') {
+        if cur_single(c, 61) {
           bump(c);
           let d: ExprId = parse_expr(c)!;
           disc = ExprOpt::some(d);
@@ -1188,7 +1234,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let whole: ExprId = parse_unary(c)!;
         let wnode: Expr = expr_of(c, whole);
         if is_call_expr(wnode) == false {
-          perform ParseFail::fail(ParseErr::InvalidExpr(expr_span(c, whole)));
+          perform ParseFail::fail(ParseErr::InvalidExpr { expr_span(c, whole) });
         }
         let cl: CallExpr = call_of(wnode);
         let callee: ExprId = cl.callee;
@@ -1197,7 +1243,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         if is_path_expr(cnode) {
           let r: IdRange = path_range(cnode);
           if r.len < 2 {
-            perform ParseFail::fail(ParseErr::InvalidExpr(expr_span(c, whole)));
+            perform ParseFail::fail(ParseErr::InvalidExpr { expr_span(c, whole) });
           }
           let last: Span = deref(deref(c).out).path_segs.get((r.start + r.len - 1) as u64);
           let shorter: IdRange = IdRange { start: r.start, len: r.len - 1 };
@@ -1210,7 +1256,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           let p2: PerformExpr = PerformExpr { eff: fx.base, op_name: fx.field, args: cargs };
           return add_expr(c, Expr::Perform(p2), Span::merge(head, deref(c).last))!;
         }
-        perform ParseFail::fail(ParseErr::InvalidExpr(expr_span(c, whole)));
+        perform ParseFail::fail(ParseErr::InvalidExpr { expr_span(c, whole) });
       };
 
       let parse_handle = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
@@ -1239,7 +1285,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let first: Span = expect_ident(c)!;
         let op: Span = first;
         let eff: ExprOpt::Opt = ExprOpt::none();
-        if two_punct(c, ':', ':') {
+        if two_punct(c, 58, 58) {
           bump(c);
           bump(c);
           let second: Span = expect_ident(c)!;
@@ -1265,7 +1311,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         }
         expect_darrow(c)!;
         let body: ExprId = parse_expr(c)!;
-        if cur_punct(c, ',') {
+        if cur_punct(c, 44) {
           bump(c);
         }
         let arm: HandleArm = HandleArm {
@@ -1331,12 +1377,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         bump(c);
         let name: Span = expect_ident(c)!;
         let ty: ExprOpt::Opt = ExprOpt::none();
-        if cur_single(c, ':') {
+        if cur_single(c, 58) {
           bump(c);
           let t: ExprId = parse_type(c)!;
           ty = ExprOpt::some(t);
         }
-        expect_punct(c, '=')!;
+        expect_punct(c, 61)!;
         let init: ExprId = parse_expr(c)!;
         optional_semi(c);
         let ld: LetDecl = LetDecl { is_pub: is_pub, name: name, ty: ty, init: init };
@@ -1346,7 +1392,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       let parse_use_decl = func(c: Mut(Self)) !{ OomErr, ParseFail } -> Decl {
         bump(c);
         let target: ExprId = parse_expr(c)!;
-        if two_punct(c, ':', ':') == false {
+        if two_punct(c, 58, 58) == false {
           fail_tok(c, cur_span(c))!;
         }
         bump(c);
@@ -1357,7 +1403,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         while peek_some(c) {
           let name: Span = expect_ident(c)!;
           push_path_seg(c, name)!;
-          if cur_punct(c, ',') {
+          if cur_punct(c, 44) {
             bump(c);
           } else if peek_some(c) {
             fail_tok(c, cur_span(c))!;
@@ -1390,16 +1436,16 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         push_group(c, root)!;
         let top: IdRange = parse_decls(c)!;
         deref(out).top_decls = top;
-        let done: Out = deref(out);
-        return reloc(done);
+        return reloc(out0);
       };
     };
   };
 };
 
-pub let parse = func(raw: Ref(RawAst() ?{ al: al }), text: Slice(u8), alloc: al::Self)
+pub let parse = func(raw: Ref(RawAst()), text: Slice(u8), alloc: al::Self)
   ?{ al: Allocator = SystemAlloc } !{ OomErr, ParseFail } -> AstModule()
 {
   let P = Parser();
-  return P::run(raw, text, alloc)!;
+  let res: AstModule() = P::run(raw, text, alloc)!;
+  return reloc(res);
 };

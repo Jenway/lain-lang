@@ -1,0 +1,239 @@
+use import("std::io")::{ SliceCursor, StdoutSink };
+use import("std::mem")::{ SystemAlloc, SystemHandle, OomErr };
+use import("frontend::syntax::span")::{ SourceId };
+use import("frontend::syntax::raw_ast")::{ RawAst, SyntaxFail };
+use import("frontend::syntax::reader")::{ read };
+use import("frontend::expand::env")::{ SyntaxEnv };
+use import("frontend::expand::sugar")::{ ExpandFail };
+use import("frontend::expand::expand")::{ expand };
+use import("frontend::ast::model")::{ AstModule };
+use import("frontend::ast::parser")::{ parse, ParseFail };
+use import("frontend::sema::hir")::{ HirModule, SemaFail };
+use import("frontend::sema::types")::{ check_module };
+use import("frontend::lower::emit")::{ lower_module, LowerFail };
+use import("kernel::ir::model")::{ IrModule };
+use import("kernel::ir::verify")::{ verify_module, VerifyErr };
+use import("kernel::ir::opt")::{ optimize_module };
+use import("kernel::vm::trap")::{ VmTrap };
+use import("kernel::vm::engine")::{ SliceOutcome };
+use import("kernel::vm::sched")::{ Limits, Sched };
+let c99 = import("kernel::backend::c99");
+
+pub {
+  let RunResult = struct {
+    ok: bool,
+    stage: u64,
+    value: u64
+  };
+};
+
+let do_verify_opt = func(ir: Mut(IrModule)) !{ OomErr, VerifyErr } -> u64 {
+  verify_module(ir);
+  optimize_module(ir);
+  return 0;
+};
+
+let run_verify_opt = func(ir: Mut(IrModule)) -> u64 {
+  return handle do_verify_opt(ir) with {
+    return(v) => v,
+    oom(_) => 1,
+    fail(vf) => 100 + vf.pc
+  };
+};
+
+let do_sched = func(ir: Ref(IrModule), entry: Ref(Slice(u8)), res_out: Mut(RunResult)) !{ OomErr, VmTrap } -> u64 {
+  let limits: Limits = Limits {
+    fuel_slice: 100000,
+    max_call_depth: 64,
+    stack_cap: 65536,
+    heap_cap: 131072
+  };
+  let empty_args: Slice(u64) = make_slice(Slice(u64), null_ref(Ref(u64)), 0);
+  let out: SliceOutcome = Sched::apply(ir, deref(entry), empty_args, limits);
+  let _r: u64 = match out {
+    Done(val) => {
+      deref(res_out) = RunResult { ok: true, stage: 0, value: val };
+      0
+    },
+    FuelSlice => {
+      deref(res_out) = RunResult { ok: false, stage: 7, value: 1 };
+      0
+    },
+    Blocked(_) => {
+      deref(res_out) = RunResult { ok: false, stage: 7, value: 2 };
+      0
+    },
+    Trapped(tr) => {
+      deref(res_out) = RunResult { ok: false, stage: 7, value: tr.pc };
+      0
+    }
+  };
+  return 0;
+};
+
+let run_sched_only = func(ir: Ref(IrModule), entry: Ref(Slice(u8)), res_out: Mut(RunResult)) -> u64 {
+  return handle do_sched(ir, entry, res_out) with {
+    return(v) => v,
+    oom(_) => 99,
+    fail(tr) => 100 + tr.pc
+  };
+};
+
+let run_after_lower = func(hir: Ref(HirModule), entry: Slice(u8)) !{ OomErr, LowerFail } -> RunResult {
+  let ir: IrModule = lower_module(hir);
+  let vrc: u64 = run_verify_opt(mut_of(ir));
+  let res: RunResult = RunResult { ok: false, stage: 6, value: vrc };
+  if vrc == 0 {
+    let rc: u64 = run_sched_only(ref_of(ir), ref_of(entry), mut_of(res));
+    if rc != 0 {
+      res = RunResult { ok: false, stage: 7, value: rc };
+    }
+  }
+  return res;
+};
+
+let run_lower_clean = func(hir: Ref(HirModule), entry: Slice(u8)) -> RunResult {
+  return handle run_after_lower(hir, entry) with {
+    return(v) => v,
+    oom(_) => RunResult { ok: false, stage: 5, value: 1 },
+    fail(_) => RunResult { ok: false, stage: 5, value: 2 }
+  };
+};
+
+let run_after_sema = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) !{ OomErr, SemaFail } -> RunResult {
+  let hir: HirModule = check_module(ast, text);
+  return run_lower_clean(ref_of(hir), entry);
+};
+
+let run_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) -> RunResult {
+  return handle run_after_sema(ast, text, entry) with {
+    return(v) => v,
+    oom(_) => RunResult { ok: false, stage: 4, value: 1 },
+    fail(_) => RunResult { ok: false, stage: 4, value: 2 }
+  };
+};
+
+let run_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, ParseFail } -> RunResult {
+  let ast: AstModule() = parse(expanded, text, al);
+  return run_sema_clean(ref_of(ast), text, entry);
+};
+
+let run_parse_clean = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> RunResult {
+  return handle run_after_parse(expanded, text, al, entry) with {
+    return(v) => v,
+    oom(_) => RunResult { ok: false, stage: 3, value: 1 },
+    fail(_) => RunResult { ok: false, stage: 3, value: 2 }
+  };
+};
+
+let run_after_expand = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, SyntaxFail, ExpandFail } -> RunResult {
+  let senv: SyntaxEnv = SyntaxEnv::new();
+  let expanded: RawAst() = expand(raw, text, ref_of(senv), al);
+  return run_parse_clean(ref_of(expanded), text, al, entry);
+};
+
+let run_expand_clean = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> RunResult {
+  return handle run_after_expand(raw, text, al, entry) with {
+    return(v) => v,
+    oom(_) => RunResult { ok: false, stage: 2, value: 1 },
+    fail(_) => RunResult { ok: false, stage: 2, value: 2 }
+  };
+};
+
+let run_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFail } -> RunResult {
+  let src: SourceId = SourceId { idx: 0 };
+  let cur: SliceCursor = SliceCursor::new(text);
+  let al: SystemHandle = SystemAlloc::new();
+  let raw: RawAst() = read(src, mut_of(cur), al);
+  return run_expand_clean(ref_of(raw), text, al, entry);
+};
+
+let emit_c99_clean = func(ir: Ref(IrModule), entry: Slice(u8)) -> bool {
+  return handle c99::emit_module(ir, entry) ?{ out: StdoutSink } with {
+    return(v) => v,
+    oom(_) => false
+  };
+};
+
+let c99_after_lower = func(hir: Ref(HirModule), entry: Slice(u8)) !{ OomErr, LowerFail } -> bool {
+  let ir: IrModule = lower_module(hir);
+  let ok: bool = false;
+  if run_verify_opt(mut_of(ir)) == 0 {
+    ok = emit_c99_clean(ref_of(ir), entry);
+  }
+  return ok;
+};
+
+let c99_lower_clean = func(hir: Ref(HirModule), entry: Slice(u8)) -> bool {
+  return handle c99_after_lower(hir, entry) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let c99_after_sema = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) !{ OomErr, SemaFail } -> bool {
+  let hir: HirModule = check_module(ast, text);
+  return c99_lower_clean(ref_of(hir), entry);
+};
+
+let c99_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) -> bool {
+  return handle c99_after_sema(ast, text, entry) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let c99_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, ParseFail } -> bool {
+  let ast: AstModule() = parse(expanded, text, al);
+  return c99_sema_clean(ref_of(ast), text, entry);
+};
+
+let c99_parse_clean = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> bool {
+  return handle c99_after_parse(expanded, text, al, entry) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let c99_after_expand = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, SyntaxFail, ExpandFail } -> bool {
+  let senv: SyntaxEnv = SyntaxEnv::new();
+  let expanded: RawAst() = expand(raw, text, ref_of(senv), al);
+  return c99_parse_clean(ref_of(expanded), text, al, entry);
+};
+
+let c99_expand_clean = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> bool {
+  return handle c99_after_expand(raw, text, al, entry) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let c99_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFail } -> bool {
+  let src: SourceId = SourceId { idx: 0 };
+  let cur: SliceCursor = SliceCursor::new(text);
+  let al: SystemHandle = SystemAlloc::new();
+  let raw: RawAst() = read(src, mut_of(cur), al);
+  return c99_expand_clean(ref_of(raw), text, al, entry);
+};
+
+pub {
+  let run_vm = func(text: Slice(u8), entry: Slice(u8)) -> RunResult {
+    return handle run_after_read(text, entry) with {
+      return(v) => v,
+      oom(_) => RunResult { ok: false, stage: 1, value: 1 },
+      fail(_) => RunResult { ok: false, stage: 1, value: 2 }
+    };
+  };
+
+  let emit_c99_stdout = func(text: Slice(u8), entry: Slice(u8)) -> bool {
+    return handle c99_after_read(text, entry) with {
+      return(v) => v,
+      oom(_) => false,
+      fail(_) => false
+    };
+  };
+};

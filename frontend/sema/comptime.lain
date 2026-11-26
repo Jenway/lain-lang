@@ -1,9 +1,9 @@
 use import("std::collections")::{ Vec };
-use import("std::mem")::{ Allocator, SystemAlloc };
+use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
 use import("std::option")::{ Option };
 use import("std::str")::{ sub };
 use import("frontend::syntax::span")::{ Span };
-use import("frontend::ast::model")::{ AstModule, Expr, ExprId, BinOp };
+use import("frontend::ast::model")::{ AstModule, Expr, ExprId, UnOp, BinOp };
 use import("frontend::sema::hir")::{ HirModule, StructInfo };
 
 let digit_value = func(c: u8) -> i64 {
@@ -197,10 +197,11 @@ pub {
     }
     return Option(i64)::some(acc);
   };
+};
 
-  let eval_int_const = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), expr_id: ExprId)
-    ?{ A: Allocator = SystemAlloc } -> Option(i64)
-  {
+pub let eval_int_const = func(ast: Ref(AstModule()), text: Slice(u8), expr_id: ExprId)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr } -> Option(i64)
+{
     let todo: Vec(i64) = Vec(i64)::new();
     let vals: Vec(i64) = Vec(i64)::new();
     todo.push(expr_id.idx as i64);
@@ -208,7 +209,7 @@ pub {
     while (todo.len() > 0) and (bad == false) {
       let n: u64 = todo.len();
       let task: i64 = todo.get(n - 1);
-      todo.pop();
+      todo.truncate(n - 1);
       if task >= 0 {
         let e: Expr = ast.exprs.get(task as u64);
         let sp: Span = ast.expr_spans.get(task as u64);
@@ -217,14 +218,11 @@ pub {
             match lk {
               Int => {
                 let parsed: Option(i64) = parse_int_literal(text, sp);
-                match parsed {
-                  Some(v) => {
-                    vals.push(v);
-                  },
-                  None => {
-                    bad = true;
-                  },
-                };
+                if Option(i64)::is_some(parsed) {
+                  vals.push(Option(i64)::unwrap_or(parsed, 0));
+                } else {
+                  bad = true;
+                }
               },
               Bool(b) => {
                 if b {
@@ -239,15 +237,16 @@ pub {
             };
           },
           Unary(u) => {
-            match u.op {
+            let uop: UnOp = u.op;
+            match uop {
               Neg => {
-                push_unary(mut_of(todo), 1);
+                todo.push(0 - 1);
               },
               Not => {
-                push_unary(mut_of(todo), 2);
+                todo.push(0 - 2);
               },
               BitNot => {
-                push_unary(mut_of(todo), 3);
+                todo.push(0 - 3);
               },
             };
             todo.push(u.operand.idx as i64);
@@ -267,16 +266,18 @@ pub {
           if vals.len() < 1 {
             bad = true;
           } else {
-            let a: i64 = vals.get(vals.len() - 1);
-            vals.pop();
+            let vn: u64 = vals.len();
+            let a: i64 = vals.get(vn - 1);
+            vals.truncate(vn - 1);
             vals.push(0 - a);
           }
         } else if code == 2 {
           if vals.len() < 1 {
             bad = true;
           } else {
-            let a: i64 = vals.get(vals.len() - 1);
-            vals.pop();
+            let vn: u64 = vals.len();
+            let a: i64 = vals.get(vn - 1);
+            vals.truncate(vn - 1);
             if as_bool(a) {
               vals.push(0);
             } else {
@@ -287,18 +288,19 @@ pub {
           if vals.len() < 1 {
             bad = true;
           } else {
-            let a: i64 = vals.get(vals.len() - 1);
-            vals.pop();
+            let vn: u64 = vals.len();
+            let a: i64 = vals.get(vn - 1);
+            vals.truncate(vn - 1);
             vals.push(0 - (a + 1));
           }
         } else if code >= 100 {
           if vals.len() < 2 {
             bad = true;
           } else {
-            let b: i64 = vals.get(vals.len() - 1);
-            vals.pop();
-            let a: i64 = vals.get(vals.len() - 1);
-            vals.pop();
+            let vn: u64 = vals.len();
+            let b: i64 = vals.get(vn - 1);
+            let a: i64 = vals.get(vn - 2);
+            vals.truncate(vn - 2);
             let flag: Mut(bool) = mut_of(bad);
             let r: i64 = apply_binary(code - 100, a, b, flag);
             vals.push(r);
@@ -308,32 +310,30 @@ pub {
         }
       }
     };
-    if bad {
-      return Option(i64)::none();
+    let res: Option(i64) = Option(i64)::none();
+    if (bad == false) and (vals.len() == 1) {
+      res = Option(i64)::some(vals.get(0));
     }
-    if vals.len() != 1 {
-      return Option(i64)::none();
-    }
-    return Option(i64)::some(vals.get(0));
-  };
+    return res;
+};
 
-  let eval_bool_const = func(ast: Ref(AstModule() ?{ al: A }), text: Slice(u8), expr_id: ExprId)
-    ?{ A: Allocator = SystemAlloc } -> Option(bool)
-  {
+pub let eval_bool_const = func(ast: Ref(AstModule()), text: Slice(u8), expr_id: ExprId)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr } -> Option(bool)
+{
     let folded: Option(i64) = eval_int_const(ast, text, expr_id);
-    return match folded {
+    let out: Option(bool) = Option(bool)::none();
+    match folded {
       Some(v) => {
         if (v == 0) or (v == 1) {
-          return Option(bool)::some(as_bool(v));
+          out = Option(bool)::some(as_bool(v));
         }
-        return Option(bool)::none();
       },
-      None => Option(bool)::none(),
+      None => {},
     };
-  };
+    return out;
+};
 
-  let field_count_of = func(hir: Ref(HirModule), struct_idx: u32) -> u32 {
-    let st: StructInfo = hir.structs.get(struct_idx as u64);
-    return st.fields.len;
-  };
+pub let field_count_of = func(hir: Ref(HirModule), struct_idx: u32) -> u32 {
+  let st: StructInfo = hir.structs.get(struct_idx as u64);
+  return st.fields.len;
 };
