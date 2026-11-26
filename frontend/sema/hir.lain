@@ -80,6 +80,57 @@ pub {
     align: u32
   };
 
+  let VariantInfo = struct {
+    name: Slice(u8),
+    payload_ty: TypeId,
+    has_payload: bool,
+    tag_val: u64
+  };
+
+  let EnumInfo = struct {
+    name: Slice(u8),
+    variants: HirRange,
+    tag_size: u32,
+    payload_off: u32,
+    size: u32,
+    align: u32,
+    is_tagged_union: bool
+  };
+
+  let HirEnumLit = struct {
+    enum_idx: u32,
+    variant_idx: u32,
+    payload: Option(HirExprId)
+  };
+
+  let HirMatchArm = struct {
+    tag_val: u64,
+    is_wildcard: bool,
+    bind_local: Option(HirLocalId),
+    body: HirExprId
+  };
+
+  let HirMatch = struct {
+    scrutinee: HirExprId,
+    enum_idx: u32,
+    arms: HirRange
+  };
+
+  let HirPtrOffset = struct {
+    base: HirExprId,
+    index: HirExprId,
+    elem_size: u32
+  };
+
+  let HirMemWrite = struct {
+    dst: HirExprId,
+    val: HirExprId
+  };
+
+  let HirDropAt = struct {
+    dst: HirExprId
+  };
+
   let HirParam = struct {
     name: Slice(u8),
     ty: TypeId,
@@ -152,6 +203,14 @@ pub {
     Field(HirField)
     StructLit(HirStructLit)
     Cast(HirCast)
+    AddrOf(HirExprId)
+    Deref(HirExprId)
+    PtrOffset(HirPtrOffset)
+    InitAt(HirMemWrite)
+    DropAt(HirDropAt)
+    EnumLit(HirEnumLit)
+    Match(HirMatch)
+    StrLit(u32)
     Reloc(HirExprId)
   };
 
@@ -209,6 +268,11 @@ pub let HirModule = module {
   let ExprIdVec = Vec(HirExprId);
   let StmtIdVec = Vec(HirStmtId);
   let InitVec = Vec(HirFieldInit);
+  let VariantVec = Vec(VariantInfo);
+  let EnumVec = Vec(EnumInfo);
+  let MatchArmVec = Vec(HirMatchArm);
+  let StrLitVec = Vec(HirRange);
+  let ByteVec = Vec(u8);
 
   pub {
     let Self = struct {
@@ -222,7 +286,12 @@ pub let HirModule = module {
       stmts: StmtVec,
       expr_lists: ExprIdVec,
       stmt_lists: StmtIdVec,
-      inits: InitVec
+      inits: InitVec,
+      enums: EnumVec,
+      variants: VariantVec,
+      match_arms: MatchArmVec,
+      str_lits: StrLitVec,
+      str_bytes: ByteVec
     };
 
     let new = func() -> Self {
@@ -237,7 +306,12 @@ pub let HirModule = module {
         stmts: StmtVec::new(),
         expr_lists: ExprIdVec::new(),
         stmt_lists: StmtIdVec::new(),
-        inits: InitVec::new()
+        inits: InitVec::new(),
+        enums: EnumVec::new(),
+        variants: VariantVec::new(),
+        match_arms: MatchArmVec::new(),
+        str_lits: StrLitVec::new(),
+        str_bytes: ByteVec::new()
       };
     };
 
@@ -428,6 +502,85 @@ pub let HirModule = module {
       return Option(u32)::none();
     };
 
+    let add_enum = func(h: Mut(Self), e: EnumInfo) !{ OomErr } -> u32 {
+      let idx: u32 = h.enums.len() as u32;
+      h.enums.push(e);
+      return idx;
+    };
+
+    let add_variant = func(h: Mut(Self), v: VariantInfo) !{ OomErr } -> u32 {
+      let idx: u32 = h.variants.len() as u32;
+      h.variants.push(v);
+      return idx;
+    };
+
+    let set_enum_layout = func(h: Mut(Self), idx: u32, variants: HirRange, tag_size: u32, payload_off: u32, size: u32, align: u32, is_tagged_union: bool) {
+      let slot: Mut(EnumInfo) = h.enums.get_mut(idx as u64);
+      slot.variants = variants;
+      slot.tag_size = tag_size;
+      slot.payload_off = payload_off;
+      slot.size = size;
+      slot.align = align;
+      slot.is_tagged_union = is_tagged_union;
+    };
+
+    let enum_at = func(h: Ref(Self), idx: u32) -> EnumInfo {
+      return h.enums.get(idx as u64);
+    };
+
+    let variant_at = func(h: Ref(Self), idx: u32) -> VariantInfo {
+      return h.variants.get(idx as u64);
+    };
+
+    let find_variant = func(h: Ref(Self), enum_idx: u32, name: Slice(u8)) -> Option(u32) {
+      let en: EnumInfo = h.enums.get(enum_idx as u64);
+      let n: u64 = en.variants.len as u64;
+      let i: u64 = 0;
+      while i < n {
+        let v: VariantInfo = h.variants.get(en.variants.start as u64 + i);
+        if eq(v.name, name) {
+          return Option(u32)::some((en.variants.start as u64 + i) as u32);
+        }
+        i = i + 1;
+      };
+      return Option(u32)::none();
+    };
+
+    let add_match_arm = func(h: Mut(Self), arm: HirMatchArm) !{ OomErr } -> u32 {
+      let idx: u32 = h.match_arms.len() as u32;
+      h.match_arms.push(arm);
+      return idx;
+    };
+
+    let match_arm_in = func(h: Ref(Self), r: HirRange, i: u32) -> HirMatchArm {
+      return h.match_arms.get((r.start + i) as u64);
+    };
+
+    let add_str_lit = func(h: Mut(Self), bytes: Slice(u8)) !{ OomErr } -> u32 {
+      let start: u32 = h.str_bytes.len() as u32;
+      let n: u64 = bytes.len;
+      let i: u64 = 0;
+      while i < n {
+        h.str_bytes.push(bytes[i]);
+        i = i + 1;
+      };
+      let idx: u32 = h.str_lits.len() as u32;
+      h.str_lits.push(HirRange { start: start, len: n as u32 });
+      return idx;
+    };
+
+    let str_lit_count = func(h: Ref(Self)) -> u32 {
+      return h.str_lits.len() as u32;
+    };
+
+    let str_lit_at = func(h: Ref(Self), idx: u32) -> HirRange {
+      return h.str_lits.get(idx as u64);
+    };
+
+    let str_byte_at = func(h: Ref(Self), idx: u32) -> u8 {
+      return h.str_bytes.get(idx as u64);
+    };
+
     let take = func(h: Mut(Self)) -> Self {
       let out0: Self = Self {
         types: deref(h).types.take(),
@@ -440,7 +593,12 @@ pub let HirModule = module {
         stmts: deref(h).stmts.take(),
         expr_lists: deref(h).expr_lists.take(),
         stmt_lists: deref(h).stmt_lists.take(),
-        inits: deref(h).inits.take()
+        inits: deref(h).inits.take(),
+        enums: deref(h).enums.take(),
+        variants: deref(h).variants.take(),
+        match_arms: deref(h).match_arms.take(),
+        str_lits: deref(h).str_lits.take(),
+        str_bytes: deref(h).str_bytes.take()
       };
       return reloc(out0);
     };

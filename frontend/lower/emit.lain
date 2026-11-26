@@ -7,12 +7,13 @@ use import("frontend::ast::model")::{ UnOp, BinOp };
 use import("frontend::sema::hir")::{
   HirModule, HirType, IntInfo, TypeId, HirFn, HirFnId, HirParam, HirLocal, HirLocalId,
   HirExprId, HirStmtId, HirRange, HirExpr, HirExprKind, HirStmt, HirFieldInit,
-  HirBinary, HirCall, HirIf, HirWhile, FieldInfo, StructInfo
+  HirBinary, HirCall, HirIf, HirWhile, FieldInfo, StructInfo,
+  EnumInfo, VariantInfo, HirMatchArm
 };
 use import("frontend::lower::mono")::{ MonoTable };
 use import("frontend::lower::drop")::{ DropTracker };
 use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, DataSeg, IrModule, MemAxiom };
-use import("kernel::ir::builder")::{ ValId, ProcId, IfToken, LoopToken, ProcBuilder, IrBuilder };
+use import("kernel::ir::builder")::{ ValId, ProcId, DataId, IfToken, LoopToken, SwitchToken, ProcBuilder, IrBuilder };
 
 pub {
   let LowerErr = enum {
@@ -95,6 +96,20 @@ let slot_bytes = func(t: Ty) -> u64 {
   return b;
 };
 
+let align_of = func(t: Ty) -> u64 {
+  let b: u64 = t.bytes();
+  if b >= 8 {
+    return 8;
+  }
+  if b >= 4 {
+    return 4;
+  }
+  if b >= 2 {
+    return 2;
+  }
+  return 1;
+};
+
 let int_ty = func(info: IntInfo) -> Ty {
   let b: u8 = info.bits;
   return Ty::Bits { b };
@@ -111,7 +126,13 @@ let ty_of = func(h: Ref(HirModule), t: TypeId) -> Ty {
     Mut(_) => Ty::Addr,
     Struct(_) => Ty::Addr,
     Fn(_) => Ty::Addr,
-    Enum(_) => Ty::Bits { 64 },
+    Enum(idx) => {
+      let ei: EnumInfo = h.enum_at(idx);
+      if ei.is_tagged_union {
+        return Ty::Addr;
+      }
+      return Ty::Bits { 64 };
+    },
     HirNever => Ty::Void,
   };
 };
@@ -350,6 +371,14 @@ let address_of = func(ctx: Mut(Ctx), eid: HirExprId) !{ OomErr, LowerFail } -> V
       let off: u64 = fi.offset as u64;
       return ctx.pb.lea(base, none_val(), 1, off);
     },
+    Deref(inner) => {
+      let out: EmitOut = lower_expr(ctx, inner);
+      return out.val;
+    },
+    StructLit(sl) => {
+      let out: EmitOut = lower_struct_lit(ctx, sl.struct_idx, sl.inits);
+      return out.val;
+    },
     _ => {
       perform LowerFail::fail(LowerErr::UnsupportedExpr { e.span });
       return none_val();
@@ -373,7 +402,7 @@ let lower_struct_lit = func(ctx: Mut(Ctx), sid: u32, inits: HirRange) !{ OomErr,
       let fty: Ty = ty_of(ctx.hir, fd.ty);
       let off: u64 = fd.offset as u64;
       let faddr: ValId = ctx.pb.lea(base, none_val(), 1, off);
-      ctx.pb.store(fty, out.val, faddr, 8);
+      ctx.pb.store(fty, out.val, faddr, align_of(fty));
     }
     i = i + 1;
   };
@@ -485,11 +514,126 @@ let lower_expr = func(ctx: Mut(Ctx), eid: HirExprId) !{ OomErr, LowerFail } -> E
       let faddr: ValId = address_of(ctx, eid);
       let fi: FieldInfo = ctx.hir.field_at(f.field);
       let fty: Ty = ty_of(ctx.hir, fi.ty);
-      let fval: ValId = ctx.pb.load(fty, faddr, 8);
+      let fval: ValId = ctx.pb.load(fty, faddr, align_of(fty));
       return parse_val(fval);
     },
     StructLit(sl) => {
       return lower_struct_lit(ctx, sl.struct_idx, sl.inits);
+    },
+    StrLit(sidx) => {
+      let sv: ValId = ctx.pb.sym_data(DataId { id: sidx as u64 });
+      return parse_val(sv);
+    },
+    AddrOf(inner) => {
+      let av: ValId = address_of(ctx, inner);
+      return parse_val(av);
+    },
+    Deref(inner) => {
+      let ptr_out: EmitOut = lower_expr(ctx, inner);
+      if ptr_out.diverged {
+        return diverge();
+      }
+      let lv: ValId = ctx.pb.load(rty, ptr_out.val, align_of(rty));
+      return parse_val(lv);
+    },
+    PtrOffset(po) => {
+      let b_out: EmitOut = lower_expr(ctx, po.base);
+      if b_out.diverged {
+        return diverge();
+      }
+      let i_out: EmitOut = lower_expr(ctx, po.index);
+      if i_out.diverged {
+        return diverge();
+      }
+      let addr: ValId = ctx.pb.lea(b_out.val, i_out.val, po.elem_size as u64, 0);
+      return parse_val(addr);
+    },
+    InitAt(mw) => {
+      let d_out: EmitOut = lower_expr(ctx, mw.dst);
+      if d_out.diverged {
+        return diverge();
+      }
+      let v_out: EmitOut = lower_expr(ctx, mw.val);
+      if v_out.diverged {
+        return diverge();
+      }
+      let vty: Ty = expr_ty(ctx.hir, mw.val);
+      ctx.pb.store(vty, v_out.val, d_out.val, align_of(vty));
+      return parse_val(none_val());
+    },
+    DropAt(_) => {
+      return parse_val(none_val());
+    },
+    EnumLit(el) => {
+      let ei: EnumInfo = ctx.hir.enum_at(el.enum_idx);
+      let vi: VariantInfo = ctx.hir.variant_at(el.variant_idx);
+      if ei.is_tagged_union == false {
+        let tagged: ValId = ctx.pb.const_bits(Ty::Bits { 64 }, vi.tag_val);
+        return parse_val(tagged);
+      }
+      let sz: u64 = if ei.size == 0 { 8 } else { ei.size as u64 };
+      let base: ValId = ctx.pb.alloca(Ty::Bits { 8 }, sz);
+      let tv: ValId = ctx.pb.const_bits(Ty::Bits { 64 }, vi.tag_val);
+      ctx.pb.store(Ty::Bits { 64 }, tv, base, 8);
+      match el.payload {
+        Some(pe) => {
+          let po: EmitOut = lower_expr(ctx, pe);
+          if po.diverged {
+            return diverge();
+          }
+          let paddr: ValId = ctx.pb.lea(base, none_val(), 1, ei.payload_off as u64);
+          let pty: Ty = ty_of(ctx.hir, vi.payload_ty);
+          ctx.pb.store(pty, po.val, paddr, align_of(pty));
+        },
+        None => {},
+      };
+      return parse_val(base);
+    },
+    Match(mx) => {
+      let sout: EmitOut = lower_expr(ctx, mx.scrutinee);
+      if sout.diverged {
+        return diverge();
+      }
+      let ei: EnumInfo = ctx.hir.enum_at(mx.enum_idx);
+      let base_ptr: ValId = sout.val;
+      let sel_val: ValId = if ei.is_tagged_union {
+        ctx.pb.load(Ty::Bits { 64 }, base_ptr, align_of(Ty::Bits { 64 }))
+      } else {
+        base_ptr
+      };
+      let payload_ptr: ValId = if ei.is_tagged_union {
+        ctx.pb.lea(base_ptr, none_val(), 1, ei.payload_off as u64)
+      } else {
+        none_val()
+      };
+      let valued: bool = rty != Ty::Void;
+      let sw0: SwitchToken = ctx.pb.begin_switch(sel_val, Ty::Bits { 64 }, rty);
+      let sw: Mut(SwitchToken) = mut_of(sw0);
+      let i: u32 = 0;
+      while i < mx.arms.len {
+        let arm: HirMatchArm = ctx.hir.match_arm_in(mx.arms, i);
+        if arm.is_wildcard {
+          ctx.pb.emit_default(sw);
+        } else {
+          ctx.pb.emit_case(sw, arm.tag_val);
+        }
+        match arm.bind_local {
+          Some(lid) => {
+            let lty: Ty = local_ty(ctx.hir, lid);
+            let pv: ValId = ctx.pb.load(lty, payload_ptr, align_of(lty));
+            let slot: ValId = ctx.slots.get(lid.idx as u64);
+            ctx.pb.store(lty, pv, slot, 8);
+          },
+          None => {},
+        };
+        let bout: EmitOut = lower_expr(ctx, arm.body);
+        if (bout.diverged == false) and valued {
+          ctx.pb.emit_yield(bout.val);
+        }
+        i = i + 1;
+      };
+      let res: ValId = ctx.pb.end_switch(deref(sw));
+      return parse_val(res);
     },
     Cast(cs) => {
       let cinner: EmitOut = lower_expr(ctx, cs.expr);
@@ -697,6 +841,23 @@ let lower_stub_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ O
   return finish_proc(ctx);
 };
 
+let emit_str_datas = func(hir: Ref(HirModule), ib: Mut(IrBuilder)) !{ OomErr } {
+  let n: u32 = hir.str_lit_count();
+  let i: u32 = 0;
+  while i < n {
+    let r: HirRange = hir.str_lit_at(i);
+    let bytes: Vec(u8) = Vec(u8)::new();
+    let k: u32 = 0;
+    while k < r.len {
+      let b: u8 = hir.str_byte_at(r.start + k);
+      bytes.push(b);
+      k = k + 1;
+    };
+    let _did: DataId = ib.add_data("str", false, 1, reloc(bytes));
+    i = i + 1;
+  };
+};
+
 let lower_checked_fns = func(hir: Ref(HirModule), mono: Mut(MonoTable), ib: Mut(IrBuilder)) !{ OomErr, LowerFail } {
   let n: u32 = hir.fn_count();
   let i: u32 = 0;
@@ -758,6 +919,7 @@ let lower_entry = func(hir: Ref(HirModule), mono: Mut(MonoTable), expr_id: HirEx
 pub let lower_module = func(hir: Ref(HirModule)) !{ OomErr, LowerFail } -> IrModule {
   let ib0: IrBuilder = IrBuilder::new();
   let ib: Mut(IrBuilder) = mut_of(ib0);
+  emit_str_datas(hir, ib);
   let mono0: MonoTable = MonoTable::new();
   let mono: Mut(MonoTable) = mut_of(mono0);
   let n: u32 = hir.fn_count();
@@ -787,6 +949,7 @@ pub let lower_module = func(hir: Ref(HirModule)) !{ OomErr, LowerFail } -> IrMod
 pub let lower_eval_expr = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8)) !{ OomErr, LowerFail } -> IrModule {
   let ib0: IrBuilder = IrBuilder::new();
   let ib: Mut(IrBuilder) = mut_of(ib0);
+  emit_str_datas(hir, ib);
   let mono0: MonoTable = MonoTable::new();
   let mono: Mut(MonoTable) = mut_of(mono0);
   lower_checked_fns(hir, mono, ib);

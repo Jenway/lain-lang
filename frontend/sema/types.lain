@@ -5,14 +5,16 @@ use import("std::str")::{ eq, parse_i64 };
 use import("frontend::syntax::span")::{ Span };
 use import("frontend::ast::model")::{
   AstModule, Decl, DeclId, IdRange, Expr, ExprId, LitKind, Stmt, StmtId,
-  LetDecl, FuncExpr, StructExpr, StructLitExpr, FieldDef, FieldInit, Param, BinOp
+  LetDecl, FuncExpr, StructExpr, StructLitExpr, FieldDef, FieldInit, Param, BinOp,
+  EnumExpr, VariantDef, MatchExpr, MatchArm, Pattern, VariantPat, CallExpr
 };
 use import("frontend::sema::hir")::{
   HirModule, TypeId, HirFnId, HirLocalId, HirExprId, HirStmtId, HirRange,
   SemaErr, SemaFail, IntInfo, HirType, FieldInfo, StructInfo, HirParam, HirLocal,
   HirUnary, HirBinary, HirCall, HirIf, HirBlock, HirField, HirFieldInit,
   HirStructLit, HirCast, HirExprKind, HirExpr, HirLet, HirAssign, HirWhile,
-  HirStmt, HirFn
+  HirStmt, HirFn, VariantInfo, EnumInfo, HirEnumLit, HirMatchArm, HirMatch,
+  HirPtrOffset, HirMemWrite, HirDropAt
 };
 use import("frontend::sema::resolve")::{ Scope, SymKind, SymEntry };
 use import("frontend::sema::effects")::{ EffRow };
@@ -40,15 +42,18 @@ pub {
     globals: Scope,
     locals: Scope,
     struct_tys: Vec(TypeId),
+    enum_tys: Vec(TypeId),
     decls: Vec(FlatDecl),
     fn_decls: Vec(FlatDecl),
     fn_checked: Vec(bool),
     consts: Vec(ConstDecl),
     arg_buf: ArgVec,
     stmt_buf: StmtVec,
+    arm_buf: Vec(HirMatchArm),
     void_tid: TypeId,
     bool_tid: TypeId,
     i64_tid: TypeId,
+    u8_tid: TypeId,
     cur_ret: TypeId
   };
 };
@@ -144,15 +149,18 @@ let new_ctx = func() -> Ctx {
     globals: Scope::new(),
     locals: Scope::new(),
     struct_tys: Vec(TypeId)::new(),
+    enum_tys: Vec(TypeId)::new(),
     decls: Vec(FlatDecl)::new(),
     fn_decls: Vec(FlatDecl)::new(),
     fn_checked: Vec(bool)::new(),
     consts: Vec(ConstDecl)::new(),
     arg_buf: ArgVec::new(),
     stmt_buf: StmtVec::new(),
+    arm_buf: Vec(HirMatchArm)::new(),
     void_tid: TypeId { idx: 0 },
     bool_tid: TypeId { idx: 0 },
     i64_tid: TypeId { idx: 0 },
+    u8_tid: TypeId { idx: 0 },
     cur_ret: TypeId { idx: 0 }
   };
 };
@@ -165,6 +173,16 @@ let fail_at = func(err: SemaErr) !{ SemaFail } -> HirExprId {
 let fail_type = func(err: SemaErr) !{ SemaFail } -> TypeId {
   perform SemaFail::fail(err);
   return TypeId { idx: 0 };
+};
+
+let fail_u64 = func(err: SemaErr) !{ SemaFail } -> u64 {
+  perform SemaFail::fail(err);
+  return 0;
+};
+
+let fail_variant = func(err: SemaErr) !{ SemaFail } -> u32 {
+  perform SemaFail::fail(err);
+  return 0;
 };
 
 let span_at = func(ast: Ref(AstModule()), r: IdRange) ?{ al: Allocator = SystemAlloc } -> Span {
@@ -181,7 +199,7 @@ let add_named = func(c: Mut(Ctx), name: Slice(u8), t: HirType, sp: Span) !{ OomE
 let seed_builtins = func(c: Mut(Ctx), sp: Span) !{ OomErr, SemaFail } {
   c.void_tid = add_named(c, "()", HirType::Void, sp);
   c.bool_tid = add_named(c, "bool", HirType::Bool, sp);
-  add_named(c, "u8", HirType::Int { IntInfo { bits: 8, signed: false } }, sp);
+  c.u8_tid = add_named(c, "u8", HirType::Int { IntInfo { bits: 8, signed: false } }, sp);
   add_named(c, "u16", HirType::Int { IntInfo { bits: 16, signed: false } }, sp);
   add_named(c, "u32", HirType::Int { IntInfo { bits: 32, signed: false } }, sp);
   add_named(c, "u64", HirType::Int { IntInfo { bits: 64, signed: false } }, sp);
@@ -256,6 +274,20 @@ let struct_align = func(c: Mut(Ctx), idx: u32) -> u32 {
   return st.align;
 };
 
+let enum_tid = func(c: Mut(Ctx), idx: u32) -> TypeId {
+  return c.enum_tys.get(idx as u64);
+};
+
+let enum_size = func(c: Mut(Ctx), idx: u32) -> u32 {
+  let en: EnumInfo = HirModule::enum_at(ref_of(deref(c).hir), idx);
+  return en.size;
+};
+
+let enum_align = func(c: Mut(Ctx), idx: u32) -> u32 {
+  let en: EnumInfo = HirModule::enum_at(ref_of(deref(c).hir), idx);
+  return en.align;
+};
+
 let type_size = func(c: Mut(Ctx), t: TypeId) -> u32 {
   let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), t);
   return match ht {
@@ -266,7 +298,7 @@ let type_size = func(c: Mut(Ctx), t: TypeId) -> u32 {
     Ref(_) => 8,
     Mut(_) => 8,
     Struct(idx) => struct_size(c, idx),
-    Enum(_) => 8,
+    Enum(idx) => enum_size(c, idx),
     Fn(_) => 8,
     HirNever => 0,
   };
@@ -282,7 +314,7 @@ let type_align = func(c: Mut(Ctx), t: TypeId) -> u32 {
     Ref(_) => 8,
     Mut(_) => 8,
     Struct(idx) => struct_align(c, idx),
-    Enum(_) => 8,
+    Enum(idx) => enum_align(c, idx),
     Fn(_) => 8,
     HirNever => 1,
   };
@@ -353,6 +385,7 @@ let named_tid = func(c: Mut(Ctx), e: SymEntry, sp: Span) !{ OomErr, SemaFail } -
   let tid: TypeId = match e.kind {
     BuiltinTy(t) => t,
     StructDef(idx) => struct_tid(c, idx),
+    EnumDef(idx) => enum_tid(c, idx),
     _ => fail_type(SemaErr::TypeMismatch(sp)),
   };
   return tid;
@@ -542,6 +575,146 @@ let declare_structs = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
   };
 };
 
+let variant_tag = func(ast: Ref(AstModule()), text: Slice(u8), vd: VariantDef, i: u64) !{ SemaFail } -> u64 {
+  let tag: u64 = i;
+  match vd.discrim {
+    Some(de) => {
+      let dx: Expr = ast.exprs.get(de.idx as u64);
+      match dx {
+        Lit(lk) => {
+          let is_int: bool = match lk {
+            Int => true,
+            _ => false,
+          };
+          let dsp: Span = ast.expr_spans.get(de.idx as u64);
+          let parsed: Option(i64) = if is_int { parse_i64(Span::slice(dsp, text)) } else { Option(i64)::none() };
+          match parsed {
+            Some(v) => {
+              tag = v as u64;
+            },
+            None => {
+              tag = fail_u64(SemaErr::TypeMismatch(vd.span));
+            },
+          };
+        },
+        _ => {
+          tag = fail_u64(SemaErr::Unsupported(vd.span));
+        },
+      };
+    },
+    None => {},
+  };
+  return tag;
+};
+
+let layout_enum = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), idx: u32, ee: EnumExpr)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let start: u32 = c.hir.variants.len() as u32;
+  let max_p_size: u32 = 0;
+  let max_p_align: u32 = 1;
+  let tagged: bool = false;
+  let i: u64 = 0;
+  while i < (ee.variants.len as u64) {
+    let vd: VariantDef = ast.variants.get((ee.variants.start as u64) + i);
+    let vname: Slice(u8) = Span::slice(vd.name, text);
+    let tag_val: u64 = variant_tag(ast, text, vd, i);
+    let pty: TypeId = c.void_tid;
+    let has_payload: bool = false;
+    match vd.payload {
+      Some(pe) => {
+        pty = resolve_type(ast, text, c, pe, vd.span);
+        has_payload = true;
+        let psz: u32 = type_size(c, pty);
+        let pal: u32 = type_align(c, pty);
+        if psz > max_p_size {
+          max_p_size = psz;
+        }
+        if pal > max_p_align {
+          max_p_align = pal;
+        }
+        tagged = true;
+      },
+      None => {},
+    };
+    let vi: VariantInfo = VariantInfo { name: vname, payload_ty: pty, has_payload: has_payload, tag_val: tag_val };
+    HirModule::add_variant(mut_of(deref(c).hir), vi);
+    i = i + 1;
+  };
+  let used: u32 = (c.hir.variants.len() as u32) - start;
+  let tag_size: u32 = 8;
+  let payload_off: u32 = 0;
+  let size: u32 = 8;
+  let align: u32 = 8;
+  if tagged {
+    payload_off = 8;
+    align = max_p_align;
+    if align < 8 {
+      align = 8;
+    }
+    size = align_up(8 + max_p_size, align) as u32;
+  }
+  HirModule::set_enum_layout(mut_of(deref(c).hir), idx, HirRange { start: start, len: used }, tag_size, payload_off, size, align, tagged);
+};
+
+let declare_enums = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
+{
+  let i: u64 = 0;
+  while i < c.decls.len() {
+    let fd: FlatDecl = c.decls.get(i);
+    let d: Decl = ast.decls.get(fd.id as u64);
+    match d {
+      Let(ld) => {
+        let init: Expr = ast.exprs.get(ld.init.idx as u64);
+        match init {
+          Enum(_) => {
+            let name: Slice(u8) = Span::slice(ld.name, text);
+            let sp: Span = ast.decl_spans.get(fd.id as u64);
+            let en: EnumInfo = EnumInfo {
+              name: name,
+              variants: HirRange { start: 0, len: 0 },
+              tag_size: 8,
+              payload_off: 0,
+              size: 8,
+              align: 8,
+              is_tagged_union: false
+            };
+            let idx: u32 = HirModule::add_enum(mut_of(deref(c).hir), en);
+            let tid: TypeId = HirModule::add_type(mut_of(deref(c).hir), HirType::Enum { idx });
+            deref(c).enum_tys.push(tid);
+            let kind: SymKind = SymKind::EnumDef { idx };
+            Scope::define(mut_of(deref(c).globals), name, kind, sp);
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    i = i + 1;
+  };
+  let idx: u32 = 0;
+  let k: u64 = 0;
+  while k < c.decls.len() {
+    let fd2: FlatDecl = c.decls.get(k);
+    let d2: Decl = ast.decls.get(fd2.id as u64);
+    match d2 {
+      Let(ld2) => {
+        let init2: Expr = ast.exprs.get(ld2.init.idx as u64);
+        match init2 {
+          Enum(ee) => {
+            layout_enum(ast, text, c, idx, ee);
+            idx = idx + 1;
+          },
+          _ => {},
+        };
+      },
+      _ => {},
+    };
+    k = k + 1;
+  };
+};
+
 let declare_fn = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), fd: FlatDecl, ld: LetDecl, fe: FuncExpr)
   ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail }
 {
@@ -598,6 +771,7 @@ let declare_fns = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
             deref(c).fn_checked.push(false);
           },
           Struct(_) => {},
+          Enum(_) => {},
           _ => {
             let sp: Span = ast.decl_spans.get(fd.id as u64);
             let cidx: u32 = deref(c).consts.len() as u32;
@@ -697,6 +871,421 @@ let const_expr = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), cidx:
   return mk(c, k, cd.ty, sp);
 };
 
+let sym_bound = func(s: Ref(Scope), name: Slice(u8)) -> bool {
+  let found: Option(SymEntry) = Scope::lookup(s, name);
+  return match found {
+    Some(_) => true,
+    None => false,
+  };
+};
+
+let call_arg = func(ast: Ref(AstModule()), call: CallExpr, i: u64) -> ExprId {
+  return ast.expr_lists.get((call.args.start as u64) + i);
+};
+
+let enum_of_path = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), r: IdRange) -> Option(u32) {
+  let out: Option(u32) = Option(u32)::none();
+  if r.len == 2 {
+    let fname: Slice(u8) = Span::slice(ast.path_segs.get(r.start as u64), text);
+    let found: Option(SymEntry) = Scope::lookup(ref_of(deref(c).globals), fname);
+    match found {
+      Some(e) => {
+        match e.kind {
+          EnumDef(idx) => {
+            out = Option(u32)::some(idx);
+          },
+          _ => {},
+        };
+      },
+      None => {},
+    };
+  }
+  return out;
+};
+
+let path_tail_name = func(ast: Ref(AstModule()), text: Slice(u8), r: IdRange) -> Slice(u8) {
+  return Span::slice(ast.path_segs.get((r.start as u64) + 1), text);
+};
+
+let enum_lit_expr = func(c: Mut(Ctx), eidx: u32, abs_v: u32, payload: Option(HirExprId), sp: Span) !{ OomErr } -> HirExprId {
+  let lit: HirEnumLit = HirEnumLit { enum_idx: eidx, variant_idx: abs_v, payload: payload };
+  let tid: TypeId = enum_tid(c, eidx);
+  return mk(c, HirExprKind::EnumLit { lit }, tid, sp);
+};
+
+let find_variant_or_fail = func(c: Mut(Ctx), eidx: u32, name: Slice(u8), sp: Span) !{ SemaFail } -> u32 {
+  let vf: Option(u32) = HirModule::find_variant(ref_of(deref(c).hir), eidx, name);
+  return match vf {
+    Some(v) => v,
+    None => fail_variant(SemaErr::UnknownIdent(sp)),
+  };
+};
+
+let enum_path_expr = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), r: IdRange, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  let eo: Option(u32) = enum_of_path(ast, text, c, r);
+  match eo {
+    Some(eidx) => {
+      let vname: Slice(u8) = path_tail_name(ast, text, r);
+      let av: u32 = find_variant_or_fail(c, eidx, vname, sp);
+      let vi: VariantInfo = HirModule::variant_at(ref_of(deref(c).hir), av);
+      if vi.has_payload {
+        out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+      } else {
+        let empty: Option(HirExprId) = Option(HirExprId)::none();
+        out = Option(HirExprId)::some(enum_lit_expr(c, eidx, av, empty, sp));
+      }
+    },
+    None => {},
+  };
+  return out;
+};
+
+let enum_call_expr = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  let cal: Expr = ast.exprs.get(call.callee.idx as u64);
+  match cal {
+    Path(r) => {
+      let eo: Option(u32) = enum_of_path(ast, text, c, r);
+      match eo {
+        Some(eidx) => {
+          let vname: Slice(u8) = path_tail_name(ast, text, r);
+          let av: u32 = find_variant_or_fail(c, eidx, vname, sp);
+          let vi: VariantInfo = HirModule::variant_at(ref_of(deref(c).hir), av);
+          if (call.args.len as u64) != 1 {
+            out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+          } else if vi.has_payload == false {
+            out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+          } else {
+            let arg: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::some(vi.payload_ty));
+            let payload: Option(HirExprId) = Option(HirExprId)::some(arg);
+            out = Option(HirExprId)::some(enum_lit_expr(c, eidx, av, payload, sp));
+          }
+        },
+        None => {},
+      };
+    },
+    _ => {},
+  };
+  return out;
+};
+
+let enum_struct_lit_expr = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), sl: StructLitExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  let tx: Expr = ast.exprs.get(sl.ty.idx as u64);
+  match tx {
+    Path(r) => {
+      let eo: Option(u32) = enum_of_path(ast, text, c, r);
+      match eo {
+        Some(eidx) => {
+          let vname: Slice(u8) = path_tail_name(ast, text, r);
+          let av: u32 = find_variant_or_fail(c, eidx, vname, sp);
+          let vi: VariantInfo = HirModule::variant_at(ref_of(deref(c).hir), av);
+          if (vi.has_payload == false) and (sl.inits.len == 0) {
+            let empty: Option(HirExprId) = Option(HirExprId)::none();
+            out = Option(HirExprId)::some(enum_lit_expr(c, eidx, av, empty, sp));
+          } else {
+            out = Option(HirExprId)::some(fail_at(SemaErr::Unsupported(sp)));
+          }
+        },
+        None => {},
+      };
+    },
+    _ => {},
+  };
+  return out;
+};
+
+let addr_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span, is_mut: bool)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 1 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let inner: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::none());
+    let it: TypeId = expr_ty(c, inner);
+    let rt: TypeId = if is_mut { intern(c, HirType::Mut { it }) } else { intern(c, HirType::Ref { it }) };
+    out = Option(HirExprId)::some(mk(c, HirExprKind::AddrOf { inner }, rt, sp));
+  }
+  return out;
+};
+
+let deref_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 1 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let inner: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::none());
+    let it: TypeId = expr_ty(c, inner);
+    let ht: HirType = HirModule::type_at(ref_of(deref(c).hir), it);
+    let inner_ty: TypeId = c.void_tid;
+    let good: bool = true;
+    match ht {
+      Ref(t) => {
+        inner_ty = t;
+      },
+      Mut(t) => {
+        inner_ty = t;
+      },
+      _ => {
+        good = false;
+      },
+    };
+    if good == false {
+      out = Option(HirExprId)::some(fail_at(SemaErr::TypeMismatch(sp)));
+    } else {
+      out = Option(HirExprId)::some(mk(c, HirExprKind::Deref { inner }, inner_ty, sp));
+    }
+  }
+  return out;
+};
+
+let ptr_offset_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 2 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let base: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::none());
+    let bt: TypeId = expr_ty(c, base);
+    let bh: HirType = HirModule::type_at(ref_of(deref(c).hir), bt);
+    let elem: TypeId = c.void_tid;
+    let good: bool = true;
+    match bh {
+      Ref(t) => {
+        elem = t;
+      },
+      Mut(t) => {
+        elem = t;
+      },
+      _ => {
+        good = false;
+      },
+    };
+    if good == false {
+      out = Option(HirExprId)::some(fail_at(SemaErr::TypeMismatch(sp)));
+    } else {
+      let idx: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 1), Option(TypeId)::none());
+      let it: TypeId = expr_ty(c, idx);
+      let ih: HirType = HirModule::type_at(ref_of(deref(c).hir), it);
+      let is_int: bool = match ih {
+        Int(_) => true,
+        _ => false,
+      };
+      if is_int == false {
+        out = Option(HirExprId)::some(fail_at(SemaErr::TypeMismatch(sp)));
+      } else {
+        let po: HirPtrOffset = HirPtrOffset { base: base, index: idx, elem_size: type_size(c, elem) };
+        out = Option(HirExprId)::some(mk(c, HirExprKind::PtrOffset { po }, bt, sp));
+      }
+    }
+  }
+  return out;
+};
+
+let ptr_cast_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 2 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let dst: TypeId = resolve_type(ast, text, c, call_arg(ast, call, 0), sp);
+    let val: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 1), Option(TypeId)::none());
+    let cs: HirCast = HirCast { expr: val, to: dst };
+    out = Option(HirExprId)::some(mk(c, HirExprKind::Cast { cs }, dst, sp));
+  }
+  return out;
+};
+
+let init_at_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 2 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let dst: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::none());
+    let val: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 1), Option(TypeId)::none());
+    let mw: HirMemWrite = HirMemWrite { dst: dst, val: val };
+    out = Option(HirExprId)::some(mk(c, HirExprKind::InitAt { mw }, c.void_tid, sp));
+  }
+  return out;
+};
+
+let drop_at_intrinsic = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  if (call.args.len as u64) != 1 {
+    out = Option(HirExprId)::some(fail_at(SemaErr::ArityMismatch(sp)));
+  } else {
+    let dst: HirExprId = check_expr_as(ast, text, c, call_arg(ast, call, 0), Option(TypeId)::none());
+    let dr: HirDropAt = HirDropAt { dst: dst };
+    out = Option(HirExprId)::some(mk(c, HirExprKind::DropAt { dr }, c.void_tid, sp));
+  }
+  return out;
+};
+
+let intrinsic_expr = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), call: CallExpr, sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> Option(HirExprId)
+{
+  let out: Option(HirExprId) = Option(HirExprId)::none();
+  let cal: Expr = ast.exprs.get(call.callee.idx as u64);
+  let nsp: Option(Span) = match cal {
+    Ident(n) => Option(Span)::some(n),
+    _ => Option(Span)::none(),
+  };
+  match nsp {
+    Some(ns) => {
+      let name: Slice(u8) = Span::slice(ns, text);
+      let bound: bool = sym_bound(ref_of(deref(c).locals), name) or sym_bound(ref_of(deref(c).globals), name);
+      if bound == false {
+        if eq(name, "ref_of") {
+          out = addr_intrinsic(ast, text, c, call, sp, false);
+        } else if eq(name, "mut_of") {
+          out = addr_intrinsic(ast, text, c, call, sp, true);
+        } else if eq(name, "deref") {
+          out = deref_intrinsic(ast, text, c, call, sp);
+        } else if eq(name, "ptr_offset") {
+          out = ptr_offset_intrinsic(ast, text, c, call, sp);
+        } else if eq(name, "ptr_cast") {
+          out = ptr_cast_intrinsic(ast, text, c, call, sp);
+        } else if eq(name, "init_at") {
+          out = init_at_intrinsic(ast, text, c, call, sp);
+        } else if eq(name, "drop_at") {
+          out = drop_at_intrinsic(ast, text, c, call, sp);
+        }
+      }
+    },
+    None => {},
+  };
+  return out;
+};
+
+let check_match = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), mx: MatchExpr, want: Option(TypeId), sp: Span)
+  ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirExprId
+{
+  let scrut: HirExprId = check_expr_as(ast, text, c, mx.scrutinee, Option(TypeId)::none());
+  let sty: TypeId = expr_ty(c, scrut);
+  let sth: HirType = HirModule::type_at(ref_of(deref(c).hir), sty);
+  let eidx: u32 = 0;
+  let is_enum: bool = true;
+  match sth {
+    Enum(i) => {
+      eidx = i;
+    },
+    _ => {
+      is_enum = false;
+    },
+  };
+  if is_enum == false {
+    return fail_at(SemaErr::TypeMismatch(sp));
+  }
+  let sbase: u64 = deref(c).arm_buf.len();
+  let res_ty: TypeId = c.void_tid;
+  let have_res: bool = false;
+  match want {
+    Some(w) => {
+      res_ty = w;
+      have_res = true;
+    },
+    None => {},
+  };
+  let i: u64 = 0;
+  while i < (mx.arms.len as u64) {
+    let arm: MatchArm = ast.match_arms.get((mx.arms.start as u64) + i);
+    let pat: Pattern = ast.pats.get(arm.pat.idx as u64);
+    let tagv: u64 = 0;
+    let wild: bool = false;
+    let binder: Option(HirLocalId) = Option(HirLocalId)::none();
+    let pushed: bool = false;
+    match pat {
+      Wildcard => {
+        wild = true;
+      },
+      Ident(nsp) => {
+        let vname: Slice(u8) = Span::slice(nsp, text);
+        let av: u32 = find_variant_or_fail(c, eidx, vname, nsp);
+        let vi: VariantInfo = HirModule::variant_at(ref_of(deref(c).hir), av);
+        if vi.has_payload {
+          return fail_at(SemaErr::TypeMismatch(nsp));
+        }
+        tagv = vi.tag_val;
+      },
+      Variant(vp) => {
+        let vspan: Span = span_at(ast, vp.path);
+        let vname: Slice(u8) = Span::slice(vspan, text);
+        let av: u32 = find_variant_or_fail(c, eidx, vname, vspan);
+        let vi: VariantInfo = HirModule::variant_at(ref_of(deref(c).hir), av);
+        tagv = vi.tag_val;
+        match vp.arg {
+          Some(apid) => {
+            let bp: Pattern = ast.pats.get(apid.idx as u64);
+            let bnm: Span = Span::empty(ast.src, 0);
+            let is_bind: bool = true;
+            match bp {
+              Ident(nb) => {
+                bnm = nb;
+              },
+              _ => {
+                is_bind = false;
+              },
+            };
+            if is_bind == false {
+              return fail_at(SemaErr::Unsupported(vspan));
+            }
+            let name: Slice(u8) = Span::slice(bnm, text);
+            Scope::push_scope(mut_of(deref(c).locals));
+            pushed = true;
+            let lid: HirLocalId = HirModule::add_local(mut_of(deref(c).hir), HirLocal { name: name, ty: vi.payload_ty });
+            let kind: SymKind = SymKind::Local { lid };
+            Scope::define(mut_of(deref(c).locals), name, kind, bnm);
+            binder = Option(HirLocalId)::some(lid);
+          },
+          None => {},
+        };
+      },
+      Lit(_) => {
+        return fail_at(SemaErr::Unsupported(arm.span));
+      },
+    };
+    let bwant: Option(TypeId) = if have_res { Option(TypeId)::some(res_ty) } else { Option(TypeId)::none() };
+    let body: HirExprId = check_expr_as(ast, text, c, arm.body, bwant);
+    if pushed {
+      Scope::pop_scope(mut_of(deref(c).locals));
+    }
+    if have_res == false {
+      res_ty = expr_ty(c, body);
+      have_res = true;
+    }
+    let harm: HirMatchArm = HirMatchArm { tag_val: tagv, is_wildcard: wild, bind_local: binder, body: body };
+    deref(c).arm_buf.push(harm);
+    i = i + 1;
+  };
+  let astart: u32 = c.hir.match_arms.len() as u32;
+  let aend: u64 = deref(c).arm_buf.len();
+  let aj: u64 = sbase;
+  while aj < aend {
+    HirModule::add_match_arm(mut_of(deref(c).hir), deref(c).arm_buf.get(aj));
+    aj = aj + 1;
+  };
+  deref(c).arm_buf.truncate(sbase);
+  let used: u32 = (aend - sbase) as u32;
+  let mh: HirMatch = HirMatch { scrutinee: scrut, enum_idx: eidx, arms: HirRange { start: astart, len: used } };
+  return mk(c, HirExprKind::Match { mh }, res_ty, sp);
+};
+
 let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e: ExprId, want: Option(TypeId))
   ?{ al: Allocator = SystemAlloc } !{ OomErr, SemaFail } -> HirExprId
 {
@@ -723,6 +1312,58 @@ let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e:
         },
         Bool(b) => {
           hid = mk(c, HirExprKind::BoolConst { b }, c.bool_tid, sp);
+        },
+        Str => {
+          let raw: Slice(u8) = Span::slice(sp, text);
+          let n: u64 = raw.len;
+          let buf: Vec(u8) = Vec(u8)::new();
+          let quoted: bool = (n >= 2) and (raw[0] == 34) and (raw[n - 1] == 34);
+          let lo: u64 = if quoted { 1 } else { 0 };
+          let hi: u64 = if quoted { n - 1 } else { n };
+          let i: u64 = lo;
+          let bad: bool = false;
+          while i < hi {
+            let ch: u8 = raw[i];
+            let escape: bool = (ch == 92) and ((i + 1) < hi);
+            if escape {
+              let esc: u8 = raw[i + 1];
+              let dec: u8 = 0;
+              let known: bool = true;
+              if esc == 110 {
+                dec = 10;
+              } else if esc == 114 {
+                dec = 13;
+              } else if esc == 116 {
+                dec = 9;
+              } else if esc == 48 {
+                dec = 0;
+              } else if esc == 92 {
+                dec = 92;
+              } else if esc == 34 {
+                dec = 34;
+              } else {
+                known = false;
+              };
+              if known {
+                buf.push(dec);
+              } else {
+                bad = true;
+              }
+              i = i + 2;
+            } else {
+              buf.push(ch);
+              i = i + 1;
+            }
+          };
+          if bad {
+            hid = fail_at(SemaErr::Unsupported(sp));
+          } else {
+            buf.push(0);
+            let bytes: Slice(u8) = buf.as_slice();
+            let sidx: u32 = HirModule::add_str_lit(mut_of(deref(c).hir), bytes);
+            let rtid: TypeId = intern(c, HirType::Ref { c.u8_tid });
+            hid = mk(c, HirExprKind::StrLit { sidx }, rtid, sp);
+          }
         },
         _ => {
           hid = fail_at(SemaErr::Unsupported(sp));
@@ -761,7 +1402,17 @@ let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e:
       };
     },
     Path(r) => {
-      if r.len == 0 {
+      let pv: Option(HirExprId) = enum_path_expr(ast, text, c, r, sp);
+      let is_enum: bool = match pv {
+        Some(_) => true,
+        None => false,
+      };
+      if is_enum {
+        hid = match pv {
+          Some(h) => h,
+          None => fail_at(SemaErr::Unsupported(sp)),
+        };
+      } else if r.len == 0 {
         hid = fail_at(SemaErr::Unsupported(sp));
       } else {
         let name: Slice(u8) = Span::slice(span_at(ast, r), text);
@@ -873,43 +1524,59 @@ let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e:
       hid = mk(c, k, info.ty, sp);
     },
     Call(call) => {
-      let cal: HirExprId = check_expr_as(ast, text, c, call.callee, Option(TypeId)::none());
-      let ct: TypeId = expr_ty(c, cal);
-      let fi: Option(u32) = fn_index(c, ct);
-      let fidx: u32 = match fi {
-        Some(v) => v,
-        None => {
-          return fail_at(SemaErr::Unsupported(sp));
-        },
+      let enum_pre: Option(HirExprId) = enum_call_expr(ast, text, c, call, sp);
+      let pre: Option(HirExprId) = match enum_pre {
+        Some(h) => Option(HirExprId)::some(h),
+        None => intrinsic_expr(ast, text, c, call, sp),
       };
-      if deref(c).fn_checked.get(fidx as u64) == false {
-        ensure_fn_checked(ast, text, c, fidx);
+      let handled: bool = match pre {
+        Some(_) => true,
+        None => false,
+      };
+      if handled {
+        hid = match pre {
+          Some(h) => h,
+          None => fail_at(SemaErr::Unsupported(sp)),
+        };
+      } else {
+        let cal: HirExprId = check_expr_as(ast, text, c, call.callee, Option(TypeId)::none());
+        let ct: TypeId = expr_ty(c, cal);
+        let fi: Option(u32) = fn_index(c, ct);
+        let fidx: u32 = match fi {
+          Some(v) => v,
+          None => {
+            return fail_at(SemaErr::Unsupported(sp));
+          },
+        };
+        if deref(c).fn_checked.get(fidx as u64) == false {
+          ensure_fn_checked(ast, text, c, fidx);
+        }
+        let fnid: HirFnId = HirFnId { idx: fidx };
+        let f: HirFn = HirModule::fn_at(ref_of(deref(c).hir), fnid);
+        if (call.args.len as u64) != (f.params.len as u64) {
+          return fail_at(SemaErr::ArityMismatch(sp));
+        }
+        let abase: u64 = deref(c).arg_buf.len();
+        let ai: u64 = 0;
+        while ai < (call.args.len as u64) {
+          let aid: ExprId = ast.expr_lists.get((call.args.start as u64) + ai);
+          let p: HirParam = HirModule::param_at(ref_of(deref(c).hir), f.params.start + (ai as u32));
+          let ah: HirExprId = check_expr_as(ast, text, c, aid, Option(TypeId)::some(p.ty));
+          deref(c).arg_buf.push(ah);
+          ai = ai + 1;
+        };
+        let astart: u32 = c.hir.expr_lists.len() as u32;
+        let aend: u64 = deref(c).arg_buf.len();
+        let aj: u64 = abase;
+        while aj < aend {
+          HirModule::add_expr_id(mut_of(deref(c).hir), deref(c).arg_buf.get(aj));
+          aj = aj + 1;
+        };
+        deref(c).arg_buf.truncate(abase);
+        let used: u32 = (aend - abase) as u32;
+        let k: HirExprKind = HirExprKind::Call { HirCall { callee: cal, args: HirRange { start: astart, len: used } } };
+        hid = mk(c, k, f.ret_ty, sp);
       }
-      let fnid: HirFnId = HirFnId { idx: fidx };
-      let f: HirFn = HirModule::fn_at(ref_of(deref(c).hir), fnid);
-      if (call.args.len as u64) != (f.params.len as u64) {
-        return fail_at(SemaErr::ArityMismatch(sp));
-      }
-      let abase: u64 = deref(c).arg_buf.len();
-      let ai: u64 = 0;
-      while ai < (call.args.len as u64) {
-        let aid: ExprId = ast.expr_lists.get((call.args.start as u64) + ai);
-        let p: HirParam = HirModule::param_at(ref_of(deref(c).hir), f.params.start + (ai as u32));
-        let ah: HirExprId = check_expr_as(ast, text, c, aid, Option(TypeId)::some(p.ty));
-        deref(c).arg_buf.push(ah);
-        ai = ai + 1;
-      };
-      let astart: u32 = c.hir.expr_lists.len() as u32;
-      let aend: u64 = deref(c).arg_buf.len();
-      let aj: u64 = abase;
-      while aj < aend {
-        HirModule::add_expr_id(mut_of(deref(c).hir), deref(c).arg_buf.get(aj));
-        aj = aj + 1;
-      };
-      deref(c).arg_buf.truncate(abase);
-      let used: u32 = (aend - abase) as u32;
-      let k: HirExprKind = HirExprKind::Call { HirCall { callee: cal, args: HirRange { start: astart, len: used } } };
-      hid = mk(c, k, f.ret_ty, sp);
     },
     Cast(cs) => {
       let inner: HirExprId = check_expr_as(ast, text, c, cs.expr, Option(TypeId)::none());
@@ -1055,34 +1722,49 @@ let check_expr_as = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx), e:
       hid = mk(c, k, rty, sp);
     },
     StructLit(sl) => {
-      let tid: TypeId = resolve_type(ast, text, c, sl.ty, sp);
-      let si: Option(u32) = struct_index(c, tid);
-      let idx: u32 = match si {
-        Some(v) => v,
-        None => {
-          return fail_at(SemaErr::TypeMismatch(sp));
-        },
+      let epv: Option(HirExprId) = enum_struct_lit_expr(ast, text, c, sl, sp);
+      let is_enum: bool = match epv {
+        Some(_) => true,
+        None => false,
       };
-      let istart: u32 = c.hir.inits.len() as u32;
-      let ii: u64 = 0;
-      while ii < (sl.inits.len as u64) {
-        let fi: FieldInit = ast.inits.get((sl.inits.start as u64) + ii);
-        let fname: Slice(u8) = Span::slice(fi.name, text);
-        let found: Option(u32) = HirModule::find_field(ref_of(deref(c).hir), idx, fname);
-        let abs: u32 = match found {
+      if is_enum {
+        hid = match epv {
+          Some(h) => h,
+          None => fail_at(SemaErr::Unsupported(sp)),
+        };
+      } else {
+        let tid: TypeId = resolve_type(ast, text, c, sl.ty, sp);
+        let si: Option(u32) = struct_index(c, tid);
+        let idx: u32 = match si {
           Some(v) => v,
           None => {
-            return fail_at(SemaErr::UnknownField(fi.span));
+            return fail_at(SemaErr::TypeMismatch(sp));
           },
         };
-        let info: FieldInfo = HirModule::field_at(ref_of(deref(c).hir), abs);
-        let vh: HirExprId = check_expr_as(ast, text, c, fi.val, Option(TypeId)::some(info.ty));
-        HirModule::add_init(mut_of(deref(c).hir), HirFieldInit { index: abs, val: vh });
-        ii = ii + 1;
-      };
-      let used: u32 = (c.hir.inits.len() as u32) - istart;
-      let k: HirExprKind = HirExprKind::StructLit { HirStructLit { struct_idx: idx, inits: HirRange { start: istart, len: used } } };
-      hid = mk(c, k, tid, sp);
+        let istart: u32 = c.hir.inits.len() as u32;
+        let ii: u64 = 0;
+        while ii < (sl.inits.len as u64) {
+          let fi: FieldInit = ast.inits.get((sl.inits.start as u64) + ii);
+          let fname: Slice(u8) = Span::slice(fi.name, text);
+          let found: Option(u32) = HirModule::find_field(ref_of(deref(c).hir), idx, fname);
+          let abs: u32 = match found {
+            Some(v) => v,
+            None => {
+              return fail_at(SemaErr::UnknownField(fi.span));
+            },
+          };
+          let info: FieldInfo = HirModule::field_at(ref_of(deref(c).hir), abs);
+          let vh: HirExprId = check_expr_as(ast, text, c, fi.val, Option(TypeId)::some(info.ty));
+          HirModule::add_init(mut_of(deref(c).hir), HirFieldInit { index: abs, val: vh });
+          ii = ii + 1;
+        };
+        let used: u32 = (c.hir.inits.len() as u32) - istart;
+        let k: HirExprKind = HirExprKind::StructLit { HirStructLit { struct_idx: idx, inits: HirRange { start: istart, len: used } } };
+        hid = mk(c, k, tid, sp);
+      }
+    },
+    Match(mx) => {
+      hid = check_match(ast, text, c, mx, want, sp);
     },
     _ => {
       hid = fail_at(SemaErr::Unsupported(sp));
@@ -1224,6 +1906,7 @@ let run = func(ast: Ref(AstModule()), text: Slice(u8), c: Mut(Ctx))
   seed_builtins(c, Span::empty(ast.src, 0));
   flatten_decls(ast, c);
   declare_structs(ast, text, c);
+  declare_enums(ast, text, c);
   declare_fns(ast, text, c);
   check_bodies(ast, text, c);
   eval_all_consts(ast, text, c);
