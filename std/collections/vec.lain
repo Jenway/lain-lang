@@ -38,6 +38,17 @@ pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
       return deref(v).len == 0;
     };
 
+    pub let take = func(v: Mut(Self)) -> Self {
+      let out: Self = Self {
+        buf: deref(v).buf,
+        len: deref(v).len,
+        alloc: deref(v).alloc,
+      };
+      deref(v).buf = empty_buf();
+      deref(v).len = 0;
+      return reloc(out);
+    };
+
     pub let reserve = func(v: Mut(Self), need: u64) !{ OomErr } {
       if try_reserve(v, need) == false {
         perform OomErr.oom(need * (size_of(T) as u64));
@@ -50,6 +61,9 @@ pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
         return true;
       }
       let wanted: u64 = if cur == 0 { 8 } else { cur * 2 };
+      if wanted < need {
+        wanted = need;
+      }
       let esz: u64 = size_of(T) as u64;
       let h: Mut(al.Self) = mut_of(deref(v).alloc);
       let raw: u64 = al.alloc(h, wanted * esz);
@@ -80,7 +94,8 @@ pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
       if ok {
         let base: u64 = deref(v).buf.ptr as u64;
         let slot: Mut(T) = elem_at(base, n);
-        deref(slot) = item;
+        let raw: Uninit(T) = ptr_cast(Uninit(T), slot);
+        init_at(raw, reloc(item));
         deref(v).len = n + 1;
       }
       return ok;
@@ -126,7 +141,8 @@ pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
       reserve(v, n + 1)!;
       let base: u64 = deref(v).buf.ptr as u64;
       let slot: Mut(T) = elem_at(base, n);
-      deref(slot) = item;
+      let raw: Uninit(T) = ptr_cast(Uninit(T), slot);
+      init_at(raw, reloc(item));
       deref(v).len = n + 1;
     };
 
@@ -167,8 +183,7 @@ pub let Vec = func(T: Type) ?{ al: mem.Allocator = mem.SystemAlloc } -> Module {
         let base: u64 = deref(v).buf.ptr as u64;
         let old: Mut(T) = elem_at(base, i);
         let free_slot: Uninit(T) = drop_at(old);
-        let dst: Mut(T) = elem_at(base, i);
-        deref(dst) = item;
+        init_at(free_slot, reloc(item));
       }
       return ok;
     };
