@@ -637,6 +637,22 @@ let bind_params = func(ctx: Mut(Ctx), f: HirFn) !{ OomErr } {
   };
 };
 
+let finish_proc = func(ctx: Mut(Ctx)) -> Proc {
+  let out: Proc = Proc {
+    name: deref(ctx).pb.proc.name,
+    link_name: deref(ctx).pb.proc.link_name,
+    is_extern: deref(ctx).pb.proc.is_extern,
+    is_pure: deref(ctx).pb.proc.is_pure,
+    ret_ty: deref(ctx).pb.proc.ret_ty,
+    params: deref(ctx).pb.proc.params.take(),
+    insts: deref(ctx).pb.proc.insts.take(),
+    call_args: deref(ctx).pb.proc.call_args.take(),
+    axioms: deref(ctx).pb.proc.axioms.take(),
+    val_count: deref(ctx).pb.proc.val_count
+  };
+  return reloc(out);
+};
+
 let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr, LowerFail } -> Proc {
   let rt: Ty = ty_of(h, f.ret_ty);
   let ptys: TyVec = param_tys(h, f);
@@ -661,19 +677,82 @@ let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr
       ctx.pb.emit_ret(body.val);
     }
   }
-  let out: Proc = Proc {
-    name: deref(ctx).pb.proc.name,
-    link_name: deref(ctx).pb.proc.link_name,
-    is_extern: deref(ctx).pb.proc.is_extern,
-    is_pure: deref(ctx).pb.proc.is_pure,
-    ret_ty: deref(ctx).pb.proc.ret_ty,
-    params: deref(ctx).pb.proc.params.take(),
-    insts: deref(ctx).pb.proc.insts.take(),
-    call_args: deref(ctx).pb.proc.call_args.take(),
-    axioms: deref(ctx).pb.proc.axioms.take(),
-    val_count: deref(ctx).pb.proc.val_count
+  return finish_proc(ctx);
+};
+
+let lower_stub_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr } -> Proc {
+  let rt: Ty = ty_of(h, f.ret_ty);
+  let ptys: TyVec = param_tys(h, f);
+  let c0: Ctx = Ctx {
+    hir: h,
+    mono: mono,
+    span: f.span,
+    pb: ProcBuilder::new(f.name, reloc(ptys), rt),
+    slots: ValVec::new(),
+    drops: DropTracker::new(),
+    loops: LoopVec::new()
   };
-  return reloc(out);
+  let ctx: Mut(Ctx) = mut_of(c0);
+  ctx.pb.emit_unreachable();
+  return finish_proc(ctx);
+};
+
+let lower_checked_fns = func(hir: Ref(HirModule), mono: Mut(MonoTable), ib: Mut(IrBuilder)) !{ OomErr, LowerFail } {
+  let n: u32 = hir.fn_count();
+  let i: u32 = 0;
+  while i < n {
+    let fid: HirFnId = HirFnId { idx: i };
+    let pid: ProcId = ProcId { id: i as u64 };
+    mono.register(fid, pid);
+    i = i + 1;
+  };
+  let j: u32 = 0;
+  while j < n {
+    let fid2: HirFnId = HirFnId { idx: j };
+    let f: HirFn = hir.fn_at(fid2);
+    let checked: bool = f.body.idx != 0;
+    if checked {
+      let body_proc: Proc = lower_fn(hir, mono, f);
+      let body_pid: ProcId = ib.add_proc(reloc(body_proc));
+      mono.register(fid2, body_pid);
+    } else {
+      let stub_proc: Proc = lower_stub_fn(hir, mono, f);
+      let stub_pid: ProcId = ib.add_proc(reloc(stub_proc));
+      mono.register(fid2, stub_pid);
+    }
+    j = j + 1;
+  };
+};
+
+let lower_entry = func(hir: Ref(HirModule), mono: Mut(MonoTable), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8)) !{ OomErr, LowerFail } -> Proc {
+  let rt: Ty = ty_of(hir, ret_ty);
+  let e: HirExpr = hir.expr_at(expr_id);
+  let c0: Ctx = Ctx {
+    hir: hir,
+    mono: mono,
+    span: e.span,
+    pb: ProcBuilder::new(entry_name, TyVec::new(), rt),
+    slots: ValVec::new(),
+    drops: DropTracker::new(),
+    loops: LoopVec::new()
+  };
+  let ctx: Mut(Ctx) = mut_of(c0);
+  let total: u64 = hir.local_count() as u64;
+  let k: u64 = 0;
+  while k < total {
+    ctx.slots.push(none_val());
+    k = k + 1;
+  };
+  let out: EmitOut = lower_expr(ctx, expr_id);
+  if out.diverged == false {
+    let void_ret: bool = rt == Ty::Void;
+    if void_ret {
+      ctx.pb.emit_ret(none_val());
+    } else {
+      ctx.pb.emit_ret(out.val);
+    }
+  }
+  return finish_proc(ctx);
 };
 
 pub let lower_module = func(hir: Ref(HirModule)) !{ OomErr, LowerFail } -> IrModule {
@@ -698,6 +777,21 @@ pub let lower_module = func(hir: Ref(HirModule)) !{ OomErr, LowerFail } -> IrMod
     mono.register(fid2, got);
     j = j + 1;
   };
+  let out: IrModule = IrModule::Self {
+    datas: deref(ib).ir.datas.take(),
+    procs: deref(ib).ir.procs.take()
+  };
+  return reloc(out);
+};
+
+pub let lower_eval_expr = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8)) !{ OomErr, LowerFail } -> IrModule {
+  let ib0: IrBuilder = IrBuilder::new();
+  let ib: Mut(IrBuilder) = mut_of(ib0);
+  let mono0: MonoTable = MonoTable::new();
+  let mono: Mut(MonoTable) = mut_of(mono0);
+  lower_checked_fns(hir, mono, ib);
+  let entry_proc: Proc = lower_entry(hir, mono, expr_id, ret_ty, entry_name);
+  ib.add_proc(reloc(entry_proc));
   let out: IrModule = IrModule::Self {
     datas: deref(ib).ir.datas.take(),
     procs: deref(ib).ir.procs.take()

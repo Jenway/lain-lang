@@ -7,205 +7,206 @@
 
 ---
 
-## 0. 架构定位与职责边界
+## 0. 架构定位与核心-标准库硬边界
 
-Lain-Meta 确立了“语言规则完全抽离于编译器内核”的微内核架构。整个编译系统的物理层级划分为三层：
+Lain-Meta 确立了“微内核编译器 + 库化语言特性”的架构。整个编译系统的物理层级划分为三层：
 
-1. **宿主底座（Seed Core）**：C 语言编写的驱动程序，仅提供无语义的源码词法切分器（Reader）以及物理执行沙箱调度能力；
-2. **执行引擎（Lain-VM）**：无状态的底层抽象机，提供无类型的 LAINIR 解释执行与能力隔离（`VSpace`、`CSpace`、`TCB`）；
-3. **元编译器（Lain-Meta）**：源语言的前端实现，**作为普通程序完全运行在 Lain-VM 的沙箱中**。
+1. **宿主底座（Driver / Seed）**：提供零关键字词法切分器（`Reader`）、构建调度与目标文件输出；
+2. **执行引擎（Lain-VM `kernel/`）**：无状态的底层抽象机，提供结构化 `LAINIR` 验证、优化、沙箱解释执行（`VSpace`、`CSpace`、`Sched::apply`）与 C99 后端；
+3. **元编译器（Lain-Meta `frontend/`）**：源语言前端，包含语法展开、解析、语义细化与 IR 降级，并在编译期直接复用 `kernel::vm::Sched::apply` 执行宏与编译期函数。
 
-源语言的全部语法糖、宏展开、作用域消解、类型推导、常数求值以及降解（Lowering）规则，均由 Meta 程序定义。其输入为宿主构建的无语义原始语法树（`RawAst`），输出为扁平、合法的 LAINIR 模块文本。
+### 0.1 统一声明体系（7 种一等构造）
+
+所有顶层与局部声明统一为 `let Name = <构造>;`（导出加 `pub`），**彻底移除 `comptime` 关键字**：
+
+```lain
+let S = struct { ... };                 // 1. 积类型（结构体）
+let E = enum { ... };                   // 2. 和类型（Tagged Union 枚举）
+let M = module { ... };                 // 3. 模块（命名空间 + 关联类型 Self）
+let C = sig { ... };                    // 4. 概念契约（约束 Module 的接口签名）
+let F = effect { ... };                 // 5. 代数效应声明
+let f = func(...) ?{...} !{...} -> R {};// 6. 函数（编译期 / 运行时双栖）
+let m = macro(...) !{...} -> Syntax {}; // 7. 语法宏（仅在 Expand 阶段操作 Syntax）
+```
+
+### 0.2 两大元能力的严格物理分治
+
+| 维度 | 能力一：编译期 AST 操作（`macro` + `std::syntax`） | 能力二：双栖 `func` 与静态反射（`func` + `std::reflect`） |
+| :--- | :--- | :--- |
+| **载体** | `let m = macro(...)` | 普通 `let f = func(...)` |
+| **所在阶段** | **Expand 阶段**（在 `Parser` 和 `Sema` **之前**） | **Sema / Elaborate 阶段**（在 `Parser` **之后**） |
+| **可见信息** | 仅可见 Token 与括号树（`RawAst` / `Syntax`），**无类型、无布局、无符号表** | 拥有完整强类型、作用域与内存布局（`Type`、`TypeInfo`、`@field_ptr`） |
+| **执行引擎** | 编译为普通 `Proc`，通过 `kernel::vm::Sched::apply` 执行 | 编译为普通 `Proc`，通过 `kernel::vm::Sched::apply` 执行（**无 AST 解释器**） |
+| **典型用途** | `f"..."` 插值、`unless` / `repeat` / `for`、`assert_eq`、DSL | `Vec(T)` 泛型模块、`size_of(T)`、递归 `drop`、`struct_eq`、常量折叠 |
 
 ---
 
-## 1. 语法输入：零语义 Reader 与 RawAst
+## 1. 零关键字 Reader、`RawAst` 与事务化 `AstOut`
 
 ### 1.1 Reader 文法模型
-宿主底座内置的词法解析器（Reader）不设任何预留关键字、类型名或语句结构语法，仅按纯形式文法将源码流切分为嵌套的“形式（Form）”：
+
+`Reader` 不设任何预留关键字、类型名或语句结构语法，仅按纯形式文法将源码切分为嵌套的括号树：
 
 ```ebnf
 Form       ::= Token | Group
 Group      ::= '(' Form* ')'
              | '[' Form* ']'
              | '{' Form* '}'
-Token      ::= Ident | IntLiteral | FloatLiteral | StringLiteral | Punct
+Token      ::= Ident | IntLit | FloatLit | StrLit | CharLit | Punct
 ```
 
-* **无关键字预设**：类似 `fn`、`let`、`if`、`struct` 等词在 Reader 阶段均作为普通 `Ident`（标识符）Token 对待，语义解释权完全交由 Meta。
+### 1.2 `RawAst` 的平坦 `NodeId` 布局
+
+`RawAst` 将节点线性写入连续数组（`Vec(RawNode)`、`Vec(Span)`、`Vec(NodeId)`），严禁包含裸内存地址，全部使用相对下标 `NodeId` 寻址；宿主通过 `VSpace::map_external` 将其以只读属性映射至执行沙箱。
+
+### 1.3 `AstOut` 游标事务机制（`mark` / `commit` / `rollback`）
+
+`AstOut` 是单向追加的语法树构建缓冲区，提供 $O(1)$ 游标事务：
+
+- `mark() -> u32`：记录当前节点与子列表水位检查点；
+- `commit(tx: u32)`：保留新增节点；
+- `rollback(tx: u32)`：游标复位，废弃节点立即失效且无内存泄漏。
 
 ---
 
-### 1.2 RawAst 的平坦 Arena 布局
+## 2. 能力一：语法宏系统（`macro`、`Syntax` 与 `quote`）
 
-宿主 Reader 解析源码时，将语法树节点线性写入一块单向追加的连续物理内存（Arena）中。为杜绝悬垂指针与跨沙箱地址失效，树节点严禁包含裸内存地址（`#addr`），全部采用相对下标（`NodeId`）：
+### 2.1 `Syntax` 句柄与对齐签名
 
-```c
-struct RawNode {
-    uint16_t kind;        // 节点类型：TOKEN_IDENT, GROUP_PAREN, GROUP_BRACE 等
-    uint16_t flags;       // 标点配对与词法属性标志位
-    uint32_t payload;     // 若为 Token，表示字面量表偏移；若为 Group，表示首个子节点的 NodeId
-    uint32_t child_count; // 子节点数量（对于 Group）
-    uint32_t span_id;     // 源码行列号映射句柄（用于精准错误诊断）
+在宏参数中，实参可能是一个标识符、一串中缀表达式（如 `a + 1`）或一个代码块。因此 `Syntax` 定义为连续节点的轻量切片句柄：
+
+```lain
+// std/syntax.lain
+pub let Syntax = struct {
+  start: u32, // 在 RawAst.children 中的起始下标
+  len: u32    // 连续节点的个数
 };
 ```
 
-* **NodeId 寻址**：根节点与子节点之间的引用关系统一使用 `uint32_t` 类型的节点数组下标；
-* **内存连续性**：整棵语法树物理上仅为一个紧凑的 `RawNode` 数组，节点间不存在离散的指针链接。
+`macro` 的参数列表与调用点实参 **1:1 对齐**，底层由编译器隐式注入 `?{ cx: SyntaxCtx }`，**彻底隐藏 `RawAst` / `AstOut` 管道参数**：
 
----
-
-### 1.3 宿主只读映射交割
-
-1. 宿主底座完成源码切分后，将生成的 `RawAst Arena` 登记为只读区段；
-2. 宿主通过 `VSpace.map_external` 将该切片**以只读属性直接映射至 Meta 所在的地址空间**；
-3. Meta 读取语法树为零拷贝物理访问；任何试图篡改原始语法树的行为由底层 `VSpace` 触发只读保护 Trap。
-
----
-
-## 2. 宏展开系统与 AstOut 事务机制
-
-### 2.1 宏的物理接口
-在 Meta 视角中，宏展开器本质上是一个接收指定语法子树并返回新语法子树的过程：
-
-```plain
-fn expand_macro(input: NodeId, ast_out: &AstOut) -> NodeId
+```lain
+let assert_eq = macro(lhs: Syntax, rhs: Syntax) -> Syntax { ... };
 ```
 
-宏在执行模式匹配或模板变换时，通过向宿主提供的输出缓冲区（`AstOut`）追加节点来构造候选 AST。
+### 2.2 三种触发形态
 
----
+当 `expand` 扫描到绑定为 `macro` 的标识符 `m` 时，按以下规则切分实参：
 
-### 2.2 AstOut 单向追加缓冲区
+1. **括号调用 `m(arg0, arg1, ...)`**：将 `Paren` 组内子节点按顶层逗号 `,` 切分为 $N$ 个 `Syntax`；
+2. **紧邻字面量调用 `m"..."`**（如 `f"hello {x}"`）：将紧贴的字符串字面量作为 1 个 `Syntax` 传入单参宏；
+3. **块调用 `m { ... }`**（或 `m(args...) { ... }`）：将尾部 `Brace` 组作为最后一个 `Syntax` 传入。
 
-`AstOut` 是宿主为 Meta（或子沙箱）分配的专有语法树构建空间：
-* 内存物理连续，内部以游标（Watermark）管理分配；
-* 新构造的节点依次顺序写入尾部，并产出递增的局部 `NodeId`。
+### 2.3 `quote { ... $x ... }` 准引用脱糖
 
----
+`quote { ... }` 是宏体内的准引用语法糖，在编译该 `macro` 时直接降级为对隐式 `cx: SyntaxCtx` 的 `AstOut` 追加调用：
 
-### 2.3 基于游标的事务与零开销回滚 (Transaction & Rollback)
+- 普通 Token 与括号原样发射（`cx::emit_*`、`cx::begin_group` / `cx::end_group`）；
+- `$ident` 将对应的 `Syntax` 片段（或 `Slice(u8)` 字符串）原样拼接进 `AstOut`（`cx::splice`）；
+- 返回 `Syntax` 值交由 `expand` 替换原调用点；若宏返回 `Option(Syntax)::none()` 或失败，触发 `AstOut::rollback`。
 
-宏展开可能涉及试探性分支匹配或候选规则推导。`AstOut` 提供严格基于游标的事务语义：
+### 2.4 宏的沙箱执行与库化清单
 
-```c
-uint32_t checkpoint = ast_out_mark();  // 1. 记录当前水位检查点
-NodeId result = try_expand(input, ast_out);
+宏本身经由 `sema -> lower -> kernel::ir` 编译为普通 `Proc`，在 `expand` 阶段通过 `kernel::vm::Sched::apply` 执行。以下特性**全部移出编译器内核，由标准库以 `macro` 实现**：
 
-if (expansion_failed(result)) {
-    ast_out_rollback(checkpoint);       // 2. 回滚：游标复位，废弃节点物理失效
-} else {
-    ast_out_commit(checkpoint);         // 3. 提交：保留新增节点
-}
-```
+- `f"..."` 字符串插值（`std::fmt`）
+- `unless`、`repeat`、`for` 等控制流语法糖（`std::macros`）
+- `assert` / `assert_eq` 等诊断宏（`std::debug`）
 
-* **零开销回滚**：回滚操作仅涉及单一指针/整数赋值，无需遍历释放废弃节点；
-* **局部一致性**：事务失败回滚后，缓冲区完全恢复至检查点状态，消除无效垃圾节点对后续分析的干扰。
-
----
-
-## 3. 编译期求值：eval 与 apply 物理契约
-
-系统不设特权的 `#eval` IR 指令，编译期计算统一收敛为 **`eval` 组织、`apply` 承接** 的正交二元模型。
-
-```text
-       ┌─────────── Meta 内部 (VSpace 0) ───────────┐
-       │                                            │
-       │   eval(SourceForm, Env)                    │
-       │     │                                      │
-       │     ├── 纯常数折叠 (快速路径, 本地计算)    │
-       │     └── 复杂表达式 / 宏调用                │
-       │           │                                │
-       │           ▼ 生成自包含临时 LAINIR 模块     │
-       │         #proc @temp_eval() { ... }         │
-       │           │                                │
-       └───────────┼────────────────────────────────┘
-                   │ #call @apply(@temp_eval, ...) [宿主系统调用]
-                   ▼
-       ┌─────── Seed 宿主底座 (Host C) ─────────────┐
-       │                                            │
-       │   apply(ProcBytes, Args, Limits)           │
-       │     │                                      │
-       │     ├── 激活热沙箱 (VSpace 1 / TCB_Sub)    │
-       │     ├── Engine 单步执行至终态              │
-       │     └── 提取标量或重映射 AstOut 切片       │
-       │                                            │
-       └────────────────────────────────────────────┘
+```lain
+// 示例：std/debug.lain
+pub let assert_eq = macro(lhs: Syntax, rhs: Syntax) -> Syntax {
+  let lhs_src: Slice(u8) = lhs.text();
+  let rhs_src: Slice(u8) = rhs.text();
+  return quote {
+    if ($lhs) != ($rhs) {
+      io::print("assertion failed: ");
+      io::print($lhs_src);
+      io::print(" != ");
+      io::println($rhs_src);
+      os::abort();
+    }
+  };
+};
 ```
 
 ---
 
-### 3.1 eval 与 apply 的正交职责
+## 3. 能力二：无 `comptime` 关键字的双栖 `func` 与静态反射
 
-* **`eval(Form, Env) -> Value`（Meta 库函数）**：
-  * 活在 Meta 沙箱内，理解词法作用域、符号环境与高级语义；
-  * **快速路径**：对基础字面量算术进行本地折叠；
-  * **完整路径**：若涉及过程调用、类型生成或宏执行，动态合成一段自包含的临时 LAINIR 过程，并通过外部调用唤起 `apply`。
-* **`apply(Proc, Args, Limits) -> Result`（Seed 宿主服务）**：
-  * 活在宿主底座中，**完全不理解源语言语法与 AST 语义**；
-  * 仅接受合法的 LAINIR 过程与标量/切片参数，并在独立的临时物理沙箱内完成物理步进，交付执行终态。
+### 3.1 双栖求值铁律（废除 AST 解释器）
 
----
+所有普通 `func` 默认既可在运行时执行，也可在编译期由 `kernel::vm::Sched::apply` 执行。**编译器前端严禁另写一套 AST 解释器**；任何编译期求值统一走 `sema -> lower -> kernel::ir -> kernel::vm::Sched::apply`。
 
-### 3.2 apply 物理沙箱契约
+### 3.2 四类编译期触发上下文
 
-宿主执行 `apply` 时，严格遵循如下物理约束：
+`sema` 仅依据调用点上下文与参数元类型自动触发编译期求值：
 
-| 约束项 | 规范细则 |
-| :--- | :--- |
-| **模块自包含** | 传入的临时 LAINIR 过程必须自包含所有依赖，不继承 Meta 的全局状态，亦不依赖隐式上下文。 |
-| **空间绝对隔离** | 每次 `apply` 运行在独立创建（或复用重置）的子空间 `VSpace_Sub` 中，不继承 Meta 的私有内存访问权。 |
-| **参数传输通道** | 标量通过固定槽位的 Wire 寄存器传递；只读复杂输入（如输入的 AST）通过宿主建立外部只读映射挂载，禁止子沙箱写回。 |
-| **结果交割规则** | 标量结果由宿主寄存器直接拷出；宏合成的复合 AST 结果统一存入宿主管理的 `AstOut` 缓冲区，执行结束后将其作为独立只读切片重映射给 Meta。 |
-| **严禁 `#addr` 逃逸** | **铁律**：`apply` 返回结果中若包含裸物理地址（`#addr`），宿主核验器立即拒绝并触发 Trap。子沙箱销毁后，其内部地址严禁泄漏至 Meta。 |
-| **预算与熔断** | 执行强制绑定资源限额（最大 Fuel 步数、栈容量、调用深度）。超时或超额立即触发 Trap 终止执行。 |
+1. **类型 / 模块 / 契约位置**：如 `let V = Vec(u64);`、`Array(u8, calc_cap(4))`、`?{ al: MyAlloc() }`；
+2. **包含元类型参数（`Type` / `Module` / `Sig`）**：如 `size_of(Pt)`、`struct_eq(a, b)`，按 `(fn_id, 编译期实参)` 查单态化缓存 `MonoTable`；
+3. **顶层常量定义**：如 `let PageSize: u64 = align_up(3000, 4096);`；
+4. **普通 `if` 的常量条件折叠**：当 `if cond { ... } else { ... }` 的 `cond` 不依赖任何运行期局部变量时，直接通过 `Sched::apply` 求值并裁剪死分支（不再需要 `comptime if`）。
 
----
+### 3.3 静态反射最小原语（仅 2 个）
 
-### 3.3 宿主能力注入模型 (CSpace)
+编译器只内置 2 个以 `@` 开头的底层反射原语，全部由 `std::reflect` 封装为普通 `func` 对外提供：
 
-Meta 自身以及在 `apply` 中运行的代码，对宿主操作系统的访问受到严格的 Capability 控制：
-* **隐式 Context**：宿主服务回调在注册阶段绑定私有 `context` 指针并永久冻结。分派时由底层 VM 自动注入，LAINIR 参数仅承载业务数据，宿主指针物理上对沙箱不可见；
-* **无特权穿透**：Meta 无法构造伪造的能力句柄。一切文件读写或外部链接均须通过已授权的 `CSpace` 槽位进行，否则由 VM 确定性拦截。
+1. **`@type_info(T: Type) -> TypeInfo`**：在 `sema` 阶段从 `HirModule` 类型表生成编译期常量描述：
+   - 字段包含 `name: Slice(u8)`、`size: u64`、`align: u64`、`has_drop: bool`、`kind: TypeKind`（`Void`、`Bool`、`Int(bits, signed)`、`Float(bits)`、`Ptr(mutable, Type)`、`Struct(Slice(FieldInfo))`、`Enum(Slice(VariantInfo))`）。
+2. **`@field_ptr(base: Ref/Mut(T), idx: u32) -> Ref/Mut(FieldTy)`**：要求 `idx` 在单态化/折叠后为编译期已知整数，直接返回第 `idx` 个字段的指针类型，并在 `lower` 阶段降级为单条 `Op::Lea(base, 0, 1, field.offset)`。
 
----
+```lain
+// 示例：std/reflect.lain —— 零样板代码的通用库能力
+pub {
+  let size_of = func(T: Type) -> u64 {
+    return @type_info(T).size;
+  };
 
-## 4. 语义处理与降解管线
+  let align_of = func(T: Type) -> u64 {
+    return @type_info(T).align;
+  };
 
-源码在 Meta 内部的生命周期严格遵循单向的三个处理阶段：
-
-```text
-源码输入 (RawAst) ──> [展开 Expand] ──> [细化 Elaborate] ──> [降解 Lower] ──> 终态 LAINIR 模块
+  let drop_in_place = func(p: Mut(T)) ?{ T: Type } {
+    let info: TypeInfo = @type_info(T);
+    if info.has_drop {
+      T::drop(p);
+    }
+    match info.kind {
+      Struct(fields) => {
+        let i: u32 = 0;
+        while i < (fields.len as u32) {
+          drop_in_place(@field_ptr(p, i));
+          i = i + 1;
+        };
+      },
+      _ => {}
+    };
+  };
+};
 ```
 
 ---
 
-### 4.1 语法绑定表驱动 (Syntax Binding Table)
+## 4. 编译器核心内置类型与内存原语最小集
 
-Meta 通过词法作用域内的“语法绑定表”确定语法结构的合法性与解释方式：
-1. **标识符分派**：当处理一个 `Group` 形式时，Meta 读取其首个元素（若为标识符）；
-2. **表项类别**：
-   * 若绑定为 **宏处理器（Macro Transformer）**：进入**展开阶段**；
-   * 若绑定为 **核心语义原语（Core Form，如 `let`、`fn`、`struct`）**：进入**细化阶段**；
-   * 若未绑定：按默认调用（Call）或语法错误处理。
+### 4.1 内置类型（不可约集合）
 
----
+- **标量与底类型**：`bool`、`u8..u64`、`i8..i64`、`f32..f64`、`()`、`Never`
+- **单指针**：`Ref(T)`、`Mut(T)`
+- **复合与元类型**：`struct`、`enum`、`func`、`Type`、`Module`、`Sig`
+- **移出编译器**：`Slice(T)` 与 `MutSlice(T)` 不再作为编译器内置类型，回归 `std::mem` 中的普通泛型结构体 `struct { ptr: Ref(T), len: u64 }`。
 
-### 4.2 三阶段管线推导
+### 4.2 内存与生命周期原语（仅 6 个，1:1 对应 IR）
 
-#### 1. 展开阶段 (Expand)
-* 遍历 `RawAst`，递归执行宏展开；
-* 宏利用 `AstOut` 生成候选树，消解高级语法糖；
-* 本阶段循环推进，直到整个语法树中不再残留任何宏调用，完全收敛至“核心语义形式（Core Forms）”。
+| 原语 | 语义与 IR 映射 | 收归 `std::mem` 的原内置函数 |
+| :--- | :--- | :--- |
+| `ref_of(x)` / `mut_of(x)` / `deref(p)` | 取地址与解引用（`Op::Load` / `Op::Store`） | `ptr_of`, `addr_of`, 裸 `load`/`store` |
+| `@ptr_offset(p, count)` | 类型化指针偏移（`Op::Lea`） | 裸 `lea` |
+| `@ptr_cast(DstPtrTy, src)` | 指针/整数强转（`Op::Bitcast`） | `null_ref`, `is_null` |
+| `reloc(x)` | 标记局部变量所有权已转移（置 moved 位） | — |
+| `init_at(dst, val)` | 向未初始化槽位写入（不触发旧值 `drop`） | `init_zero` |
+| `drop_at(dst)` | 显式触发槽位析构 | — |
 
-#### 2. 细化阶段 (Elaborate)
-* 在核心语义形式上建立完整的符号表、词法作用域链，并执行静态类型推导与检查；
-* **物理求解调用**：当遇到结构体内存布局（字段偏移、对齐计算）或常量定义时，细化器调用 `eval` 组织计算，经 `apply` 获得确定性的数值标量，回填至类型注册表中。
+### 4.3 宿主上下文 Witness 化
 
-#### 3. 降解阶段 (Lower)
-* 将经过类型完备验证的核心 AST 彻底扁平化，抹去全部高级语言抽象：
-  * 用户结构体降解为具体的字节尺寸与基于 `#lea` 的物理偏移计算；
-  * 局部变量降解为纯 SSA 寄存器槽位或基于 `#alloca` 的栈内存；
-  * 内存访问严格降解为带 `align` 的 `#load` 与 `#store`；
-  * 控制流结构单向映射为显式交付的 `#if`、`#loop` 与 `#switch`。
-* 最终交付**纯净、平坦、自包含的合法 LAINIR 模块文本**，输出给下游编译器后端。
+`target_os`、`is_windows`、`is_linux`、`is_macos`、`is_portable_c99` 等平台查询不再作为全局内置函数，统一通过 `std::target` 的默认 `?{ target: Target = HostTarget }` witness 提供。

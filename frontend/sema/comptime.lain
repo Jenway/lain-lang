@@ -1,339 +1,98 @@
-use import("std::collections")::{ Vec };
-use import("std::mem")::{ Allocator, SystemAlloc, OomErr };
-use import("std::option")::{ Option };
-use import("std::str")::{ sub };
+use import("std::mem")::{ OomErr };
 use import("frontend::syntax::span")::{ Span };
-use import("frontend::ast::model")::{ AstModule, Expr, ExprId, UnOp, BinOp };
-use import("frontend::sema::hir")::{ HirModule, StructInfo };
+use import("frontend::sema::hir")::{ HirModule, HirExprId, TypeId, SemaErr, SemaFail };
+use import("frontend::lower::emit")::{ lower_eval_expr, LowerFail };
+use import("kernel::ir::model")::{ IrModule };
+use import("kernel::ir::verify")::{ verify_module, VerifyErr };
+use import("kernel::ir::opt")::{ optimize_module };
+use import("kernel::vm::trap")::{ VmTrap };
+use import("kernel::vm::engine")::{ SliceOutcome };
+use import("kernel::vm::sched")::{ Limits, Sched };
 
-let digit_value = func(c: u8) -> i64 {
-  if (c >= 48) and (c <= 57) {
-    return (c as i64) - 48;
-  }
-  if (c >= 97) and (c <= 102) {
-    return (c as i64) - 87;
-  }
-  if (c >= 65) and (c <= 70) {
-    return (c as i64) - 55;
-  }
-  return -1;
-};
-
-let word_of = func(text: Slice(u8), sp: Span) -> Slice(u8) {
-  return sub(text, sp.start as u64, sp.end as u64);
-};
-
-let as_bool = func(v: i64) -> bool {
-  return v != 0;
-};
-
-let code_of = func(op: BinOp) -> i64 {
-  return match op {
-    Add => 0,
-    Sub => 1,
-    Mul => 2,
-    Div => 3,
-    Rem => 4,
-    BitAnd => 5,
-    BitOr => 6,
-    BitXor => 7,
-    Shl => 8,
-    Shr => 9,
-    Eq => 10,
-    Ne => 11,
-    Lt => 12,
-    Le => 13,
-    Gt => 14,
-    Ge => 15,
-    And => 16,
-    Or => 17,
+let run_sched_eval = func(ir: Ref(IrModule), entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool))
+  !{ OomErr, VmTrap } -> u64
+{
+  let limits: Limits = Limits {
+    fuel_slice: 100000,
+    max_call_depth: 32,
+    stack_cap: 16384,
+    heap_cap: 65536
   };
-};
-
-let apply_binary = func(code: i64, a: i64, b: i64, bad: Mut(bool)) -> i64 {
-  if code == 0 {
-    return a + b;
-  }
-  if code == 1 {
-    return a - b;
-  }
-  if code == 2 {
-    return a * b;
-  }
-  if code == 3 {
-    if b == 0 {
-      deref(bad) = true;
-      return 0;
-    }
-    return a / b;
-  }
-  if code == 4 {
-    if b == 0 {
-      deref(bad) = true;
-      return 0;
-    }
-    return a % b;
-  }
-  if code == 5 {
-    return a & b;
-  }
-  if code == 6 {
-    return a | b;
-  }
-  if code == 7 {
-    return a ^ b;
-  }
-  if code == 8 {
-    if (b < 0) or (b >= 64) {
-      deref(bad) = true;
-      return 0;
-    }
-    return a << b;
-  }
-  if code == 9 {
-    if (b < 0) or (b >= 64) {
-      deref(bad) = true;
-      return 0;
-    }
-    return a >> b;
-  }
-  if code == 10 {
-    if a == b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 11 {
-    if a != b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 12 {
-    if a < b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 13 {
-    if a <= b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 14 {
-    if a > b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 15 {
-    if a >= b {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 16 {
-    if as_bool(a) and as_bool(b) {
-      return 1;
-    }
-    return 0;
-  }
-  if code == 17 {
-    if as_bool(a) or as_bool(b) {
-      return 1;
-    }
-    return 0;
-  }
-  deref(bad) = true;
+  let empty_args: Slice(u64) = make_slice(Slice(u64), null_ref(Ref(u64)), 0);
+  let res: SliceOutcome = Sched::apply(ir, entry_name, empty_args, limits);
+  let _u: u64 = match res {
+    Done(val) => {
+      deref(out) = val;
+      deref(ok) = true;
+      0
+    },
+    _ => 0,
+  };
   return 0;
 };
 
-let push_unary = func(todo: Mut(Vec(i64)), code: i64) {
-  todo.push(0 - code);
-};
-
-pub {
-  let parse_int_literal = func(text: Slice(u8), sp: Span) -> Option(i64) {
-    let s: Slice(u8) = word_of(text, sp);
-    let n: u64 = s.len;
-    let i: u64 = 0;
-    let neg: bool = false;
-    if (n > 0) and ((s[0] as u64) == 45) {
-      neg = true;
-      i = 1;
-    }
-    if (n > 0) and ((s[0] as u64) == 43) {
-      i = 1;
-    }
-    let radix: i64 = 10;
-    if ((i + 1) < n) and ((s[i] as u64) == 48) and (((s[i + 1] as u64) == 120) or ((s[i + 1] as u64) == 88)) {
-      radix = 16;
-      i = i + 2;
-    }
-    let acc: i64 = 0;
-    let seen: bool = false;
-    let stop: bool = false;
-    while (i < n) and (stop == false) {
-      let c: u8 = s[i];
-      if (c as u64) == 95 {
-        i = i + 1;
-      } else {
-        let d: i64 = digit_value(c);
-        if (d < 0) or ((radix == 10) and (d > 9)) {
-          stop = true;
-        } else {
-          acc = acc * radix + d;
-          seen = true;
-          i = i + 1;
-        }
-      }
-    };
-    if seen == false {
-      return Option(i64)::none();
-    }
-    if neg {
-      return Option(i64)::some(0 - acc);
-    }
-    return Option(i64)::some(acc);
+let run_verify_eval = func(ir: Mut(IrModule), entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool), oom_n: Mut(u64), oom_hit: Mut(bool))
+  !{ OomErr, VerifyErr } -> u64
+{
+  verify_module(ir);
+  optimize_module(ir);
+  return handle run_sched_eval(ir, entry_name, out, ok) with {
+    return(v) => v,
+    oom(n) => {
+      deref(oom_n) = n;
+      deref(oom_hit) = true;
+      1
+    },
+    fail(_) => 2,
   };
 };
 
-pub let eval_int_const = func(ast: Ref(AstModule()), text: Slice(u8), expr_id: ExprId)
-  ?{ al: Allocator = SystemAlloc } !{ OomErr } -> Option(i64)
+let run_lower_eval = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool), oom_n: Mut(u64), oom_hit: Mut(bool))
+  !{ OomErr, LowerFail } -> u64
 {
-    let todo: Vec(i64) = Vec(i64)::new();
-    let vals: Vec(i64) = Vec(i64)::new();
-    todo.push(expr_id.idx as i64);
-    let bad: bool = false;
-    while (todo.len() > 0) and (bad == false) {
-      let n: u64 = todo.len();
-      let task: i64 = todo.get(n - 1);
-      todo.truncate(n - 1);
-      if task >= 0 {
-        let e: Expr = ast.exprs.get(task as u64);
-        let sp: Span = ast.expr_spans.get(task as u64);
-        match e {
-          Lit(lk) => {
-            match lk {
-              Int => {
-                let parsed: Option(i64) = parse_int_literal(text, sp);
-                if Option(i64)::is_some(parsed) {
-                  vals.push(Option(i64)::unwrap_or(parsed, 0));
-                } else {
-                  bad = true;
-                }
-              },
-              Bool(b) => {
-                if b {
-                  vals.push(1);
-                } else {
-                  vals.push(0);
-                }
-              },
-              _ => {
-                bad = true;
-              },
-            };
-          },
-          Unary(u) => {
-            let uop: UnOp = u.op;
-            match uop {
-              Neg => {
-                todo.push(0 - 1);
-              },
-              Not => {
-                todo.push(0 - 2);
-              },
-              BitNot => {
-                todo.push(0 - 3);
-              },
-            };
-            todo.push(u.operand.idx as i64);
-          },
-          Binary(bx) => {
-            todo.push(0 - (100 + code_of(bx.op)));
-            todo.push(bx.rhs.idx as i64);
-            todo.push(bx.lhs.idx as i64);
-          },
-          _ => {
-            bad = true;
-          },
-        };
-      } else {
-        let code: i64 = 0 - task;
-        if code == 1 {
-          if vals.len() < 1 {
-            bad = true;
-          } else {
-            let vn: u64 = vals.len();
-            let a: i64 = vals.get(vn - 1);
-            vals.truncate(vn - 1);
-            vals.push(0 - a);
-          }
-        } else if code == 2 {
-          if vals.len() < 1 {
-            bad = true;
-          } else {
-            let vn: u64 = vals.len();
-            let a: i64 = vals.get(vn - 1);
-            vals.truncate(vn - 1);
-            if as_bool(a) {
-              vals.push(0);
-            } else {
-              vals.push(1);
-            }
-          }
-        } else if code == 3 {
-          if vals.len() < 1 {
-            bad = true;
-          } else {
-            let vn: u64 = vals.len();
-            let a: i64 = vals.get(vn - 1);
-            vals.truncate(vn - 1);
-            vals.push(0 - (a + 1));
-          }
-        } else if code >= 100 {
-          if vals.len() < 2 {
-            bad = true;
-          } else {
-            let vn: u64 = vals.len();
-            let b: i64 = vals.get(vn - 1);
-            let a: i64 = vals.get(vn - 2);
-            vals.truncate(vn - 2);
-            let flag: Mut(bool) = mut_of(bad);
-            let r: i64 = apply_binary(code - 100, a, b, flag);
-            vals.push(r);
-          }
-        } else {
-          bad = true;
-        }
-      }
-    };
-    let res: Option(i64) = Option(i64)::none();
-    if (bad == false) and (vals.len() == 1) {
-      res = Option(i64)::some(vals.get(0));
-    }
-    return res;
+  let ir: IrModule = lower_eval_expr(hir, expr_id, ret_ty, entry_name);
+  return handle run_verify_eval(mut_of(ir), entry_name, out, ok, oom_n, oom_hit) with {
+    return(v) => v,
+    oom(n) => {
+      deref(oom_n) = n;
+      deref(oom_hit) = true;
+      1
+    },
+    fail(_) => 2,
+  };
 };
 
-pub let eval_bool_const = func(ast: Ref(AstModule()), text: Slice(u8), expr_id: ExprId)
-  ?{ al: Allocator = SystemAlloc } !{ OomErr } -> Option(bool)
+pub let eval_hir_u64 = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, span: Span)
+  !{ OomErr, SemaFail } -> u64
 {
-    let folded: Option(i64) = eval_int_const(ast, text, expr_id);
-    let out: Option(bool) = Option(bool)::none();
-    match folded {
-      Some(v) => {
-        if (v == 0) or (v == 1) {
-          out = Option(bool)::some(as_bool(v));
-        }
-      },
-      None => {},
-    };
-    return out;
+  let oom_n_val: u64 = 0;
+  let oom_hit_val: bool = false;
+  let out_val: u64 = 0;
+  let ok_val: bool = false;
+  let oom_n: Mut(u64) = mut_of(oom_n_val);
+  let oom_hit: Mut(bool) = mut_of(oom_hit_val);
+  let out: Mut(u64) = mut_of(out_val);
+  let ok: Mut(bool) = mut_of(ok_val);
+  let _rc: u64 = handle run_lower_eval(hir, expr_id, ret_ty, "__ct_eval", out, ok, oom_n, oom_hit) with {
+    return(v) => v,
+    oom(n) => {
+      deref(oom_n) = n;
+      deref(oom_hit) = true;
+      1
+    },
+    fail(_) => 2,
+  };
+  if deref(oom_hit) {
+    perform OomErr::oom(deref(oom_n));
+  }
+  if deref(ok) == false {
+    perform SemaFail::fail(SemaErr::ComptimeTrap { span });
+  }
+  return deref(out);
 };
 
-pub let field_count_of = func(hir: Ref(HirModule), struct_idx: u32) -> u32 {
-  let st: StructInfo = hir.structs.get(struct_idx as u64);
-  return st.fields.len;
+pub let eval_hir_bool = func(hir: Ref(HirModule), expr_id: HirExprId, bool_ty: TypeId, span: Span)
+  !{ OomErr, SemaFail } -> bool
+{
+  return eval_hir_u64(hir, expr_id, bool_ty, span)! != 0;
 };
