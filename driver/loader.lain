@@ -1,0 +1,254 @@
+use import("std::collections")::{ Vec };
+use import("std::mem")::{ SystemAlloc, OomErr };
+let os = import("std::os");
+
+let push_bytes = func(dst: Mut(Vec(u8)), src: Slice(u8)) !{ OomErr } {
+  let i: u64 = 0;
+  while i < src.len {
+    dst.push(src[i]);
+    i = i + 1;
+  };
+};
+
+let push_u64_dec = func(dst: Mut(Vec(u8)), n: u64) !{ OomErr } {
+  if n == 0 {
+    dst.push(48);
+    return;
+  }
+  let tmp: Vec(u8) = Vec(u8)::new();
+  let v: u64 = n;
+  while v > 0 {
+    let d: u8 = ((v % 10) + 48) as u8;
+    tmp.push(d);
+    v = v / 10;
+  };
+  let k: u64 = tmp.len();
+  while k > 0 {
+    k = k - 1;
+    dst.push(tmp.get(k));
+  };
+};
+
+let push_imp_name = func(dst: Mut(Vec(u8)), idx: u64) !{ OomErr } {
+  push_bytes(dst, "__imp_");
+  push_u64_dec(dst, idx);
+};
+
+let find_seen = func(s_bytes: Mut(Vec(u8)), s_starts: Mut(Vec(u64)), s_lens: Mut(Vec(u64)), spec: Slice(u8)) -> i64 {
+  let n: u64 = s_starts.len();
+  let i: u64 = 0;
+  while i < n {
+    let st: u64 = s_starts.get(i);
+    let ln: u64 = s_lens.get(i);
+    if ln == spec.len {
+      let k: u64 = 0;
+      let ok: bool = true;
+      while (k < ln) and ok {
+        if s_bytes.get(st + k) != spec[k] {
+          ok = false;
+        }
+        k = k + 1;
+      };
+      if ok {
+        return i as i64;
+      }
+    }
+    i = i + 1;
+  };
+  return -1;
+};
+
+let add_seen = func(s_bytes: Mut(Vec(u8)), s_starts: Mut(Vec(u64)), s_lens: Mut(Vec(u64)), spec: Slice(u8)) !{ OomErr } -> u64 {
+  let idx: u64 = s_starts.len();
+  let st: u64 = s_bytes.len();
+  push_bytes(s_bytes, spec);
+  s_starts.push(st);
+  s_lens.push(spec.len);
+  return idx;
+};
+
+let spec_to_path = func(spec: Slice(u8), out: Mut(Vec(u8))) !{ OomErr } {
+  let i: u64 = 0;
+  while i < spec.len {
+    let c: u8 = spec[i];
+    if (c == 58) and ((i + 1) < spec.len) {
+      let c2: u8 = spec[i + 1];
+      if c2 == 58 {
+        out.push(47);
+        i = i + 2;
+      } else {
+        out.push(c);
+        i = i + 1;
+      }
+    } else {
+      out.push(c);
+      i = i + 1;
+    }
+  };
+  push_bytes(out, ".lain");
+  out.push(0);
+};
+
+let match_kw_import = func(src: Slice(u8), pos: u64) -> bool {
+  let pat: Slice(u8) = "import(\"";
+  if (pos + pat.len) > src.len {
+    return false;
+  }
+  let i: u64 = 0;
+  while i < pat.len {
+    if src[pos + i] != pat[i] {
+      return false;
+    }
+    i = i + 1;
+  };
+  if pos > 0 {
+    let prev: u8 = src[pos - 1];
+    let is_id: bool = ((prev >= 97) and (prev <= 122)) or ((prev >= 65) and (prev <= 90)) or ((prev >= 48) and (prev <= 57)) or (prev == 95);
+    if is_id {
+      return false;
+    }
+  }
+  return true;
+};
+
+let process_src = func(src: Slice(u8), body_out: Mut(Vec(u8)), mods_out: Mut(Vec(u8)), s_bytes: Mut(Vec(u8)), s_starts: Mut(Vec(u64)), s_lens: Mut(Vec(u64))) !{ OomErr } -> bool {
+  let ok: bool = true;
+  let i: u64 = 0;
+  while (i < src.len) and ok {
+    let c: u8 = src[i];
+    if c == 34 {
+      body_out.push(c);
+      i = i + 1;
+      let done_str: bool = false;
+      while (i < src.len) and (done_str == false) {
+        let sc: u8 = src[i];
+        body_out.push(sc);
+        i = i + 1;
+        if (sc == 92) and (i < src.len) {
+          let esc: u8 = src[i];
+          body_out.push(esc);
+          i = i + 1;
+        } else if sc == 34 {
+          done_str = true;
+        }
+      };
+    } else if match_kw_import(src, i) {
+      let sp_start: u64 = i + 8;
+      let j: u64 = sp_start;
+      let found_q: bool = false;
+      while (j < src.len) and (found_q == false) {
+        if src[j] == 34 {
+          found_q = true;
+        } else {
+          j = j + 1;
+        }
+      };
+      if (found_q == false) or ((j + 1) >= src.len) or (src[j + 1] != 41) {
+        ok = false;
+      } else {
+        let spec_buf: Vec(u8) = Vec(u8)::new();
+        let k: u64 = sp_start;
+        while k < j {
+          spec_buf.push(src[k]);
+          k = k + 1;
+        };
+        let spec: Slice(u8) = spec_buf.as_slice();
+        let existing: i64 = find_seen(s_bytes, s_starts, s_lens, spec);
+        let mod_idx: u64 = 0;
+        if existing >= 0 {
+          mod_idx = existing as u64;
+        } else {
+          mod_idx = add_seen(s_bytes, s_starts, s_lens, spec);
+          let path_buf: Vec(u8) = Vec(u8)::new();
+          spec_to_path(spec, mut_of(path_buf));
+          let ps: Slice(u8) = path_buf.as_slice();
+          let path_sl: Slice(u8) = make_slice(Slice(u8), ps.ptr, path_buf.len() - 1);
+          let fh: Mut(u8) = os::open_file(path_sl, "rb");
+          if is_null(fh) {
+            ok = false;
+          } else {
+            let chunk: MutSlice(u8) = os::alloc_slice(4096);
+            let raw_buf: Vec(u8) = Vec(u8)::new();
+            let reading: bool = true;
+            while reading {
+              let got: u64 = os::c_fread(chunk.ptr, 1, chunk.len, fh) as u64;
+              if got == 0 {
+                reading = false;
+              } else {
+                let ci: u64 = 0;
+                while ci < got {
+                  raw_buf.push(chunk[ci]);
+                  ci = ci + 1;
+                };
+              }
+            };
+            os::c_fclose(fh);
+            os::free_slice(chunk);
+            let sub_body: Vec(u8) = Vec(u8)::new();
+            let sub_sl: Slice(u8) = raw_buf.as_slice();
+            if process_src(sub_sl, mut_of(sub_body), mods_out, s_bytes, s_starts, s_lens) == false {
+              ok = false;
+            } else {
+              push_bytes(mods_out, "let ");
+              push_imp_name(mods_out, mod_idx);
+              push_bytes(mods_out, " = module { ");
+              push_bytes(mods_out, sub_body.as_slice());
+              push_bytes(mods_out, " };\n");
+            }
+          }
+        }
+        if ok {
+          push_imp_name(body_out, mod_idx);
+          i = j + 2;
+        }
+      }
+    } else {
+      body_out.push(c);
+      i = i + 1;
+    }
+  };
+  return ok;
+};
+
+pub {
+  let has_import = func(src: Slice(u8)) -> bool {
+    let i: u64 = 0;
+    while i < src.len {
+      if match_kw_import(src, i) {
+        return true;
+      }
+      i = i + 1;
+    };
+    return false;
+  };
+
+  let bundle_imports = func(src: Slice(u8), out: Mut(Vec(u8))) !{ OomErr } -> bool {
+    let s_bytes: Vec(u8) = Vec(u8)::new();
+    let s_starts: Vec(u64) = Vec(u64)::new();
+    let s_lens: Vec(u64) = Vec(u64)::new();
+    let mods_out: Vec(u8) = Vec(u8)::new();
+    let body_out: Vec(u8) = Vec(u8)::new();
+    let ok: bool = process_src(src, mut_of(body_out), mut_of(mods_out), mut_of(s_bytes), mut_of(s_starts), mut_of(s_lens));
+    if ok {
+      push_bytes(out, mods_out.as_slice());
+      push_bytes(out, body_out.as_slice());
+    }
+    return ok;
+  };
+
+  let bundle_to_slice = func(src: Slice(u8), out_sl: Mut(Slice(u8))) !{ OomErr } -> bool {
+    let out: Vec(u8) = Vec(u8)::new();
+    let ok: bool = bundle_imports(src, mut_of(out));
+    if ok {
+      let sl: Slice(u8) = out.as_slice();
+      let ms: MutSlice(u8) = os::alloc_slice(sl.len);
+      let i: u64 = 0;
+      while i < sl.len {
+        ms[i] = sl[i];
+        i = i + 1;
+      };
+      deref(out_sl) = make_slice(Slice(u8), ptr_cast(Ref(u8), ms.ptr), ms.len);
+    }
+    return ok;
+  };
+};

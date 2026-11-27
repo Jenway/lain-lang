@@ -218,8 +218,8 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         };
       };
 
-      let cur_group = func(c: Mut(Self), d: Delim) -> bool {
-        let o: NodeOpt::Opt = peek_opt(c, 0);
+      let group_at = func(c: Mut(Self), k: u32, d: Delim) -> bool {
+        let o: NodeOpt::Opt = peek_opt(c, k);
         return match o {
           Some(id) => {
             let n: RawNode = node_at(c, id);
@@ -232,6 +232,10 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           },
           None => false
         };
+      };
+
+      let cur_group = func(c: Mut(Self), d: Delim) -> bool {
+        return group_at(c, 0, d);
       };
 
       let cur_ident = func(c: Mut(Self), w: Slice(u8)) -> bool {
@@ -692,12 +696,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
 
       let parse_path_or_ident = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
         let first: Span = expect_ident(c)!;
-        if two_punct(c, 58, 58) == false {
+        if (two_punct(c, 58, 58) == false) or group_at(c, 2, Delim::Brace) {
           return add_expr(c, Expr::Ident(first), first)!;
         }
         let start: u32 = deref(deref(c).out).path_segs.len() as u32;
         push_path_seg(c, first)!;
-        while two_punct(c, 58, 58) {
+        while two_punct(c, 58, 58) and (group_at(c, 2, Delim::Brace) == false) {
           bump(c);
           bump(c);
           let seg: Span = expect_ident(c)!;
@@ -717,7 +721,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
             let fld: Span = expect_ident(c)!;
             let f: FieldExpr = FieldExpr { base: e, field: fld };
             e = add_expr(c, Expr::Field(f), Span::merge(expr_span(c, e), deref(c).last))!;
-          } else if two_punct(c, 58, 58) {
+          } else if two_punct(c, 58, 58) and (group_at(c, 2, Delim::Brace) == false) {
             bump(c);
             bump(c);
             let mem: Span = expect_ident(c)!;
@@ -1518,6 +1522,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         };
         pop_group(c);
         bump(c);
+        optional_semi(c);
         let len: u32 = (deref(deref(c).out).path_segs.len() as u32) - start;
         let u: UseDecl = UseDecl { target: target, names: IdRange { start: start, len: len } };
         return Decl::Use(u);

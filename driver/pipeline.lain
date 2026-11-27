@@ -19,6 +19,7 @@ use import("kernel::vm::trap")::{ VmTrap };
 use import("kernel::vm::engine")::{ SliceOutcome };
 use import("kernel::vm::sched")::{ Limits, Sched };
 let c99 = import("kernel::backend::c99");
+let loader = import("driver::loader");
 
 pub {
   let RunResult = struct {
@@ -131,7 +132,7 @@ let run_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u
 };
 
 let run_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, ParseFail } -> RunResult {
-  let ast: AstModule() = parse(expanded, text, al);
+  let ast: AstModule() = parse(expanded, text, al)!;
   return run_sema_clean(ref_of(ast), text, entry);
 };
 
@@ -158,11 +159,19 @@ let run_expand_clean = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandl
 };
 
 let run_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFail } -> RunResult {
+  let effective: Slice(u8) = text;
+  let load_ok: bool = true;
+  if loader::has_import(text) {
+    load_ok = loader::bundle_to_slice(text, mut_of(effective));
+  }
+  if load_ok == false {
+    return RunResult { ok: false, stage: 1, value: 3 };
+  }
   let src: SourceId = SourceId { idx: 0 };
-  let cur: SliceCursor = SliceCursor::new(text);
+  let cur: SliceCursor = SliceCursor::new(effective);
   let al: SystemHandle = SystemAlloc::new();
   let raw: RawAst() = read(src, mut_of(cur), al);
-  return run_expand_clean(ref_of(raw), text, al, entry);
+  return run_expand_clean(ref_of(raw), effective, al, entry);
 };
 
 let emit_c99_clean = func(ir: Ref(IrModule), entry: Slice(u8)) -> bool {
@@ -203,7 +212,7 @@ let c99_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u
 };
 
 let c99_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) !{ OomErr, ParseFail } -> bool {
-  let ast: AstModule() = parse(expanded, text, al);
+  let ast: AstModule() = parse(expanded, text, al)!;
   return c99_sema_clean(ref_of(ast), text, entry);
 };
 
@@ -230,11 +239,22 @@ let c99_expand_clean = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandl
 };
 
 let c99_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFail } -> bool {
+  let effective: Slice(u8) = text;
+  let load_ok: bool = true;
+  if loader::has_import(text) {
+    load_ok = loader::bundle_to_slice(text, mut_of(effective));
+    io::print("BUNDLE_OK=");
+    io::println_u64(if load_ok { 1 } else { 0 });
+    io::println(effective);
+  }
+  if load_ok == false {
+    return false;
+  }
   let src: SourceId = SourceId { idx: 0 };
-  let cur: SliceCursor = SliceCursor::new(text);
+  let cur: SliceCursor = SliceCursor::new(effective);
   let al: SystemHandle = SystemAlloc::new();
   let raw: RawAst() = read(src, mut_of(cur), al);
-  return c99_expand_clean(ref_of(raw), text, al, entry);
+  return c99_expand_clean(ref_of(raw), effective, al, entry);
 };
 
 pub {
