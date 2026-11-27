@@ -1,0 +1,928 @@
+use import("std::collections")::{ Vec };
+use import("std::io")::{ SliceCursor };
+use import("std::mem")::{ Allocator, SystemAlloc, SystemHandle, OomErr };
+use import("std::option")::{ Option };
+use import("std::str")::{ eq };
+use import("frontend::syntax::span")::{ SourceId, Span };
+use import("frontend::syntax::raw_ast")::{ SyntaxFail, NodeId, Delim, GroupRange, RawNode, RawAst };
+use import("frontend::syntax::ast_out")::{ AstOut };
+use import("frontend::syntax::reader")::{ read };
+use import("frontend::expand::sugar")::{ desugar, ExpandErr, ExpandFail };
+use import("frontend::ast::model")::{ AstModule };
+use import("frontend::ast::parser")::{ parse, ParseFail };
+use import("frontend::sema::hir")::{ HirModule, SemaFail };
+use import("frontend::sema::types")::{ check_module };
+use import("frontend::lower::emit")::{ lower_module, LowerFail };
+use import("kernel::ir::model")::{ IrModule };
+use import("kernel::ir::verify")::{ verify_module, VerifyErr };
+use import("kernel::ir::opt")::{ optimize_module };
+use import("kernel::vm::trap")::{ VmTrap };
+use import("kernel::vm::engine")::{ SliceOutcome };
+use import("kernel::vm::sched")::{ Limits, Sched };
+
+let MacroDef = struct {
+  name: Slice(u8),
+  param_count: u64,
+  ir_idx: u64,
+  quote_start: u64,
+  quote_len: u64
+};
+
+let CopyFrame = struct {
+  grp: GroupRange,
+  idx: u64,
+  end_pos: u32,
+  close_group: bool
+};
+
+let push_bytes = func(dst: Mut(Vec(u8)), src: Slice(u8)) !{ OomErr } {
+  let i: u64 = 0;
+  while i < src.len {
+    dst.push(src[i]);
+    i = i + 1;
+  };
+};
+
+let push_u64_dec = func(dst: Mut(Vec(u8)), n: u64) !{ OomErr } {
+  if n == 0 {
+    dst.push(48);
+    return;
+  }
+  let tmp: Vec(u8) = Vec(u8)::new();
+  let v: u64 = n;
+  while v > 0 {
+    tmp.push(((v % 10) + 48) as u8);
+    v = v / 10;
+  };
+  let k: u64 = tmp.len();
+  while k > 0 {
+    k = k - 1;
+    dst.push(tmp.get(k));
+  };
+};
+
+let is_ident_node = func(n: RawNode) -> bool {
+  return match n { Ident => true, _ => false };
+};
+
+let is_punct_ch = func(n: RawNode, ch: u8) -> bool {
+  return match n { Punct(c) => c == ch, _ => false };
+};
+
+let is_group_delim = func(n: RawNode, d: Delim) -> bool {
+  return match n { Group(g) => g.delim == d, _ => false };
+};
+
+let group_of = func(n: RawNode) -> GroupRange {
+  return match n {
+    Group(g) => g,
+    _ => GroupRange { delim: Delim::Root, start: 0, len: 0 }
+  };
+};
+
+let emit_prelude = func(dst: Mut(Vec(u8))) !{ OomErr } {
+  push_bytes(dst, "let Syntax = struct { start: u32, len: u32 };\n");
+  push_bytes(dst, "let __q_pack = func(q: Syntax) -> u64 { return ((q.start as u64) << 32) | (q.len as u64); };\n");
+  push_bytes(dst, "let __q_unpack = func(v: u64) -> Syntax { return Syntax { start: (v >> 32) as u32, len: (v & 4294967295) as u32 }; };\n");
+  push_bytes(dst, "let __q_emit0 = func(tape: Mut(u64), qid: u64) -> Syntax {\n");
+  push_bytes(dst, "  let pos: u64 = deref(tape);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos)) = qid;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 1)) = 0;\n");
+  push_bytes(dst, "  deref(tape) = pos + 2;\n");
+  push_bytes(dst, "  return Syntax { start: (((1 as u32) << 31) | (pos as u32)), len: 1 };\n");
+  push_bytes(dst, "};\n");
+  push_bytes(dst, "let __q_emit1 = func(tape: Mut(u64), qid: u64, s0: Syntax) -> Syntax {\n");
+  push_bytes(dst, "  let pos: u64 = deref(tape);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos)) = qid;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 1)) = 1;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 2)) = __q_pack(s0);\n");
+  push_bytes(dst, "  deref(tape) = pos + 3;\n");
+  push_bytes(dst, "  return Syntax { start: (((1 as u32) << 31) | (pos as u32)), len: 1 };\n");
+  push_bytes(dst, "};\n");
+  push_bytes(dst, "let __q_emit2 = func(tape: Mut(u64), qid: u64, s0: Syntax, s1: Syntax) -> Syntax {\n");
+  push_bytes(dst, "  let pos: u64 = deref(tape);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos)) = qid;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 1)) = 2;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 2)) = __q_pack(s0);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 3)) = __q_pack(s1);\n");
+  push_bytes(dst, "  deref(tape) = pos + 4;\n");
+  push_bytes(dst, "  return Syntax { start: (((1 as u32) << 31) | (pos as u32)), len: 1 };\n");
+  push_bytes(dst, "};\n");
+  push_bytes(dst, "let __q_emit3 = func(tape: Mut(u64), qid: u64, s0: Syntax, s1: Syntax, s2: Syntax) -> Syntax {\n");
+  push_bytes(dst, "  let pos: u64 = deref(tape);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos)) = qid;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 1)) = 3;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 2)) = __q_pack(s0);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 3)) = __q_pack(s1);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 4)) = __q_pack(s2);\n");
+  push_bytes(dst, "  deref(tape) = pos + 5;\n");
+  push_bytes(dst, "  return Syntax { start: (((1 as u32) << 31) | (pos as u32)), len: 1 };\n");
+  push_bytes(dst, "};\n");
+  push_bytes(dst, "let __q_emit4 = func(tape: Mut(u64), qid: u64, s0: Syntax, s1: Syntax, s2: Syntax, s3: Syntax) -> Syntax {\n");
+  push_bytes(dst, "  let pos: u64 = deref(tape);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos)) = qid;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 1)) = 4;\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 2)) = __q_pack(s0);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 3)) = __q_pack(s1);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 4)) = __q_pack(s2);\n");
+  push_bytes(dst, "  deref(ptr_offset(tape, pos + 5)) = __q_pack(s3);\n");
+  push_bytes(dst, "  deref(tape) = pos + 6;\n");
+  push_bytes(dst, "  return Syntax { start: (((1 as u32) << 31) | (pos as u32)), len: 1 };\n");
+  push_bytes(dst, "};\n");
+};
+
+let collect_quote_slots = func(raw: Ref(RawAst()), grp: GroupRange, slots: Mut(Vec(NodeId))) !{ OomErr } {
+  let n: u64 = grp.len as u64;
+  let i: u64 = 0;
+  while i < n {
+    let id: NodeId = raw.child_at(grp, i as u32);
+    let node: RawNode = raw.node(id);
+    if is_punct_ch(node, 36) and ((i + 1) < n) {
+      let nid: NodeId = raw.child_at(grp, (i + 1) as u32);
+      if is_ident_node(raw.node(nid)) {
+        slots.push(nid);
+        i = i + 2;
+      } else {
+        i = i + 1;
+      }
+    } else {
+      match node {
+        Group(cg) => {
+          collect_quote_slots(raw, cg, slots);
+        },
+        _ => {},
+      };
+      i = i + 1;
+    }
+  };
+};
+
+let emit_group_text = func(raw: Ref(RawAst()), text: Slice(u8), grp: GroupRange, dst: Mut(Vec(u8)), quotes: Mut(Vec(GroupRange)), q_base: u64) !{ OomErr, ExpandFail } {
+  let n: u64 = grp.len as u64;
+  let i: u64 = 0;
+  let prev_end: u32 = 0;
+  let has_prev: bool = false;
+  while i < n {
+    let id: NodeId = raw.child_at(grp, i as u32);
+    let node: RawNode = raw.node(id);
+    let sp: Span = raw.span(id);
+    if is_ident_node(node) and raw.text_eq(text, id, "quote") and ((i + 1) < n) {
+      let nid: NodeId = raw.child_at(grp, (i + 1) as u32);
+      let nnode: RawNode = raw.node(nid);
+      if is_group_delim(nnode, Delim::Brace) {
+        let qgrp: GroupRange = group_of(nnode);
+        let qid: u64 = quotes.len() - q_base;
+        quotes.push(qgrp);
+        let slots: Vec(NodeId) = Vec(NodeId)::new();
+        collect_quote_slots(raw, qgrp, mut_of(slots));
+        if slots.len() > 4 {
+          perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
+        }
+        if has_prev {
+          dst.push(32);
+        }
+        push_bytes(dst, "__q_emit");
+        push_u64_dec(dst, slots.len());
+        push_bytes(dst, "(__tape, ");
+        push_u64_dec(dst, qid);
+        let si: u64 = 0;
+        while si < slots.len() {
+          push_bytes(dst, ", ");
+          push_bytes(dst, raw.text_of(text, slots.get(si)));
+          si = si + 1;
+        };
+        dst.push(41);
+        has_prev = true;
+        prev_end = raw.span(nid).end;
+        i = i + 2;
+      } else {
+        if has_prev and (prev_end != sp.start) {
+          dst.push(32);
+        }
+        push_bytes(dst, raw.text_of(text, id));
+        has_prev = true;
+        prev_end = sp.end;
+        i = i + 1;
+      }
+    } else {
+      match node {
+        Group(cg) => {
+          if has_prev and (prev_end != sp.start) {
+            dst.push(32);
+          }
+          let open_c: u8 = match cg.delim {
+            Paren => 40,
+            Bracket => 91,
+            Brace => 123,
+            Root => 32
+          };
+          let close_c: u8 = match cg.delim {
+            Paren => 41,
+            Bracket => 93,
+            Brace => 125,
+            Root => 32
+          };
+          dst.push(open_c);
+          emit_group_text(raw, text, cg, dst, quotes, q_base);
+          dst.push(close_c);
+          has_prev = true;
+          prev_end = sp.end;
+        },
+        _ => {
+          if has_prev and (prev_end != sp.start) {
+            dst.push(32);
+          }
+          push_bytes(dst, raw.text_of(text, id));
+          has_prev = true;
+          prev_end = sp.end;
+        },
+      };
+      i = i + 1;
+    }
+  };
+};
+
+let compile_verify = func(ir: Mut(IrModule)) !{ OomErr, VerifyErr } -> bool {
+  verify_module(ir);
+  optimize_module(ir);
+  return true;
+};
+
+let compile_lower = func(hir: Ref(HirModule), ir_out: Mut(IrModule)) !{ OomErr, LowerFail } -> bool {
+  let ir: IrModule = lower_module(hir);
+  let ok: bool = handle compile_verify(mut_of(ir)) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+  if ok {
+    deref(ir_out) = reloc(ir);
+  }
+  return ok;
+};
+
+let compile_sema = func(ast: Ref(AstModule()), text: Slice(u8), ir_out: Mut(IrModule)) !{ OomErr, SemaFail } -> bool {
+  let hir: HirModule = check_module(ast, text)!;
+  return handle compile_lower(ref_of(hir), ir_out) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let compile_parse = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, ir_out: Mut(IrModule)) !{ OomErr, ParseFail } -> bool {
+  let ast: AstModule() = parse(raw, text, al)!;
+  return handle compile_sema(ref_of(ast), text, ir_out) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let compile_read = func(text: Slice(u8), al: SystemHandle, ir_out: Mut(IrModule)) !{ OomErr, SyntaxFail } -> bool {
+  let src: SourceId = SourceId { idx: 0 };
+  let cur: SliceCursor = SliceCursor::new(text);
+  let raw: RawAst() = read(src, mut_of(cur), al);
+  return handle compile_parse(ref_of(raw), text, al, ir_out) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+};
+
+let compile_ir_clean = func(text: Slice(u8), al: SystemHandle, sp: Span) !{ OomErr, ExpandFail } -> IrModule {
+  let ir: IrModule = IrModule::new();
+  let ok: bool = handle compile_read(text, al, mut_of(ir)) with {
+    return(v) => v,
+    oom(_) => false,
+    fail(_) => false
+  };
+  if ok == false {
+    perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
+  }
+  return reloc(ir);
+};
+
+let parse_macro_params = func(raw: Ref(RawAst()), pgrp: GroupRange, pnames: Mut(Vec(NodeId))) !{ OomErr } {
+  let n: u64 = pgrp.len as u64;
+  let i: u64 = 0;
+  let expect_name: bool = true;
+  while i < n {
+    let id: NodeId = raw.child_at(pgrp, i as u32);
+    let node: RawNode = raw.node(id);
+    if expect_name and is_ident_node(node) {
+      pnames.push(id);
+      expect_name = false;
+    } else if is_punct_ch(node, 44) {
+      expect_name = true;
+    }
+    i = i + 1;
+  };
+};
+
+let try_match_macro_decl = func(
+  raw: Ref(RawAst()),
+  text: Slice(u8),
+  grp: GroupRange,
+  i: u64,
+  end_i_out: Mut(u64),
+  name_id_out: Mut(NodeId),
+  pgrp_out: Mut(GroupRange),
+  bgrp_out: Mut(GroupRange)
+) -> bool {
+  let n: u64 = grp.len as u64;
+  let k: u64 = i;
+  if k >= n { return false; }
+  let id0: NodeId = raw.child_at(grp, k as u32);
+  if is_ident_node(raw.node(id0)) and raw.text_eq(text, id0, "pub") {
+    k = k + 1;
+  }
+  if (k + 4) >= n { return false; }
+  let id_let: NodeId = raw.child_at(grp, k as u32);
+  let id_name: NodeId = raw.child_at(grp, (k + 1) as u32);
+  let id_eq: NodeId = raw.child_at(grp, (k + 2) as u32);
+  let id_mac: NodeId = raw.child_at(grp, (k + 3) as u32);
+  let id_par: NodeId = raw.child_at(grp, (k + 4) as u32);
+  if (is_ident_node(raw.node(id_let)) == false) or (raw.text_eq(text, id_let, "let") == false) {
+    return false;
+  }
+  if is_ident_node(raw.node(id_name)) == false {
+    return false;
+  }
+  if is_punct_ch(raw.node(id_eq), 61) == false {
+    return false;
+  }
+  if (is_ident_node(raw.node(id_mac)) == false) or (raw.text_eq(text, id_mac, "macro") == false) {
+    return false;
+  }
+  if is_group_delim(raw.node(id_par), Delim::Paren) == false {
+    return false;
+  }
+  let j: u64 = k + 5;
+  let found_brace: bool = false;
+  let bgrp: GroupRange = GroupRange { delim: Delim::Root, start: 0, len: 0 };
+  while (j < n) and (found_brace == false) {
+    let cur_id: NodeId = raw.child_at(grp, j as u32);
+    let cur_n: RawNode = raw.node(cur_id);
+    if is_group_delim(cur_n, Delim::Brace) {
+      bgrp = group_of(cur_n);
+      found_brace = true;
+    } else if is_punct_ch(cur_n, 59) {
+      return false;
+    }
+    j = j + 1;
+  };
+  if found_brace == false {
+    return false;
+  }
+  if (j < n) and is_punct_ch(raw.node(raw.child_at(grp, j as u32)), 59) {
+    j = j + 1;
+  }
+  deref(end_i_out) = j;
+  deref(name_id_out) = id_name;
+  deref(pgrp_out) = group_of(raw.node(id_par));
+  deref(bgrp_out) = bgrp;
+  return true;
+};
+
+let compile_macro_def = func(
+  raw: Ref(RawAst()),
+  text: Slice(u8),
+  al: SystemHandle,
+  name: Slice(u8),
+  sp: Span,
+  pgrp: GroupRange,
+  bgrp: GroupRange,
+  quotes: Mut(Vec(GroupRange)),
+  irs: Mut(Vec(IrModule))
+) !{ OomErr, ExpandFail } -> MacroDef {
+  let pnames: Vec(NodeId) = Vec(NodeId)::new();
+  parse_macro_params(raw, pgrp, mut_of(pnames));
+  let q_base: u64 = quotes.len();
+  let src_buf: Vec(u8) = Vec(u8)::new();
+  emit_prelude(mut_of(src_buf));
+  push_bytes(mut_of(src_buf), "let __macro_impl = func(__tape: Mut(u64)");
+  let pi: u64 = 0;
+  while pi < pnames.len() {
+    push_bytes(mut_of(src_buf), ", ");
+    push_bytes(mut_of(src_buf), raw.text_of(text, pnames.get(pi)));
+    push_bytes(mut_of(src_buf), ": Syntax");
+    pi = pi + 1;
+  };
+  push_bytes(mut_of(src_buf), ") -> Syntax {\n");
+  emit_group_text(raw, text, bgrp, mut_of(src_buf), quotes, q_base);
+  push_bytes(mut_of(src_buf), "\n};\n");
+  push_bytes(mut_of(src_buf), "pub let __macro_entry = func(__tape: Mut(u64)");
+  pi = 0;
+  while pi < pnames.len() {
+    push_bytes(mut_of(src_buf), ", __a");
+    push_u64_dec(mut_of(src_buf), pi);
+    push_bytes(mut_of(src_buf), ": u64");
+    pi = pi + 1;
+  };
+  push_bytes(mut_of(src_buf), ") -> u64 {\n");
+  pi = 0;
+  while pi < pnames.len() {
+    push_bytes(mut_of(src_buf), "  let __p");
+    push_u64_dec(mut_of(src_buf), pi);
+    push_bytes(mut_of(src_buf), ": Syntax = __q_unpack(__a");
+    push_u64_dec(mut_of(src_buf), pi);
+    push_bytes(mut_of(src_buf), ");\n");
+    pi = pi + 1;
+  };
+  push_bytes(mut_of(src_buf), "  return __q_pack(__macro_impl(__tape");
+  pi = 0;
+  while pi < pnames.len() {
+    push_bytes(mut_of(src_buf), ", __p");
+    push_u64_dec(mut_of(src_buf), pi);
+    pi = pi + 1;
+  };
+  push_bytes(mut_of(src_buf), "));\n};\n");
+  let ir: IrModule = compile_ir_clean(src_buf.as_slice(), al, sp);
+  let ir_idx: u64 = irs.len();
+  irs.push(reloc(ir));
+  let q_len: u64 = quotes.len() - q_base;
+  return MacroDef {
+    name: name,
+    param_count: pnames.len(),
+    ir_idx: ir_idx,
+    quote_start: q_base,
+    quote_len: q_len
+  };
+};
+
+let find_macro = func(macros: Ref(Vec(MacroDef)), name: Slice(u8)) -> i64 {
+  let i: u64 = 0;
+  while i < macros.len() {
+    let m: Ref(MacroDef) = macros.get_ref(i);
+    if eq(m.name, name) {
+      return i as i64;
+    }
+    i = i + 1;
+  };
+  return -1;
+};
+
+let split_call_args = func(raw: Ref(RawAst()), pgrp: GroupRange, args_out: Mut(Vec(u64))) !{ OomErr } {
+  let n: u64 = pgrp.len as u64;
+  if n == 0 {
+    return;
+  }
+  let cur_start: u32 = pgrp.start;
+  let cur_len: u32 = 0;
+  let i: u64 = 0;
+  while i < n {
+    let id: NodeId = raw.child_at(pgrp, i as u32);
+    if is_punct_ch(raw.node(id), 44) {
+      args_out.push(((cur_start as u64) << 32) | (cur_len as u64));
+      cur_start = pgrp.start + (i as u32) + 1;
+      cur_len = 0;
+    } else {
+      cur_len = cur_len + 1;
+    }
+    i = i + 1;
+  };
+  args_out.push(((cur_start as u64) << 32) | (cur_len as u64));
+};
+
+let pack_single_node = func(id: NodeId) -> u64 {
+  let tagged: u32 = ((1 as u32) << 30) | id.idx;
+  return ((tagged as u64) << 32) | 1;
+};
+
+let SpliceFrame = struct {
+  is_quote: bool,
+  grp: GroupRange,
+  idx: u64,
+  end_pos: u32,
+  close_group: bool,
+  slot_base: u64,
+  slot_cnt: u64,
+  cursor_idx: u64
+};
+
+let MacroPass = func() -> Module {
+  let Raw = RawAst();
+  let Out = AstOut();
+
+  return module {
+    let push_handle_frames = func(
+      call_raw: Ref(Raw),
+      quotes: Ref(Vec(GroupRange)),
+      q_base: u64,
+      tape: Ref(Vec(u64)),
+      handle_u64: u64,
+      stack: Mut(Vec(SpliceFrame)),
+      q_cursors: Mut(Vec(u64))
+    ) !{ OomErr } {
+      let start_w: u32 = (handle_u64 >> 32) as u32;
+      let len_w: u32 = (handle_u64 & 4294967295) as u32;
+      let is_quote: bool = (start_w >> 31) != 0;
+      if is_quote {
+        let pos: u64 = (start_w & 2147483647) as u64;
+        let qid: u64 = tape.get(pos);
+        let slot_cnt: u64 = tape.get(pos + 1);
+        let qgrp: GroupRange = quotes.get(q_base + qid);
+        let cidx: u64 = q_cursors.len();
+        q_cursors.push(0);
+        stack.push(SpliceFrame {
+          is_quote: true,
+          grp: qgrp,
+          idx: 0,
+          end_pos: 0,
+          close_group: false,
+          slot_base: pos + 2,
+          slot_cnt: slot_cnt,
+          cursor_idx: cidx
+        });
+      } else {
+        let is_single: bool = (start_w >> 30) != 0;
+        if is_single {
+          let nid: NodeId = NodeId { idx: start_w & 1073741823 };
+          let node: RawNode = call_raw.node(nid);
+          let sp: Span = call_raw.span(nid);
+          let _m1: u64 = match node {
+            Group(cg) => {
+              stack.push(SpliceFrame {
+                is_quote: false,
+                grp: cg,
+                idx: 0,
+                end_pos: sp.end,
+                close_group: true,
+                slot_base: 0,
+                slot_cnt: 0,
+                cursor_idx: 0
+              });
+              0
+            },
+            _ => 0
+          };
+        } else {
+          let grp_slice: GroupRange = GroupRange { delim: Delim::Root, start: start_w, len: len_w };
+          stack.push(SpliceFrame {
+            is_quote: false,
+            grp: grp_slice,
+            idx: 0,
+            end_pos: 0,
+            close_group: false,
+            slot_base: 0,
+            slot_cnt: 0,
+            cursor_idx: 0
+          });
+        }
+      }
+    };
+
+    let splice_handle = func(
+      call_raw: Ref(Raw),
+      macro_raw: Ref(Raw),
+      quotes: Ref(Vec(GroupRange)),
+      q_base: u64,
+      tape: Ref(Vec(u64)),
+      handle_u64: u64,
+      out: Mut(Out)
+    ) !{ OomErr } {
+      let start_w0: u32 = (handle_u64 >> 32) as u32;
+      let is_q0: bool = (start_w0 >> 31) != 0;
+      let is_s0: bool = (start_w0 >> 30) != 0;
+      if (is_q0 == false) and is_s0 {
+        let nid0: NodeId = NodeId { idx: start_w0 & 1073741823 };
+        let n0: RawNode = call_raw.node(nid0);
+        let n0_grp: bool = match n0 { Group(_) => true, _ => false };
+        if n0_grp == false {
+          let _e0: NodeId = out.emit(n0, call_raw.span(nid0));
+          return;
+        }
+      }
+      let stack: Vec(SpliceFrame) = Vec(SpliceFrame)::new();
+      let q_cursors: Vec(u64) = Vec(u64)::new();
+      if (is_q0 == false) and is_s0 {
+        let nid1: NodeId = NodeId { idx: start_w0 & 1073741823 };
+        out.begin_group(group_of(call_raw.node(nid1)).delim, call_raw.span(nid1).start);
+      }
+      push_handle_frames(call_raw, quotes, q_base, tape, handle_u64, mut_of(stack), mut_of(q_cursors));
+      while stack.len() > 0 {
+        let top_i: u64 = stack.len() - 1;
+        let fr: Mut(SpliceFrame) = stack.get_mut(top_i);
+        let n: u64 = deref(fr).grp.len as u64;
+        if deref(fr).idx >= n {
+          let close_g: bool = deref(fr).close_group;
+          let delim: Delim = deref(fr).grp.delim;
+          let end_pos: u32 = deref(fr).end_pos;
+          stack.truncate(top_i);
+          if close_g {
+            let _cl: NodeId = out.end_group(delim, end_pos);
+          }
+        } else {
+          let ci: u64 = deref(fr).idx;
+          let cur_grp: GroupRange = deref(fr).grp;
+          let is_q: bool = deref(fr).is_quote;
+          let s_base: u64 = deref(fr).slot_base;
+          let s_cnt: u64 = deref(fr).slot_cnt;
+          if is_q {
+            let id: NodeId = macro_raw.child_at(cur_grp, ci as u32);
+            let node: RawNode = macro_raw.node(id);
+            let sp: Span = macro_raw.span(id);
+            if is_punct_ch(node, 36) and ((ci + 1) < n) {
+              let nid: NodeId = macro_raw.child_at(cur_grp, (ci + 1) as u32);
+              if is_ident_node(macro_raw.node(nid)) {
+                let cidx: u64 = deref(fr).cursor_idx;
+                let cp: Mut(u64) = q_cursors.get_mut(cidx);
+                let sc: u64 = deref(cp);
+                deref(cp) = sc + 1;
+                deref(fr).idx = ci + 2;
+                if sc < s_cnt {
+                  let h: u64 = tape.get(s_base + sc);
+                  let sw: u32 = (h >> 32) as u32;
+                  let h_q: bool = (sw >> 31) != 0;
+                  let h_s: bool = (sw >> 30) != 0;
+                  if (h_q == false) and h_s {
+                    let snid: NodeId = NodeId { idx: sw & 1073741823 };
+                    let sn: RawNode = call_raw.node(snid);
+                    let sn_grp: bool = match sn { Group(_) => true, _ => false };
+                    if sn_grp == false {
+                      let _es: NodeId = out.emit(sn, call_raw.span(snid));
+                    } else {
+                      out.begin_group(group_of(sn).delim, call_raw.span(snid).start);
+                      push_handle_frames(call_raw, quotes, q_base, tape, h, mut_of(stack), mut_of(q_cursors));
+                    }
+                  } else {
+                    push_handle_frames(call_raw, quotes, q_base, tape, h, mut_of(stack), mut_of(q_cursors));
+                  }
+                }
+              } else {
+                deref(fr).idx = ci + 1;
+                let _e: NodeId = out.emit(node, sp);
+              }
+            } else {
+              deref(fr).idx = ci + 1;
+              let _m2: u64 = match node {
+                Group(cg) => {
+                  out.begin_group(cg.delim, sp.start);
+                  stack.push(SpliceFrame {
+                    is_quote: true,
+                    grp: cg,
+                    idx: 0,
+                    end_pos: sp.end,
+                    close_group: true,
+                    slot_base: s_base,
+                    slot_cnt: s_cnt,
+                    cursor_idx: deref(fr).cursor_idx
+                  });
+                  0
+                },
+                _ => {
+                  let _e: NodeId = out.emit(node, sp);
+                  0
+                }
+              };
+            }
+          } else {
+            deref(fr).idx = ci + 1;
+            let id2: NodeId = call_raw.child_at(cur_grp, ci as u32);
+            let node2: RawNode = call_raw.node(id2);
+            let sp2: Span = call_raw.span(id2);
+            let _m3: u64 = match node2 {
+              Group(cg2) => {
+                out.begin_group(cg2.delim, sp2.start);
+                stack.push(SpliceFrame {
+                  is_quote: false,
+                  grp: cg2,
+                  idx: 0,
+                  end_pos: sp2.end,
+                  close_group: true,
+                  slot_base: 0,
+                  slot_cnt: 0,
+                  cursor_idx: 0
+                });
+                0
+              },
+              _ => {
+                let _e2: NodeId = out.emit(node2, sp2);
+                0
+              }
+            };
+          }
+        }
+      };
+    };
+
+    let expand_group = func(
+      cur_raw: Ref(Raw),
+      macro_raw: Ref(Raw),
+      text: Slice(u8),
+      macros: Ref(Vec(MacroDef)),
+      irs: Ref(Vec(IrModule)),
+      quotes: Ref(Vec(GroupRange)),
+      grp: GroupRange,
+      is_root: bool,
+      strip_macros: bool,
+      out: Mut(Out),
+      did_expand: Mut(bool)
+    ) !{ OomErr, ExpandFail } {
+      let n: u64 = grp.len as u64;
+      let i: u64 = 0;
+      while i < n {
+        let handled: bool = false;
+        if is_root and strip_macros {
+          let end_i: u64 = 0;
+          let dummy_id: NodeId = NodeId { idx: 0 };
+          let dummy_p: GroupRange = GroupRange { delim: Delim::Root, start: 0, len: 0 };
+          let dummy_b: GroupRange = GroupRange { delim: Delim::Root, start: 0, len: 0 };
+          if try_match_macro_decl(cur_raw, text, grp, i, mut_of(end_i), mut_of(dummy_id), mut_of(dummy_p), mut_of(dummy_b)) {
+            i = end_i;
+            handled = true;
+          }
+        }
+        if handled == false {
+          let id: NodeId = cur_raw.child_at(grp, i as u32);
+          let node: RawNode = cur_raw.node(id);
+          let sp: Span = cur_raw.span(id);
+          if is_ident_node(node) {
+            let name: Slice(u8) = cur_raw.text_of(text, id);
+            let midx: i64 = find_macro(macros, name);
+            if midx >= 0 {
+              let m: Ref(MacroDef) = macros.get_ref(midx as u64);
+              let args: Vec(u64) = Vec(u64)::new();
+              let next_i: u64 = i + 1;
+              let matched_call: bool = false;
+              if next_i < n {
+                let nid: NodeId = cur_raw.child_at(grp, next_i as u32);
+                let nnode: RawNode = cur_raw.node(nid);
+                let nsp: Span = cur_raw.span(nid);
+                if is_group_delim(nnode, Delim::Paren) {
+                  split_call_args(cur_raw, group_of(nnode), mut_of(args));
+                  next_i = next_i + 1;
+                  matched_call = true;
+                  if next_i < n {
+                    let bid: NodeId = cur_raw.child_at(grp, next_i as u32);
+                    if is_group_delim(cur_raw.node(bid), Delim::Brace) {
+                      args.push(pack_single_node(bid));
+                      next_i = next_i + 1;
+                    }
+                  }
+                } else if is_group_delim(nnode, Delim::Brace) {
+                  args.push(pack_single_node(nid));
+                  next_i = next_i + 1;
+                  matched_call = true;
+                } else {
+                  let is_str: bool = match nnode { StrLit => true, _ => false };
+                  if is_str and Span::touches(sp, nsp) {
+                    args.push(pack_single_node(nid));
+                    next_i = next_i + 1;
+                    matched_call = true;
+                  }
+                }
+              }
+              if matched_call {
+                if args.len() != m.param_count {
+                  perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
+                }
+                let tape: Vec(u64) = Vec(u64)::new();
+                let res_h: u64 = 0;
+                exec_macro_vm(irs.get_ref(m.ir_idx), args.as_slice(), mut_of(tape), sp, mut_of(res_h));
+                splice_handle(cur_raw, macro_raw, quotes, m.quote_start, ref_of(tape), res_h, out);
+                deref(did_expand) = true;
+                i = next_i;
+                handled = true;
+              }
+            }
+          }
+          if handled == false {
+            let _m4: u64 = match node {
+              Group(cg) => {
+                out.begin_group(cg.delim, sp.start);
+                expand_group(cur_raw, macro_raw, text, macros, irs, quotes, cg, false, false, out, did_expand);
+                let _cl: NodeId = out.end_group(cg.delim, sp.end);
+                0
+              },
+              _ => {
+                let _e: NodeId = out.emit(node, sp);
+                0
+              }
+            };
+            i = i + 1;
+          }
+        }
+      };
+    };
+
+    pub {
+      let run_pass = func(
+        cur_raw: Ref(Raw),
+        macro_raw: Ref(Raw),
+        text: Slice(u8),
+        macros: Ref(Vec(MacroDef)),
+        irs: Ref(Vec(IrModule)),
+        quotes: Ref(Vec(GroupRange)),
+        strip_macros: bool,
+        alloc: SystemHandle,
+        did_exp: Mut(bool)
+      ) !{ OomErr, ExpandFail } -> Raw {
+        let r_sp: Span = cur_raw.span(cur_raw.root);
+        let r_grp: GroupRange = group_of(cur_raw.node(cur_raw.root));
+        let out: Out = Out::with_alloc(r_sp.src, alloc);
+        expand_group(cur_raw, macro_raw, text, macros, irs, quotes, r_grp, true, strip_macros, mut_of(out), did_exp);
+        let next_raw: Raw = out.finish(r_sp.end);
+        return reloc(next_raw);
+      };
+    };
+  };
+};
+
+let exec_macro_inner = func(
+  ir: Ref(IrModule),
+  args: Slice(u64),
+  tape: Mut(Vec(u64)),
+  out_val: Mut(u64)
+) !{ OomErr, VmTrap } -> u64 {
+  let limits: Limits = Limits {
+    fuel_slice: 100000,
+    max_call_depth: 32,
+    stack_cap: 16384,
+    heap_cap: 65536
+  };
+  let outcome: SliceOutcome = Sched::apply_with_buf(ir, "__macro_entry", args, 4096, tape, limits);
+  let rc: u64 = match outcome {
+    Done(v) => {
+      deref(out_val) = v;
+      0
+    },
+    _ => 1
+  };
+  return rc;
+};
+
+let exec_macro_vm = func(
+  ir: Ref(IrModule),
+  args: Slice(u64),
+  tape: Mut(Vec(u64)),
+  sp: Span,
+  out_val: Mut(u64)
+) !{ OomErr, ExpandFail } {
+  let rc: u64 = handle exec_macro_inner(ir, args, tape, out_val) with {
+    return(v) => v,
+    oom(_) => 1,
+    fail(_) => 2
+  };
+  if rc != 0 {
+    perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
+  }
+};
+
+pub let expand_with_macros = func(raw: Ref(RawAst()), text: Slice(u8), alloc: SystemHandle)
+  !{ OomErr, SyntaxFail, ExpandFail } -> RawAst()
+{
+  let cur: RawAst() = desugar(raw, text, alloc);
+  let root_n: RawNode = cur.node(cur.root);
+  let root_grp: GroupRange = group_of(root_n);
+  let macros: Vec(MacroDef) = Vec(MacroDef)::new();
+  let irs: Vec(IrModule) = Vec(IrModule)::new();
+  let quotes: Vec(GroupRange) = Vec(GroupRange)::new();
+  let n: u64 = root_grp.len as u64;
+  let i: u64 = 0;
+  while i < n {
+    let end_i: u64 = 0;
+    let name_id: NodeId = NodeId { idx: 0 };
+    let pgrp: GroupRange = GroupRange { delim: Delim::Root, start: 0, len: 0 };
+    let bgrp: GroupRange = GroupRange { delim: Delim::Root, start: 0, len: 0 };
+    if try_match_macro_decl(ref_of(cur), text, root_grp, i, mut_of(end_i), mut_of(name_id), mut_of(pgrp), mut_of(bgrp)) {
+      let mname: Slice(u8) = cur.text_of(text, name_id);
+      let msp: Span = cur.span(name_id);
+      let mdef: MacroDef = compile_macro_def(ref_of(cur), text, alloc, mname, msp, pgrp, bgrp, mut_of(quotes), mut_of(irs));
+      macros.push(reloc(mdef));
+      i = end_i;
+    } else {
+      i = i + 1;
+    }
+  };
+  let asts: Vec(RawAst()) = Vec(RawAst())::new();
+  asts.push(reloc(cur));
+  let P = MacroPass();
+  let depth: u64 = 0;
+  let strip: bool = true;
+  let keep_going: bool = macros.len() > 0;
+  while keep_going {
+    if depth > 64 {
+      let cur_r0: Ref(RawAst()) = asts.get_ref(asts.len() - 1);
+      let r_sp: Span = cur_r0.span(cur_r0.root);
+      perform ExpandFail::fail(ExpandErr::DepthLimit(r_sp));
+    }
+    let did_exp: bool = false;
+    let cur_r: Ref(RawAst()) = asts.get_ref(asts.len() - 1);
+    let m_r: Ref(RawAst()) = asts.get_ref(0);
+    let next_raw: RawAst() = P::run_pass(cur_r, m_r, text, ref_of(macros), ref_of(irs), ref_of(quotes), strip, alloc, mut_of(did_exp));
+    asts.push(reloc(next_raw));
+    strip = false;
+    if did_exp == false {
+      keep_going = false;
+    } else {
+      depth = depth + 1;
+    }
+  };
+  let dummy_exp: bool = false;
+  let last_r: Ref(RawAst()) = asts.get_ref(asts.len() - 1);
+  let m_r2: Ref(RawAst()) = asts.get_ref(0);
+  let final_raw: RawAst() = P::run_pass(last_r, m_r2, text, ref_of(macros), ref_of(irs), ref_of(quotes), false, alloc, mut_of(dummy_exp));
+  return reloc(final_raw);
+};

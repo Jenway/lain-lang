@@ -2,9 +2,9 @@ use import("std::collections")::{ Vec };
 use import("std::option")::{ Option };
 use import("std::mem")::{ OomErr };
 use import("kernel::ir::model")::{ Proc, IrModule };
-use import("kernel::vm::addr")::{ SegId, TcbId, EpId };
+use import("kernel::vm::addr")::{ SegId, TcbId, EpId, VmAddr };
 use import("kernel::vm::trap")::{ Trap, VmTrap };
-use import("kernel::vm::vspace")::{ VSpace };
+use import("kernel::vm::vspace")::{ VSpace, Segment };
 use import("kernel::vm::cspace")::{ CSpace };
 use import("kernel::vm::endpoint")::{ Endpoint, Rendezvous };
 use import("kernel::vm::image")::{ Image };
@@ -158,6 +158,50 @@ pub {
         let p: Ref(Proc) = m.procs.get_ref(entry_id);
         sched.spawn(mut_of(vs), entry_id, p.val_count + 1, args, limits.stack_cap, limits.max_call_depth);
         return sched.run_all(ref_of(img), mut_of(vs), ref_of(cs));
+      };
+
+      let apply_with_buf = func(
+        m: Ref(IrModule),
+        entry: Slice(u8),
+        args: Slice(u64),
+        buf_bytes: u64,
+        out_words: Mut(Vec(u64)),
+        limits: Limits
+      ) !{ VmTrap, OomErr } -> SliceOutcome {
+        let entry_id: u64 = match find_entry(m, entry) {
+          Some(id) => id,
+          None => perform VmTrap::fail(Trap { reason: Trap::Reason::Unreachable, proc_id: 0, pc: 0 }),
+        };
+        let img: Image = Image::load(m);
+        let vs: VSpace = VSpace::new(limits.heap_cap);
+        img.mount(mut_of(vs));
+        let buf_sid: SegId = vs.alloc_seg(buf_bytes, true);
+        let buf_seg: Ref(Segment) = vs.segs.get_ref(buf_sid.id);
+        let buf_vaddr: u64 = buf_seg.base.raw;
+        vs.store(VmAddr { raw: buf_vaddr }, 1, 8, 8);
+        let cs: CSpace = CSpace::new();
+        cs.freeze();
+        let sched: Self = new(limits.fuel_slice);
+        let p: Ref(Proc) = m.procs.get_ref(entry_id);
+        let full_args: Vec(u64) = Vec(u64)::new();
+        full_args.push(buf_vaddr);
+        let ai: u64 = 0;
+        while ai < args.len {
+          full_args.push(args[ai]);
+          ai = ai + 1;
+        };
+        sched.spawn(mut_of(vs), entry_id, p.val_count + 1, full_args.as_slice(), limits.stack_cap, limits.max_call_depth);
+        let res: SliceOutcome = sched.run_all(ref_of(img), mut_of(vs), ref_of(cs));
+        let used_words: u64 = vs.load(VmAddr { raw: buf_vaddr }, 8, 8);
+        let max_words: u64 = buf_bytes / 8;
+        let lim: u64 = if used_words < max_words { used_words } else { max_words };
+        let wi: u64 = 0;
+        while wi < lim {
+          let w: u64 = vs.load(VmAddr { raw: buf_vaddr + (wi * 8) }, 8, 8);
+          out_words.push(w);
+          wi = wi + 1;
+        };
+        return res;
       };
     };
   };
