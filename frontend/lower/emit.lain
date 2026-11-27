@@ -45,7 +45,9 @@ let Ctx = struct {
   pb: ProcBuilder,
   slots: ValVec,
   drops: DropTracker,
-  loops: LoopVec
+  loops: LoopVec,
+  cur_sret: Option(ValId),
+  cur_sret_bytes: u64
 };
 
 let none_val = func() -> ValId {
@@ -187,8 +189,48 @@ let arith_op = func(op: BinOp, signed: bool) -> Op {
   };
 };
 
-let param_tys = func(h: Ref(HirModule), f: HirFn) -> TyVec {
+let agg_bytes = func(h: Ref(HirModule), t: TypeId) -> u64 {
+  let ht: HirType = h.type_at(t);
+  return match ht {
+    Struct(idx) => {
+      let si: StructInfo = h.struct_at(idx);
+      if si.size == 0 { 8 } else { si.size as u64 }
+    },
+    Enum(idx) => {
+      let ei: EnumInfo = h.enum_at(idx);
+      if ei.is_tagged_union {
+        if ei.size == 0 { 8 } else { ei.size as u64 }
+      } else {
+        0
+      }
+    },
+    _ => 0,
+  };
+};
+
+let copy_agg = func(ctx: Mut(Ctx), dst: ValId, src: ValId, bytes: u64) !{ OomErr } {
+  let off: u64 = 0;
+  while (off + 8) <= bytes {
+    let sp: ValId = if off == 0 { src } else { ctx.pb.lea(src, none_val(), 1, off) };
+    let dp: ValId = if off == 0 { dst } else { ctx.pb.lea(dst, none_val(), 1, off) };
+    let v: ValId = ctx.pb.load(Ty::Bits { 64 }, sp, 8);
+    ctx.pb.store(Ty::Bits { 64 }, v, dp, 8);
+    off = off + 8;
+  };
+  while off < bytes {
+    let sp1: ValId = if off == 0 { src } else { ctx.pb.lea(src, none_val(), 1, off) };
+    let dp1: ValId = if off == 0 { dst } else { ctx.pb.lea(dst, none_val(), 1, off) };
+    let v1: ValId = ctx.pb.load(Ty::Bits { 8 }, sp1, 1);
+    ctx.pb.store(Ty::Bits { 8 }, v1, dp1, 1);
+    off = off + 1;
+  };
+};
+
+let param_tys = func(h: Ref(HirModule), f: HirFn, with_sret: bool) -> TyVec {
   let out: TyVec = TyVec::new();
+  if with_sret {
+    out.push(Ty::Addr);
+  }
   let i: u32 = 0;
   while i < f.params.len {
     let p: HirParam = h.param_at(f.params.start + i);
@@ -420,7 +462,14 @@ let lower_call = func(ctx: Mut(Ctx), c: HirCall, rty: Ty, span: Span) !{ OomErr,
       let found: Option(ProcId) = ctx.mono.lookup(fid);
       match found {
         Some(pid) => {
+          let f: HirFn = ctx.hir.fn_at(fid);
+          let sret_sz: u64 = agg_bytes(ctx.hir, f.ret_ty);
           let args: ValVec = ValVec::new();
+          let sret_buf: ValId = none_val();
+          if sret_sz > 0 {
+            sret_buf = ctx.pb.alloca(Ty::Bits { 8 }, sret_sz);
+            args.push(sret_buf);
+          }
           let div: bool = false;
           let i: u32 = 0;
           while (i < c.args.len) and (div == false) {
@@ -433,8 +482,13 @@ let lower_call = func(ctx: Mut(Ctx), c: HirCall, rty: Ty, span: Span) !{ OomErr,
           let view: Slice(ValId) = args.as_slice();
           let rv: ValId = none_val();
           if div == false {
-            let got: ValId = ctx.pb.call(pid, view, rty, false);
-            rv = got;
+            if sret_sz > 0 {
+              let _v: ValId = ctx.pb.call(pid, view, Ty::Void, false);
+              rv = sret_buf;
+            } else {
+              let got: ValId = ctx.pb.call(pid, view, rty, false);
+              rv = got;
+            }
           }
           if div {
             return diverge();
@@ -706,7 +760,15 @@ let lower_stmt = func(ctx: Mut(Ctx), sid: HirStmtId) !{ OomErr, LowerFail } -> E
           if out.diverged {
             return diverge();
           }
-          ctx.pb.emit_ret(out.val);
+          match deref(ctx).cur_sret {
+            Some(dst) => {
+              copy_agg(ctx, dst, out.val, deref(ctx).cur_sret_bytes);
+              ctx.pb.emit_ret(none_val());
+            },
+            None => {
+              ctx.pb.emit_ret(out.val);
+            },
+          };
         },
         None => {
           ctx.pb.emit_ret(none_val());
@@ -777,12 +839,13 @@ let alloc_slots = func(ctx: Mut(Ctx), f: HirFn) !{ OomErr } {
   };
 };
 
-let bind_params = func(ctx: Mut(Ctx), f: HirFn) !{ OomErr } {
+let bind_params = func(ctx: Mut(Ctx), f: HirFn, has_sret: bool) !{ OomErr } {
   let k: u32 = 0;
   while k < f.params.len {
     let p: HirParam = ctx.hir.param_at(f.params.start + k);
     let pty: Ty = ty_of(ctx.hir, p.ty);
-    let pv: ValId = ctx.pb.param(k as u64);
+    let pidx: u64 = if has_sret { (k + 1) as u64 } else { k as u64 };
+    let pv: ValId = ctx.pb.param(pidx);
     let paddr: ValId = ctx.slots.get(p.local.idx as u64);
     ctx.pb.store(pty, pv, paddr, 8);
     ctx.drops.track(p.local);
@@ -807,8 +870,10 @@ let finish_proc = func(ctx: Mut(Ctx)) -> Proc {
 };
 
 let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr, LowerFail } -> Proc {
-  let rt: Ty = ty_of(h, f.ret_ty);
-  let ptys: TyVec = param_tys(h, f);
+  let sret_sz: u64 = agg_bytes(h, f.ret_ty);
+  let has_sret: bool = sret_sz > 0;
+  let rt: Ty = if has_sret { Ty::Void } else { ty_of(h, f.ret_ty) };
+  let ptys: TyVec = param_tys(h, f, has_sret);
   let c0: Ctx = Ctx {
     hir: h,
     mono: mono,
@@ -816,15 +881,26 @@ let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr
     pb: ProcBuilder::new(f.name, reloc(ptys), rt),
     slots: ValVec::new(),
     drops: DropTracker::new(),
-    loops: LoopVec::new()
+    loops: LoopVec::new(),
+    cur_sret: Option(ValId)::none(),
+    cur_sret_bytes: sret_sz
   };
   let ctx: Mut(Ctx) = mut_of(c0);
+  if has_sret {
+    deref(ctx).cur_sret = Option(ValId)::some(ctx.pb.param(0));
+  }
   alloc_slots(ctx, f);
-  bind_params(ctx, f);
+  bind_params(ctx, f, has_sret);
   let body: EmitOut = lower_block(ctx, f.body);
   let void_ret: bool = rt == Ty::Void;
   if body.diverged == false {
-    if void_ret {
+    if has_sret {
+      match deref(ctx).cur_sret {
+        Some(dst) => { copy_agg(ctx, dst, body.val, sret_sz); },
+        None => {},
+      };
+      ctx.pb.emit_ret(none_val());
+    } else if void_ret {
       ctx.pb.emit_ret(none_val());
     } else {
       ctx.pb.emit_ret(body.val);
@@ -834,8 +910,10 @@ let lower_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr
 };
 
 let lower_stub_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ OomErr } -> Proc {
-  let rt: Ty = ty_of(h, f.ret_ty);
-  let ptys: TyVec = param_tys(h, f);
+  let sret_sz: u64 = agg_bytes(h, f.ret_ty);
+  let has_sret: bool = sret_sz > 0;
+  let rt: Ty = if has_sret { Ty::Void } else { ty_of(h, f.ret_ty) };
+  let ptys: TyVec = param_tys(h, f, has_sret);
   let c0: Ctx = Ctx {
     hir: h,
     mono: mono,
@@ -843,7 +921,9 @@ let lower_stub_fn = func(h: Ref(HirModule), mono: Ref(MonoTable), f: HirFn) !{ O
     pb: ProcBuilder::new(f.name, reloc(ptys), rt),
     slots: ValVec::new(),
     drops: DropTracker::new(),
-    loops: LoopVec::new()
+    loops: LoopVec::new(),
+    cur_sret: Option(ValId)::none(),
+    cur_sret_bytes: 0
   };
   let ctx: Mut(Ctx) = mut_of(c0);
   ctx.pb.emit_unreachable();
@@ -904,7 +984,9 @@ let lower_entry = func(hir: Ref(HirModule), mono: Mut(MonoTable), expr_id: HirEx
     pb: ProcBuilder::new(entry_name, TyVec::new(), rt),
     slots: ValVec::new(),
     drops: DropTracker::new(),
-    loops: LoopVec::new()
+    loops: LoopVec::new(),
+    cur_sret: Option(ValId)::none(),
+    cur_sret_bytes: 0
   };
   let ctx: Mut(Ctx) = mut_of(c0);
   let total: u64 = hir.local_count() as u64;

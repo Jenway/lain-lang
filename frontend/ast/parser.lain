@@ -10,7 +10,7 @@ use import("frontend::ast::model")::{
   UnaryExpr, BinaryExpr, FieldExpr, IndexExpr, CallExpr, CastExpr, IfExpr,
   MatchArm, MatchExpr, BlockExpr, Param, WitnessParam, FuncExpr, FieldDef,
   VariantDef, StructExpr, EnumExpr, FieldInit, StructLitExpr, PerformExpr,
-  HandleArm, HandleExpr, Expr, VariantPat, Pattern, LetStmt, AssignStmt,
+  HandleArm, HandleExpr, EffectOp, Expr, VariantPat, Pattern, LetStmt, AssignStmt,
   WhileStmt, Stmt, UseDecl, LetDecl, Decl, AstModule
 };
 
@@ -49,6 +49,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
     let FrameVec = Vec(Frame);
     let ExprIdVec = Vec(ExprId);
     let StmtIdVec = Vec(StmtId);
+    let DeclIdVec = Vec(DeclId);
 
     pub {
       let Self = struct {
@@ -57,6 +58,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         src: SourceId,
         out: Mut(Out::Self),
         frames: FrameVec,
+        decl_buf: DeclIdVec,
         last: Span,
         no_struct: bool
       };
@@ -309,7 +311,19 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         if cur_punct(c, 63) == false {
           return false;
         }
-        return cur_group(c, Delim::Brace);
+        let o: NodeOpt::Opt = peek_opt(c, 1);
+        return match o {
+          Some(id) => {
+            let n: RawNode = node_at(c, id);
+            if is_group_node(n) == false {
+              false
+            } else {
+              let g: GroupRange = group_range(n);
+              g.delim == Delim::Brace
+            }
+          },
+          None => false
+        };
       };
 
       let bump = func(c: Mut(Self)) {
@@ -428,7 +442,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         let id: DeclId = DeclId { idx: deref(deref(c).out).decls.len() as u32 };
         deref(deref(c).out).decls.push(d)!;
         deref(deref(c).out).decl_spans.push(sp)!;
-        deref(deref(c).out).decl_lists.push(id)!;
+        deref(c).decl_buf.push(id)!;
       };
 
       let push_expr_id = func(c: Mut(Self), e: ExprId) !{ OomErr } {
@@ -617,6 +631,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           if eq(w, "module") {
             return parse_module(c)!;
           }
+          if eq(w, "sig") {
+            return parse_sig(c)!;
+          }
+          if eq(w, "effect") {
+            return parse_effect(c)!;
+          }
           if eq(w, "perform") {
             return parse_perform(c)!;
           }
@@ -697,6 +717,12 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
             let fld: Span = expect_ident(c)!;
             let f: FieldExpr = FieldExpr { base: e, field: fld };
             e = add_expr(c, Expr::Field(f), Span::merge(expr_span(c, e), deref(c).last))!;
+          } else if two_punct(c, 58, 58) {
+            bump(c);
+            bump(c);
+            let mem: Span = expect_ident(c)!;
+            let f2: FieldExpr = FieldExpr { base: e, field: mem };
+            e = add_expr(c, Expr::Field(f2), Span::merge(expr_span(c, e), deref(c).last))!;
           } else if cur_group(c, Delim::Paren) {
             let gid: NodeId = peek_id(c, 0);
             let args: IdRange = parse_arg_list(c, gid)!;
@@ -1066,8 +1092,13 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           let t: ExprId = parse_type(c)!;
           ret = ExprOpt::some(t);
         }
-        let bid: NodeId = expect_group(c, Delim::Brace)!;
-        let body: ExprId = parse_block_node(c, bid)!;
+        let body: ExprId = if deref(c).no_struct and (cur_group(c, Delim::Brace) == false) {
+          let eb: BlockExpr = BlockExpr { stmts: IdRange { start: 0, len: 0 }, tail: ExprOpt::none() };
+          add_expr(c, Expr::Block(eb), head)!
+        } else {
+          let bid: NodeId = expect_group(c, Delim::Brace)!;
+          parse_block_node(c, bid)!
+        };
         let f: FuncExpr = FuncExpr {
           params: IdRange { start: pstart, len: plen },
           witnesses: IdRange { start: wstart, len: wlen },
@@ -1216,6 +1247,79 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
         return add_expr(c, Expr::ModuleLit(inner), Span::merge(head, deref(c).last))!;
       };
 
+      let parse_sig = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
+        let head: Span = cur_span(c);
+        bump(c);
+        let gid: NodeId = expect_group(c, Delim::Brace)!;
+        let start: u32 = deref(deref(c).out).fields.len() as u32;
+        push_group(c, gid)!;
+        while peek_some(c) {
+          if cur_ident(c, "pub") {
+            bump(c);
+          }
+          if cur_ident(c, "let") == false {
+            let lsp: Span = cur_span(c);
+            perform ParseFail::fail(ParseErr::ExpectedIdent { lsp });
+          }
+          bump(c);
+          let name: Span = expect_ident(c)!;
+          expect_punct(c, 58)!;
+          let ty: ExprId = parse_type(c)!;
+          expect_punct(c, 59)!;
+          let fd: FieldDef = FieldDef { name: name, ty: ty, span: Span::merge(name, deref(c).last) };
+          deref(deref(c).out).fields.push(fd)!;
+        };
+        pop_group(c);
+        bump(c);
+        let len: u32 = (deref(deref(c).out).fields.len() as u32) - start;
+        return add_expr(c, Expr::SigLit(IdRange { start: start, len: len }), Span::merge(head, deref(c).last))!;
+      };
+
+      let parse_effect = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
+        let head: Span = cur_span(c);
+        bump(c);
+        let gid: NodeId = expect_group(c, Delim::Brace)!;
+        let start: u32 = deref(deref(c).out).effect_ops.len() as u32;
+        push_group(c, gid)!;
+        while peek_some(c) {
+          if cur_ident(c, "op") == false {
+            let osp: Span = cur_span(c);
+            perform ParseFail::fail(ParseErr::ExpectedIdent { osp });
+          }
+          bump(c);
+          let name: Span = expect_ident(c)!;
+          let pgid: NodeId = expect_group(c, Delim::Paren)!;
+          let pstart: u32 = deref(deref(c).out).params.len() as u32;
+          push_group(c, pgid)!;
+          while peek_some(c) {
+            parse_param(c)!;
+            if cur_punct(c, 44) {
+              bump(c);
+            } else if peek_some(c) {
+              fail_tok(c, cur_span(c))!;
+            }
+          };
+          pop_group(c);
+          bump(c);
+          let plen: u32 = (deref(deref(c).out).params.len() as u32) - pstart;
+          let params: IdRange = IdRange { start: pstart, len: plen };
+          let ret: ExprOpt::Opt = ExprOpt::none();
+          if two_punct(c, 45, 62) {
+            bump(c);
+            bump(c);
+            let rty: ExprId = parse_type(c)!;
+            ret = ExprOpt::some(rty);
+          }
+          expect_punct(c, 59)!;
+          let op: EffectOp = EffectOp { name: name, params: params, ret_ty: ret, span: Span::merge(name, deref(c).last) };
+          deref(deref(c).out).effect_ops.push(op)!;
+        };
+        pop_group(c);
+        bump(c);
+        let len: u32 = (deref(deref(c).out).effect_ops.len() as u32) - start;
+        return add_expr(c, Expr::EffectLit(IdRange { start: start, len: len }), Span::merge(head, deref(c).last))!;
+      };
+
       let parse_reloc = func(c: Mut(Self)) !{ OomErr, ParseFail } -> ExprId {
         let head: Span = cur_span(c);
         bump(c);
@@ -1329,12 +1433,19 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
       };
 
       let parse_decls = func(c: Mut(Self)) !{ OomErr, ParseFail } -> IdRange {
-        let start: u32 = deref(deref(c).out).decl_lists.len() as u32;
+        let base: u64 = deref(c).decl_buf.len();
         while peek_some(c) {
           parse_decl(c)!;
         };
-        let endn: u32 = deref(deref(c).out).decl_lists.len() as u32;
-        return IdRange { start: start, len: endn - start };
+        let endn: u64 = deref(c).decl_buf.len();
+        let start: u32 = deref(deref(c).out).decl_lists.len() as u32;
+        let i: u64 = base;
+        while i < endn {
+          deref(deref(c).out).decl_lists.push(deref(c).decl_buf.get(i))!;
+          i = i + 1;
+        };
+        deref(c).decl_buf.truncate(base);
+        return IdRange { start: start, len: (endn - base) as u32 };
       };
 
       let parse_decl = func(c: Mut(Self)) !{ OomErr, ParseFail } {
@@ -1424,6 +1535,7 @@ let Parser = func() ?{ al: Allocator = SystemAlloc } -> Module {
           src: src,
           out: out,
           frames: FrameVec::with_alloc(alloc),
+          decl_buf: DeclIdVec::with_alloc(alloc),
           last: Span::empty(src, 0),
           no_struct: false
         };

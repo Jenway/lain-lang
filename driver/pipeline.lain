@@ -9,7 +9,7 @@ use import("frontend::expand::sugar")::{ ExpandFail };
 use import("frontend::expand::expand")::{ expand };
 use import("frontend::ast::model")::{ AstModule };
 use import("frontend::ast::parser")::{ parse, ParseFail };
-use import("frontend::sema::hir")::{ HirModule, SemaFail };
+use import("frontend::sema::hir")::{ HirModule, SemaFail, SemaErr };
 use import("frontend::sema::types")::{ check_module };
 use import("frontend::lower::emit")::{ lower_module, LowerFail };
 use import("kernel::ir::model")::{ IrModule };
@@ -76,7 +76,10 @@ let run_sched_only = func(ir: Ref(IrModule), entry: Ref(Slice(u8)), res_out: Mut
   return handle do_sched(ir, entry, res_out) with {
     return(v) => v,
     oom(_) => 99,
-    fail(tr) => 100 + tr.pc
+    fail(tr) => {
+      deref(res_out) = RunResult { ok: false, stage: 8, value: tr.pc };
+      100 + tr.pc
+    }
   };
 };
 
@@ -106,11 +109,24 @@ let run_after_sema = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u
   return run_lower_clean(ref_of(hir), entry);
 };
 
+let sema_err_code = func(e: SemaErr) -> u64 {
+  return match e {
+    UnknownIdent(s) => 10000 + (s.start as u64),
+    TypeMismatch(s) => 20000 + (s.start as u64),
+    ArityMismatch(s) => 30000 + (s.start as u64),
+    UnknownField(s) => 40000 + (s.start as u64),
+    UnhandledEffect(s) => 50000 + (s.start as u64),
+    DuplicateSym(s) => 60000 + (s.start as u64),
+    Unsupported(s) => 70000 + (s.start as u64),
+    ComptimeTrap(s) => 80000 + (s.start as u64)
+  };
+};
+
 let run_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) -> RunResult {
   return handle run_after_sema(ast, text, entry) with {
     return(v) => v,
     oom(_) => RunResult { ok: false, stage: 4, value: 1 },
-    fail(_) => RunResult { ok: false, stage: 4, value: 2 }
+    fail(e) => RunResult { ok: false, stage: 4, value: sema_err_code(e) }
   };
 };
 
