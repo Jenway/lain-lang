@@ -1,3 +1,4 @@
+let diag = import("std::diag");
 use import("std::collections")::{ Vec };
 use import("std::mem")::{ OomErr };
 use import("std::option")::{ Option };
@@ -78,7 +79,7 @@ pub let Scope = module {
       return reloc(old);
     };
 
-    let define = func(s: Mut(Self), name: Slice(u8), kind: SymKind, span: Span) !{ OomErr, SemaFail } -> SymId {
+    let define_at = func(s: Mut(Self), name: Slice(u8), kind: SymKind, span: Span, text: Slice(u8)) !{ OomErr, SemaFail } -> SymId {
       let i: u64 = s.syms.len();
       while i > 0 {
         i = i - 1;
@@ -87,6 +88,15 @@ pub let Scope = module {
           break;
         }
         if eq(e.name, name) {
+          diag::emit_msg("sema", "DuplicateSym");
+          diag::emit_msg("sema", name);
+          diag::emit_msg_u64("sema", "dup_depth", s.depth as u64);
+          diag::emit_msg_u64("sema", "dup_syms", s.syms.len());
+          if (text.len > 0) and ((span.start as u64) <= text.len) {
+            diag::emit_span("sema", "DuplicateSym", text, span.start as u64);
+          } else {
+            diag::emit_pos("sema", "DuplicateSym", span.start as u64);
+          }
           perform SemaFail::fail(SemaErr::DuplicateSym { span });
           return SymId { idx: 0 };
         }
@@ -94,6 +104,10 @@ pub let Scope = module {
       let id: SymId = SymId { idx: s.syms.len() as u32 };
       s.syms.push(SymEntry { name: name, kind: kind, depth: s.depth, pad: 0 });
       return id;
+    };
+
+    let define = func(s: Mut(Self), name: Slice(u8), kind: SymKind, span: Span) !{ OomErr, SemaFail } -> SymId {
+      return Self::define_at(s, name, kind, span, "");
     };
 
     let lookup = func(s: Ref(Self), name: Slice(u8)) -> Option(SymEntry) {

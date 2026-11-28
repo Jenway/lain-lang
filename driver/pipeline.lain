@@ -1,3 +1,4 @@
+let diag = import("std::diag");
 let io = import("std::io");
 use import("std::io")::{ SliceCursor, StdoutSink };
 use import("std::mem")::{ SystemAlloc, SystemHandle, OomErr };
@@ -8,11 +9,11 @@ use import("frontend::expand::env")::{ SyntaxEnv };
 use import("frontend::expand::sugar")::{ ExpandFail };
 use import("frontend::expand::expand")::{ expand };
 use import("frontend::ast::model")::{ AstModule };
-use import("frontend::ast::parser")::{ parse, ParseFail };
+use import("frontend::ast::parser")::{ parse, ParseFail, ParseErr };
 use import("frontend::sema::hir")::{ HirModule, SemaFail, SemaErr };
 use import("frontend::sema::types")::{ check_module };
 use import("frontend::lower::emit")::{ lower_module, LowerFail };
-use import("kernel::ir::model")::{ IrModule };
+use import("kernel::ir::model")::{ IrModule, Proc, Inst };
 use import("kernel::ir::verify")::{ verify_module, VerifyErr };
 use import("kernel::ir::opt")::{ optimize_module };
 use import("kernel::vm::trap")::{ VmTrap };
@@ -40,7 +41,26 @@ let run_verify_opt = func(ir: Mut(IrModule)) -> u64 {
   return handle do_verify_opt(ir) with {
     return(v) => v,
     oom(_) => 1,
-    fail(vf) => 100 + vf.pc
+    fail(vf) => {
+      let vp: Ref(Proc) = ir.procs.get_ref(vf.proc_id);
+      diag::emit_msg("verify_proc", vp.name);
+      let vval: u64 = match vf.err {
+        UndefinedValue(vid) => vid,
+        _ => 0
+      };
+      if vf.pc < vp.insts.len() {
+        let vi: Inst = vp.insts.get(vf.pc);
+        diag::emit_ir("verify_detail", "val_op", vval, vi.op as u64);
+        diag::emit_ir("verify_detail", "ab", vi.a, vi.b);
+        if (vi.op as u64) == 60 {
+          let cp: Ref(Proc) = ir.procs.get_ref(vi.a);
+          diag::emit_msg("verify_callee", cp.name);
+        }
+      } else {
+        diag::emit_ir("verify_detail", "val", vval, 0);
+      }
+      100 + vf.pc
+    }
   };
 };
 
@@ -59,14 +79,17 @@ let do_sched = func(ir: Ref(IrModule), entry: Ref(Slice(u8)), res_out: Mut(RunRe
       0
     },
     FuelSlice => {
+      diag::emit_msg("vm", "FuelSlice exhausted");
       deref(res_out) = RunResult { ok: false, stage: 7, value: 1 };
       0
     },
     Blocked(_) => {
+      diag::emit_msg("vm", "Blocked (no entry or waiting on endpoint)");
       deref(res_out) = RunResult { ok: false, stage: 7, value: 2 };
       0
     },
     Trapped(tr) => {
+      diag::emit_msg("vm", "Trapped");
       deref(res_out) = RunResult { ok: false, stage: 7, value: tr.pc };
       0
     }
@@ -120,15 +143,25 @@ let sema_err_code = func(e: SemaErr) -> u64 {
     UnhandledEffect(s) => 50000 + (s.start as u64),
     DuplicateSym(s) => 60000 + (s.start as u64),
     Unsupported(s) => 70000 + (s.start as u64),
-    ComptimeTrap(s) => 80000 + (s.start as u64)
+    ComptimeTrap(s) => 80000 + (s.start as u64),
+    _ => 99999
   };
 };
 
 let run_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) -> RunResult {
   return handle run_after_sema(ast, text, entry) with {
     return(v) => v,
-    oom(_) => RunResult { ok: false, stage: 4, value: 1 },
-    fail(e) => RunResult { ok: false, stage: 4, value: sema_err_code(e) }
+    oom(_) => {
+      diag::emit_msg("sema", "Out of memory during semantic analysis");
+      RunResult { ok: false, stage: 4, value: 1 }
+    },
+    fail(e) => {
+      let code: u64 = sema_err_code(e);
+      if code == 99999 {
+        diag::emit_msg("sema", "Unknown or unmapped SemaErr variant");
+      }
+      RunResult { ok: false, stage: 4, value: code }
+    }
   };
 };
 
@@ -137,11 +170,22 @@ let run_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemH
   return run_sema_clean(ref_of(ast), text, entry);
 };
 
+let parse_err_pos = func(e: ParseErr) -> u64 {
+  return match e {
+    UnexpectedToken(sp) => sp.start as u64,
+    UnexpectedEof(sp) => sp.start as u64,
+    ExpectedIdent(sp) => sp.start as u64,
+    ExpectedPunct(sp) => sp.start as u64,
+    InvalidExpr(sp) => sp.start as u64,
+    _ => 99999
+  };
+};
+
 let run_parse_clean = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> RunResult {
   return handle run_after_parse(expanded, text, al, entry) with {
     return(v) => v,
     oom(_) => RunResult { ok: false, stage: 3, value: 1 },
-    fail(_) => RunResult { ok: false, stage: 3, value: 2 }
+    fail(e) => RunResult { ok: false, stage: 3, value: parse_err_pos(e) }
   };
 };
 
@@ -166,6 +210,7 @@ let run_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFa
     load_ok = loader::bundle_to_slice(text, mut_of(effective));
   }
   if load_ok == false {
+    diag::emit_msg("loader", "Failed to load or bundle import");
     return RunResult { ok: false, stage: 1, value: 3 };
   }
   let src: SourceId = SourceId { idx: 0 };
@@ -178,7 +223,10 @@ let run_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFa
 let emit_c99_clean = func(ir: Ref(IrModule), entry: Slice(u8)) -> bool {
   return handle c99::emit_module(ir, entry) ?{ out: StdoutSink } with {
     return(v) => v,
-    oom(_) => false
+    oom(_) => {
+      diag::emit_msg("c99", "Out of memory during C99 emission");
+      false
+    }
   };
 };
 
@@ -194,7 +242,10 @@ let c99_after_lower = func(hir: Ref(HirModule), entry: Slice(u8)) !{ OomErr, Low
 let c99_lower_clean = func(hir: Ref(HirModule), entry: Slice(u8)) -> bool {
   return handle c99_after_lower(hir, entry) with {
     return(v) => v,
-    oom(_) => false,
+    oom(_) => {
+      diag::emit_msg("lower", "Out of memory during lowering");
+      false
+    },
     fail(_) => false
   };
 };
@@ -207,7 +258,10 @@ let c99_after_sema = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u
 let c99_sema_clean = func(ast: Ref(AstModule()), text: Slice(u8), entry: Slice(u8)) -> bool {
   return handle c99_after_sema(ast, text, entry) with {
     return(v) => v,
-    oom(_) => false,
+    oom(_) => {
+      diag::emit_msg("sema", "Out of memory during semantic analysis");
+      false
+    },
     fail(_) => false
   };
 };
@@ -220,8 +274,11 @@ let c99_after_parse = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemH
 let c99_parse_clean = func(expanded: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> bool {
   return handle c99_after_parse(expanded, text, al, entry) with {
     return(v) => v,
-    oom(_) => { io::println("FAIL_PARSE_OOM"); false },
-    fail(_) => { io::println("FAIL_PARSE"); false }
+    oom(_) => {
+      diag::emit_msg("parse", "Out of memory during parsing");
+      false
+    },
+    fail(_) => false
   };
 };
 
@@ -234,7 +291,10 @@ let c99_after_expand = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandl
 let c99_expand_clean = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, entry: Slice(u8)) -> bool {
   return handle c99_after_expand(raw, text, al, entry) with {
     return(v) => v,
-    oom(_) => false,
+    oom(_) => {
+      diag::emit_msg("expand", "Out of memory during macro expansion");
+      false
+    },
     fail(_) => false
   };
 };
@@ -244,11 +304,9 @@ let c99_after_read = func(text: Slice(u8), entry: Slice(u8)) !{ OomErr, SyntaxFa
   let load_ok: bool = true;
   if loader::has_import(text) {
     load_ok = loader::bundle_to_slice(text, mut_of(effective));
-    io::print("BUNDLE_OK=");
-    io::println_u64(if load_ok { 1 } else { 0 });
-    io::println(effective);
   }
   if load_ok == false {
+    diag::emit_msg("loader", "Failed to load or bundle import");
     return false;
   }
   let src: SourceId = SourceId { idx: 0 };

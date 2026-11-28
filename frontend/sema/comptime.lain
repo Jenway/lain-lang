@@ -1,3 +1,4 @@
+let diag = import("std::diag");
 use import("std::mem")::{ OomErr };
 use import("frontend::syntax::span")::{ Span };
 use import("frontend::sema::hir")::{ HirModule, HirExprId, TypeId, SemaErr, SemaFail };
@@ -31,61 +32,49 @@ let run_sched_eval = func(ir: Ref(IrModule), entry_name: Slice(u8), out: Mut(u64
   return 0;
 };
 
-let run_verify_eval = func(ir: Mut(IrModule), entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool), oom_n: Mut(u64), oom_hit: Mut(bool))
+let run_verify_eval = func(ir: Mut(IrModule), entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool))
   !{ OomErr, VerifyErr } -> u64
 {
   verify_module(ir);
   optimize_module(ir);
   return handle run_sched_eval(ir, entry_name, out, ok) with {
     return(v) => v,
-    oom(n) => {
-      deref(oom_n) = n;
-      deref(oom_hit) = true;
-      1
+    fail(_) => {
+      diag::emit_msg("comptime", "VM trap during comptime eval");
+      2
     },
-    fail(_) => 2,
   };
 };
 
-let run_lower_eval = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool), oom_n: Mut(u64), oom_hit: Mut(bool))
+let run_lower_eval = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, entry_name: Slice(u8), out: Mut(u64), ok: Mut(bool))
   !{ OomErr, LowerFail } -> u64
 {
   let ir: IrModule = lower_eval_expr(hir, expr_id, ret_ty, entry_name);
-  return handle run_verify_eval(mut_of(ir), entry_name, out, ok, oom_n, oom_hit) with {
+  return handle run_verify_eval(mut_of(ir), entry_name, out, ok) with {
     return(v) => v,
-    oom(n) => {
-      deref(oom_n) = n;
-      deref(oom_hit) = true;
-      1
+    fail(_) => {
+      diag::emit_msg("comptime", "VM trap during comptime eval");
+      2
     },
-    fail(_) => 2,
   };
 };
 
 pub let eval_hir_u64 = func(hir: Ref(HirModule), expr_id: HirExprId, ret_ty: TypeId, span: Span)
   !{ OomErr, SemaFail } -> u64
 {
-  let oom_n_val: u64 = 0;
-  let oom_hit_val: bool = false;
   let out_val: u64 = 0;
   let ok_val: bool = false;
-  let oom_n: Mut(u64) = mut_of(oom_n_val);
-  let oom_hit: Mut(bool) = mut_of(oom_hit_val);
   let out: Mut(u64) = mut_of(out_val);
   let ok: Mut(bool) = mut_of(ok_val);
-  let _rc: u64 = handle run_lower_eval(hir, expr_id, ret_ty, "__ct_eval", out, ok, oom_n, oom_hit) with {
+  let _rc: u64 = handle run_lower_eval(hir, expr_id, ret_ty, "__ct_eval", out, ok) with {
     return(v) => v,
-    oom(n) => {
-      deref(oom_n) = n;
-      deref(oom_hit) = true;
-      1
+    fail(_) => {
+      diag::emit_msg("comptime", "VM trap during comptime eval");
+      2
     },
-    fail(_) => 2,
   };
-  if deref(oom_hit) {
-    perform OomErr::oom(deref(oom_n));
-  }
   if deref(ok) == false {
+    diag::emit_pos("sema", "ComptimeTrap", span.start as u64);
     perform SemaFail::fail(SemaErr::ComptimeTrap { span });
   }
   return deref(out);

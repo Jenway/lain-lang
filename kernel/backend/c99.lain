@@ -41,7 +41,32 @@ let emit_c_ty = func(t: Ty) ?{ out: io::Sink } {
 };
 
 let emit_preamble = func() ?{ out: io::Sink } {
-  out::write("#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
+  out::write("#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n\n");
+  out::write("static int g_lain_argc = 0;\nstatic char **g_lain_argv = NULL;\n\n");
+  out::write("static inline uint64_t lain_os_argc(void) { return (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0); }\n");
+  out::write("static inline uint64_t lain_os_argv_len(uint64_t idx) { if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0; return (uint64_t)strlen(g_lain_argv[idx]); }\n");
+  out::write("static inline uint64_t lain_os_argv_copy(uint64_t idx, uint64_t buf, uint64_t cap) { size_t n; if (!g_lain_argv || idx >= (uint64_t)(g_lain_argc > 0 ? g_lain_argc : 0)) return 0; n = strlen(g_lain_argv[idx]); if (n > (size_t)cap) n = (size_t)cap; if (n > 0 && buf) memcpy((void*)(uintptr_t)buf, g_lain_argv[idx], n); return (uint64_t)n; }\n");
+  out::write("static inline uint64_t lain_os_eprint(uint64_t ptr, uint64_t len) { if (len > 0 && ptr) fwrite((const void*)(uintptr_t)ptr, 1, (size_t)len, stderr); return len; }\n");
+  out::write("static inline uint64_t lain_ext_calloc(uint64_t n, uint64_t sz) { return (uint64_t)(uintptr_t)calloc((size_t)n, (size_t)sz); }\n");
+  out::write("static inline uint64_t lain_ext_malloc(uint64_t n) { return (uint64_t)(uintptr_t)malloc((size_t)n); }\n");
+  out::write("static inline void lain_ext_free(uint64_t p) { free((void*)(uintptr_t)p); }\n");
+  out::write("static inline uint64_t lain_ext_memcpy(uint64_t d, uint64_t s, uint64_t n) { return (uint64_t)(uintptr_t)memcpy((void*)(uintptr_t)d, (const void*)(uintptr_t)s, (size_t)n); }\n");
+  out::write("static inline uint64_t lain_ext_fopen(uint64_t p, uint64_t m) { return (uint64_t)(uintptr_t)fopen((const char*)(uintptr_t)p, (const char*)(uintptr_t)m); }\n");
+  out::write("static inline uint64_t lain_ext_fclose(uint64_t f) { return (uint64_t)(int64_t)fclose((FILE*)(uintptr_t)f); }\n");
+  out::write("static inline uint64_t lain_ext_fseek(uint64_t f, uint64_t o, uint64_t w) { return (uint64_t)(int64_t)fseek((FILE*)(uintptr_t)f, (long)(int64_t)o, (int)(int64_t)w); }\n");
+  out::write("static inline uint64_t lain_ext_ftell(uint64_t f) { return (uint64_t)(int64_t)ftell((FILE*)(uintptr_t)f); }\n");
+  out::write("static inline uint64_t lain_ext_fread(uint64_t b, uint64_t s, uint64_t n, uint64_t f) { return (uint64_t)fread((void*)(uintptr_t)b, (size_t)s, (size_t)n, (FILE*)(uintptr_t)f); }\n");
+  out::write("static inline uint64_t lain_ext_fwrite(uint64_t b, uint64_t s, uint64_t n, uint64_t f) { return (uint64_t)fwrite((const void*)(uintptr_t)b, (size_t)s, (size_t)n, (FILE*)(uintptr_t)f); }\n");
+  out::write("static inline uint64_t lain_ext_remove(uint64_t p) { return (uint64_t)(int64_t)remove((const char*)(uintptr_t)p); }\n");
+  out::write("static inline uint64_t lain_ext_system(uint64_t c) { return (uint64_t)(int64_t)system((const char*)(uintptr_t)c); }\n");
+  out::write("static inline uint64_t lain_ext_putchar(uint64_t c) { return (uint64_t)(int64_t)putchar((int)(int64_t)c); }\n\n");
+  out::write("typedef struct { uint8_t *buf; size_t used; size_t cap; } LainArenaChunk;\n");
+  out::write("typedef struct { LainArenaChunk *chunks; size_t count; size_t cap; size_t cur; } LainArena;\n");
+  out::write("typedef struct { size_t chunk_idx; size_t used; } LainArenaMark;\n");
+  out::write("static LainArena g_lain_arena = { NULL, 0, 0, 0 };\n");
+  out::write("static LainArenaMark lain_arena_mark(void) { LainArenaMark m; m.chunk_idx = g_lain_arena.cur; m.used = (g_lain_arena.cur < g_lain_arena.count) ? g_lain_arena.chunks[g_lain_arena.cur].used : 0; return m; }\n");
+  out::write("static void lain_arena_reset(LainArenaMark m) { size_t i = m.chunk_idx + 1; while (i < g_lain_arena.count) { g_lain_arena.chunks[i].used = 0; i++; } if (m.chunk_idx < g_lain_arena.count) { g_lain_arena.chunks[m.chunk_idx].used = m.used; g_lain_arena.cur = m.chunk_idx; } else { g_lain_arena.cur = 0; } }\n");
+  out::write("static uint64_t lain_arena_alloc(size_t n) { size_t align_n = (n == 0 ? 1 : n); align_n = (align_n + 15u) & ~(size_t)15u; while (g_lain_arena.cur < g_lain_arena.count) { LainArenaChunk *c = &g_lain_arena.chunks[g_lain_arena.cur]; if (c->used + align_n <= c->cap) { uint8_t *p = c->buf + c->used; memset(p, 0, align_n); c->used += align_n; return (uint64_t)(uintptr_t)p; } g_lain_arena.cur++; } size_t new_cap = 65536u; if (align_n > new_cap) new_cap = align_n; if (g_lain_arena.count == g_lain_arena.cap) { size_t ncap = g_lain_arena.cap ? g_lain_arena.cap * 2u : 8u; LainArenaChunk *nc = (LainArenaChunk *)realloc(g_lain_arena.chunks, ncap * sizeof(LainArenaChunk)); if (!nc) abort(); g_lain_arena.chunks = nc; g_lain_arena.cap = ncap; } uint8_t *buf = (uint8_t *)calloc(1, new_cap); if (!buf) abort(); size_t idx = g_lain_arena.count++; g_lain_arena.chunks[idx].buf = buf; g_lain_arena.chunks[idx].used = align_n; g_lain_arena.chunks[idx].cap = new_cap; g_lain_arena.cur = idx; return (uint64_t)(uintptr_t)buf; }\n\n");
   out::write("static inline uint64_t lain_udiv(uint64_t a, uint64_t b) { if (!b) abort(); return a / b; }\n");
   out::write("static inline uint64_t lain_urem(uint64_t a, uint64_t b) { if (!b) abort(); return a % b; }\n");
   out::write("static inline uint64_t lain_sdiv(uint64_t a, uint64_t b) { if (!b) abort(); if (((int64_t)a == INT64_MIN) && ((int64_t)b == -1)) abort(); return (uint64_t)((int64_t)a / (int64_t)b); }\n");
@@ -80,6 +105,20 @@ let emit_data = func(m: Ref(IrModule)) ?{ out: io::Sink } {
     i = i + 1;
   };
   if n > 0 { out::write("\n"); }
+};
+
+let is_c_wrapped_extern = func(name: Slice(u8)) -> bool {
+  return str::eq(name, "calloc") or str::eq(name, "malloc") or str::eq(name, "free") or
+         str::eq(name, "memcpy") or str::eq(name, "fopen") or str::eq(name, "fclose") or
+         str::eq(name, "fseek") or str::eq(name, "ftell") or str::eq(name, "fread") or
+         str::eq(name, "fwrite") or str::eq(name, "remove") or str::eq(name, "system") or
+         str::eq(name, "putchar");
+};
+
+let is_preamble_extern = func(name: Slice(u8)) -> bool {
+  return is_c_wrapped_extern(name) or str::eq(name, "lain_os_argc") or
+         str::eq(name, "lain_os_argv_len") or str::eq(name, "lain_os_argv_copy") or
+         str::eq(name, "lain_os_eprint");
 };
 
 let emit_proc_sig = func(p: Ref(Proc), id: u64) ?{ out: io::Sink } {
@@ -236,15 +275,10 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
     out::write(";\n");
   } else if op == Op::Alloca {
     let bytes: u64 = ins.imm * ins.ty.bytes();
-    out::write("uint8_t stk_");
-    emit_u64(pc) ?{ out: out };
-    out::write("[");
-    emit_u64(if bytes == 0 { 1 } else { bytes }) ?{ out: out };
-    out::write("]; ");
     emit_val(ins.dst) ?{ out: out };
-    out::write(" = (uint64_t)(uintptr_t)stk_");
-    emit_u64(pc) ?{ out: out };
-    out::write(";\n");
+    out::write(" = lain_arena_alloc(");
+    emit_u64(if bytes == 0 { 1 } else { bytes }) ?{ out: out };
+    out::write(");\n");
   } else if op == Op::Lea {
     emit_val(ins.dst) ?{ out: out };
     out::write(" = ");
@@ -282,6 +316,9 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
       out::write(" = ");
     }
     if callee.is_extern {
+      if is_c_wrapped_extern(callee.link_name) {
+        out::write("lain_ext_");
+      }
       out::write(callee.link_name);
     } else {
       out::write("p_");
@@ -397,11 +434,22 @@ let emit_inst = func(m: Ref(IrModule), p: Ref(Proc), pc: u64) ?{ out: io::Sink }
     }
   } else if op == Op::Return {
     if ins.a != 0 {
-      out::write("return ");
+      out::write("{ ");
+      emit_c_ty(p.ret_ty) ?{ out: out };
+      out::write(" __rv = ");
       emit_val(ins.a) ?{ out: out };
-      out::write(";\n");
+      out::write("; lain_arena_reset(__am); return __rv; }\n");
     } else {
-      out::write("return;\n");
+      out::write("lain_arena_reset(__am); ");
+      let is_void_ret: bool = match p.ret_ty {
+        Void => true,
+        _ => false,
+      };
+      if is_void_ret {
+        out::write("return;\n");
+      } else {
+        out::write("return 0;\n");
+      }
     }
   } else if op == Op::Assume {
     out::write("if (!");
@@ -418,7 +466,7 @@ let emit_proc = func(m: Ref(IrModule), id: u64) ?{ out: io::Sink } {
     return;
   }
   emit_proc_sig(p, id) ?{ out: out };
-  out::write(" {\n");
+  out::write(" {\n  LainArenaMark __am = lain_arena_mark();\n");
   let vi: u64 = 1;
   while vi <= p.val_count {
     out::write("  uint64_t ");
@@ -450,8 +498,11 @@ pub let emit_module = func(m: Ref(IrModule), entry: Slice(u8)) ?{ out: io::Sink 
   let i: u64 = 0;
   let n: u64 = m.procs.len();
   while i < n {
-    emit_proc_sig(m.procs.get_ref(i), i) ?{ out: out };
-    out::write(";\n");
+    let sp: Ref(Proc) = m.procs.get_ref(i);
+    if (sp.is_extern == false) or (is_preamble_extern(sp.link_name) == false) {
+      emit_proc_sig(sp, i) ?{ out: out };
+      out::write(";\n");
+    }
     i = i + 1;
   };
   out::write("\n");
@@ -465,7 +516,7 @@ pub let emit_module = func(m: Ref(IrModule), entry: Slice(u8)) ?{ out: io::Sink 
     while ei < n {
       let ep: Ref(Proc) = m.procs.get_ref(ei);
       if str::eq(ep.name, entry) {
-        out::write("int main(void) { return (int)p_");
+        out::write("int main(int argc, char **argv) { g_lain_argc = argc; g_lain_argv = argv; return (int)p_");
         emit_u64(ei) ?{ out: out };
         out::write("(); }\n");
         return true;

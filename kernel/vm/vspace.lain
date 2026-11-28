@@ -2,7 +2,7 @@ use import("std::collections")::{ Vec };
 use import("std::option")::{ Option };
 use import("std::mem")::{ OomErr, align_up, is_pow2 };
 use import("kernel::vm::addr")::{ VmAddr, SegId };
-use import("kernel::vm::trap")::{ Trap, VmTrap };
+use import("kernel::vm::trap")::{ Trap, VmTrap, raise_trap };
 
 pub {
   let SegKind = enum {
@@ -49,11 +49,7 @@ pub {
       let alloc_seg = func(vs: Mut(Self), size: u64, writable: bool) !{ VmTrap, OomErr } -> SegId {
         let off: u64 = align_up(vs.pool_used, 8);
         if (off + size) > vs.pool.len() {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::CapacityExceeded { size },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::CapacityExceeded { size }, 0, 0);
         }
         let vaddr: u64 = align_up(vs.next_vaddr, 4096);
         let id: u64 = vs.segs.len();
@@ -97,11 +93,7 @@ pub {
       let unmap_external = func(vs: Mut(Self), sid: SegId) !{ VmTrap } {
         let seg: Mut(Segment) = vs.segs.get_mut(sid.id);
         if seg.borrows > 0 {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::BorrowActive { sid },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::BorrowActive { sid }, 0, 0);
         }
         seg.active = false;
       };
@@ -123,11 +115,7 @@ pub {
         let old: u64 = align_up(seg.accessible, 8);
         let next: u64 = old + delta;
         if next > seg.capacity {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::StackOverflow { next },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::StackOverflow { next }, 0, 0);
         }
         seg.accessible = next;
         return VmAddr { raw: seg.base.raw + old };
@@ -177,19 +165,11 @@ pub {
 
       let load = func(vs: Ref(Self), vaddr: VmAddr, bytes: u64, align: u64) !{ VmTrap } -> u64 {
         if (is_pow2(align) == false) or ((vaddr.raw % align) != 0) {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::Alignment { vaddr },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::Alignment { vaddr }, 0, 0);
         }
         let sid: SegId = match find_seg(vs, vaddr, bytes) {
           Some(id) => id,
-          None => perform VmTrap::fail(Trap {
-            reason: Trap::Reason::MemoryOob { vaddr },
-            proc_id: 0,
-            pc: 0
-          }),
+          None => raise_trap(Trap::Reason::MemoryOob { vaddr }, 0, 0),
         };
         let seg: Ref(Segment) = vs.segs.get_ref(sid.id);
         let rel: u64 = vaddr.raw - seg.base.raw;
@@ -208,27 +188,15 @@ pub {
 
       let store = func(vs: Mut(Self), vaddr: VmAddr, val: u64, bytes: u64, align: u64) !{ VmTrap } {
         if (is_pow2(align) == false) or ((vaddr.raw % align) != 0) {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::Alignment { vaddr },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::Alignment { vaddr }, 0, 0);
         }
         let sid: SegId = match find_seg(ref_of(deref(vs)), vaddr, bytes) {
           Some(id) => id,
-          None => perform VmTrap::fail(Trap {
-            reason: Trap::Reason::MemoryOob { vaddr },
-            proc_id: 0,
-            pc: 0
-          }),
+          None => raise_trap(Trap::Reason::MemoryOob { vaddr }, 0, 0),
         };
         let seg: Ref(Segment) = vs.segs.get_ref(sid.id);
         if seg.writable == false {
-          perform VmTrap::fail(Trap {
-            reason: Trap::Reason::PermViolation { vaddr },
-            proc_id: 0,
-            pc: 0
-          });
+          raise_trap(Trap::Reason::PermViolation { vaddr }, 0, 0);
         }
         let rel: u64 = vaddr.raw - seg.base.raw;
         let i: u64 = 0;

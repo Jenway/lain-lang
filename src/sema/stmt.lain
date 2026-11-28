@@ -141,6 +141,24 @@ let sig_ann = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
   return 1;
 };
 
+let rhs_is_local = func(k: Mut(st.State), g: u64, e: u64) -> u64 {
+  let off: u64 = drop.bare_local(k, g, e);
+  if off == 0 { return 0; }
+  return 1;
+};
+
+let bind_value = func(k: Mut(st.State), sl: u64, cv: Mut(ty.Val), vt: Mut(ty.Ty), copy: u64) -> u64 {
+  if copy == 0 { return cx.slot_put(k, sl, cv, vt); }
+  if agg.is_value_agg(vt) == 0 { return cx.slot_put(k, sl, cv, vt); }
+  let sh: u64 = ty.tsh(vt);
+  if agg.shp_has_drop(sh) == 1 { return cx.slot_put(k, sl, cv, vt); }
+  let obj: Mut(ty.Val) = ax.new_val(k);
+  let buf: u64 = agg.new_obj(k, sh, obj);
+  let sz: u64 = agg.shp_size(sh);
+  let cp: u64 = agg.copy_block(k, ty.vn(obj), ty.vn(cv), sz);
+  return cx.slot_put(k, sl, obj, vt);
+};
+
 let stmt_let = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   let name: u64 = ax.n_sym(g, i + 1);
   let j0: u64 = i + 2;
@@ -217,7 +235,8 @@ let stmt_let = func(k: Mut(st.State), g: u64, i: u64, term: Mut(u64)) -> u64 {
   let c1: u64 = cx.coerce(k, v, ty.vty(v), vt, cv);
   if st.st_ok(k) != 0 { return nj; }
   let sl: u64 = st.st_next_slot(k);
-  cx.slot_put(k, sl, cv, ty.vty(cv));
+  let place: u64 = rhs_is_local(k, g, e);
+  let bd: u64 = bind_value(k, sl, cv, vt, place);
   env.env_push(k, name, sl, vt);
   let csh: u64 = ty.tsh(vt);
   if csh != 0 and agg.shp_has_drop(csh) == 1 {

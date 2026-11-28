@@ -1,3 +1,4 @@
+let diag = import("std::diag");
 use import("std::collections")::{ Vec };
 use import("std::err")::{ Fail };
 use import("std::mem")::{ OomErr, is_pow2 };
@@ -71,13 +72,33 @@ pub {
   let VerifyErr = Fail(VerifyFault);
 };
 
+let verify_err_kind = func(err: VerifyError) -> Slice(u8) {
+  return match err {
+    BadType => "BadType",
+    TypeMismatch => "TypeMismatch",
+    BadAlign(_) => "BadAlign",
+    BadControlFlow => "BadControlFlow",
+    TailNotBeforeReturn => "TailNotBeforeReturn",
+    DeadCodeAfterTerm => "DeadCodeAfterTerm",
+    BadCallTarget(_) => "BadCallTarget",
+    BadCallArity(_) => "BadCallArity",
+    UndefinedValue(_) => "UndefinedValue",
+    DuplicateCase(_) => "DuplicateCase"
+  };
+};
+
+let verify_fail = func(err: VerifyError, proc_id: u64, pc: u64) !{ VerifyErr } -> Never {
+  diag::emit_ir("verify", verify_err_kind(err), proc_id, pc);
+  perform VerifyErr::fail(VerifyFault { err: err, proc_id: proc_id, pc: pc });
+};
+
 let require_defined = func(val_tys: Ref(Vec(Ty)), val_id: u64, proc_id: u64, pc: u64) !{ VerifyErr } -> Ty {
   if (val_id == 0) or (val_id >= val_tys.len()) {
-    perform VerifyErr::fail(VerifyFault { err: VerifyError::UndefinedValue { val_id }, proc_id: proc_id, pc: pc });
+    verify_fail(VerifyError::UndefinedValue { val_id }, proc_id, pc);
   }
   let t: Ty = val_tys.get(val_id);
   if (t == Ty::Void) {
-    perform VerifyErr::fail(VerifyFault { err: VerifyError::UndefinedValue { val_id }, proc_id: proc_id, pc: pc });
+    verify_fail(VerifyError::UndefinedValue { val_id }, proc_id, pc);
   }
   return t;
 };
@@ -92,7 +113,7 @@ pub {
   let verify_proc = func(m: Ref(IrModule), proc_id: u64) !{ VerifyErr, OomErr } {
     let p: Ref(Proc) = m.procs.get_ref(proc_id);
     if is_valid_ty(p.ret_ty) == false {
-      perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: 0 });
+      verify_fail(VerifyError::BadType, proc_id, 0);
     }
     if p.is_extern {
       return;
@@ -107,7 +128,7 @@ pub {
     while pi < p.params.len() {
       let pt: Ty = p.params.get(pi);
       if is_valid_ty(pt) == false {
-        perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: 0 });
+        verify_fail(VerifyError::BadType, proc_id, 0);
       }
       if (pi + 1) <= p.val_count {
         val_tys.set(pi + 1, pt);
@@ -127,27 +148,27 @@ pub {
         dead = false;
       } else {
         if dead {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::DeadCodeAfterTerm, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::DeadCodeAfterTerm, proc_id, pc);
         }
       }
       if is_valid_ty(ins.ty) == false {
-        perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: pc });
+        verify_fail(VerifyError::BadType, proc_id, pc);
       }
       if (ins.op == Op::Load) or (ins.op == Op::Store) {
         if is_pow2(ins.imm) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadAlign { ins.imm }, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadAlign { ins.imm }, proc_id, pc);
         }
       }
       if ins.op == Op::Call {
         if ins.a >= m.procs.len() {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadCallTarget { ins.a }, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadCallTarget { ins.a }, proc_id, pc);
         }
         let callee: Ref(Proc) = m.procs.get_ref(ins.a);
         if ins.c != callee.params.len() {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadCallArity { ins.c }, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadCallArity { ins.c }, proc_id, pc);
         }
         if (ins.b + ins.c) > p.call_args.len() {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadCallArity { ins.c }, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadCallArity { ins.c }, proc_id, pc);
         }
         let ai: u64 = 0;
         while ai < ins.c {
@@ -155,74 +176,74 @@ pub {
           let at: Ty = require_defined(ref_of(val_tys), av, proc_id, pc);
           let pt: Ty = callee.params.get(ai);
           if at != pt {
-            perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+            verify_fail(VerifyError::TypeMismatch, proc_id, pc);
           }
           ai = ai + 1;
         };
         if ins.aux == 1 {
           if (pc + 1) >= n {
-            perform VerifyErr::fail(VerifyFault { err: VerifyError::TailNotBeforeReturn, proc_id: proc_id, pc: pc });
+            verify_fail(VerifyError::TailNotBeforeReturn, proc_id, pc);
           }
           let nxt: Ref(Inst) = p.insts.get_ref(pc + 1);
           if nxt.op != Op::Return {
-            perform VerifyErr::fail(VerifyFault { err: VerifyError::TailNotBeforeReturn, proc_id: proc_id, pc: pc });
+            verify_fail(VerifyError::TailNotBeforeReturn, proc_id, pc);
           }
         }
       }
       let k: u64 = ins.op as u64;
       if (k >= (Op::Add as u64)) and (k <= (Op::Ashr as u64)) {
         if is_bits_ty(ins.ty) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if ta != ins.ty {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         let tb: Ty = require_defined(ref_of(val_tys), ins.b, proc_id, pc);
         if tb != ins.ty {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, ins.ty);
       } else if (k >= (Op::Eq as u64)) and (k <= (Op::Sge as u64)) {
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if ta != ins.ty {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         let tb: Ty = require_defined(ref_of(val_tys), ins.b, proc_id, pc);
         if tb != ins.ty {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, Ty::Bits { 1 });
       } else if ins.op == Op::Load {
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if is_addr_ty(ta) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, ins.ty);
       } else if ins.op == Op::Store {
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if ta != ins.ty {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         let tb: Ty = require_defined(ref_of(val_tys), ins.b, proc_id, pc);
         if is_addr_ty(tb) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
       } else if ins.op == Op::Alloca {
         if ins.imm == 0 {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadType, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadType, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, Ty::Addr);
       } else if ins.op == Op::Lea {
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if is_addr_ty(ta) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, Ty::Addr);
       } else if (ins.op == Op::If) or (ins.op == Op::Assume) {
         let ta: Ty = require_defined(ref_of(val_tys), ins.a, proc_id, pc);
         if is_bit1_ty(ta) == false {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::TypeMismatch, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::TypeMismatch, proc_id, pc);
         }
         record_type(mut_of(val_tys), ins.dst, p.val_count, ins.ty);
       } else {
@@ -239,7 +260,7 @@ pub {
         let ci: u64 = start;
         while ci < case_seen.len() {
           if case_seen.get(ci) == ins.imm {
-            perform VerifyErr::fail(VerifyFault { err: VerifyError::DuplicateCase { ins.imm }, proc_id: proc_id, pc: pc });
+            verify_fail(VerifyError::DuplicateCase { ins.imm }, proc_id, pc);
           }
           ci = ci + 1;
         };
@@ -260,7 +281,7 @@ pub {
       }
       if (ins.op == Op::EndIf) or (ins.op == Op::EndLoop) or (ins.op == Op::EndSwitch) {
         if depth == 0 {
-          perform VerifyErr::fail(VerifyFault { err: VerifyError::BadControlFlow, proc_id: proc_id, pc: pc });
+          verify_fail(VerifyError::BadControlFlow, proc_id, pc);
         }
         depth = depth - 1;
       }
@@ -270,7 +291,7 @@ pub {
       pc = pc + 1;
     };
     if depth != 0 {
-      perform VerifyErr::fail(VerifyFault { err: VerifyError::BadControlFlow, proc_id: proc_id, pc: n });
+      verify_fail(VerifyError::BadControlFlow, proc_id, n);
     }
   };
 

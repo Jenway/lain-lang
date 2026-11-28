@@ -3,7 +3,7 @@ use import("std::option")::{ Option };
 use import("std::mem")::{ OomErr };
 use import("kernel::ir::model")::{ Ty, Op, Inst, Proc, IrModule };
 use import("kernel::vm::addr")::{ VmAddr, EpId };
-use import("kernel::vm::trap")::{ Trap, VmTrap };
+use import("kernel::vm::trap")::{ Trap, VmTrap, raise_trap };
 use import("kernel::vm::vspace")::{ VSpace, Segment };
 use import("kernel::vm::cspace")::{ CSpace, CapEntry };
 use import("kernel::vm::image")::{ Image };
@@ -34,7 +34,7 @@ let mask_bits = func(v: u64, bits: u64) -> u64 {
 let sext_bits = func(v: u64, bits: u64) -> i64 {
   if bits >= 64 { return v as i64; }
   let shift: u64 = 64 - bits;
-  return ((v << shift) as i64) >> shift;
+  return ((v << shift) as i64) >> (shift as i64);
 };
 
 let slot_get = func(tcb: Ref(Tcb), base: u64, val_id: u64) -> u64 {
@@ -58,7 +58,7 @@ let eval_arith = func(op: Op, bits: u64, lhs: u64, rhs: u64, proc_id: u64, pc: u
   if op == Op::Xor { return mask_bits(a ^ b, bits); }
   if (op == Op::Udiv) or (op == Op::Urem) {
     if b == 0 {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::DivideByZero, proc_id: proc_id, pc: pc });
+      raise_trap(Trap::Reason::DivideByZero, proc_id, pc);
     }
     if op == Op::Udiv { return mask_bits(a / b, bits); }
     return mask_bits(a % b, bits);
@@ -67,24 +67,24 @@ let eval_arith = func(op: Op, bits: u64, lhs: u64, rhs: u64, proc_id: u64, pc: u
     let sa: i64 = sext_bits(a, bits);
     let sb: i64 = sext_bits(b, bits);
     if sb == 0 {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::DivideByZero, proc_id: proc_id, pc: pc });
+      raise_trap(Trap::Reason::DivideByZero, proc_id, pc);
     }
     let min_val: i64 = sext_bits((1 as u64) << (bits - 1), bits);
     if (sa == min_val) and (sb == -1) {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::SignedDivOverflow, proc_id: proc_id, pc: pc });
+      raise_trap(Trap::Reason::SignedDivOverflow, proc_id, pc);
     }
     if op == Op::Sdiv { return mask_bits((sa / sb) as u64, bits); }
     return mask_bits((sa % sb) as u64, bits);
   }
   if (op == Op::Shl) or (op == Op::Lshr) or (op == Op::Ashr) {
     if b >= bits {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::ShiftOutOfRange { b }, proc_id: proc_id, pc: pc });
+      raise_trap(Trap::Reason::ShiftOutOfRange { b }, proc_id, pc);
     }
     if op == Op::Shl { return mask_bits(a << b, bits); }
     if op == Op::Lshr { return mask_bits(a >> b, bits); }
-    return mask_bits((sext_bits(a, bits) >> b) as u64, bits);
+    return mask_bits((sext_bits(a, bits) >> (b as i64)) as u64, bits);
   }
-  perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { op as u64 }, proc_id: proc_id, pc: pc });
+  raise_trap(Trap::Reason::BadOpcode { op as u64 }, proc_id, pc);
 };
 
 let eval_cmp = func(op: Op, bits: u64, lhs: u64, rhs: u64) -> u64 {
@@ -208,11 +208,11 @@ let step_loop = func(
       if callee.is_extern {
         let idx: u64 = match cs.lookup(callee.link_name) {
           Some(ci) => ci,
-          None => perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc }),
+          None => raise_trap(Trap::Reason::CapDenied, pid, pc),
         };
         let entry: Ref(CapEntry) = cs.entries.get_ref(idx);
         if entry.param_count != call_vals.len() {
-          perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc });
+          raise_trap(Trap::Reason::CapDenied, pid, pc);
         }
         let h: Fn((u64, Mut(VSpace), Slice(u64)) -> u64) = entry.handler;
         let res: u64 = h(entry.ctx, vs, call_vals.as_slice());
@@ -234,7 +234,7 @@ let step_loop = func(
     } else if op == Op::CallIndirect {
       let fp: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       if (fp == 0) or ((fp - 1) >= deref(ir_m).procs.len()) {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { fp }, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::BadOpcode { fp }, pid, pc);
       }
       let callee_id: u64 = fp - 1;
       let callee: Ref(Proc) = deref(ir_m).procs.get_ref(callee_id);
@@ -248,11 +248,11 @@ let step_loop = func(
       if callee.is_extern {
         let idx: u64 = match cs.lookup(callee.link_name) {
           Some(ci) => ci,
-          None => perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc }),
+          None => raise_trap(Trap::Reason::CapDenied, pid, pc),
         };
         let entry: Ref(CapEntry) = cs.entries.get_ref(idx);
         if entry.param_count != call_vals.len() {
-          perform VmTrap::fail(Trap { reason: Trap::Reason::CapDenied, proc_id: pid, pc: pc });
+          raise_trap(Trap::Reason::CapDenied, pid, pc);
         }
         let h: Fn((u64, Mut(VSpace), Slice(u64)) -> u64) = entry.handler;
         let res: u64 = h(entry.ctx, vs, call_vals.as_slice());
@@ -331,7 +331,7 @@ let step_loop = func(
         sc = sc + 1;
       };
       if end_target == 0 {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::BadOpcode { k }, pid, pc);
       }
       fr.pc = end_target;
     } else if op == Op::Yield {
@@ -349,7 +349,7 @@ let step_loop = func(
         } else if (b_op == Op::If) or (b_op == Op::Loop) or (b_op == Op::Switch) {
           if depth == 0 {
             if b_op == Op::Loop {
-              perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+              raise_trap(Trap::Reason::BadOpcode { k }, pid, pc);
             }
             hdr_pc = i;
             found = true;
@@ -365,7 +365,7 @@ let step_loop = func(
         }
         fr.pc = hdr.c + 1;
       } else {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::BadOpcode { k }, pid, pc);
       }
     } else if op == Op::Break {
       let val: u64 = slot_get(ref_of(deref(tcb)), base, ins.b);
@@ -391,7 +391,7 @@ let step_loop = func(
         }
         fr.pc = lp.b + 1;
       } else {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { lbl }, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::BadOpcode { lbl }, pid, pc);
       }
     } else if op == Op::Continue {
       let lbl: u64 = ins.a;
@@ -412,7 +412,7 @@ let step_loop = func(
       if found {
         fr.pc = loop_pc + 1;
       } else {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { lbl }, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::BadOpcode { lbl }, pid, pc);
       }
     } else if op == Op::Return {
       let rv: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
@@ -433,13 +433,13 @@ let step_loop = func(
     } else if op == Op::Assume {
       let cond: u64 = slot_get(ref_of(deref(tcb)), base, ins.a);
       if cond == 0 {
-        perform VmTrap::fail(Trap { reason: Trap::Reason::Unreachable, proc_id: pid, pc: pc });
+        raise_trap(Trap::Reason::Unreachable, pid, pc);
       }
       fr.pc = pc + 1;
     } else if op == Op::Unreachable {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::Unreachable, proc_id: pid, pc: pc });
+      raise_trap(Trap::Reason::Unreachable, pid, pc);
     } else {
-      perform VmTrap::fail(Trap { reason: Trap::Reason::BadOpcode { k }, proc_id: pid, pc: pc });
+      raise_trap(Trap::Reason::BadOpcode { k }, pid, pc);
     }
     }
   };

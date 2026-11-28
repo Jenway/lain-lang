@@ -407,22 +407,101 @@ let arm_region = func(k: Mut(st.State), c: Mut(MatchCtx), a: Mut(Arm), o: Mut(Ar
   return 0;
 };
 
+let copy_arm = func(dst: Mut(Arm), src: Mut(Arm)) -> u64 {
+  dst.kind = src.kind;
+  dst.value = src.value;
+  dst.bind = src.bind;
+  dst.mem = src.mem;
+  dst.body = src.body;
+  dst.blk = src.blk;
+  dst.region = src.region;
+  return 0;
+};
+
+let pat_alt_list = func(k: Mut(st.State), c: Mut(MatchCtx), p: u64) -> u64 {
+  let ag: u64 = c.ag;
+  let n: u64 = ax.n_count(ag);
+  if p >= n { return p; }
+  if ax.is_group(ag, p) == 1 { return p; }
+  if ax.n_sym(ag, p) != s.o_pipe() { return p; }
+  let q: u64 = p + 1;
+  if q >= n { st.st_fail(k, ax.FailKind.Ast as u64); return q; }
+  let aa: Mut(Arm) = arm_at(c.arms, c.nrec);
+  let np: u64 = pat_parse(k, ag, q, c.sh, aa);
+  c.nrec = c.nrec + 1;
+  if st.st_ok(k) != 0 { return np; }
+  return pat_alt_list(k, c, np);
+};
+
+let compact_alts = func(k: Mut(st.State), c: Mut(MatchCtx), idx: u64, last: u64, live: u64) -> u64 {
+  if idx >= last { return live; }
+  let src: Mut(Arm) = arm_at(c.arms, idx);
+  let dup: u64 = shadowed(c.arms, live, src.kind, src.value, 0);
+  if dup == 1 { return compact_alts(k, c, idx + 1, last, live); }
+  if live != idx {
+    let dst: Mut(Arm) = arm_at(c.arms, live);
+    let cp: u64 = copy_arm(dst, src);
+  }
+  return compact_alts(k, c, idx + 1, last, live + 1);
+};
+
+let check_or_binds = func(k: Mut(st.State), c: Mut(MatchCtx), base: u64, last: u64, multi: u64) -> u64 {
+  if multi == 0 { return 1; }
+  if base >= last { return 1; }
+  let a: Mut(Arm) = arm_at(c.arms, base);
+  if a.bind != 0 {
+    let m: Ref(u8) = "or-pattern bindings are not supported";
+    let d: u64 = ir.diag(k, 0, 1, m, 37);
+    st.st_fail(k, ax.FailKind.Type as u64);
+    return 0;
+  }
+  return check_or_binds(k, c, base + 1, last, multi);
+};
+
+let set_alts_region = func(base: Mut(Arm), idx: u64, last: u64, region: u64) -> u64 {
+  if idx >= last { return 0; }
+  let a: Mut(Arm) = arm_at(base, idx);
+  a.region = region;
+  return set_alts_region(base, idx + 1, last, region);
+};
+
+let add_alt_cases = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64, last: u64, region: u64, term: u64) -> u64 {
+  if i >= last { return i; }
+  let a: Mut(Arm) = arm_at(c.arms, i);
+  if a.kind == 2 {
+    c.hasdef = 1;
+    c.defr = region;
+    c.defterm = term;
+  } else {
+    c.cases = c.cases + 1;
+  }
+  return add_alt_cases(k, c, i + 1, last, region, term);
+};
+
 let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   let ag: u64 = c.ag;
   let j: u64 = skip_seps(ag, i);
   if j >= ax.n_count(ag) { return j; }
-  let a: Mut(Arm) = arm_at(c.arms, c.nrec);
-  let pj: u64 = pat_parse(k, ag, j, c.sh, a);
+  let base: u64 = c.nrec;
+  let first: Mut(Arm) = arm_at(c.arms, base);
+  let pj: u64 = pat_parse(k, ag, j, c.sh, first);
   if st.st_ok(k) != 0 { return pj; }
-  let bj: u64 = arrow_at(k, ag, pj);
+  c.nrec = base + 1;
+  let pj2: u64 = pat_alt_list(k, c, pj);
+  if st.st_ok(k) != 0 { return pj2; }
+  let bj: u64 = arrow_at(k, ag, pj2);
   if st.st_ok(k) != 0 { return bj; }
-  let shadow: u64 = shadowed(c.arms, c.nrec, a.kind, a.value, 0);
-  if shadow == 1 {
+  let last: u64 = c.nrec;
+  let live: u64 = compact_alts(k, c, base, last, base);
+  c.nrec = live;
+  if live == base {
     let m: Ref(u8) = "unreachable match arm";
     let d: u64 = ir.diag(k, ax.n_at(ag, j), 2, m, 21);
     return arm_loop(k, c, skip_body(ag, bj));
   }
-  c.nrec = c.nrec + 1;
+  let multi: u64 = if live > (base + 1) { 1 } else { 0 };
+  if check_or_binds(k, c, base, live, multi) == 0 { return skip_body(ag, bj); }
+  let a: Mut(Arm) = arm_at(c.arms, base);
   let isblk: u64 = if (ax.is_group(ag, bj) == 1) and (ax.delim_of(ag, bj) == ax.Delim.Brace as u64) { 1 } else { 0 };
   a.body = bj;
   a.blk = isblk;
@@ -434,14 +513,9 @@ let arm_loop = func(k: Mut(st.State), c: Mut(MatchCtx), i: u64) -> u64 {
   arm_region(k, c, a, ao);
   if st.st_ok(k) != 0 { return bj; }
   a.region = ao.region;
+  let sr: u64 = set_alts_region(c.arms, base + 1, live, ao.region);
+  let ac: u64 = add_alt_cases(k, c, base, live, ao.region, ao.term);
   let next: u64 = if isblk == 1 { bj + 1 } else { ao.end };
-  if a.kind == 2 {
-    c.hasdef = 1;
-    c.defr = ao.region;
-    c.defterm = ao.term;
-  } else {
-    c.cases = c.cases + 1;
-  }
   if ao.term == 0 { c.allterm = 0; }
   return arm_loop(k, c, next);
 };

@@ -1,5 +1,10 @@
 let io = import("std::io");
 let fs = import("std::fs");
+let os = import("std::os");
+let cli = import("std::cli");
+let str = import("std::str");
+use import("std::mem")::{ OomErr };
+use import("std::collections")::{ Vec };
 use import("driver::pipeline")::{ RunResult, run_vm, emit_c99_stdout };
 
 let check_case = func(label: Slice(u8), src: Slice(u8), expected: u64) -> u64 {
@@ -42,7 +47,7 @@ let check_fail_stage = func(label: Slice(u8), src: Slice(u8), exp_stage: u64) ->
   return 1;
 };
 
-let main = func() -> i64 {
+let run_self_tests = func() -> i64 {
   io::println("=== Lain v2 Driver (frontend + kernel) ===");
   let fails: u64 = 0;
 
@@ -144,4 +149,147 @@ let main = func() -> i64 {
     return 0;
   }
   return 1;
+};
+
+let print_usage = func() {
+  io::println("usage: lainc_v2 [--test] | <source.lain> [--entry <name>] [--c99 | --run] [--help]");
+};
+
+let read_source_file = func(path: Slice(u8), out: Mut(Vec(u8))) !{ OomErr } -> bool {
+  let path_z: Vec(u8) = Vec(u8)::new();
+  let pi: u64 = 0;
+  while pi < path.len {
+    path_z.push(path[pi]);
+    pi = pi + 1;
+  };
+  path_z.push(0);
+  let ps: Slice(u8) = path_z.as_slice();
+  let path_sl: Slice(u8) = make_slice(Slice(u8), ps.ptr, path_z.len() - 1);
+  let fh: Mut(u8) = os::open_file(path_sl, "rb");
+  let ok: bool = false;
+  if is_null(fh) == false {
+    ok = true;
+    let chunk: MutSlice(u8) = os::alloc_slice(4096);
+    let reading: bool = true;
+    while reading {
+      let got: u64 = os::c_fread(chunk.ptr, 1, chunk.len, fh) as u64;
+      if got == 0 {
+        reading = false;
+      } else {
+        let ci: u64 = 0;
+        while ci < got {
+          out.push(chunk[ci]);
+          ci = ci + 1;
+        };
+      }
+    };
+    os::c_fclose(fh);
+    os::free_slice(chunk);
+  }
+  return ok;
+};
+
+let stage_name = func(stage: u64) -> Slice(u8) {
+  if stage == 1 { return "read/load"; }
+  if stage == 2 { return "expand"; }
+  if stage == 3 { return "parse"; }
+  if stage == 4 { return "sema"; }
+  if stage == 5 { return "lower"; }
+  if stage == 6 { return "verify"; }
+  if stage == 7 { return "vm"; }
+  if stage == 8 { return "vm_trap"; }
+  return "unknown";
+};
+
+let run_file_inner = func(src_path: Slice(u8), entry_name: Slice(u8), want_run: bool) !{ OomErr } -> i64 {
+  let src_buf: Vec(u8) = Vec(u8)::new();
+  let rc: i64 = 1;
+  if read_source_file(src_path, mut_of(src_buf)) == false {
+    io::print("error: cannot read source file: ");
+    io::println(src_path);
+  } else {
+    let src_bytes: Slice(u8) = src_buf.as_slice();
+    if want_run {
+      let r: RunResult = run_vm(src_bytes, entry_name);
+      if r.ok {
+        io::println_u64(r.value);
+        rc = 0;
+      } else {
+        io::print("error: stage=");
+        io::print(stage_name(r.stage));
+        io::print(" (");
+        io::print_u64(r.stage);
+        io::print(") code=");
+        io::println_u64(r.value);
+      }
+    } else {
+      let ok: bool = emit_c99_stdout(src_bytes, entry_name);
+      if ok {
+        rc = 0;
+      } else {
+        io::println("error: c99 compilation failed");
+      }
+    }
+  }
+  return rc;
+};
+
+let main = func() -> i64 {
+  let argc: u64 = cli::count();
+  if argc <= 1 {
+    return run_self_tests();
+  }
+  let want_test: bool = false;
+  let want_run: bool = false;
+  let want_help: bool = false;
+  let has_src: bool = false;
+  let src_path: Slice(u8) = "";
+  let entry_name: Slice(u8) = "main";
+  let i: u64 = 1;
+  while i < argc {
+    let a: cli::OptSlice.Opt = cli::arg(i);
+    let s: Slice(u8) = cli::OptSlice.unwrap_or(a, "");
+    if str::eq(s, "--help") or str::eq(s, "-h") {
+      want_help = true;
+      i = i + 1;
+    } else if str::eq(s, "--test") {
+      want_test = true;
+      i = i + 1;
+    } else if str::eq(s, "--run") {
+      want_run = true;
+      i = i + 1;
+    } else if str::eq(s, "--c99") {
+      want_run = false;
+      i = i + 1;
+    } else if str::eq(s, "--entry") and ((i + 1) < argc) {
+      let ea: cli::OptSlice.Opt = cli::arg(i + 1);
+      entry_name = cli::OptSlice.unwrap_or(ea, "main");
+      i = i + 2;
+    } else if str::eq(s, "--entry") {
+      print_usage();
+      return 1;
+    } else if has_src == false {
+      src_path = s;
+      has_src = true;
+      i = i + 1;
+    } else {
+      print_usage();
+      return 1;
+    }
+  };
+  if want_help {
+    print_usage();
+    return 0;
+  }
+  if want_test {
+    return run_self_tests();
+  }
+  if has_src == false {
+    print_usage();
+    return 1;
+  }
+  return handle run_file_inner(src_path, entry_name, want_run) with {
+    return(v) => v,
+    oom(_) => 1
+  };
 };

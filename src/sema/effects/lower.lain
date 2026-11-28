@@ -174,6 +174,39 @@ let ensure_trap_depth = func(k: Mut(st.State)) -> u64 {
   return ensure_global(k, trap_depth_name(k), 8);
 };
 
+let pay_top_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_paytop", 12);
+};
+
+let pay_arena_name = func(k: Mut(st.State)) -> u64 {
+  return ir.sym_lit("__eff_payarena", 14);
+};
+
+let pay_arena_bytes = func() -> u64 { return 65536; };
+
+let ensure_pay_top = func(k: Mut(st.State)) -> u64 {
+  return ensure_global(k, pay_top_name(k), 8);
+};
+
+let pay_arena_ptr = func(k: Mut(st.State)) -> Mut(ty.Val) {
+  let nm: u64 = ensure_global(k, pay_arena_name(k), pay_arena_bytes());
+  let res: u64 = ir.fresh_t(k);
+  let e: u64 = ir.emit_lea(k, res, nm, 0, 1, 0);
+  let v: Mut(ty.Val) = new_val(k);
+  let vr: u64 = ty.val_ref(v, res, ir.taddr(k));
+  return v;
+};
+
+let pay_top_load = func(k: Mut(st.State)) -> u64 {
+  let g: u64 = ensure_pay_top(k);
+  return load_u64(k, g, 0);
+};
+
+let pay_top_reset = func(k: Mut(st.State)) -> u64 {
+  let g: u64 = ensure_pay_top(k);
+  return store_lit(k, g, 0, 0);
+};
+
 let trap_depth_load = func(k: Mut(st.State)) -> u64 {
   let g: u64 = ensure_trap_depth(k);
   return load_u64(k, g, 0);
@@ -254,6 +287,16 @@ let add_imm = func(k: Mut(st.State), a: u64, imm: u64) -> u64 {
   return res;
 };
 
+let add_val = func(k: Mut(st.State), a: u64, b: u64) -> u64 {
+  let t: Mut(ty.Ty) = t64(k);
+  let res: u64 = ir.fresh_t(k);
+  ir.args_reset(k);
+  let x: u64 = ir.arg_ref(k, a);
+  let y: u64 = ir.arg_ref(k, b);
+  let ins: u64 = ir.emit(k, codes.InstKind.Add as u64, res, t);
+  return res;
+};
+
 let cond_u64 = func(k: Mut(st.State), kind: u64, a: u64, imm: u64) -> u64 {
   let t: Mut(ty.Ty) = t64(k);
   let res: u64 = ir.fresh_t(k);
@@ -277,6 +320,53 @@ let alloc_dyn_slot = func(k: Mut(st.State)) -> u64 {
   let r: u64 = ir.arg_ref(k, nm);
   ir.emit_mem(k, codes.InstKind.Store as u64, 0, ir.tbits(k, 64), 0);
   return j;
+};
+
+let payload_stable = func(k: Mut(st.State), payload: Mut(ty.Val)) -> Mut(ty.Val) {
+  let pt: Mut(ty.Ty) = ty.vty(payload);
+  let t: Mut(ty.Ty) = t64(k);
+  let out: Mut(ty.Val) = new_val(k);
+  if agg.is_value_agg(pt) == 0 {
+    let rc: u64 = cx.coerce(k, payload, pt, t, out);
+    return out;
+  }
+  let size: u64 = agg.shp_size(ty.tsh(pt));
+  let aligned: u64 = ((size + 7) / 8) * 8;
+  let used: u64 = pay_top_load(k);
+  let next: u64 = add_imm(k, used, aligned);
+  let basev: Mut(ty.Val) = pay_arena_ptr(k);
+  let baseu: Mut(ty.Val) = as_u64(k, basev);
+  let off: u64 = add_val(k, ty.vn(baseu), used);
+  let rawv: Mut(ty.Val) = new_val(k);
+  let rawl: u64 = ty.val_ref(rawv, off, t);
+  let dsta: Mut(ty.Val) = new_val(k);
+  let dstr: u64 = cx.coerce(k, rawv, t, ir.taddr(k), dsta);
+  let dst: u64 = ty.vn(dsta);
+  let over: u64 = cond_u64(k, codes.InstKind.UGt as u64, next, pay_arena_bytes());
+  let okl: u64 = ir.region_begin(k);
+  let cp: u64 = agg.copy_block(k, dst, ty.vn(payload), size);
+  let okr: u64 = ir.region_end(k);
+  let badl: u64 = ir.region_begin(k);
+  let bad: u64 = ir.emit_jump(k, codes.InstKind.Unreachable as u64, 0);
+  let badr: u64 = ir.region_end(k);
+  let ifi: u64 = ir.emit_if(k, 0, over, badr, okr);
+  let nv: Mut(ty.Val) = new_val(k);
+  let nvl: u64 = ty.val_ref(nv, next, t);
+  let g: u64 = ensure_pay_top(k);
+  let ns: u64 = store_val(k, g, 0, nv);
+  let vr: u64 = ty.val_at(out, dsta);
+  return out;
+};
+
+let arm_payload_copy = func(k: Mut(st.State), sl: u64, pt: Mut(ty.Ty), cv: Mut(ty.Val)) -> u64 {
+  if agg.is_value_agg(pt) == 1 {
+    let size: u64 = agg.shp_size(ty.tsh(pt));
+    let obj: Mut(ty.Val) = new_val(k);
+    let buf: u64 = agg.new_bytes(k, size, 8, obj);
+    let cp: u64 = agg.copy_block(k, ty.vn(obj), ty.vn(cv), size);
+    return cx.slot_put(k, sl, obj, pt);
+  }
+  return cx.slot_put(k, sl, cv, pt);
 };
 
 let push_eff_frame = func(k: Mut(st.State), fnname: u64) -> u64 {
@@ -657,13 +747,14 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       return j2 + 3;
     }
     let base: u64 = state_addr(k);
+    let stable: Mut(ty.Val) = payload_stable(k, payload);
     if is_trap == 1 {
 
       let deep: u64 = trap_depth_load(k);
       let active: u64 = cond_u64(k, codes.InstKind.Ne as u64, deep, 0);
       let tr: u64 = ir.region_begin(k);
       let t0: u64 = store_lit(k, base, 0, tag);
-      let t1: u64 = store_val(k, base, 8, payload);
+      let t1: u64 = store_val(k, base, 8, stable);
       let t2: u64 = store_lit(k, base, 24, 0);
       if row.in_handle(k) == 0 {
         let t3: u64 = emit_default_return(k);
@@ -681,7 +772,7 @@ pub let perform_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), 
       ty.val_none(out);
     } else {
       let s0: u64 = store_lit(k, base, 0, tag);
-      let s1: u64 = store_val(k, base, 8, payload);
+      let s1: u64 = store_val(k, base, 8, stable);
       let s2: u64 = store_lit(k, base, 24, 0);
       if row.in_handle(k) == 1 {
         ty.val_none(out);
@@ -809,6 +900,29 @@ let arm_new = func(k: Mut(st.State), ag: u64, cnt: u64) -> Mut(row.HandlerRec) {
 
 let arm_at = func(h: Mut(row.HandlerRec), i: u64) -> Mut(row.HArm) {
   return ptr_cast(Mut(row.HArm), ptr_cast(Mut(u8), h.arms) + i * 88);
+};
+
+let case_buf = func(k: Mut(st.State), n: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), st.st_alloc(k, (n + 1) * 8));
+};
+
+let case_put = func(p: Mut(u64), i: u64, region: u64) -> u64 {
+  let q: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + i * 8);
+  deref(q) = region;
+  return 1;
+};
+
+let case_get = func(p: Mut(u64), i: u64) -> u64 {
+  let q: Mut(u64) = ptr_cast(Mut(u64), ptr_cast(Mut(u8), p) + i * 8);
+  return deref(q);
+};
+
+let case_flush = func(k: Mut(st.State), tags: Mut(u64), regions: Mut(u64), n: u64) -> u64 {
+  let i: u64 = loop f(i: u64 = 0) while i < n {
+    let ca: u64 = ir.case_add(k, case_get(tags, i), case_get(regions, i));
+    i = i + 1;
+  };
+  return n;
 };
 
 let parse_arms = func(k: Mut(st.State), ag: u64, cand: Mut(row.EffRow), cnt: u64) -> Mut(row.HandlerRec) {
@@ -1141,13 +1255,17 @@ pub let flush_one_handler = func(k: Mut(st.State)) -> u64 {
   let prevc: u64 = cx.coerce(k, prev, at, u64t, prevu);
   let gtop: u64 = ensure_handler(k);
   let sw0: u64 = store_val(k, gtop, 0, prevu);
+  let tags: Mut(u64) = case_buf(k, cnt);
+  let regions: Mut(u64) = case_buf(k, cnt);
   let i: u64 = 0;
   let added: u64 = loop dc(i: u64 = 0) while i < cnt {
     let ar: Mut(row.HArm) = ptr_cast(Mut(row.HArm), ptr_cast(Mut(u8), arms) + i * 88);
     let cr: u64 = disp_arm_region(k, ag, ar, payv);
-    let ca: u64 = ir.case_add(k, ar.tag, cr);
+    let ct: u64 = case_put(tags, i, ar.tag);
+    let cp: u64 = case_put(regions, i, cr);
     i = i + 1;
   };
+  let cf: u64 = case_flush(k, tags, regions, cnt);
 
   let dr: u64 = ir.region_begin(k);
   let has_prev: u64 = cond_u64(k, codes.InstKind.Ne as u64, ty.vn(prevu), 0);
@@ -1222,9 +1340,10 @@ let arm_region = func(k: Mut(st.State), h: Mut(row.HandlerRec), ar: Mut(row.HArm
     ty.val_ref(v, pv, t64(k));
     let cv: Mut(ty.Val) = new_val(k);
     let rc: u64 = cx.coerce(k, v, ty.vty(v), pt, cv);
-    cx.slot_put(k, sl, cv, pt);
+    let sc: u64 = arm_payload_copy(k, sl, pt, cv);
     env.env_push(k, ar.bind, sl, pt);
   }
+  let prz: u64 = pay_top_reset(k);
   let pr: u64 = if ar.kind == 1 and ar.has_resume == 1 { row.push_resume(k, 1, ar.ret_tid, st.st_loopdepth(k)) } else { 0 };
   if ar.blk == 1 {
     let bg: u64 = n_at(h.ag, ar.body);
@@ -1357,12 +1476,18 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   let hr0: Mut(row.HandlerRec) = parse_arms(k, ag, cand, n_count(ag));
   if st.st_ok(k) != 0 { return wi + 2; }
   let dname: u64 = if hr0.has_resumable == 1 { enqueue_disp(k, hr0) } else { 0 };
-  let gen_first: u64 = if is_null(callee) == 0 and modules.sym_kind(callee) == modules.sym_kind_generic() {
-    1
-  } else if direct == 0 and i + 1 < n and is_name(g, i + 1) == 1 {
-    let ge2: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i + 1));
-    if is_null(ge2) == 0 and modules.sym_kind(ge2) == modules.sym_kind_generic() { 1 } else { 0 }
-  } else { 0 };
+  let gen_first: u64 = 0;
+  if is_null(callee) == 0 {
+    if modules.sym_kind(callee) == modules.sym_kind_generic() { gen_first = 1; }
+  }
+  if gen_first == 0 {
+    if direct == 0 and i + 1 < n and is_name(g, i + 1) == 1 {
+      let ge2: Mut(modules.SymEntry) = ctf.find_sym(k, n_sym(g, i + 1));
+      if is_null(ge2) == 0 {
+        if modules.sym_kind(ge2) == modules.sym_kind_generic() { gen_first = 1; }
+      }
+    }
+  }
   let exv: Mut(ty.Val) = new_val(k);
   if gen_first == 1 { let gj: u64 = core_expr(k, g, i + 1, 0, want, exv); }
   if gen_first == 1 and hr0.n == 1 and hr0.has_return == 1 and hr0.has_resumable == 0 {
@@ -1402,7 +1527,8 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
   let nx: u64 = if gen_first == 1 {
     wi
   } else if direct == 1 {
-    if is_null(callee) == 0 and modules.sym_kind(callee) == modules.sym_kind_generic() {
+    let ck: u64 = if is_null(callee) == 0 { modules.sym_kind(callee) } else { 0 };
+    if ck == modules.sym_kind_generic() {
       let j4: u64 = core_expr(k, g, i + 1, 0, want, exv);
       wi
     } else {
@@ -1475,20 +1601,28 @@ pub let handle_expr = func(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), o
       cx.slot_put(k, resj, exv, ty.vty(exv));
     }
   }
+  let prz0: u64 = pay_top_reset(k);
   env.env_release(k, m0);
   let cr0: u64 = ir.region_end(k);
-  ir.case_add(k, 0, cr0);
 
+  let case_n: u64 = hr0.n + 1;
+  let tags: Mut(u64) = case_buf(k, case_n);
+  let regions: Mut(u64) = case_buf(k, case_n);
+  let rt0: u64 = case_put(tags, 0, 0);
+  let rp0: u64 = case_put(regions, 0, cr0);
   let ci: u64 = 0;
   let added: u64 = loop ac(i: u64 = 0) while i < hr0.n {
     let ar: Mut(row.HArm) = arm_at(hr0, i);
     if ar.kind == 1 {
       let srst: u64 = store_lit(k, base, 0, 0);
       let cr: u64 = arm_region(k, hr0, ar, resj, rwant, 0);
-      let ca: u64 = ir.case_add(k, ar.tag, cr);
+      let ct: u64 = case_put(tags, ci + 1, ar.tag);
+      let cp: u64 = case_put(regions, ci + 1, cr);
+      ci = ci + 1;
     }
     i = i + 1;
   };
+  let cf: u64 = case_flush(k, tags, regions, ci + 1);
 
   let dr: u64 = ir.region_begin(k);
   if prev != 1 {

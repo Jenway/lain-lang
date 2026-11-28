@@ -1,3 +1,4 @@
+let diag = import("std::diag");
 use import("std::collections")::{ Vec };
 use import("std::io")::{ SliceCursor };
 use import("std::mem")::{ Allocator, SystemAlloc, SystemHandle, OomErr };
@@ -176,6 +177,7 @@ let emit_group_text = func(raw: Ref(RawAst()), text: Slice(u8), grp: GroupRange,
         let slots: Vec(NodeId) = Vec(NodeId)::new();
         collect_quote_slots(raw, qgrp, mut_of(slots));
         if slots.len() > 4 {
+          diag::emit_pos("macro", "QuoteSlotLimitExceeded", sp.start as u64);
           perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
         }
         if has_prev {
@@ -252,8 +254,14 @@ let compile_lower = func(hir: Ref(HirModule), ir_out: Mut(IrModule)) !{ OomErr, 
   let ir: IrModule = lower_module(hir);
   let ok: bool = handle compile_verify(mut_of(ir)) with {
     return(v) => v,
-    oom(_) => false,
-    fail(_) => false
+    oom(_) => {
+      diag::emit_msg("macro", "verify OOM");
+      false
+    },
+    fail(_) => {
+      diag::emit_msg("macro", "verify failed");
+      false
+    }
   };
   if ok {
     deref(ir_out) = reloc(ir);
@@ -265,8 +273,14 @@ let compile_sema = func(ast: Ref(AstModule()), text: Slice(u8), ir_out: Mut(IrMo
   let hir: HirModule = check_module(ast, text)!;
   return handle compile_lower(ref_of(hir), ir_out) with {
     return(v) => v,
-    oom(_) => false,
-    fail(_) => false
+    oom(_) => {
+      diag::emit_msg("macro", "lower OOM");
+      false
+    },
+    fail(_) => {
+      diag::emit_msg("macro", "lower failed");
+      false
+    }
   };
 };
 
@@ -274,8 +288,14 @@ let compile_parse = func(raw: Ref(RawAst()), text: Slice(u8), al: SystemHandle, 
   let ast: AstModule() = parse(raw, text, al)!;
   return handle compile_sema(ref_of(ast), text, ir_out) with {
     return(v) => v,
-    oom(_) => false,
-    fail(_) => false
+    oom(_) => {
+      diag::emit_msg("macro", "sema OOM");
+      false
+    },
+    fail(_) => {
+      diag::emit_msg("macro", "sema failed");
+      false
+    }
   };
 };
 
@@ -285,8 +305,14 @@ let compile_read = func(text: Slice(u8), al: SystemHandle, ir_out: Mut(IrModule)
   let raw: RawAst() = read(src, mut_of(cur), al);
   return handle compile_parse(ref_of(raw), text, al, ir_out) with {
     return(v) => v,
-    oom(_) => false,
-    fail(_) => false
+    oom(_) => {
+      diag::emit_msg("macro", "parse OOM");
+      false
+    },
+    fail(_) => {
+      diag::emit_msg("macro", "parse failed");
+      false
+    }
   };
 };
 
@@ -294,10 +320,17 @@ let compile_ir_clean = func(text: Slice(u8), al: SystemHandle, sp: Span) !{ OomE
   let ir: IrModule = IrModule::new();
   let ok: bool = handle compile_read(text, al, mut_of(ir)) with {
     return(v) => v,
-    oom(_) => false,
-    fail(_) => false
+    oom(_) => {
+      diag::emit_msg("macro", "read OOM");
+      false
+    },
+    fail(_) => {
+      diag::emit_msg("macro", "read failed");
+      false
+    }
   };
   if ok == false {
+    diag::emit_span("macro", "MacroCompileFailed", text, sp.start as u64);
     perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
   }
   return reloc(ir);
@@ -776,6 +809,7 @@ let MacroPass = func() -> Module {
               }
               if matched_call {
                 if args.len() != m.param_count {
+                  diag::emit_span("macro", "MacroArityMismatch", text, sp.start as u64);
                   perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
                 }
                 let tape: Vec(u64) = Vec(u64)::new();
@@ -866,6 +900,8 @@ let exec_macro_vm = func(
     fail(_) => 2
   };
   if rc != 0 {
+    diag::emit_msg_u64("macro", "MacroVmFailed", rc);
+    diag::emit_pos("macro", "MacroVmFailed", sp.start as u64);
     perform ExpandFail::fail(ExpandErr::MacroFailed(sp));
   }
 };
@@ -906,6 +942,7 @@ pub let expand_with_macros = func(raw: Ref(RawAst()), text: Slice(u8), alloc: Sy
     if depth > 64 {
       let cur_r0: Ref(RawAst()) = asts.get_ref(asts.len() - 1);
       let r_sp: Span = cur_r0.span(cur_r0.root);
+      diag::emit_span("macro", "DepthLimit", text, r_sp.start as u64);
       perform ExpandFail::fail(ExpandErr::DepthLimit(r_sp));
     }
     let did_exp: bool = false;
